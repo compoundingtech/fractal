@@ -60,7 +60,7 @@ pub fn run_plan(
     let mut args: Vec<OsString> = vec![
         format!("--unit={}", registry::tools_unit(name)).into(),
         format!("--slice={}", registry::slice_unit(name)).into(),
-        format!("--description=st tile {name}").into(),
+        format!("--description=Fractal tile {name}").into(),
         "--service-type=exec".into(),
         "--collect".into(),
         "--wait".into(),

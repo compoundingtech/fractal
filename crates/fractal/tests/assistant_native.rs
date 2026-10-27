@@ -65,7 +65,7 @@ impl Harness {
             node: "assistant-native".into(), state_dir: root.path().into(),
             pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
             fleet_id: None, configured_peers: vec![], client_relay: None,
-            native_session_home: None, planner_default: Default::default(),
+            native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
         };
         Self { local: fractal_daemon::api::router(state.clone()), fabric: fractal_daemon::api::fabric_router(state.clone()), root, state }
     }
@@ -93,6 +93,7 @@ impl Harness {
             api_version: fractal_client::API_VERSION.into(), code: challenge["value"]["code"].as_str().unwrap().into(),
             device_public_key: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into(),
             key_storage: Some("software".into()),
+            fabric_node_id: None,
         };
         let (status, value) = request(&self.fabric, "POST", &path, None, None, &complete).await;
         assert_eq!(status, StatusCode::OK, "{value}");
@@ -105,6 +106,9 @@ impl Harness {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{unavailable}");
             assert_eq!(unavailable["message"], "the attention view is still being prepared; retry shortly");
         }
+        // The unavailable summary read can leave receipts queued after its response.
+        // Drain them before publishing and comparing the fixture's exact claim cut.
+        self.state.assistant_receipts.flush().await.unwrap();
         // Complete the same publications the daemon performs at startup, including
         // an empty owner view. Pairing alone does not make these views ready.
         fractal_daemon::api::refresh_agent_roster_for_test(&self.state.store).unwrap();
@@ -127,6 +131,7 @@ impl Harness {
         let (replay, _) = request(&self.fabric, "POST", &path, None, None, &complete).await;
         assert_eq!(replay, StatusCode::FORBIDDEN);
         self.policy(&paired, scopes()).await;
+        self.state.assistant_receipts.flush().await.unwrap();
         paired
     }
 

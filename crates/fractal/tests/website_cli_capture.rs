@@ -119,6 +119,7 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         // The app seed's maintainer runs Codex. The daemon reads its native session from here.
         native_session_home: app.then(|| dir.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let store = state.store.clone();
     let (source, workspace, requester) = if app {

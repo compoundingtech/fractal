@@ -459,7 +459,7 @@ pub async fn revise_mission_run(
             "a run revision must contain exactly one top-level mission",
         )));
     }
-    if !initial.subjects.is_empty() {
+    if !mission_only_subjects(&initial) {
         return Err(ApiError::bad(St3Error::new(
             "invalid-mission-revision-intent",
             "a run revision can contain only its mission",
@@ -472,6 +472,12 @@ pub async fn revise_mission_run(
     let resolved_kdl =
         resolve_document_references(&request.intent.kdl, &bindings).map_err(ApiError::bad)?;
     let intent = parse_intent(&resolved_kdl, &state.node).map_err(ApiError::bad)?;
+    if !mission_only_subjects(&intent) {
+        return Err(ApiError::bad(St3Error::new(
+            "invalid-mission-revision-intent",
+            "a run revision can contain only its mission",
+        )));
+    }
     let mission_id = current
         .mission
         .strip_prefix("mission/")
@@ -510,19 +516,18 @@ pub async fn revise_mission_run(
         .store
         .validate_revision_seat_carry(&current, replacement)
         .map_err(ApiError::bad)?;
-    let mut publication = intent.clone();
-    publication.subjects.clear();
+    let publication = &intent;
     let mut planned = state
         .store
         .mission(
-            &publication,
+            publication,
             crate::model::IntentInput {
                 kdl: resolved_kdl,
                 source_name: request.intent.source_name,
             },
         )
         .map_err(ApiError::bad)?;
-    publication_refusals(&state, &publication)
+    publication_refusals(&state, publication)
         .await?
         .block(&mut planned);
     if !planned.blockers.is_empty() {
@@ -535,7 +540,7 @@ pub async fn revise_mission_run(
     state
         .store
         .apply_as(
-            &publication,
+            publication,
             &planned.subject_tokens,
             &format!("{}:publish", request.idempotency_key),
             Some(&actor),

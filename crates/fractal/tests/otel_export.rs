@@ -1889,6 +1889,8 @@ async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
     let root = tempfile::tempdir().unwrap();
     seed_roster(root.path(), "agent/otel-test.observed");
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Each missions window's first frame must be its snapshot (see collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans).
+    daemon.await_mission_list();
     let mut socket = daemon.websocket("/v1/client/collections/stream",
         "st3.client.collections.v0", UPGRADE).await;
     let upgrade = daemon.await_span(root.path(), |span| {

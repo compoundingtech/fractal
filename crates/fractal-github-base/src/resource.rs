@@ -41,7 +41,7 @@ pub struct ProviderObservation {
 /// not finish in one poll, so an observer's declared interval does not delay it.
 pub const PROVIDER_CONTINUE_MS: u128 = 1_000;
 
-pub use crate::github_admission::ProviderRateLimit;
+pub use crate::github_admission::{LocalObserverBudget, ProviderRateLimit};
 
 /// The resource a GitHub repository's observations land on: `resource/github/OWNER/REPO`.
 pub fn default_resource(locator: &str) -> String {
@@ -125,6 +125,7 @@ fn github_retry_at(headers: &reqwest::header::HeaderMap, now: u128) -> u128 {
     retry_after
         .into_iter()
         .chain(rate_reset)
+        .filter(|deadline| *deadline > now)
         .max()
         .unwrap_or_else(|| now.saturating_add(15 * 60_000))
 }
@@ -237,6 +238,9 @@ fn github_client() -> reqwest::Client {
     CLIENT
         .get_or_init(|| {
             reqwest::Client::builder()
+                // Follow REST redirects explicitly so every HTTP hop is admitted.
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .user_agent("st3-resource-observer/0.1")
                 .connect_timeout(GITHUB_CONNECT_TIMEOUT)
                 .timeout(GITHUB_REQUEST_TIMEOUT)
@@ -1212,6 +1216,66 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     #[tokio::test]
+    async fn github_rest_redirects_send_each_hop_explicitly() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: /renamed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}".to_owned(),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..size]);
+                    if size == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") { break; }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        // SOURCE is process-global: isolate configuration from other provider tests.
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().to_owned();
+        let child = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "resource::tests::github_redirect_admission_child", "--ignored", "--nocapture"])
+                .env("OBSERVER_REDIRECT_TEST_URL", format!("{base}/old"))
+                .env("OBSERVER_REDIRECT_TEST_STATE", state_dir)
+                .output().unwrap()
+        }).await.unwrap();
+        assert!(child.status.success(), "{}", String::from_utf8_lossy(&child.stdout));
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /old "));
+        assert!(requests[1].starts_with("GET /renamed "));
+        let rows: Value = serde_json::from_slice(
+            &std::fs::read(root.path().join("github-admission.json")).unwrap()
+        ).unwrap();
+        assert_eq!(rows.as_array().unwrap().iter()
+            .filter(|row| row["observer"] == true)
+            .map(|row| row["count"].as_u64().unwrap()).sum::<u64>(), 2);
+    }
+
+    #[tokio::test]
+    #[ignore = "subprocess fixture for github_rest_redirects_send_each_hop_explicitly"]
+    async fn github_redirect_admission_child() {
+        let config = crate::config::Config {
+            state_dir: std::env::var_os("OBSERVER_REDIRECT_TEST_STATE").unwrap().into(),
+            ..Default::default()
+        };
+        crate::github_http::configure(&config).unwrap();
+        let payload = spend_as("observer/redirect-test".into(), github_json(
+            &github_client(), std::env::var("OBSERVER_REDIRECT_TEST_URL").unwrap(),
+            &GithubAuth::test("fixture"), Duration::ZERO,
+        )).await.unwrap();
+        assert_eq!(payload.value["ok"], true);
+    }
+
+    #[tokio::test]
     async fn credentials_recover_after_a_missing_token_and_rotate() {
         use std::os::unix::fs::PermissionsExt as _;
         let root = tempfile::tempdir().unwrap();
@@ -1392,6 +1456,36 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(observation.facts["status"], "missing");
+    }
+
+    #[test]
+    fn github_rate_limit_stale_reset_uses_real_cooldown() {
+        let now = 2_000_000;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-reset", "1000".parse().unwrap());
+        for status in [reqwest::StatusCode::TOO_MANY_REQUESTS, reqwest::StatusCode::FORBIDDEN] {
+            assert!(matches!(
+                github_refusal(status, &headers, r#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#),
+                Some(GithubRefusal::RateLimit)
+            ));
+        }
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+        headers.insert("x-ratelimit-reset", "2000".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
+    }
+
+    #[test]
+    fn github_rate_limit_honours_retry_after_without_reset() {
+        let now = 2_000_000;
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 120_000);
+        headers.insert("x-ratelimit-reset", "1000".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 120_000);
+        headers.insert(reqwest::header::RETRY_AFTER, "Thu, 01 Jan 1970 00:35:00 GMT".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), 2_100_000);
+        headers.insert(reqwest::header::RETRY_AFTER, "0".parse().unwrap());
+        assert_eq!(github_retry_at(&headers, now), now + 15 * 60_000);
     }
 
     /// A provider that accepts the connection and never answers must not hold its observer forever.

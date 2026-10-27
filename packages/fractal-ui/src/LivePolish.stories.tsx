@@ -24,6 +24,7 @@ const styles = stylex.create({
   contrastFailure: { opacity: 0.3 },
 })
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Live polish', component: LiveActivity,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Frozen 12s/13s and 4h27m live clocks with missing-start/opacity negative controls prove elapsed text and 4.5 contrast; the exact 12-line prompt proves collapse height and focus retention, local composer history proves recall geometry, and an idle one-pane fixture proves draft survival across clock rerenders and dock spacing.' }, layout: 'fullscreen' },
   args: { scheme: 'dark' as Scheme, narrow: false, failingControl: false, contrastFailure: false, state: { _tag: 'Working' as const }, now: clock, startedAt },
@@ -39,6 +40,19 @@ const meta = {
   },
 } satisfies Meta<React.ComponentProps<typeof LiveActivity> & { scheme: Scheme; narrow: boolean; failingControl: boolean; contrastFailure: boolean }>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Dark440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+  'WaitingDark1440:contract-fixture',
+  'WaitingDark440:contract-fixture',
+  'WaitingLight1440:contract-fixture',
+  'WaitingLight440:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 export const Dark1440: Story = { play: async ({ mount, args }) => {
   const canvas = await mount()

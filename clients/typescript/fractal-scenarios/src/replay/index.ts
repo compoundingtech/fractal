@@ -31,7 +31,7 @@ export interface ReplayHandle extends Replay {
   readonly flush: () => Promise<void>
 }
 
-type Filters = { status?: string; actor?: string; person?: string; subject?: string; owner?: string; state?: string }
+type Filters = { status?: string; actor?: string; person?: string; subject?: string; owner?: string; state?: string; owner_run?: string; launch_id?: string }
 type Subscription = {
   id: string
   collection: CollectionName | 'conversation' | 'terminal' | 'terminals'
@@ -51,10 +51,10 @@ type Subscription = {
 type Connection = { socket: CollectionSocket; open: boolean; closed: boolean; subscriptions: Map<string, Subscription>; legacy: boolean; recorded_socket_id?: string }
 const collectionKind = (collection: string): SliceKind | undefined => {
   switch (collection) {
-    case 'agents': case 'runtimes': case 'machines': case 'arrangements': return 'roster'
-    case 'missions': case 'work': return 'details'
+    case 'agents': case 'runtimes': case 'machines': case 'arrangements': case 'sessions': case 'devices': return 'roster'
+    case 'missions': case 'work': case 'launches': return 'details'
     case 'attention': case 'messages': return 'attention'
-    case 'conversation': case 'timeline': case 'sessions': return 'conversation'
+    case 'conversation': case 'timeline': return 'conversation'
     case 'terminal': case 'terminals': return 'terminal'
     case 'capabilities': return 'sync'
     default: return undefined
@@ -79,16 +79,23 @@ const matches = (sub: Subscription, selector: Selector): boolean =>
   (!('terminal' in selector) || sub.terminal === selector.terminal)
 const selectorKey = (selector: Selector): string => JSON.stringify(selector)
 const filtered = (items: WireResource[], filters: Filters): WireResource[] => items.filter((item) => {
-  if (filters.status !== undefined && (item.kind !== 'agent' || !('state' in item) || item.state !== filters.status)) return false
-  if (filters.actor !== undefined && (item.kind !== 'work' || (!('assigned_to' in item) || item.assigned_to !== filters.actor) && (!('claimant' in item) || item.claimant !== filters.actor))) return false
+  if (filters.status !== undefined && !(
+    'state' in item && item.state === filters.status ||
+    'status' in item && item.status === filters.status ||
+    'phase' in item && item.phase === filters.status)) return false
+  if (filters.actor !== undefined && !(
+    item.kind === 'work' && ('assigned_to' in item && item.assigned_to === filters.actor || 'claimant' in item && item.claimant === filters.actor) ||
+    item.kind === 'session' && 'owner_id' in item && item.owner_id === filters.actor)) return false
   if (filters.person !== undefined) {
     if (item.kind === 'arrangement') {
       if (!('owner' in item) || item.owner !== filters.person) return false
-    } else if (item.kind !== 'attention' || !('person_id' in item) || item.person_id !== filters.person) return false
+    } else if (!('person_id' in item) || item.person_id !== filters.person) return false
   }
   if (filters.subject !== undefined && item.id !== filters.subject) return false
-  if (filters.owner !== undefined && (item.kind !== 'runtime' || !('owner_id' in item) || item.owner_id !== filters.owner)) return false
+  if (filters.owner !== undefined && (!('owner_id' in item) || item.owner_id !== filters.owner)) return false
   if (filters.state !== undefined && (!('state' in item) || item.state !== filters.state)) return false
+  if (filters.owner_run !== undefined && (!('owner_run_id' in item) || item.owner_run_id !== filters.owner_run)) return false
+  if (filters.launch_id !== undefined && (!('launch_id' in item) || item.launch_id !== filters.launch_id)) return false
   return true
 })
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null
@@ -188,15 +195,19 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       case 'terminals': return state('terminal').terminals.map((terminal) => terminal.runtime)
       case 'machines': return state('roster').machines
       case 'arrangements': return state('roster').arrangements ?? []
+      case 'sessions': return state('roster').sessions
+      case 'devices': return state('roster').devices
       case 'missions': return [...state('details').missions, ...(state('details').resources ?? [])]
       case 'work': return state('details').work
+      case 'launches': return state('details').launches
+      case 'variants': return state('details').launch_variants
       case 'attention': return [...state('attention').attention, ...(state('attention').resources ?? [])]
       case 'messages': return state('attention').messages
       case 'operations': return [...operations.values()]
       default: return []
     }
   }
-  const allRows = () => ['agents', 'runtimes', 'machines', 'missions', 'work', 'attention', 'messages', 'operations'].flatMap(rows)
+  const allRows = () => ['agents', 'runtimes', 'machines', 'sessions', 'devices', 'missions', 'work', 'launches', 'variants', 'attention', 'messages', 'operations'].flatMap(rows)
   const windowOf = (sub: Subscription) => {
     const all = filtered(rows(sub.collection), sub.filters)
     return { items: all.slice(0, sub.limit), has_more: all.length > sub.limit }
@@ -632,17 +643,30 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     const url = new URL(req.url)
     const parts = url.pathname.replace(/^\/v1\/client\/?/, '').split('/').map(decodeURIComponent)
     const route = parts[0] ?? ''
-    const family = parts.includes('timeline') ? 'timeline' : route
-    // Arrangements are a synthetic read-only overlay, never attributed to recorded transport.
+    const recordedRequest = world.recording?.http.find((entry) => entry.at_ms === offset() && entry.method === req.method &&
+      entry.path === url.pathname && entry.query === url.searchParams.toString())
+    const timelineRoute = route === 'sessions' && parts.at(-1) === 'timeline' &&
+      (parts.length === 3 || recordedRequest?.value.kind === 'timeline')
+    const variantsRoute = route === 'launches' && parts[2] === 'variants' && (parts.length === 3 || parts.length === 4)
+    const family = timelineRoute ? 'timeline' : route
+    const collections = ['agents', 'runtimes', 'machines', 'sessions', 'devices', 'missions', 'work', 'launches', 'attention', 'messages', 'operations', 'terminals']
+    const supported = url.pathname.startsWith('/v1/client/') && (
+      collections.includes(route) && (parts.length === 1 || parts.length === 2 && parts[1] !== '') ||
+      (route === 'capabilities' || route === 'events' || route === 'resources' || route === 'actions') && parts.length === 1 ||
+      route === 'arrangements' && (parts.length === 1 || parts.length === 3) ||
+      route === 'terminals' && parts.length === 3 && parts[2] === 'screen' ||
+      timelineRoute || variantsRoute)
+    if (!supported && recordedRequest === undefined) return json(errorEnvelope('unsupported-capability', 'Route not supported by this world'), 501)
+    const inventoryRoute = !timelineRoute && ['sessions', 'devices', 'launches'].includes(route)
+    /** Arrangements and inventories are synthetic read-only overlays, never attributed to recorded transport. */
     if (route === 'actions' && req.method === 'POST') {
       const action: unknown = await req.clone().json()
       if (record(action) && typeof action.type === 'string' && action.type.startsWith('arrangement.')) {
         return json(errorEnvelope('unsupported-capability', 'Arrangement writes are not supported by replay'), 405)
       }
     }
-    if (world.recording !== undefined && route !== 'arrangements' && !(route === 'capabilities' && req.method === 'GET' && state('sync').capabilities !== undefined)) {
-      const metadata = world.recording.http.find((entry) => entry.at_ms === offset() && entry.method === req.method &&
-        entry.path === url.pathname && entry.query === url.searchParams.toString())
+    if (world.recording !== undefined && !inventoryRoute && route !== 'arrangements' && !(route === 'capabilities' && req.method === 'GET' && state('sync').capabilities !== undefined)) {
+      const metadata = recordedRequest
       if (metadata === undefined) throw new Error(`No recorded HTTP transport for ${req.method} ${url.pathname} at ${offset()}`)
       if (metadata.value.kind === 'attach') {
         const action: unknown = await req.json()
@@ -710,6 +734,19 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
     const start = cursor === null ? 0 : Number(cursor.replace(/^scenario-cursor\//, ''))
     if (!Number.isSafeInteger(start) || start < 0) return json(errorEnvelope('page-cursor-expired', 'Invalid page cursor'), 410)
     const pageInfo = (length: number, next: number) => ({ limit, has_more: next < length, ...(next < length ? { next_cursor: `scenario-cursor/${next}` } : {}) })
+    const filters = Object.fromEntries([...url.searchParams].filter(([key]) => key !== 'cursor' && key !== 'limit'))
+    if (variantsRoute) {
+      const launch = state('details').launches.find((item) => item.id === parts[1] || item.id === `launch/${parts[1]}`)
+      if (launch === undefined) return json(errorEnvelope('not-found', 'Launch not found'), 404)
+      const variants = state('details').launch_variants.filter((item) => item.launch_id === launch.id && launch.variants.includes(item.id))
+      if (parts.length === 4) {
+        const value = variants.find((item) => item.id === parts[3] || item.id === `launch-variant/${parts[3]}`)
+        return value === undefined ? json(errorEnvelope('not-found', 'Launch variant not found'), 404) : json(envelope(value))
+      }
+      const items = filtered(variants, filters)
+      return json(envelope({ kind: 'page', collection: `launches/${launch.id}/variants`, filters, items: items.slice(start, start + limit),
+        page: pageInfo(items.length, start + limit), ...(sync === undefined ? {} : { sync }) }))
+    }
     if (route === 'arrangements') {
       const person = parts.length === 1 ? url.searchParams.get('person') ?? undefined : `person/${parts[1]}`
       const subject = parts.length === 1 ? undefined : `arrangement/${person}/${parts[2] ?? ''}`
@@ -759,10 +796,11 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
         const screen = terminal?.screens.filter((item) => item.at_ms <= offset()).at(-1)?.screen
         return screen === undefined ? json(errorEnvelope('not-found', 'Screen not found'), 404) : json(envelope(screen))
       }
-      const value = rows(route).find((item) => item.id === parts[1] || (route === 'terminals' && item.kind === 'runtime' && 'terminal_id' in item && item.terminal_id === parts[1]))
+      const value = rows(route).find((item) => item.id === parts[1] ||
+        (route === 'sessions' || route === 'launches') && item.id === `${item.kind}/${parts[1]}` ||
+        route === 'terminals' && item.kind === 'runtime' && 'terminal_id' in item && item.terminal_id === parts[1])
       return value === undefined ? json(errorEnvelope('not-found', 'Resource not found'), 404) : json(envelope(value))
     }
-    const filters = Object.fromEntries([...url.searchParams].filter(([key]) => key !== 'cursor' && key !== 'limit'))
     if (route === 'resources') {
       for (const kind of ['roster', 'details', 'attention', 'terminal'] as const) consumed.add(kind)
       const resources = allRows().filter((item) => (filters.kind === undefined || item.kind === filters.kind) && (filters.subject_prefix === undefined || item.id.startsWith(filters.subject_prefix)))

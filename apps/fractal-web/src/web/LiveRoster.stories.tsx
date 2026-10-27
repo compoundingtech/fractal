@@ -69,7 +69,7 @@ const styles = stylex.create({
   sidebar: { width: 280, minHeight: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: c.sidebar, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
 })
 
-const meta = {
+const meta = { excludeStories: ['scenarioExemptions'],
   title: 'wf/Sidebar/Roster decode',
   component: Roster,
   parameters: { layout: 'fullscreen' },
@@ -77,6 +77,13 @@ const meta = {
   args: { scheme: 'dark' },
 } satisfies Meta<typeof Roster>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllBadStale:contract-fixture',
+  'FullyDecoded:contract-fixture',
+  'UndecodableRow:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 const agentRefs = (scenario: keyof typeof scenarios) => {

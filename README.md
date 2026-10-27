@@ -123,5 +123,13 @@ issue in this repository.
 - [Engineering documentation](docs/st3/README.md)
 - [UI component Storybook](https://storybook.compounding.tech): Fractal UI stories; [deployment setup](docs/development.md#storybook-deployment).
 
+The Fractal web transcript reads native conversation block visibility and typed views. Internal
+and harness-hidden records do not draw rows, including tool invocations and orphan results;
+hidden results are never attached to visible tool calls. Unsupported records draw an explicit
+marker with a redacted, size-capped Inspect disclosure rather than raw JSON or harness envelopes.
+Run `pnpm check:st-coverage` in
+`apps/fractal-web` to check the renderer vocabulary against the st client schema; use
+`bun apps/fractal-web/scripts/replay-transcript.ts DIRECTORY...` to audit saved timeline pages.
+
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.
 This repository also carries the previous generation; see [its guide](README.st2.md).

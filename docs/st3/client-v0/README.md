@@ -317,8 +317,34 @@ on the seat, has not ended, and has a lease that runs past the read. Each one ha
 own `id`, its `subagent_type`, a one-line `description`, its `driver` and `session_id`, the
 `work_id` of the step the seat held when it appeared, `started_at`, and `lease_expires_at`. A
 subagent is part of its agent, not a resource of its own, and has no actions. The list is read
-per request, so a lease that runs out leaves it at the next read without a new claim. A daemon
-older than the field omits it; clients read a missing list as empty.
+per request, so a lease that runs out leaves it at the next read without a new claim. The field
+is omitted when the agent's driver does not report subagents, or by an older daemon. An absent
+field means not reported, while an empty list means the driver reports no running subagents.
+Claude, Codex, and OMP report subagents; Pi and OpenCode do not.
+
+### Declared resources
+
+An agent's or mission's `resources` lists the resources its current declaration names, in authored
+order: each has its `name`, ordinary resource `subject`, authored `kind` (`uri` or `subject`),
+URI `resolution`, and nullable `reason`. A mission's list comes from its current published
+revision. The owner stores typed edges, while the shared smallclaims subject stores the immutable
+URI. Its ID is `resource/uri/` followed by the lowercase hex SHA-256 of the exact URI's bytes;
+different owners naming that URI resolve to the same subject.
+
+The list is read-only; change it by reapplying the seat declaration or publishing a new mission
+revision (see [declared resources](../../site/reference/configuration.md#declared-resources)). Removing an edge does
+not delete its subject or other owners' references. A URI edge has `resolution: "resolved"` and
+a string `uri` when its locator is available, or `resolution: "unresolved"` and no `uri` while
+the URI declaration is unavailable locally. Explicit subject edges have `resolution: "not-applicable"`
+and no `uri`: they need no URI locator, and this state does not assert subject existence.
+A daemon older than the field omits it; clients read a missing list as empty.
+
+These declared references are distinct from `GET /v1/client/resources`, which lists resource
+observations. Declaring a URI does not fetch it, create an observation, or start an observer.
+
+`GET /v1/resource-references/{subject}` on the privileged local API returns the declarations
+that reference that ordinary resource subject, without scanning all declarations. This is not a
+paired-client route and does not grant ownership or make a shared URI target eligible for cleanup.
 
 ### Native harness inventory
 
@@ -1071,8 +1097,8 @@ for combined families, and `run` for an `after-run` step.
 ## Harness-neutral session timeline
 
 The timeline schema deliberately contains no Claude, Codex, Pi, OMP, or transcript-file types. A
-session has ordered entries with a strictly increasing `sequence`, stable entry ID, RFC 3339
-timestamp, `role` (`system`, `user`, `assistant`, or `tool`), and one typed body:
+session has chronologically ordered entries with a source-local `sequence`, stable entry ID,
+RFC 3339 timestamp, `role` (`system`, `user`, `assistant`, or `tool`), and one typed body:
 
 - `message`: logical turn metadata;
 - `content`: text or an attachment reference with a media type;
@@ -1088,6 +1114,25 @@ Incremental timeline events use `append`, `replace`, or `finalize`. `replace` ta
 entry and increments its revision; it cannot change the entry's ID, sequence, role, or type.
 `finalize` makes the entry immutable. Tool results must refer to a preceding tool call. Timeline
 pages and updates are bounded by the negotiated byte and item limits.
+
+Presentation order is numeric timestamp, then source sequence, then stable entry ID. Native
+harness counters and graph-derived counters are separate namespaces: comparing them without
+time can put a new tool call before an hours-old status. The gateway preserves both counters
+as source evidence; clients must not re-sort merged entries by sequence alone. `replace` and
+`finalize` also preserve the original append timestamp, so a revision changes content rather
+than moving the entry. A graph delivery header and its content share a timestamp and retain
+their adjacent sequence slots.
+
+HTTP opens at the newest bounded chronological window; its page cursor walks backward (a keyset
+cursor for a native transcript, a frozen projection for a stored timeline). Conversation changes
+and WebSocket follow frames use the same chronology. The conversation cursor independently
+tracks graph-store position, local-observation position, and native-source high-water sequence.
+Its native mark is the source's newest native sequence, not just the latest display window's, so
+graph-only windows cannot rewind it: when the 200-entry window is truncated, the gateway reads
+the newest native entries by sequence beside it (at most one window more). A change omitted by
+the byte/item-bounded replay window, native or graph, is still a `cursor-gap` requiring
+resynchronization; new native activity is never silently discarded merely because graph
+counters are larger.
 
 Pi-family native replay recognizes OMP's message-level `role: "toolResult"` records: the
 `toolCallId` correlates the result with its call, `isError` selects error or success status, and
@@ -1604,7 +1649,12 @@ and does not substitute ordinary person grants on older servers.
 The original slice-B proof-gated mode remains a legacy branch capability; the standalone
 adapter does not use it, does not send its proof header, and has no SCG dependency.
 In consent-at-grant mode, the same six scoped reads authorize against the current grant on
-every request and revalidate it immediately before returning the response. Envelope budgets
+every request and revalidate it immediately before returning the response. The response does not
+wait for their read-used and read-outcome receipts: after that final check they are queued in a
+bounded queue that a single writer commits in batches without a timer; a crash can lose receipts
+still queued. Proof-gated
+`approval-once` reads keep writing both receipts before the response. See
+[read receipts](../external-assistants.md#read-receipts). Envelope budgets
 default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
 `response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
 
@@ -2696,6 +2746,18 @@ present in the harness transcript and full structured tool arguments are shown
 without secret or token filtering. Without the feature, the server returns known
 text/tool/status bodies with visible size-limit notices. Old clients can read those
 fallbacks but do not fetch images or expand a chunked remainder.
+
+Subagent `conversation.session_id` links encode the native parent, task id, and root
+routing session. A gateway resolves ownership from that routing session and forwards the
+unchanged child id to its owner; the child is not a managed parent conversation. Owners
+resolve managed parents through their bound transcript and require the native parent id
+to match before opening the child file. Descendants retain the root routing session.
+Session detail GETs use the same routing key through the internal peer `session-detail`
+read operation; transcript pages and content chunks retain the child id as well.
+Child links are generated from volatile transcript content, not persisted session inventory.
+All gateways and owners must run the three-field child-id encoding; mixed versions are
+not supported. Previously opened two-field links must be regenerated by reopening the
+parent conversation after upgrading.
 
 A block MAY also carry `view: {type, ...}`, a parsed typed projection discriminated by
 the open `type` string. The schema defines one closed definition per known type

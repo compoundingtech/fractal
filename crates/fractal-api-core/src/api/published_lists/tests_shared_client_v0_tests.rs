@@ -117,6 +117,7 @@ pub fn app_state(root: &std::path::Path) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     }
 }
 

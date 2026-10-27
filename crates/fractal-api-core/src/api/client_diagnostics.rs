@@ -179,7 +179,7 @@ mod tests {
             store:Arc::new(crate::store::Store::open(&root.join("graph.db"),"diagnostic-test").unwrap()),
             notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,
             node:"diagnostic-test".into(),state_dir:root.into(),pty_root:root.join("pty"),pty_binary:root.join("unused-pty"),
-            fleet_id:None,configured_peers:Vec::new(),client_relay:None,native_session_home:None,planner_default:Default::default(),
+            fleet_id:None,configured_peers:Vec::new(),client_relay:None,native_session_home:None,planner_default:Default::default(),assistant_receipts:Default::default(),
             owning_person:None,
         }
     }
