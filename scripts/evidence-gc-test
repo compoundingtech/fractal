@@ -405,6 +405,8 @@ done
 """)
         hook.chmod(0o755)
         self.f.git('remote', 'add', 'origin', str(bare))
+        # evidence-gc clears GIT_CONFIG_* for its Git commands, so pin the server's hook lookup locally too.
+        self.f.git('-C', str(bare), 'config', 'core.hooksPath', str(bare / 'hooks'))
         calls = self.f.root / 'lock-calls'
         python = sys.executable
         log = f'open({str(calls)!r}, "a").write'

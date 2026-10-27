@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Test only: evidence-gc tests ignore global and system Git configuration, so a developer's core.hooksPath cannot bypass the fixture remote's tag-protection hook; timer subprocess fixtures retain the same isolation.",
+  "summary": "Test only: evidence-gc fixtures ignore global and system Git configuration, preserve that isolation for timer subprocesses, and explicitly select the protected remote's hooks directory so GC's environment cleanup cannot reintroduce a developer's core.hooksPath.",
   "replay": {"status": "none", "detail": "Test change only; no replay or recovery behavior changes."},
   "schema": {"status": "none", "detail": "No schema or persistent data changes."},
   "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},
