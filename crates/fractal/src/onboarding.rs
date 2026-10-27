@@ -255,14 +255,7 @@ pub async fn start(
         .context("the built-in Fractal Assistant has no declaration")?;
     let claim: fractal_daemon::model::ClaimRecord = client.get(&format!("/v1/claims/by-id/{token}")).await?;
     let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
-    let mut agent = fractal_daemon::graph::render_desired_node(&desired.desired)?;
-    // Typed harnesses require a body even when the provider has no default flags.
-    if let Some(body) = agent.children_mut()
-        && let Some(harness) = body.get_mut("harness")
-        && harness.children().is_none()
-    {
-        harness.set_children(KdlDocument::new());
-    }
+    let agent = fractal_daemon::graph::render_desired_node(&desired.desired)?;
     let mut run: KdlDocument = source.parse()?;
     run.nodes_mut()
         .retain(|node| node.name().value() != "agent");
