@@ -82,6 +82,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const anchor = React.useRef<HTMLDivElement>(null)
   const touch = useTouchLayout()
   const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
+  const [countExplained, setCountExplained] = React.useState(false)
   const [menuFocused, setMenuFocused] = React.useState(false)
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
@@ -107,7 +108,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="name" {...stylex.props(styles.name, !hasTrailing && styles.titleToEdge)}>
       <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-      {!displayOnly && row.childrenKnown !== undefined && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} onExplain={() => setHovered(false)} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
+      {!displayOnly && row.childrenKnown !== undefined && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
     </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
@@ -127,7 +128,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     {!displayOnly && <>
       <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
-      {hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
+      {hovered && !countExplained && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
         <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
       </Popover>}
     </>}
@@ -147,20 +148,19 @@ const unreportedReason = 'The number of subagents isn’t reported.'
  * word kept for assistive tech, then drops the count so the title keeps a readable stretch; the count never paints past
  * the name column.
  */
-function SubagentCount({ count, onPress, onExplain }: { readonly count: number | undefined; readonly onPress: (() => void) | undefined; readonly onExplain: () => void }) {
+function SubagentCount({ count, onPress, onExplain }: { readonly count: number | undefined; readonly onPress: (() => void) | undefined; readonly onExplain: (open: boolean) => void }) {
   const reasonId = React.useId()
   const unknown = count === undefined
   const label = unknown ? unreportedLabel : `${count} ${count === 1 ? 'subagent' : 'subagents'}`
   const id = unknown ? 'unknown' : String(count)
   const tag = <span aria-hidden={unknown || undefined} data-count-text {...stylex.props(styles.countTag)}>{unknown ? '?' : count}<span data-count-word {...stylex.props(styles.countWord)}>{count === 1 ? ' subagent' : ' subagents'}</span></span>
   const reason = unknown ? <span id={reasonId} hidden>{unreportedReason}</span> : null
-  const explain = (open: boolean) => { if (open) onExplain() }
-  if (onPress !== undefined) return <Tooltip label={unknown ? unreportedReason : label} placement="top" onOpenChange={explain}>
+  if (onPress !== undefined) return <Tooltip label={unknown ? unreportedReason : label} placement="top" onOpenChange={onExplain}>
     <Button data-subagent-count={id} aria-label={label} aria-describedby={unknown ? reasonId : undefined} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{tag}{reason}</Button>
   </Tooltip>
   if (!unknown) return <span data-subagent-count={id} {...stylex.props(styles.countHit)}>{tag}</span>
   return <span data-subagent-count={id} {...stylex.props(styles.countHit)}>
-    <Tooltip label={unreportedReason} placement="top" onOpenChange={explain}>
+    <Tooltip label={unreportedReason} placement="top" onOpenChange={onExplain}>
       <Focusable><span tabIndex={0} role="img" aria-label={label} aria-describedby={reasonId} data-count-trigger {...stylex.props(styles.countFocus)}>{tag}</span></Focusable>
     </Tooltip>
     {reason}
