@@ -1573,12 +1573,17 @@ push a shared host's load high enough to starve its daemons. Whoever runs the ho
 **The tree it signs is the tree the CI gate will judge.** Usually that is the pushed head. But when protected files moved on main since the branch
 point (or the branch is more than `HEAD_TREE_MAX_BEHIND` commits behind), the gate falls back to the MERGE tree (`head_tree=fallback:...` in its
 output), which a signature on the head does not cover. `fractal-test` asks the base's own `scripts/ci-evidence-gate` (`branch_point_verdict`, the function
-`choose_tree` calls: one rule, not a copy). When it says fallback, `fractal-test` makes the merge of the head with the base as a commit (`git merge-tree`,
-nothing is checked out in your clone), signs and tests THAT tree in its pool tree, and says so; if the branch does not merge cleanly it refuses and tells
-you to merge the base into the branch first. `fractal-test --status`, which the pre-push hook asks, judges the same tree, so a push is refused when the tree CI
-will judge is not covered even if the head tree is. A run that waits for a pool tree fetches the base again once it has one and chooses the commit to sign
-at the base's tip then, so the merge it signs is only as old as the run itself, not the run plus its wait (a branch that does not merge with the base
-is still refused before the wait).
+`choose_tree` calls: one rule, not a copy). When a signing run hears fallback, for either reason, it **merges the base into the branch** in your checkout
+first (`git merge --no-ff`, with your git identity: a new head commit), then signs and tests that head's own tree. It prints the reason and the merge
+commit (`fractal-test: the branch is 37 commits behind main, more than 24: merged origin/main (...) into my-branch as <sha>; the head tree is what is signed`).
+A signed merge tree is void at main's next commit, but the merged head's tree stays the one CI judges for `HEAD_TREE_MAX_BEHIND` more commits of main
+(as long as no protected file moves), so a run that waited hours for a pool tree is not lost to what landed meanwhile. A conflict stops the run at once,
+with the branch as it was (`git merge --abort`); so does a checkout that gained uncommitted changes to tracked files during the wait. With `--push`, a run
+that merged and exits 0 also pushes the branch at that merge to the branch of the same name on REMOTE (never forced, through the pre-push hook as any
+push). It refuses, and pushes nothing, when the remote branch has commits the local one lacks. A detached HEAD, or a branch named as the base's, is not
+pushed: the command is printed. `--status` changes nothing: it asks about the tree CI would judge now, the merge tree (`git merge-tree`, nothing
+checked out), so the pre-push hook refuses a push when that tree is not covered even if the head tree is. A run that waits for a pool tree fetches
+the base again once it has one and decides at the base's tip then (a branch that does not merge with the base is still refused before the wait).
 A check whose base policy compares a note's input with the run's own value (`input_order`: `fractal-web`'s `kit_inputs`) is judged the way the CI gate
 judges it: `fractal-test` passes the verifier `--run-input kit_inputs=...`, computed by the base's `scripts/ci-fractal-web-changes` (`kit_paths` of the diff
 from the merge base; `true` when that cannot be told) in `--status`, in the pre-push hook (which only asks `--status`) and in the skip of an
