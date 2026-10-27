@@ -2,6 +2,7 @@
 //! Setup uses only this HOME, state directory and sockets; no host daemon or service.
 
 use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
