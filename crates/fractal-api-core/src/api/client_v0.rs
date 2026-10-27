@@ -931,6 +931,11 @@ pub fn mission_list_cards_with(
         .into_iter()
         .map(|d| (d.mission.subject.clone(), d))
         .collect::<BTreeMap<_, _>>();
+    let resource_uris = store.declared_resource_uris(
+        definitions
+            .values()
+            .flat_map(|definition| &definition.mission.resources),
+    )?;
     ids.iter().map(|id| {
         let overview = crate::performance::task("mission_collection/overview", || store.mission_overview(id, 3))?;
         let newest = overview["newest"].as_array().expect("overview previews");
@@ -993,6 +998,8 @@ pub fn mission_list_cards_with(
             "run_details":details,"active_runs":active,"total_runs":overview["total_runs"],
             "run_counts":overview["counts"],"runs_truncated":overview["total_runs"].as_u64().unwrap_or(0)>newest.len() as u64,
             "run_generations":generations,"must_act":must_act,
+            "resources":crate::api::client_declared_resources(
+                definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
             "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
     }).collect()
 }
@@ -3014,49 +3021,119 @@ fn managed_claude_transcript(
     }
 }
 
+fn pi_family_binding<'a>(
+    bindings: &'a [crate::model::ClaimRecord],
+    owner: &str,
+    incarnation: &str,
+    driver: crate::external_sessions::ExternalDriver,
+) -> Option<&'a crate::model::ClaimRecord> {
+    let matches_owner = |fields: &Value| {
+        fields["harness"] == driver.as_str() && fields["agent"] == owner
+    };
+    bindings.iter().rev().find(|claim| {
+        let fields = claim.body.get("fields").unwrap_or(&claim.body);
+        matches_owner(fields) && fields["incarnation_id"] == incarnation
+    }).or_else(|| bindings.last().filter(|claim| {
+        // Import provenance is usable only until a runtime binding supersedes it.
+        let fields = claim.body.get("fields").unwrap_or(&claim.body);
+        matches_owner(fields)
+            && fields["incarnation_id"].is_null()
+            && fields["source_session"].as_str().is_some()
+    }))
+}
+
+#[cfg(test)]
+mod pi_family_binding_tests {
+    use super::*;
+
+    #[test]
+    fn exact_incarnation_beats_newer_imports_and_other_runtime_bindings() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&root.path().join("graph.db"), "test").unwrap();
+        let owner = "agent/binding-test";
+        let append = |incarnation: Option<&str>, source: Option<&str>, agent: &str| {
+            if let Some(incarnation) = incarnation {
+                store.append_claim(&crate::model::ClaimInput {
+                    subject: owner.into(), kind: "runtime.observed".into(),
+                    actor: Some("person/robin".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("running")),
+                        ("incarnation_id".into(), json!(incarnation)),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            store.append_claim(&crate::model::ClaimInput {
+                subject: owner.into(),
+                kind: "harness.session-file".into(),
+                actor: Some("person/robin".into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("omp")),
+                    ("session_id".into(), json!("native-binding")),
+                    ("agent".into(), json!(agent)),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("source_session".into(), json!(source)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        let imported = append(None, Some("session/imported"), owner);
+        let claims = || store.claims_for(owner, Some("harness.session-file")).unwrap();
+        let selected = |bindings: &[crate::model::ClaimRecord], incarnation: &str| {
+            pi_family_binding(bindings, owner, incarnation, crate::external_sessions::ExternalDriver::Omp)
+                .map(|claim| claim.id.clone())
+        };
+        assert_eq!(selected(&claims(), "old"), Some(imported.id));
+        let exact = append(Some("old"), None, owner);
+        append(Some("new"), None, owner);
+        assert_eq!(selected(&claims(), "old"), Some(exact.id.clone()));
+        assert_eq!(selected(&claims(), "unbound"), None, "runtime claims supersede import provenance");
+        append(None, Some("session/later-import"), owner);
+        assert_eq!(selected(&claims(), "old"), Some(exact.id.clone()));
+        append(Some("old"), None, "agent/other-owner");
+        assert_eq!(selected(&claims(), "old"), Some(exact.id));
+        assert_eq!(selected(&claims(), "unbound"), None, "a foreign latest claim cannot revive an import");
+    }
+}
+
 fn managed_pi_family_transcript(
     state: &AppState,
     owner: &str,
     incarnation: &str,
     driver: crate::external_sessions::ExternalDriver,
 ) -> Result<crate::external_sessions::ExternalSession, Missing> {
-    if let Some(claim) = state
+    let bindings = state
         .store
-        .latest_claim(owner, Some("harness.session-file"))
-        .map_err(|error| format!("reading the pi-family session record failed: {error:#}"))?
-    {
+        .claims_for(owner, Some("harness.session-file"))
+        .map_err(|error| format!("reading the pi-family session record failed: {error:#}"))?;
+    if let Some(claim) = pi_family_binding(&bindings, owner, incarnation, driver) {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
-        if fields["harness"] == driver.as_str()
-            && fields["agent"] == owner
-            && (fields["incarnation_id"] == incarnation
-                || (fields["incarnation_id"].is_null()
-                    && fields["source_session"].as_str().is_some()))
-        {
-            let (Some(path), Some(native_id)) =
-                (fields["path"].as_str(), fields["session_id"].as_str())
-            else {
-                return Err(Missing::not_yet(
-                    "the bound pi-family session has no transcript path",
-                ));
-            };
-            return match crate::external_sessions::find_bound_pi_family_transcript(
-                driver,
-                Path::new(path),
-                native_id,
-            ) {
-                Ok(Some(session)) => Ok(session),
-                Ok(None) => Err(format!(
-                    "the bound {} session {native_id} is not readable",
-                    driver.as_str()
-                )
-                .into()),
-                Err(error) => Err(format!(
-                    "reading the bound {} session {native_id} failed: {error:#}",
-                    driver.as_str()
-                )
-                .into()),
-            };
-        }
+        let (Some(path), Some(native_id)) =
+            (fields["path"].as_str(), fields["session_id"].as_str())
+        else {
+            return Err(Missing::not_yet(
+                "the bound pi-family session has no transcript path",
+            ));
+        };
+        return match crate::external_sessions::find_bound_pi_family_transcript(
+            driver,
+            Path::new(path),
+            native_id,
+        ) {
+            Ok(Some(session)) => Ok(session),
+            Ok(None) => Err(format!(
+                "the bound {} session {native_id} is not readable",
+                driver.as_str()
+            )
+            .into()),
+            Err(error) => Err(format!(
+                "reading the bound {} session {native_id} failed: {error:#}",
+                driver.as_str()
+            )
+            .into()),
+        };
     }
     let root = state
         .state_dir

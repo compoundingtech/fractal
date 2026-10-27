@@ -317,8 +317,34 @@ on the seat, has not ended, and has a lease that runs past the read. Each one ha
 own `id`, its `subagent_type`, a one-line `description`, its `driver` and `session_id`, the
 `work_id` of the step the seat held when it appeared, `started_at`, and `lease_expires_at`. A
 subagent is part of its agent, not a resource of its own, and has no actions. The list is read
-per request, so a lease that runs out leaves it at the next read without a new claim. A daemon
-older than the field omits it; clients read a missing list as empty.
+per request, so a lease that runs out leaves it at the next read without a new claim. The field
+is omitted when the agent's driver does not report subagents, or by an older daemon. An absent
+field means not reported, while an empty list means the driver reports no running subagents.
+Claude, Codex, and OMP report subagents; Pi and OpenCode do not.
+
+### Declared resources
+
+An agent's or mission's `resources` lists the resources its current declaration names, in authored
+order: each has its `name`, ordinary resource `subject`, authored `kind` (`uri` or `subject`),
+URI `resolution`, and nullable `reason`. A mission's list comes from its current published
+revision. The owner stores typed edges, while the shared smallclaims subject stores the immutable
+URI. Its ID is `resource/uri/` followed by the lowercase hex SHA-256 of the exact URI's bytes;
+different owners naming that URI resolve to the same subject.
+
+The list is read-only; change it by reapplying the seat declaration or publishing a new mission
+revision (see [declared resources](../../site/reference/configuration.md#declared-resources)). Removing an edge does
+not delete its subject or other owners' references. A URI edge has `resolution: "resolved"` and
+a string `uri` when its locator is available, or `resolution: "unresolved"` and no `uri` while
+the URI declaration is unavailable locally. Explicit subject edges have `resolution: "not-applicable"`
+and no `uri`: they need no URI locator, and this state does not assert subject existence.
+A daemon older than the field omits it; clients read a missing list as empty.
+
+These declared references are distinct from `GET /v1/client/resources`, which lists resource
+observations. Declaring a URI does not fetch it, create an observation, or start an observer.
+
+`GET /v1/resource-references/{subject}` on the privileged local API returns the declarations
+that reference that ordinary resource subject, without scanning all declarations. This is not a
+paired-client route and does not grant ownership or make a shared URI target eligible for cleanup.
 
 ### Native harness inventory
 
