@@ -32,8 +32,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
     "pull_request": {
       types: readyPullRequestTypes,
       "paths": [
-        ".github/workflows/release-smalltalk.yml",
-        ".github/workflows/release-smalltalk.yml.genie.ts",
+        ".github/workflows/release-fractal.yml",
+        ".github/workflows/release-fractal.yml.genie.ts",
         ".gitignore",
         "crates/fractal-build-stamp/**",
         "crates/fractal-drivers/src/version.rs",
@@ -44,7 +44,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/release-build-stamp.py",
         "scripts/release-rust-version",
         "scripts/fixtures/install-release-v0.3.17",
-        "scripts/release-smalltalk*",
+        "scripts/release-fractal*",
         "scripts/release_notes*",
         "scripts/compat-baseline-release*",
         ".github/*-compat-baseline.json",
@@ -93,11 +93,11 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         },
         {
           "name": "Test release names, install entry points and isolated app transactions",
-          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-smalltalk-edge-test\npython3 scripts/compat-baseline-release-test\n"
+          "run": "scripts/install-test\nscripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-fractal-edge-test\npython3 scripts/release-fractal-manifest-test\npython3 scripts/compat-baseline-release-test\n"
         },
         {
           "name": "Test the daily release failure path",
-          "run": "python3 scripts/release-smalltalk-daily-test"
+          "run": "python3 scripts/release-fractal-daily-test"
         }
       ]
     },
@@ -176,11 +176,11 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         },
         {
           "name": "Test installer",
-          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-smalltalk-test\npython3 scripts/release_notes_test.py\n"
+          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-fractal-test\npython3 scripts/release_notes_test.py\n"
         },
         {
           "name": "Build, package, and test extracted tools",
-          "run": "scripts/release-smalltalk '${{ matrix.target }}' dist"
+          "run": "scripts/release-fractal '${{ matrix.target }}' dist"
         },
         ...buildSnapshotSave,
         {
@@ -221,12 +221,12 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
           "env": {
             "SOURCE_SHA": "${{ github.sha }}"
           },
-          "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-smalltalk-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
+          "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
         },
         {
           "uses": "actions/upload-artifact@v4",
           "with": {
-            "name": "smalltalk-release",
+            "name": "fractal-release",
             "path": "dist/*",
             "if-no-files-found": "error",
             "retention-days": 7
@@ -259,13 +259,13 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         {
           "uses": "actions/download-artifact@v4",
           "with": {
-            "name": "smalltalk-release",
+            "name": "fractal-release",
             "path": "dist"
           }
         },
         {
           "name": "Move the rolling edge pre-release to this verified commit",
-          "run": "scripts/release-smalltalk-edge --source \"$SOURCE_SHA\" --dist dist --run-url \"$RUN_URL\""
+          "run": "scripts/release-fractal-edge --source \"$SOURCE_SHA\" --dist dist --run-url \"$RUN_URL\""
         }
       ]
     },
@@ -288,13 +288,13 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         {
           "uses": "actions/download-artifact@v4",
           "with": {
-            "name": "smalltalk-release",
+            "name": "fractal-release",
             "path": "dist"
           }
         },
         {
           "name": "Publish the verified tag artifacts",
-          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/compat-baseline-release check --source \"$SOURCE_SHA\" --require-latest\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-smalltalk-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --draft --title \"Fractal $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json\ngh release edit \"$TAG\" --draft=false\n"
+          "run": "set -euo pipefail\ngit fetch origin \"refs/tags/$TAG\"\ntest \"$(git rev-parse 'FETCH_HEAD^{commit}')\" = \"$SOURCE_SHA\"\npython3 scripts/compat-baseline-release check --source \"$SOURCE_SHA\" --require-latest\npython3 scripts/release_notes.py --source \"$SOURCE_SHA\" --tag \"$TAG\" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json\ncd dist\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\n# Refuse to replace any existing release or its assets. A partial draft stays private\n# for inspection; delete that draft before retrying, never move the tag.\ngh release create \"$TAG\" --verify-tag --draft --title \"Fractal $TAG\" \\\n  --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json\ngh release edit \"$TAG\" --draft=false\n"
         }
       ]
     },

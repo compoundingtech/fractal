@@ -1617,7 +1617,7 @@ record (`"v": 1`) has `started` and `ended` (UTC, from before the base fetch to 
 run; `null` when no check builds), `parallel` (the light checks ran alongside the build lane), `rows` (every summary row's name, result and
 seconds), `exit`, and `stages`: `linux-gate`'s stages (name, start, end, seconds, exit, queue waits and queue seconds) from the table
 `scripts/ci-local` prints at its end, read from its output, which fractal-test copies to the terminal as it comes and keeps (`[]` when there is
-no table). `scripts/st-test-report [FILE...] [--hours 24 | --since ISO] [--slo-s 720] [--max-s 900] [--markdown]` reads those files and
+no table). `scripts/fractal-test-report [FILE...] [--hours 24 | --since ISO] [--slo-s 720] [--max-s 900] [--markdown]` reads those files and
 prints, over the full warm runs in the window that ran and signed every check (exit 0), the count,
 the nearest-rank p50 and p90, the maximum, the share within the objective, whether it is breached and why, the same per host, and the five
 slowest stages or checks; the runs left out are counted by reason (`not_full`, `cold`, `partial`: exit 4, a tree that edits a lane runs nothing for that check, and `failed`). It writes nothing.
