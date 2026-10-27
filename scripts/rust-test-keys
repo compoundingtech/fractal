@@ -59,7 +59,7 @@ def show(repo, tree, path):
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — no unextracted sibling dependency.
 def config_path(repo, revision, legacy):
     preferred = legacy.replace('.st/', '.fractal/', 1)
-    done = subprocess.run(['git', '-C', str(repo), 'ls-tree', '-z', revision, '--', preferred, legacy], capture_output=True)
+    done = subprocess.run(['git', '-C', str(repo), 'ls-tree', '-z', '--full-tree', revision, '--', preferred, legacy], capture_output=True)
     if done.returncode != 0:
         raise Failure(f'cannot resolve configuration at {revision}: {done.stderr.decode(errors="replace").strip()}')
     names = {entry.partition(b'\t')[2].decode() for entry in done.stdout.split(b'\0') if entry}

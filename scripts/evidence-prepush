@@ -138,7 +138,7 @@ def git(*args):
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — never consult candidate keys.
 def config_path(base, name):
     path = f'.fractal/{name}'
-    probe = git('ls-tree', '-z', base, '--', path)
+    probe = git('ls-tree', '--full-tree', '-z', base, '--', path)
     if probe.returncode != 0:
         raise RuntimeError(f'cannot inspect accepted configuration at {base}')
     return path if probe.stdout else f'.st/{name}'

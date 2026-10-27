@@ -167,6 +167,50 @@ class ConfigBridgeTest(unittest.TestCase):
                         else:
                             module.config_path('missing-revision', 'required-lanes.json')
 
+    def test_subdirectory_runner_cannot_bootstrap_candidate_over_base_rust_policy(self):
+        for layout in ('.st', '.fractal'):
+            with self.subTest(layout=layout), tempfile.TemporaryDirectory() as scratch:
+                root = Path(scratch)
+                repo = root / 'repo'
+                repo.mkdir()
+                git(repo, 'init', '-q')
+                (repo / layout).mkdir()
+                (repo / layout / 'evidence-skip-policy.json').write_text('{"checks":{"rust-tests":{}}}')
+                (repo / layout / 'rust-test-inputs.json').write_text('{"version":1,"no_tests":["accepted"]}')
+                (repo / layout / 'required-lanes.json').write_text('{"lanes":{"rust-tests":{}}}')
+                (repo / 'scripts').mkdir()
+                (repo / 'scripts/rust-test-keys').write_text('print(\'{"accepted":"base"}\')\n')
+                (repo / 'scripts/evidence-verify').write_text('# accepted verifier\n')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'accepted rust policy and tools')
+                base = git(repo, 'rev-parse', 'HEAD')
+                marker = root / 'candidate-ran'
+                (repo / 'scripts/rust-test-keys').write_text(
+                    f'from pathlib import Path\nPath({str(marker)!r}).touch()\nprint(\'{{"malicious":"candidate"}}\')\n')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'candidate malicious key producer')
+                tree = git(repo, 'rev-parse', 'HEAD')
+                nested = repo / 'nested/deeper'
+                nested.mkdir(parents=True)
+                copied = root / 'st-test'
+                shutil.copyfile(ROOT / 'scripts/st-test', copied)
+                outputs = root / 'tools'
+                outputs.mkdir()
+                with contextlib.chdir(nested), mock.patch.dict(os.environ, GIT_ENV, clear=True):
+                    self.assertTrue(st_test.judged_by_policy(base))
+                    self.assertEqual(st_test.lane_names(base), {'rust-tests'})
+                    self.assertEqual(st_test.listed_no_tests(base), ['accepted'])
+                    self.assertEqual(st_test.crate_keys(base, repo, tree, outputs), ({'accepted': 'base'}, None))
+                executed = subprocess.run(
+                    [sys.executable, '-I', '-c',
+                     'import json,runpy,sys; m=runpy.run_path(sys.argv[1]); '
+                     'print(json.dumps(m["crate_keys"](sys.argv[2],sys.argv[3],sys.argv[4],sys.argv[5])))',
+                     str(copied), base, str(repo), tree, str(outputs)],
+                    cwd=nested, env=GIT_ENV, capture_output=True, text=True)
+                self.assertEqual(executed.returncode, 0, executed.stderr)
+                self.assertEqual(json.loads(executed.stdout), [{'accepted': 'base'}, None])
+                self.assertFalse(marker.exists(), 'candidate producer must never execute under accepted rust-tests policy')
+
 
 class PoolTreeTest(unittest.TestCase):
     """Pool reuse without a signer or remote: only disposable local worktrees are involved."""

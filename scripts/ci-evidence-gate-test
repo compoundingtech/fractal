@@ -331,6 +331,21 @@ class ConfigLayoutBridge(unittest.TestCase):
             return module.base_file(revision, legacy)
         return module.config_path(revision, legacy)
 
+    def test_subdirectory_callers_still_select_repository_root_configuration(self):
+        legacy, preferred = '.st/rust-test-inputs.json', '.fractal/rust-test-inputs.json'
+        base = self.commit({legacy: '{"no_tests": ["old"]}', preferred: '{"no_tests": ["root"]}',
+                            'nested/.fractal/rust-test-inputs.json': '{"no_tests": ["wrong-subdirectory"]}'})
+        nested = self.f.repo / 'nested'
+        os.chdir(nested)
+        for name, module in self.modules.items():
+            with self.subTest(tool=name):
+                if name in ('evidence-verify', 'rust-test-keys'):
+                    self.assertEqual(module.config_path(str(nested), base, legacy), preferred)
+                elif name == 'ci-rust-test-notes':
+                    self.assertEqual(module.no_tests(base), {'root'})
+                else:
+                    self.assertEqual(module.config_path(base, legacy), preferred)
+
     def test_old_new_and_both_resolve_at_the_requested_revision_in_extracted_tools(self):
         legacy, preferred = '.st/rust-test-inputs.json', '.fractal/rust-test-inputs.json'
         old = self.commit({legacy: '{"no_tests": ["old"]}'})

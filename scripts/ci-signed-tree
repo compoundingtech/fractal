@@ -48,7 +48,7 @@ def run(*command, timeout=120):
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — no candidate or sibling fallback.
 def config_path(base, legacy):
     preferred = legacy.replace('.st/', '.fractal/', 1)
-    code, listing = run('git', 'ls-tree', '-z', base, '--', preferred, legacy)
+    code, listing = run('git', 'ls-tree', '-z', '--full-tree', base, '--', preferred, legacy)
     if code != 0:
         raise RuntimeError(f'could not resolve configuration at {base}')
     names = {entry.partition(b'\t')[2].decode() for entry in listing.split(b'\0') if entry}

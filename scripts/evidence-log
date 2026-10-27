@@ -89,7 +89,7 @@ def git(repo, *args, stdin=None, check=True, env=None, config=()):
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for timer-extracted log tools.
 def config_path(repo, base, name):
     path = f'.fractal/{name}'
-    return path if git(repo, 'ls-tree', '-z', base, '--', path).stdout else f'.st/{name}'
+    return path if git(repo, 'ls-tree', '--full-tree', '-z', base, '--', path).stdout else f'.st/{name}'
 
 
 def verifier():

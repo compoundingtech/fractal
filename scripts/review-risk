@@ -42,7 +42,7 @@ def load_engine(path):
 def config_path(repo, path, base=None):
     new = path.replace(".st/", ".fractal/", 1)
     if base is not None:
-        probe = subprocess.run(["git", "ls-tree", "-z", base, "--", new], cwd=repo, capture_output=True, check=True)
+        probe = subprocess.run(["git", "ls-tree", "--full-tree", "-z", base, "--", new], cwd=repo, capture_output=True, check=True)
         return new if probe.stdout else path
     try:
         (repo / new).lstat()

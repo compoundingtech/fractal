@@ -809,7 +809,14 @@ pub fn load_policy(repo: &Path, revision: &str) -> Result<Policy> {
     // Probe the pinned tree separately: missing objects and unreadable new blobs fail closed.
     let path = if git(
         repo,
-        &["ls-tree", "-z", &revision, "--", ".fractal/evidence-policy.json"],
+        &[
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            &revision,
+            "--",
+            ".fractal/evidence-policy.json",
+        ],
         None,
     )?
     .is_empty()
@@ -842,10 +849,7 @@ mod policy_path_tests {
         .unwrap()
     }
 
-    fn fixture(
-        legacy: Option<&[u8]>,
-        current: Option<&[u8]>,
-    ) -> (tempfile::TempDir, String) {
+    fn fixture(legacy: Option<&[u8]>, current: Option<&[u8]>) -> (tempfile::TempDir, String) {
         let root = tempfile::tempdir().unwrap();
         let repo = root.path();
         git(repo, &["init", "-q"], None).unwrap();
@@ -887,6 +891,12 @@ mod policy_path_tests {
             let (root, revision) = fixture(legacy, current);
             let policy = load_policy(root.path(), &revision).unwrap();
             assert_eq!(policy.required_checks, BTreeSet::from([expected.into()]));
+            let subdir = root.path().join("nested");
+            std::fs::create_dir(&subdir).unwrap();
+            assert_eq!(
+                load_policy(&subdir, &revision).unwrap().required_checks,
+                BTreeSet::from([expected.into()])
+            );
         }
         let (root, revision) = fixture(Some(&old), None);
         std::fs::create_dir(root.path().join(".fractal")).unwrap();

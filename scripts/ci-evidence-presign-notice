@@ -34,7 +34,7 @@ def fields_of(text):
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — this script is extracted individually in CI.
 def lanes_at(base, runner=subprocess.run):
     path = '.fractal/required-lanes.json'
-    probe = runner(['git', 'ls-tree', '-z', base, '--', path], capture_output=True, text=True, check=False)
+    probe = runner(['git', 'ls-tree', '--full-tree', '-z', base, '--', path], capture_output=True, text=True, check=False)
     if probe.returncode != 0:
         raise RuntimeError(f'cannot inspect lane definition at {base[:12]}')
     if not probe.stdout:

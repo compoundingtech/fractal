@@ -772,7 +772,7 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
           run: `# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
-key_entry=$(git ls-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
 key_path=.st/evidence-keys
 if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
 git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
@@ -875,7 +875,7 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sig
           'continue-on-error': true,
           run: `[ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
-key_entry=$(git ls-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
 key_path=.st/evidence-keys
 if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
 git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }

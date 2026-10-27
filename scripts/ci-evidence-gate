@@ -126,7 +126,7 @@ def run(*command, stdin=None, timeout=120, env=None):
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for the individually extracted gate.
 def config_path(base, legacy):
     preferred = legacy.replace('.st/', '.fractal/', 1)
-    listing = run('git', 'ls-tree', '-z', base, '--', preferred, legacy)
+    listing = run('git', 'ls-tree', '-z', '--full-tree', base, '--', preferred, legacy)
     if listing.returncode != 0:
         raise Fallback(f'could not resolve configuration at {base}')
     names = {entry.partition(b'\t')[2].decode() for entry in listing.stdout.split(b'\0') if entry}

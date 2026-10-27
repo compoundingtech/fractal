@@ -272,7 +272,7 @@ def old_base(root, row, runner, seen):
 def config_path(root, path, revision=None, runner=default_runner):
     new = path.replace('.st/', '.fractal/', 1)
     if revision is not None:
-        return new if git(root, 'ls-tree', '-z', revision, '--', new, runner=runner) else path
+        return new if git(root, 'ls-tree', '--full-tree', '-z', revision, '--', new, runner=runner) else path
     try:
         (Path(root) / new).lstat()
     except FileNotFoundError:
@@ -289,7 +289,7 @@ def predates(root, base, reason, check, runner):
         return not ok('cat-file', '-e', f'{base}:{GATE}')
     try:
         path = config_path(root, POLICY, base, runner)
-        if not git(root, 'ls-tree', '-z', base, '--', path, runner=runner):
+        if not git(root, 'ls-tree', '--full-tree', '-z', base, '--', path, runner=runner):
             return True  # genuinely absent at the old base, not an unreadable object
         return check not in json.loads(git(root, 'show', f'{base}:{path}', runner=runner))['checks']
     except (RuntimeError, ValueError, KeyError, TypeError):

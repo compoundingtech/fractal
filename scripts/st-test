@@ -269,7 +269,7 @@ def git(*args, cwd=None, env=None, check=True, stdin=None):
 def config_path(base, name):
     for directory in ('.fractal', '.st'):
         path = f'{directory}/{name}'
-        if git('ls-tree', '-z', base, '--', path).stdout:
+        if git('ls-tree', '--full-tree', '-z', base, '--', path).stdout:
             return path
     return None
 
@@ -554,7 +554,10 @@ def lane_edits(verifier_path, directory, base, check, tree):
     verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(verifier)
     try:
-        rules = verifier.lane_rules(git('show', f'{base}:{verifier.LANES_PATH}').stdout.decode(), check)
+        blob = config_blob(base, 'required-lanes.json')
+        if blob is None:
+            raise Failure(f'no lane file at accepted base {base}')
+        rules = verifier.lane_rules(blob.decode(), check)
         base_tree = text(git('rev-parse', '--verify', '--end-of-options', base + '^{tree}'))
         return verifier.lane_definition(str(directory), base_tree, tree, rules)['changed']
     except verifier.Failure:
@@ -1057,7 +1060,7 @@ def crate_keys(base, directory, tree, scratch):
     while the base's policy does not name rust-tests, so nothing judges a note yet, are the tree's own used: the change that introduces them
     is judged by itself. Once the base's policy names it, a base without them is an error, never a fallback. Returns (keys, error)."""
     tool = Path(scratch) / 'rust-test-keys'
-    shown = git('show', f'{base}:{RUST_TEST_KEYS}') if git('ls-tree', '-z', base, '--', RUST_TEST_KEYS).stdout else None
+    shown = git('show', f'{base}:{RUST_TEST_KEYS}') if git('ls-tree', '--full-tree', '-z', base, '--', RUST_TEST_KEYS).stdout else None
     inputs_at = base
     inputs = config_blob(base, RUST_TEST_INPUTS)
     if inputs is not None:

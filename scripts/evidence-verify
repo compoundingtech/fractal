@@ -82,7 +82,7 @@ def git(repo, *args, stdin=None, config=(), env=None):
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for extracted base tools.
 def config_path(repo, revision, legacy):
     preferred = legacy.replace('.st/', '.fractal/', 1)
-    listing = git(repo, 'ls-tree', '-z', revision, '--', preferred, legacy)
+    listing = git(repo, 'ls-tree', '-z', '--full-tree', revision, '--', preferred, legacy)
     names = {entry.partition(b'\t')[2].decode() for entry in listing.split(b'\0') if entry}
     return preferred if preferred in names else legacy if legacy in names else None
 

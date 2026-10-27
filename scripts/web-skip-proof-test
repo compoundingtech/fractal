@@ -135,6 +135,12 @@ with tempfile.TemporaryDirectory() as scratch:
     both = commit(repo, "new layout shadows old", {})
     lines = decisions(repo, both, both)
     assert lines["fractal-web-kit"]["reason"] == "shadow", lines
+    nested = repo / "nested"
+    nested.mkdir()
+    subdir = subprocess.run([str(tool), "--base", both, "--head", both], cwd=nested,
+                           capture_output=True, text=True, env=clean)
+    assert subdir.returncode == 0, subdir.stderr
+    assert "reason=shadow" in subdir.stdout, "subdirectory lookup must select the root's new policy"
     old_policy.unlink()
     moved = commit(repo, "new layout only", {})
     assert decisions(repo, moved, moved)["fractal-web-kit"]["reason"] == "shadow"

@@ -1,6 +1,5 @@
 {
   "version": 1,
-  "_config_dir_bridge": "arn:lmig:smalltalk:2026-10-27-dot-fractal-config",
   "checks": {
     "linux-gate": {
       "trust_levels": [
