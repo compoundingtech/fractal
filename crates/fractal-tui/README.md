@@ -2,11 +2,36 @@
 
 `st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
 a mission, a terminal, Inbox or usage. `st ui --space NAME` opens a named space. `st ui --demo`
-shows them on invented data and sends nothing. Spaces are the Fractal terminal UI's only layout: the layout from
+shows the kit's generated `fleet-mid-refactor` world and sends nothing. Spaces are the Fractal terminal UI's only layout: the layout from
 before them is gone ([#1166](https://github.com/compoundingtech/fractal/issues/1166)), and
 `st ui --classic` refuses with what to run instead. `tui` is an alias of `ui`, including after global options such as `st --endpoint URL tui`.
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
+
+Demo data flows from the six committed `fixtures/scenarios/fleet-mid-refactor/*.json`
+slices (embedded in the binary), through `fractal_client::scenarios` strict decoding
+and timestamp rebasing to now, into the ordinary `ui/adapt.rs` model adapter and screens.
+It includes the generated roster, sessions, machines, devices, mission and work,
+attention, conversations and recorded terminal screen. Launches and variants are
+decoded with the details inventory and supply available launch previews; the TUI
+does not have a standalone launch inventory screen. A bad slice stops demo startup
+before terminal raw mode, naming the slice and failing wire-value pointer.
+
+The demo renders the slices' initial state only: timeline updates and recorded history
+are validated but not played back. Tolerant-decode slices are rejected, not silently
+accepted. The selected identity is fixed to `person/robin`, with `host/meadow` as the
+snapshot host; roster and inventory rows themselves come from the slices. Worktrees
+are explicitly unavailable because the kit does not model them (the live graph also
+has no worktree collection). Clients and Usage remain loading: these screens do not
+yet have a scenario-backed projection.
+
+`fixtures/clients/demo-world.json` is only a derived client contract, not demo input.
+Regenerate it and the text capture `tests/fixtures/scenario-demo.golden` with
+`STUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.
+The contract uses the kit anchor clock and omits local conversation clock labels;
+normal demo mode rebases to the current clock. Without the update flag, contract
+and rendered-frame tests fail on scenario/adapter drift. Invented per-feature inputs
+remain test-only fixtures, never a second runtime demo world.
 
 The TUI library connects through the generated Rust `st3.client.v0` client, the same typed data boundary
 used by the CLI. Its subscriptions, reconnects, snapshot model and cache come from
@@ -217,7 +242,7 @@ Older members read inventories when their relevant view opens or its period
 changes; Fleet says these inventories are read, not followed. Read errors and
 partial windows stay visible. Connection generations fence legacy results, so a
 late read cannot replace a newer member's streamed rows. The actual-binary idle
-transport test runs `scripts/stui-test-client` with `STUI_TIMING_LOG` on a private
+transport test runs `scripts/fractal-ui-test-client` with `STUI_TIMING_LOG` on a private
 daemon, opening the Fleet list and Usage from Ctrl+K and holding them idle beyond every old
 read interval.
 

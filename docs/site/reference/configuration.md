@@ -133,7 +133,7 @@ Within a fleet, an agent may publish, start, and revise missions and move agent 
 
 Publication saves a definition; it does not create a run. Start it explicitly with `fractal missions start`. To make a new run wait for another run to complete, use `--after RUN`; a failed or cancelled prerequisite is not successful completion. See [Missions in practice](../guides/missions-in-practice.md#queue-follow-on-work) for the runnable sequence.
 
-For exact supported syntax, see the [mission runtime](https://github.com/compoundingtech/fractal/blob/main/docs/st3/mission-graph-runtime.md), [schema](https://github.com/compoundingtech/fractal/blob/main/docs/st3/schema.md), and [worked examples](https://github.com/compoundingtech/fractal/blob/main/examples/st3/README.md).
+For exact supported syntax, see the [mission runtime](https://github.com/compoundingtech/fractal/blob/main/docs/st3/mission-graph-runtime.md), [schema](https://github.com/compoundingtech/fractal/blob/main/docs/st3/schema.md), and [worked examples](https://github.com/compoundingtech/fractal/blob/main/examples/fractal/README.md).
 
 ## Declared resources
 

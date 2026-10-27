@@ -11,43 +11,43 @@ Future imports require an explicit eval review before they enter this corpus.
 
 | Eval | st2 | st3 |
 | --- | --- | --- |
-| License MIT | `st2/license-mit` | `st3/license-mit` |
-| Ghost bug | `st2/ghost-bug` | `st3/ghost-bug` |
-| Signal rename | `st2/signal-rename` | `st3/signal-rename` |
-| Restart continuity | `st2/restart-continuity` | `st3/restart-continuity` |
-| Fork in the road | `st2/fork-in-the-road` | `st3/fork-in-the-road` |
-| Poisoned pull request | `st2/poisoned-pr` | `st3/poisoned-pr` |
-| Test Writing | `st2/test-writing` | `st3/test-writing` |
-| Weird Git Setup | `st2/weird-git-setup` | `st3/weird-git-setup` |
-| Claude Skill Inheritance | `st2/claude-skill-inheritance` | `st3/claude-skill-inheritance` |
-| Resource cold start | `st2/resource-cold-start` | `st3/resource-cold-start` |
-| Resource retarget | `st2/resource-retarget` | `st3/resource-retarget` |
-| Resource handoff | `st2/resource-handoff` | `st3/resource-handoff` |
-| Context and resource continuity | `st2/context-resource-continuity` | `st3/context-resource-continuity` |
-| Crash escalation | `st2/crash-escalation` | `st3/crash-escalation` |
-| PTY attach machine stream | `st2/pty-attach-machine-stream` | `st3/pty-attach-machine-stream` |
-| PTY attach only | `st2/pty-attach-only` | `st3/pty-attach-only` |
-| PTY send and peek | `st2/pty-send-peek` | `st3/pty-send-peek` |
-| Network smoke | `st2/network-smoke` | `st3/network-smoke` |
-| Network isolation | `st2/network-isolation` | `st3/network-isolation` |
-| Mission Document Lift | Not supported | `st3/mission-document-lift` |
-| Mixed Worker Pool | Not supported | `st3/mixed-worker-pool` |
-| Cross-harness message wake | Not supported | `st3/cross-harness-message-wake` |
-| Work wake reliability | Not supported | `st3/work-wake-reliability` |
-| Seat queue | Not supported | `st3/seat-queue` |
-| Planning Mode | Not supported | `st3/planning-mode` |
-| Run Generation Revision | Not supported | `st3/run-generation-revision` |
-| Mission Inputs | Not supported | `st3/mission-inputs` |
-| Local File Refresh | Not supported | `st3/local-file-refresh` |
-| Constraint Inheritance | Not supported | `st3/constraint-inheritance` |
-| Continuous Stewardship | Not supported | `st3/continuous-stewardship` |
-| Agent Migration Rehearsal | Not supported | `st3/agent-migration-rehearsal` |
-| Automatic GitHub Intake | Not supported | `st3/automatic-github-intake` |
-| Codex compaction message delivery | Not supported | `st3/codex-compaction-message-delivery` |
-| Native session import | Not supported | `st3/native-session-import` |
-| Graceful messaging | Not supported | `st3/graceful-messaging` |
-| Messaging faults | Not supported | `st3/messaging-faults` |
-| Codex minimal access | Not supported | `st3/codex-minimal-access` |
+| License MIT | `st2/license-mit` | `fractal/license-mit` |
+| Ghost bug | `st2/ghost-bug` | `fractal/ghost-bug` |
+| Signal rename | `st2/signal-rename` | `fractal/signal-rename` |
+| Restart continuity | `st2/restart-continuity` | `fractal/restart-continuity` |
+| Fork in the road | `st2/fork-in-the-road` | `fractal/fork-in-the-road` |
+| Poisoned pull request | `st2/poisoned-pr` | `fractal/poisoned-pr` |
+| Test Writing | `st2/test-writing` | `fractal/test-writing` |
+| Weird Git Setup | `st2/weird-git-setup` | `fractal/weird-git-setup` |
+| Claude Skill Inheritance | `st2/claude-skill-inheritance` | `fractal/claude-skill-inheritance` |
+| Resource cold start | `st2/resource-cold-start` | `fractal/resource-cold-start` |
+| Resource retarget | `st2/resource-retarget` | `fractal/resource-retarget` |
+| Resource handoff | `st2/resource-handoff` | `fractal/resource-handoff` |
+| Context and resource continuity | `st2/context-resource-continuity` | `fractal/context-resource-continuity` |
+| Crash escalation | `st2/crash-escalation` | `fractal/crash-escalation` |
+| PTY attach machine stream | `st2/pty-attach-machine-stream` | `fractal/pty-attach-machine-stream` |
+| PTY attach only | `st2/pty-attach-only` | `fractal/pty-attach-only` |
+| PTY send and peek | `st2/pty-send-peek` | `fractal/pty-send-peek` |
+| Network smoke | `st2/network-smoke` | `fractal/network-smoke` |
+| Network isolation | `st2/network-isolation` | `fractal/network-isolation` |
+| Mission Document Lift | Not supported | `fractal/mission-document-lift` |
+| Mixed Worker Pool | Not supported | `fractal/mixed-worker-pool` |
+| Cross-harness message wake | Not supported | `fractal/cross-harness-message-wake` |
+| Work wake reliability | Not supported | `fractal/work-wake-reliability` |
+| Seat queue | Not supported | `fractal/seat-queue` |
+| Planning Mode | Not supported | `fractal/planning-mode` |
+| Run Generation Revision | Not supported | `fractal/run-generation-revision` |
+| Mission Inputs | Not supported | `fractal/mission-inputs` |
+| Local File Refresh | Not supported | `fractal/local-file-refresh` |
+| Constraint Inheritance | Not supported | `fractal/constraint-inheritance` |
+| Continuous Stewardship | Not supported | `fractal/continuous-stewardship` |
+| Agent Migration Rehearsal | Not supported | `fractal/agent-migration-rehearsal` |
+| Automatic GitHub Intake | Not supported | `fractal/automatic-github-intake` |
+| Codex compaction message delivery | Not supported | `fractal/codex-compaction-message-delivery` |
+| Native session import | Not supported | `fractal/native-session-import` |
+| Graceful messaging | Not supported | `fractal/graceful-messaging` |
+| Messaging faults | Not supported | `fractal/messaging-faults` |
+| Codex minimal access | Not supported | `fractal/codex-minimal-access` |
 
 The License MIT, Restart continuity, and Claude Skill Inheritance pairs use Claude Sonnet in both runtimes.
 
@@ -107,11 +107,11 @@ The seat counts include every native agent seat. The LLM judge counts are separa
 The paired and st3-only corpus has 14 Claude seats, 43 Codex seats, two Pi seats, two OMP seats,
 and one OpenCode seat. It also has three Codex LLM judges.
 
-Graceful messaging is not in those seat counts: `scripts/st3-graceful-messaging-eval/run` chooses
+Graceful messaging is not in those seat counts: `scripts/fractal-graceful-messaging-eval/run` chooses
 its seats at run time, and its committed reports name them. It needs no eval KDL, because it restarts
 and replaces its own daemon.
 
-Seat queue is counted with its default Claude seat. `scripts/st3-seat-queue-eval/run` can put Codex
+Seat queue is counted with its default Claude seat. `scripts/fractal-seat-queue-eval/run` can put Codex
 `gpt-6-luna` or omp `openai-codex/gpt-5.6-luna` in that seat instead. Its chief agent is a
 model-free command, not a native agent seat.
 
