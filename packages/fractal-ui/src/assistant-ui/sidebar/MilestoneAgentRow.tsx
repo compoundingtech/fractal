@@ -1,7 +1,8 @@
 // Explicit-clock presentation only: time leaves read the shared context clock, or the host's fixed instant when given.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Popover, VisuallyHidden } from 'react-aria-components'
+import { Button, Focusable, Popover } from 'react-aria-components'
+import { Tooltip } from '../composition/Controls'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import type { SidebarActions, SidebarAgentRow as Row } from './model'
@@ -73,13 +74,15 @@ export const openAgentRowMenu = (element: Element): boolean => {
  * card with no timers: the CSS entrance delay supplies hover intent. The shared ghost action trigger overlays the end of
  * line 2 on desktop, which fades out beneath it; touch rows reserve an always-visible touch-sized action column.
  * The subagent count sits right after the title, which truncates before the count does: "N subagents", "1 subagent",
- * "? subagents" while unreported, nothing at zero; display-only rows carry none.
+ * "? subagents" while unreported, nothing at zero; display-only rows carry none. The unreported "?" explains itself in
+ * the kit tooltip on hover and keyboard focus, and to assistive tech as its description.
  */
 export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, active = false, reportedStatusOnly = false, displayOnly = false, frozen = false, now, query, depth = 0, focused = false, chevron, touchDisclosure, onOpen, onSubagentsPress, actions, onMarkRead }: MilestoneAgentRowProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const touch = useTouchLayout()
   const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
+  const [countExplained, setCountExplained] = React.useState(false)
   const [menuFocused, setMenuFocused] = React.useState(false)
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
   const mission = !displayOnly && row.missionContext?._tag === 'Mission' ? row.missionContext : undefined
@@ -100,10 +103,12 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
     {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, touchRow && styles.touchRow, touchRow && chevron !== undefined && styles.touchWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, touchMission && styles.touchMissionRow, !displayOnly && active && styles.active, !displayOnly && focused && styles.focused)}>
+    {/* One themed portal layer for the whole row: the count's tooltip mounts here, never inside the clipping name column. */}
+    <ThemePortal>
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={row.statusLabel} statusSince={row.statusSince} variant="SG-1" discRefinement="G3" freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="name" {...stylex.props(styles.name, !hasTrailing && styles.titleToEdge)}>
       <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-      {!displayOnly && row.childrenKnown !== undefined && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
+      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
     </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
@@ -120,35 +125,51 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
           : <span data-row-field="status-label">{row.statusLabel}</span>}<span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span data-row-field="host">{row.host}</span></>}
     </span>
     {/* The hover card and the actions' overlays portal into the row's themed surface, so a light root gets light overlays. */}
-    {!displayOnly && <ThemePortal>
+    {!displayOnly && <>
       <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
-      {hovered && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
+      {hovered && !countExplained && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
         <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
       </Popover>}
-    </ThemePortal>}
+    </>}
+    </ThemePortal>
   </div>
 })
 
+const unreportedLabel = 'Unreported subagents'
+const unreportedReason = 'The number of subagents isn’t reported.'
+
 /**
- * Running subagents; `undefined` when the harness does not report them. A known count is its own accessible text; the
- * unreported "?" is spoken as "Unreported subagents", which keeps the visible word in the name. A narrow name column
- * (deep nesting, the 240px sidebar) shows the bare count with the word kept for assistive tech, then drops the count so
- * the title keeps a readable stretch; the count never paints past the name column.
+ * Running subagents; `undefined` when the harness does not report them. A known count is its own accessible text, with
+ * its full "N subagents" label in the kit tooltip when it is a button. The unreported "?" is spoken as "Unreported
+ * subagents", which keeps the visible word in the name, and is described by why it is unknown; that reason is its
+ * tooltip on hover and keyboard focus, so as static metadata it takes a focus stop of its own. Opening a count tooltip
+ * dismisses the row's hover card. A narrow name column (the 240px sidebar, deep nesting) shows the bare count with the
+ * word kept for assistive tech, then drops the count so the title keeps a readable stretch; the count never paints past
+ * the name column.
  */
-function SubagentCount({ count, onPress }: { readonly count: number | undefined; readonly onPress: (() => void) | undefined }) {
-  const content = count === undefined
-    ? <><span aria-hidden="true" data-count-text {...stylex.props(styles.countTag)}>?<span data-count-word {...stylex.props(styles.countWord)}> subagents</span></span><VisuallyHidden>Unreported subagents</VisuallyHidden></>
-    : <span data-count-text {...stylex.props(styles.countTag)}>{count}<span data-count-word {...stylex.props(styles.countWord)}>{count === 1 ? ' subagent' : ' subagents'}</span></span>
-  const id = count === undefined ? 'unknown' : String(count)
-  return onPress === undefined
-    ? <span data-subagent-count={id} {...stylex.props(styles.countHit)}>{content}</span>
-    : <Button data-subagent-count={id} aria-label={count === undefined ? 'Unreported subagents' : `${count} ${count === 1 ? 'subagent' : 'subagents'}`} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{content}</Button>
+function SubagentCount({ count, frozen, onPress, onExplain }: { readonly count: number | undefined; readonly frozen: boolean; readonly onPress: (() => void) | undefined; readonly onExplain: (open: boolean) => void }) {
+  const reasonId = React.useId()
+  const unknown = count === undefined
+  const label = unknown ? unreportedLabel : `${count} ${count === 1 ? 'subagent' : 'subagents'}`
+  const id = unknown ? 'unknown' : String(count)
+  const tag = <span aria-hidden={unknown || undefined} data-count-text {...stylex.props(styles.countTag, frozen && styles.frozenInk)}>{unknown ? '?' : count}<span data-count-word {...stylex.props(styles.countWord)}>{count === 1 ? ' subagent' : ' subagents'}</span></span>
+  const reason = unknown ? <span id={reasonId} hidden>{unreportedReason}</span> : null
+  if (onPress !== undefined) return <Tooltip label={unknown ? unreportedReason : label} placement="top" onOpenChange={onExplain}>
+    <Button data-subagent-count={id} aria-label={label} aria-describedby={unknown ? reasonId : undefined} onPress={onPress} {...stylex.props(styles.countHit, styles.countButton)}>{tag}{reason}</Button>
+  </Tooltip>
+  if (!unknown) return <span data-subagent-count={id} {...stylex.props(styles.countHit)}>{tag}</span>
+  return <span data-subagent-count={id} {...stylex.props(styles.countHit)}>
+    <Tooltip label={unreportedReason} placement="top" onOpenChange={onExplain}>
+      <Focusable><span tabIndex={0} role="img" aria-label={label} aria-describedby={reasonId} data-count-trigger {...stylex.props(styles.countFocus)}>{tag}</span></Focusable>
+    </Tooltip>
+    {reason}
+  </span>
 }
 
-// Name-column widths: below `compactName` the full "14 subagents" would leave the title under ~24px, so the count goes
-// bare; below `hiddenCount` even the bare count would, so it leaves line 1.
-const compactName = '@container agent-name (width < 104px)'
+// Keep ~96px for the title, 6px for the gap and ~90px for a full two-digit count. Tighter name columns, including touch
+// rows at 320px, use the bare count. Below `hiddenCount` even that would leave too little title, so it leaves line 1.
+const compactName = '@container agent-name (width < 192px)'
 const hiddenCount = '@container agent-name (width < 48px)'
 
 const styles = stylex.create({
@@ -181,6 +202,8 @@ const styles = stylex.create({
   countHit: { flexShrink: 0, display: { default: 'inline-flex', [hiddenCount]: 'none' }, alignItems: 'center', height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans },
   // Inset ring: the clipping name column would cut an outset one.
   countButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  // The static unreported count's own focus stop, for its tooltip: line 1's full track, ringed inset like the button.
+  countFocus: { display: 'inline-flex', alignItems: 'center', height: g.controlSm, borderRadius: r.sm, outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   // fgSoft, not fgMuted: 11px text must clear 4.5:1 on the hover and active-row washes too. Inline-block, not flex, so the
   // space before the word survives in the text and the accessible name. Relative: the compacted word stays inside the tag.
   countTag: { position: 'relative', display: 'inline-block', paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },

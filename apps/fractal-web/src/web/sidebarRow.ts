@@ -93,7 +93,7 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
   // The active-child lease proves membership, not activity, usage or a last-turn time.
   status: 'unobserved', statusLabel: 'Not observed', freshness: stale ? 'stale' : 'live',
   usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' },
-  children: [],
+  subagentObservation: { _tag: 'NotReported' }, children: [],
 })
 
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
@@ -118,7 +118,8 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
   const statusLabel = statuses[status].label
   // OMP supports subagent observations; other harnesses opt in only by reporting a roster.
   const supportsSubagents = agent.harness === 'omp' || agent.subagents !== undefined
-  const subagentsKnown = agent.subagents !== undefined && !(agent.harness === 'omp' && stale)
+  // Stale observations retain the same last-verified facts as the row status, including children and their count.
+  const subagentsKnown = agent.subagents !== undefined
   return {
     ref: agent.ref, id: agent.ref, title: agent.name, host: agent.host, status,
     statusLabel: stale ? 'Last verified · ' + statusLabel : statusLabel,
@@ -130,7 +131,7 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
     missionInfo,
     needsMe,
     subagentCount: subagentsKnown ? agent.subagents!.length : undefined,
-    childrenKnown: supportsSubagents ? subagentsKnown : undefined,
+    subagentObservation: { _tag: subagentsKnown ? 'Reported' : supportsSubagents ? 'Unavailable' : 'NotReported' },
     children: agent.subagents?.map(child => sidebarSubagentRow({ parent: agent, child, stale })) ?? [],
     // Cost is optional and may use another currency; never present unknown spend as $0.
     usage: agent.usage._tag === 'Known' ? {
