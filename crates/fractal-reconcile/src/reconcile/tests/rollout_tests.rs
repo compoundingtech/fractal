@@ -481,89 +481,50 @@ fn rollout_drains_then_resumes_once_across_disk_reopens() {
 }
 
 #[test]
-fn rollout_provider_switch_starts_fresh_and_verifies_the_replacement_provider() {
-    for reported_provider in ["codex", "claude"] {
-        let mut seat = Seat::new();
-        // Switching back to a provider must not revive its older conversation either.
-        let original = seat.runtime.observation.lock().unwrap().clone().unwrap();
-        seat.append("runtime.observed", json!({
-            "status":"running", "runtime_id":original.runtime_id, "terminal":original.terminal,
-            "incarnation_id":"historical", "host":"amber"
-        }));
-        seat.append("harness.session-file", json!({
-            "harness":"codex", "session_id":"historical-codex", "incarnation_id":"historical",
-            "path":"/codex/historical.jsonl"
-        }));
-        seat.append("runtime.observed", json!({
-            "status":"running", "runtime_id":original.runtime_id, "terminal":original.terminal,
-            "incarnation_id":original.incarnation_id, "host":"amber"
-        }));
-        seat.append("harness.session-file", json!({
-            "harness":"claude", "session_id":"native-one", "incarnation_id":"original-1",
-            "path":"/claude/original.jsonl", "account_ref":"claude-login"
-        }));
-        let source = seat.source("replacement-model", "")
-            .replace("harness \"claude\"", "harness \"codex\"");
-        seat.publish_source(2, &source, Some(Policy::when_idle(1_800_000, false)), false);
-        seat.step();
-        assert_eq!(seat.operation().phase, "draining");
-        seat.ack();
-        seat.busy(false);
-        seat.step();
-        assert_eq!(seat.operation().phase, "stopping");
-        seat.reopen();
-        seat.step();
-        assert_eq!(*seat.runtime.stops.lock().unwrap(), ["original-1"]);
-        seat.step();
-        assert_eq!(seat.operation().phase, "starting");
-        seat.reopen();
-        seat.step();
-        assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1, "{:?}", seat.operation().reason);
-        let launch = seat.runtime.starts.lock().unwrap()[0].clone();
-        assert_eq!(launch.driver.as_deref(), Some("codex"));
-        for selector in [
-            crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV,
-            crate::suspension::CONTINUE_PATH_ENV, rollout::RESUME_PATH_ENV,
-        ] {
-            assert!(!launch.environment.contains_key(selector), "carried {selector} across providers");
-        }
-        // The old snapshot remains historical evidence, not the replacement's launch selector.
-        assert_eq!(seat.operation().native_session_id.as_deref(), Some("native-one"));
-        assert_eq!(seat.operation().native_account.as_deref(), Some("claude-login"));
-        seat.reopen();
-        seat.step();
-        assert_eq!(seat.operation().phase, "verifying");
-        seat.step();
-        assert_eq!(seat.operation().phase, "verifying", "absence is not a native binding");
-        seat.append("harness.session-file", json!({
-            "harness":reported_provider, "session_id":"replacement-native",
-            "incarnation_id":"replacement-1", "path":"/replacement/native.jsonl"
-        }));
-        seat.append("harness.observed", json!({
-            "driver":reported_provider, "state":"idle", "incarnation_id":"replacement-1",
-            "quiescent":true, "blocking":[]
-        }));
-        seat.step();
-        let expected = if reported_provider == "codex" { "running" } else { "failed" };
-        assert_eq!(seat.operation().phase, expected, "{:?}", seat.operation().reason);
-        seat.reopen();
-        let reconciler = Reconciler::new(
-            seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
-        );
-        let observed = seat.runtime.observation.lock().unwrap().clone();
-        assert_eq!(
-            reconciler.reconcile_rollout(&seat.desired(), observed.as_ref(), None).unwrap(),
-            expected != "running",
-            "a completed rollout releases ordinary reconciliation after reopening",
-        );
-        assert_eq!(seat.operation().phase, expected);
-        assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
-        assert_eq!(
-            seat.runtime.stops.lock().unwrap().len(),
-            if reported_provider == "codex" { 1 } else { 2 },
-            "a valid Codex binding must not stop its replacement; a Claude binding cannot qualify it",
-        );
-    }
+fn rollout_provider_switch_is_rejected_before_draining_the_incumbent() {
+    let seat = Seat::new();
+    let original = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    let revision = seat.store.owned_sets().unwrap()[0].revision.clone();
+    let source = seat
+        .source("replacement-model", "")
+        .replace("harness \"claude\"", "harness \"codex\"");
+    let input = crate::graph::parse_owned_set_intent(&source, "amber").unwrap();
+    let mut options = Options {
+        set: "garden".into(),
+        source: Source {
+            repository: "acme/garden".into(),
+            r#ref: "refs/heads/main".into(),
+            sha: format!("{:040x}", 2),
+            sequence: 2,
+        },
+        expected_set: revision.clone(),
+        rollout: Some(Policy::when_idle(1_800_000, false)),
+        adopt: Default::default(),
+        allow_empty: false,
+        confirm_retire: None,
+        expected_subjects: Default::default(),
+    };
+    let preview = seat.store.owned_set_preview(&input, &options).unwrap();
+    let refusal = "agent/garden/orchard: when-idle requires the same host and harness family";
+    assert_eq!(preview.blockers, [refusal]);
+    options.confirm_retire = Some(preview.digest.clone());
+    options.expected_subjects = preview.expected_subjects.clone();
+    let error = seat.store.apply_owned_set(
+        &input, &options, "publish-2", "person/operator",
+    ).unwrap_err();
+    assert!(error.to_string().contains(refusal), "{error:#}");
+    assert_eq!(seat.store.owned_sets().unwrap()[0].revision, revision);
+    assert_eq!(seat.desired().member.as_ref().unwrap().driver.as_deref(), Some("claude"));
+    assert!(seat.store.rollout(SUBJECT).unwrap().is_none());
+    let reconciler = Reconciler::new(
+        seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+    );
+    assert!(!reconciler.reconcile_rollout(&seat.desired(), Some(&original), None).unwrap());
+    let observed = seat.runtime.observation.lock().unwrap().clone().unwrap();
+    assert_eq!(observed.incarnation_id, original.incarnation_id);
+    assert_eq!(observed.status, original.status);
+    assert!(seat.runtime.starts.lock().unwrap().is_empty());
+    assert!(seat.runtime.stops.lock().unwrap().is_empty());
 }
 
 #[test]

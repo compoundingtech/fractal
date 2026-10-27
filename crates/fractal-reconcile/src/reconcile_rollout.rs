@@ -538,37 +538,22 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .member
                     .clone()
                     .context("rollout replacement has no launch")?;
-                if same_provider {
-                    member.environment.insert(
-                        crate::suspension::RESUME_ENV.into(),
-                        operation
-                            .native_session_id
-                            .clone()
-                            .context("rollout snapshot has no session")?,
-                    );
-                    if let Some(path) = &operation.native_path {
-                        member.environment.insert(rollout::RESUME_PATH_ENV.into(), path.clone());
-                    }
-                } else {
-                    // Native session IDs and transcript paths are provider-specific. Retain the
-                    // predecessor snapshot for retirement/history, never for the new provider.
-                    crate::environment::remove_aliases(&mut member.environment, crate::suspension::RESUME_ENV);
-                    crate::environment::remove_aliases(&mut member.environment, rollout::RESUME_PATH_ENV);
-                    // Also fence any older binding for the replacement provider: switching back
-                    // to a provider must not resurrect one of its historical conversations.
-                    self.store.append_claim(&ClaimInput {
-                        subject: agent.clone(),
-                        kind: "runtime.action.requested".into(),
-                        actor: operation.requested_by.clone(),
-                        fields: BTreeMap::from([
-                            ("action".into(), Value::from(crate::suspension::FRESH_SESSION_ACTION)),
-                            ("runtime_id".into(), Value::from(member.runtime_id.clone())),
-                        ]),
-                        evidence: vec![operation.id.clone()],
-                        expected_subject: None,
-                        idempotency_key: Some(format!("seat-rollout-fresh-session:{}", operation.id)),
-                    })?;
+                if !same_provider {
+                    phase(
+                        &operation,
+                        "blocked",
+                        Some("rollout cannot resume a native conversation across harness providers"),
+                        &["native-harness-mismatch".into()],
+                    )?;
+                    return Ok(true);
                 }
+                member.environment.insert(
+                    crate::suspension::RESUME_ENV.into(),
+                    operation
+                        .native_session_id
+                        .clone()
+                        .context("rollout snapshot has no session")?,
+                );
                 member
                     .environment
                     .insert(rollout::OPERATION_ENV.into(), operation.id.clone());
@@ -576,6 +561,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     rollout::PREDECESSOR_ENV.into(),
                     operation.old_incarnation.clone(),
                 );
+                if let Some(path) = &operation.native_path {
+                    member
+                        .environment
+                        .insert(rollout::RESUME_PATH_ENV.into(), path.clone());
+                }
                 operation.desired_token = self
                     .store
                     .selected_desired_token(agent)?
@@ -587,11 +577,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if let Err(error) = self.perform_start(
                     subject,
                     &member,
-                    if same_provider {
-                        "owned-set rollout resumed its native conversation"
-                    } else {
-                        "owned-set rollout started a fresh native conversation on its replacement provider"
-                    },
+                    "owned-set rollout resumed its native conversation",
                 ) {
                     phase(
                         &operation,
@@ -629,15 +615,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                             && c.body.pointer("/fields/code").and_then(Value::as_str)
                                 == Some(crate::suspension::RESUME_UNAVAILABLE_CODE)
                     });
-                let account_mismatch = same_provider && binding.is_some()
+                let account_mismatch = binding.is_some()
                     && rollout::bound_account(&self.store, agent, replacement)?
                         != operation.native_account;
-                let expected_provider = subject.member.as_ref().and_then(|member| member.driver.as_deref());
-                let mismatch = binding.as_ref().is_some_and(|(harness, session, _)| {
-                    Some(harness.as_str()) != expected_provider
-                        || session.is_empty()
-                        || (same_provider
-                            && Some(session.as_str()) != operation.native_session_id.as_deref())
+                let mismatch = !same_provider || binding.as_ref().is_some_and(|(harness, session, _)| {
+                    Some(harness.as_str()) != old.driver.as_deref()
+                        || Some(session.as_str()) != operation.native_session_id.as_deref()
                 });
                 if refused
                     || mismatch
@@ -651,11 +634,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     phase(
                         &operation,
                         "failed",
-                        Some(if same_provider {
-                            "replacement could not verify the original native conversation"
-                        } else {
-                            "replacement could not verify its new provider's native conversation"
-                        }),
+                        Some("replacement could not verify the original native conversation"),
                         &["native-verification-failed".into()],
                     )?;
                     if observation.status == "running" && current()? {
@@ -689,7 +668,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         // The native channel binds its mailbox against runtime.running before
                         // it can publish a session binding. Publish the physically observed,
                         // launch-fenced replacement now; the rollout still holds intake until
-                        // that channel proves the replacement provider's native conversation.
+                        // that channel proves the original native conversation.
                         self.record_member(subject, observation, true)?;
                         if binding.is_some() {
                             phase(&operation, "running", None, &[])?;
