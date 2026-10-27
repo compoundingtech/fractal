@@ -2281,7 +2281,7 @@ class PerCrate(StTest):
         calls = Path(self.tmp.name) / 'pushes'
         refs = self.push_refs(85)
         self.hook(f'echo x >> {calls}\nif [ ! -e {calls}.rejected ]; then touch {calls}.rejected; echo "transient" >&2; exit 1; fi\nexit 0\n')
-        with mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
             self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
         self.assertEqual(sorted(self.remote_refs()), sorted(refs))
         self.assertEqual(len(calls.read_text().split()), 4, 'three chunks of at most 40, and the one that failed once again')
@@ -2294,7 +2294,7 @@ class PerCrate(StTest):
         calls = Path(self.tmp.name) / 'batch-sizes'
         self.hook(f'count=0\nwhile read -r old new ref; do count=$((count + 1)); done\n'
                   f'echo "$count" >> {calls}\n[ "$count" -le {st_test.PUSH_CHUNK} ]\n')
-        with contextlib.chdir(self.work):
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), contextlib.chdir(self.work):
             self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
         self.assertEqual(sorted(self.remote_refs()), sorted(refs))
         self.assertEqual(calls.read_text().split(), ['40', '40', '5'])
@@ -2302,7 +2302,7 @@ class PerCrate(StTest):
     def test_a_ref_the_remote_keeps_rejecting_is_named_with_its_reason_after_the_tries(self):
         refs = self.push_refs(3)
         self.hook('echo "no such thing" >&2\nexit 1\n')
-        with mock.patch.object(st_test.time, 'sleep') as slept, contextlib.chdir(self.work):
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep') as slept, contextlib.chdir(self.work):
             error = st_test.push_records(self.work, 'origin', refs)
         self.assertIn('push of 3 of 3 refs failed after 3 tries', error)
         self.assertIn('refs/notes/pushtest/r0', error)
