@@ -38,13 +38,6 @@ pub struct ChildParts {
 /// Decode a child link at the boundary, normalizing legacy two-field links to a root routing
 /// key. A routing parent is native or managed, never another child.
 pub fn child_parts(session_id: &str) -> Option<ChildParts> {
-    child_parts_at_depth(session_id, 32)
-}
-
-fn child_parts_at_depth(session_id: &str, remaining: usize) -> Option<ChildParts> {
-    if remaining == 0 {
-        return None;
-    }
     let encoded = session_id.strip_prefix(CHILD_PREFIX)?;
     let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
     let fields = serde_json::from_slice::<Vec<String>>(&decoded).ok()?;
@@ -59,7 +52,9 @@ fn child_parts_at_depth(session_id: &str, remaining: usize) -> Option<ChildParts
         }
         _ => return None,
     };
-    let parent_parts = child_parts_at_depth(&parent, remaining - 1);
+    // Nested encodings grow geometrically in bytes. Decode each parent once so work stays
+    // proportional to the link size, without imposing a depth limit absent from the writer.
+    let parent_parts = child_parts(&parent);
     let routing_parent = routing_parent.unwrap_or_else(|| {
         parent_parts.as_ref().map_or_else(
             || parent.clone(),
@@ -377,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn deeply_nested_legacy_links_decode_each_parent_once_and_have_a_depth_bound() {
+    fn deeply_nested_legacy_links_decode_each_parent_once() {
         let root = "session/external-0123456789abcdef01234567";
         let mut descendant = root.to_owned();
         for _ in 0..24 {
@@ -386,6 +381,16 @@ mod tests {
             ));
         }
         assert_eq!(child_parts(&descendant).unwrap().routing_parent_session_id, root);
-        assert!(child_parts_at_depth(&descendant, 23).is_none());
+    }
+
+    #[test]
+    fn deeply_nested_current_ids_round_trip_through_the_writer_and_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let mut native = parent(root.path());
+        let routing_root = native.id.clone();
+        for _ in 0..33 {
+            native.id = child_session_id(&native, "task", &routing_root);
+        }
+        assert_eq!(child_parts(&native.id).unwrap().routing_parent_session_id, routing_root);
     }
 }

@@ -886,7 +886,10 @@ impl ClientRelay {
         if let Some(trace) = relay_trace::current() {
             trace.http_status(status.as_u16());
         }
-        // Old workers expose only POST here. Never probe them with a new operation or flag.
+        // Pre-discovery workers expose only POST; Axum's 404/405 has no fleet signature.
+        // Classify that absence without probing their closed decoder. A plain-HTTP
+        // intermediary can forge this refusal, but already can deny service; it can only
+        // change the explanation, never grant a capability or authorize an operation.
         if inspect_capabilities && matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
             return Err(client_read_unsupported(&request.request).into());
         }
