@@ -782,13 +782,25 @@ impl ClientRelay {
         peer: &PeerConfig,
         request: &ClientReadRequest,
     ) -> Result<serde_json::Value> {
-        if matches!(request.request, ClientReadOperation::Messages { messages_paging: true, .. }) {
+        let required = match &request.request {
+            ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
+            ClientReadOperation::Timeline { session_id, .. }
+            | ClientReadOperation::ConversationContent { session_id, .. }
+            | ClientReadOperation::ConversationChanges { session_id, .. }
+                if session_id.starts_with("session/external-child-") =>
+            {
+                Some(("session-detail-child-id", 1))
+            }
+            ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            _ => None,
+        };
+        if let Some((id, version)) = required {
             let capabilities = self.send_http(peer, request, true).await?;
             if !capabilities["capabilities"].as_array().is_some_and(|items| {
-                items.iter().any(|item| item["id"] == "messages-paging"
-                    && item["version"] == 2 && item["state"] == "granted")
+                items.iter().any(|item| item["id"] == id
+                    && item["version"] == version && item["state"] == "granted")
             }) {
-                return Err(messages_paging_unsupported().into());
+                return Err(client_read_unsupported(&request.request).into());
             }
         }
         self.send_http(peer, request, false).await
@@ -876,7 +888,7 @@ impl ClientRelay {
         }
         // Old workers expose only POST here. Never probe them with a new operation or flag.
         if inspect_capabilities && matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
-            return Err(messages_paging_unsupported().into());
+            return Err(client_read_unsupported(&request.request).into());
         }
         if status == StatusCode::UNAUTHORIZED {
             return Err(ClientReadRejected::unreachable(
@@ -1245,6 +1257,20 @@ async fn forward_client_read(
         })
 }
 
+fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejected {
+    if matches!(operation, ClientReadOperation::Messages { .. }) {
+        return messages_paging_unsupported();
+    }
+    let mut rejected = ClientReadRejected::new(
+        "peer-too-old",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "This host runs an older Fractal version; update it to open subagent conversations.",
+    );
+    rejected.details.insert("capability".into(), "session-detail-child-id".into());
+    rejected.details.insert("version".into(), 1.into());
+    rejected
+}
+
 fn messages_paging_unsupported() -> ClientReadRejected {
     ClientReadRejected::new(
         "unsupported-capability",
@@ -1265,7 +1291,10 @@ async fn client_read_capabilities(
     };
     signed_response_for(
         &state, CLIENT_READ_PATH, &FleetAuth::body_digest(&[]), 0,
-        serde_json::json!({"capabilities":[{"id":"messages-paging","version":2,"state":"granted"}]}),
+        serde_json::json!({"capabilities":[
+            {"id":"messages-paging","version":2,"state":"granted"},
+            {"id":"session-detail-child-id","version":1,"state":"granted"}
+        ]}),
     ).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 

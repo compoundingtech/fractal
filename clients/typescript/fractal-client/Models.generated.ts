@@ -1525,6 +1525,7 @@ export type ErrorCode = (
   | "not-found"
   | "forbidden"
   | "unsupported-capability"
+  | "peer-too-old"
   | "validation-failed"
   | "idempotency-conflict"
   | "issuer-required"

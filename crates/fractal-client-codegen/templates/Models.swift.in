@@ -65,6 +65,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case notFound
     case forbidden
     case unsupportedCapability
+    case peerTooOld
     case validationFailed
     case idempotencyConflict
     case attentionMigrated
@@ -137,6 +138,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "not-found": .notFound
         case "forbidden": .forbidden
         case "unsupported-capability": .unsupportedCapability
+        case "peer-too-old": .peerTooOld
         case "validation-failed": .validationFailed
         case "idempotency-conflict": .idempotencyConflict
         case "stale-fence": .staleFence
@@ -208,6 +210,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .notFound: "not-found"
         case .forbidden: "forbidden"
         case .unsupportedCapability: "unsupported-capability"
+        case .peerTooOld: "peer-too-old"
         case .validationFailed: "validation-failed"
         case .idempotencyConflict: "idempotency-conflict"
         case .staleFence: "stale-fence"
