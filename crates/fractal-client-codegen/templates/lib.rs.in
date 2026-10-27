@@ -436,7 +436,7 @@ impl Capabilities {
     /// Whether this daemon granted capability `id` at `version` or newer.
     pub fn grants(&self, id: &str, version: u32) -> bool {
         self.capabilities.iter().any(|capability| {
-            capability.id == id && capability.version >= version && capability.state == CapabilityState::Granted
+            capability.id == id && capability.version >= u64::from(version) && capability.state == CapabilityState::Granted
         })
     }
 }
