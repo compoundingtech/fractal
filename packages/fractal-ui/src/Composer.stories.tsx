@@ -211,12 +211,15 @@ export const Idle: Story = { tags: ['critical'],
     await expect(guidance?.textContent).toMatch(/@.*\//)
     await expect(field.getAttribute('aria-describedby')?.split(' ')).toContain(guidance?.id)
     const form = field.closest('form')!
-    // C2 stays a column slab even for one line; the container, not the textbox, owns the focus ring.
+    // C2 stays a column slab even for one line; textarea focus changes only the frame border.
     await expect(getComputedStyle(form).flexDirection).toBe('column')
+    const borderBeforeFocus = getComputedStyle(form).borderColor
     await userEvent.click(field)
     await expect(getComputedStyle(field).outlineStyle).toBe('none')
-    await expect(getComputedStyle(form).outlineStyle).toBe('solid')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
+    await expect(getComputedStyle(form).borderColor).not.toBe(borderBeforeFocus)
     await userEvent.keyboard('Ship the composer')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-placeholder"]')).toBeNull())
     await expect(field.getAttribute('aria-describedby')?.split(' ')).not.toContain(guidance?.id)
     await userEvent.keyboard('{Enter}')
@@ -576,10 +579,10 @@ export const FooterWidthBudgetMediumLight: Story = { ...FooterWidthBudgetMedium,
 export const FooterWidthBudgetWide: Story = { ...footerWidthBudget(451), tags: ['critical'] }
 export const FooterWidthBudgetWideLight: Story = { ...FooterWidthBudgetWide, args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
-/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab. */
+/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab (the pending shape pick). */
 export const LayoutShapes: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
-  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.geometryLane(768))}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.shapeGallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.shapeLane)}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
   play: async ({ canvasElement }) => {
     const formOf = (layout: ComposerLayout) => canvasElement.querySelector<HTMLElement>(`[data-composer-frame="layout.${layout}"] form`)!
     await document.fonts.ready
@@ -596,7 +599,13 @@ export const LayoutShapes: Story = { tags: ['critical'],
     })
     await userEvent.click(within(formOf('C3')).getByRole('textbox'))
     await waitFor(() => expect(getComputedStyle(formOf('C3')).flexDirection).toBe('column'))
+    // C1 is the live layout: focus alone changes only the frame border, never its geometry.
+    const c1BeforeFocus = formOf('C1').getBoundingClientRect()
     await userEvent.click(within(formOf('C1')).getByRole('textbox'))
+    await expect(getComputedStyle(formOf('C1')).flexDirection).toBe('row')
+    await expect(getComputedStyle(formOf('C1')).outlineStyle).toBe('none')
+    await expect(formOf('C1').getBoundingClientRect().height).toBe(c1BeforeFocus.height)
+    await expect(formOf('C1').getBoundingClientRect().width).toBe(c1BeforeFocus.width)
     await userEvent.keyboard('one{Shift>}{Enter}{/Shift}two')
     await waitFor(() => expect(getComputedStyle(formOf('C1')).flexDirection).toBe('column'))
   },
@@ -789,6 +798,9 @@ const styles = stylex.create({
   fillFrameBody: { flexGrow: 1, justifyContent: 'flex-end' },
   narrow: { width: g.tooltipMax, minWidth: 0 },
   gallery: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl },
+  // Shapes are compared at one desktop lane; narrow viewports scroll instead of letting the footer cramp C1 into a slab.
+  shapeGallery: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: s.xl, maxWidth: '100%', overflowX: 'auto' },
+  shapeLane: { width: 768, flexShrink: 0 },
   budgetPreviews: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.md },
   budgetFrame: (width: number) => ({ width: `calc(${width}px + ${s.md} + ${s.md} + ${g.hairline} + ${g.hairline})`, boxSizing: 'border-box', flexShrink: 0, overflow: 'visible' }),
   budgetFrameBody: { overflow: 'visible' },
