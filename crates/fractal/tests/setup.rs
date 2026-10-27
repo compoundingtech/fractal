@@ -917,6 +917,7 @@ async fn onboarding_api(
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        assistant_receipts: Default::default(),
     };
     // These declarations use a simulated provider; no host provider or daemon is touched.
     let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(

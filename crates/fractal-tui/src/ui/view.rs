@@ -99,6 +99,9 @@ pub struct World {
     /// Each account's freshest limits reading, from the same read.
     #[serde(skip)]
     pub usage_limits: Vec<fractal_client::UsageLimit>,
+    /// Every declared account, so the Usage tab lists the same accounts on every screen.
+    #[serde(skip)]
+    pub usage_accounts: Vec<fractal_client::UsageAccount>,
     #[serde(skip)]
     pub agent_messages: Option<fractal_client::AgentMessageEstimate>,
     /// Objectives and budgets, from st's `slo.list` read: the same rows the phone and the web

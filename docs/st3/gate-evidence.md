@@ -1463,7 +1463,10 @@ evicts whole slots, least recently used first, the old per-clone layout included
 `megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
 from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
 shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
-recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
+recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base, and so does `st-test` itself: a
+run started from a branch whose `scripts/st-test` differs from the base's re-executes the base's copy first (once: `ST_TEST_REEXEC` names the base
+commit; no opt-out), so how runs queue for pool trees and build slots, and which commit they sign, is always main's, however old the branch. A
+branch's own `st-test` changes are tested by its `ci-script-tests`, which run `st-test-test` from the tree. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.

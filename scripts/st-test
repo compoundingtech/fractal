@@ -62,6 +62,7 @@ because one of its tests passed only on a retry (CI's own per-crate notes refuse
 as flaky_tests).
 """
 import argparse
+import atexit
 import base64
 import codecs
 import concurrent.futures
@@ -332,6 +333,39 @@ def gate_commit(base):
                 result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
     GATE_TREE[key] = result
     return result
+
+
+REEXEC = 'ST_TEST_REEXEC'  # set to the base commit in the base's copy that run_base_copy started: it never re-executes again
+
+
+def run_base_copy(argv):
+    """Replace this process with the base's own scripts/st-test, as BASE_SCRIPTS does for the wrapper, signer and verifier. Every seat runs
+    st-test from its own branch, so without this, how runs queue for pool trees and build slots (and which commit they sign) stays at whatever
+    the branch last merged, for days, and old branches keep racing while new ones queue. A branch's own st-test changes are still tested, by
+    its ci-script-tests (st-test-test runs from the tree), and that is what is signed. There is no opt-out: an opt-out would be a way around
+    the queue. This copy runs (the call returns) only when the base has no scripts/st-test, the base's copy is this file, or this already is
+    the base's copy (ST_TEST_REEXEC)."""
+    if os.environ.get(REEXEC):
+        return
+    scrub_git_environment()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--base', default='origin/main')
+    base = parser.parse_known_args(argv)[0].base
+    try:
+        commit = fetch_base(base)
+    except Exception:  # offline, or no such remote: the base as this clone has it, else this copy
+        commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not commit:
+        return
+    shown = git('show', f'{commit}:scripts/st-test', check=False)
+    if shown.returncode != 0 or not shown.stdout or shown.stdout == Path(__file__).read_bytes():
+        return
+    scratch = Path(tempfile.mkdtemp(prefix='st-test-base-'))
+    path = scratch / 'st-test'
+    path.write_bytes(shown.stdout)
+    path.chmod(0o700)
+    print(f"st-test: running the base's st-test ({base} at {commit[:12]}), not this branch's copy", file=sys.stderr, flush=True)
+    os.execve(sys.executable, [sys.executable, str(path), *argv], dict(os.environ, **{REEXEC: commit}))
 
 
 def fetch_base(base):
@@ -1850,7 +1884,10 @@ def main(argv):
 if __name__ == '__main__':
     # TERM (the pre-push hook's timeout, a closed terminal) unwinds like an error so the throwaway worktree is removed.
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+    if os.environ.get(REEXEC) and Path(__file__).parent.name.startswith('st-test-base-'):
+        atexit.register(shutil.rmtree, Path(__file__).parent, True)  # the copy run_base_copy wrote: gone when this run ends
     try:
+        run_base_copy(sys.argv[1:])
         sys.exit(main(sys.argv[1:]))
     except Failure as error:
         print(f'st-test: {error}', file=sys.stderr)

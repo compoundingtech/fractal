@@ -8043,9 +8043,87 @@ fn harness_usage_replicates_on_a_schedule_while_working_and_at_once_when_it_stop
     assert!(
         local_observation_position(&usage("context_occupancy", 36, 1, start + 11 * minute).0)
             .is_none(),
-        "an idle harness replicates its usage at once"
+        "the interval has passed since the stop replicated the last reading"
     );
-    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 12);
+    assert!(
+        local_observation_position(&usage("context_occupancy", 37, 1, start + 12 * minute).0)
+            .is_some(),
+        "subagents answering while the harness rests wait for the interval"
+    );
+    let state = |state: &str, at: u128| {
+        store
+            .append_latest_observation(&harness_state(subject, state, at as u64), at)
+            .unwrap()
+    };
+    state("working", start + 13 * minute);
+    state("idle", start + 14 * minute);
+    assert_eq!(
+        usage_claims(&store).last(),
+        Some(&occupancy(37)),
+        "the turn's end replicates what was pending"
+    );
+    state("working", start + 15 * minute);
+    state("idle", start + 16 * minute);
+    assert!(
+        local_observation_position(&usage("context_occupancy", 38, 1, start + 16 * minute + 500).0)
+            .is_none(),
+        "a turn's last response can arrive after its idle report and replicates at once"
+    );
+    assert!(
+        local_observation_position(&usage("context_occupancy", 39, 1, start + 17 * minute).0)
+            .is_some(),
+        "later responses of the same rest wait for the interval"
+    );
+    state("idle", start + 19 * minute);
+    assert_eq!(usage_claims(&store).last(), Some(&occupancy(38)));
+    state("idle", start + 22 * minute);
+    assert_eq!(
+        usage_claims(&store).last(),
+        Some(&occupancy(39)),
+        "a resting harness's re-stamp replicates the reading that waited out its interval"
+    );
+    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 21);
+}
+
+/// Measured on the fleet (2026-10-26): a seat whose main loop waited while its subagent worked
+/// replicated a usage claim for every response, one every four seconds, because its harness
+/// reported idle. Ten minutes of that, then a working turn of the same pace, then its end.
+#[test]
+fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let second = 1_000_u128;
+    let state = |state: &str, at: u128| {
+        store
+            .append_latest_observation(&harness_state(subject, state, at as u64), at)
+            .unwrap();
+    };
+    let mut responses = 0;
+    let mut respond = |at: u128| {
+        responses += 1;
+        store
+            .append_latest_observation(&harness_usage(subject, "context_occupancy", responses, 0), at)
+            .unwrap();
+    };
+    state("idle", start);
+    for tick in 0..=150 {
+        respond(start + second + tick * 4 * second);
+    }
+    let resting = store.claims_for(subject, Some("harness.usage")).unwrap().len();
+    // The first reading, then one per five-minute interval of the ten minutes.
+    assert_eq!(resting, 3, "{resting} usage claims for 151 responses at rest");
+    let turn = start + 11 * 60 * second;
+    state("working", turn);
+    for tick in 0..75 {
+        respond(turn + second + tick * 4 * second);
+    }
+    state("idle", turn + 301 * second);
+    let total = store.claims_for(subject, Some("harness.usage")).unwrap().len();
+    // The interval during the turn, and its end.
+    assert_eq!(total, resting + 2, "{total} usage claims for {responses} responses");
+    let newest = store.latest_claim(subject, Some("harness.usage")).unwrap().unwrap();
+    assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
 }
 
 #[test]

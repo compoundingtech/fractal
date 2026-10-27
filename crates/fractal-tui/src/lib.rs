@@ -791,7 +791,7 @@ impl Args {
 
     // Keep the renderer's option handling together; the CLI owns validation and help.
     fn render_args(&self) -> Vec<String> {
-        let mut args = vec!["st ui".to_owned()];
+        let mut args = vec!["fractal ui".to_owned()];
         for (enabled, flag) in [
             (self.demo, "--demo"),
             (self.local, "--local"),
@@ -831,8 +831,8 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("fractal tui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config")?;
-    let dir = ui::requests::dir(&person).context("fractal tui open needs a state directory: set HOME")?;
+        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config")?;
+    let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
         (true, false) => Place::Right,
@@ -939,7 +939,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "fractal tui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config"
+        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {
@@ -1371,6 +1371,7 @@ mission "release" state="ready" {
                 client_relay: None,
                 native_session_home: None,
                 planner_default: fractal_daemon::model::PlannerSpec::default(),
+                assistant_receipts: Default::default(),
             };
             let socket = root.path().join("st3.sock");
             let server_socket = socket.clone();
