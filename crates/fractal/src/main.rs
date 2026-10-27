@@ -6372,6 +6372,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        assistant_receipts: Default::default(),
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));
@@ -6602,20 +6603,55 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ).await?;
     let web_status = axum::Extension(web.status.clone());
     let web_state = state.clone();
-    tokio::try_join!(
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            local_reserved,
-            router(state.clone()).layer(web_status.clone()),
-            Some(state.store.clone()),
-            ready
-        ),
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            gateway_reserved, fabric_router(state).layer(web_status), None, ready,
-        ),
-        web.serve(web_state),
-    )?;
+    let receipts = state.assistant_receipts.clone();
+    // A stop signal first commits the assistant read receipts of reads that already returned,
+    // then ends the process by that signal as it did before the daemon handled it.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let serving = async {
+        tokio::try_join!(
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                local_reserved,
+                router(state.clone()).layer(web_status.clone()),
+                Some(state.store.clone()),
+                ready
+            ),
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+            ),
+            web.serve(web_state),
+        )
+    };
+    let stopped = tokio::select! {
+        served = serving => Err(served),
+        _ = terminate.recv() => Ok(libc::SIGTERM),
+        _ = interrupt.recv() => Ok(libc::SIGINT),
+    };
+    // Shutdown refuses receipts from connections still being served, then waits for the writer
+    // to commit every admitted one however long it takes. Only a second stop signal, an
+    // explicit forced stop, ends the daemon before they commit.
+    tokio::select! {
+        flushed = receipts.shutdown() => if let Err(error) = flushed {
+            eprintln!("st3: assistant read receipts failed to commit at shutdown: {}", error.message);
+        },
+        _ = terminate.recv() => eprintln!("st3: forced stop before assistant read receipts committed"),
+        _ = interrupt.recv() => eprintln!("st3: forced stop before assistant read receipts committed"),
+    }
     telemetry.shutdown();
-    Ok(())
+    match stopped {
+        Ok(signal) => end_by_signal(signal),
+        Err(served) => served.map(|_| ()),
+    }
+}
+
+/// Ends this process by `signal` with its default disposition, as if no handler had caught it.
+fn end_by_signal(signal: libc::c_int) -> Result<()> {
+    // SAFETY: both calls take a valid signal number and no pointers.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+    anyhow::bail!("signal {signal} did not end the daemon")
 }
 
 /// Links `git` and `gh` to this executable for the daemon and its members. The daemon still

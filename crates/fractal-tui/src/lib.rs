@@ -1371,6 +1371,7 @@ mission "release" state="ready" {
                 client_relay: None,
                 native_session_home: None,
                 planner_default: fractal_daemon::model::PlannerSpec::default(),
+                assistant_receipts: Default::default(),
             };
             let socket = root.path().join("st3.sock");
             let server_socket = socket.clone();

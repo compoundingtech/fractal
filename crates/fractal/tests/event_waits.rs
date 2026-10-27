@@ -57,6 +57,7 @@ impl Daemon {
             native_session_home: None,
             owning_person: None,
             planner_default: fractal_daemon::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
         };
         let socket = daemon.socket();
         let (stop, stopped) = tokio::sync::oneshot::channel();

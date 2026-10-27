@@ -215,6 +215,9 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Caller-bound assistant read receipts committed off the request path. Shut it down before
+    /// the store closes; the last state reference to drop commits what remains.
+    pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
