@@ -1453,7 +1453,7 @@ impl Ui {
         }
         let (text, color) = match (live, age) {
             (true, Some(age)) => (format!(" ● live · updated {age} "), theme::OVERLAY1),
-            (true, None) => (" ● live · waiting for st ".to_owned(), theme::OVERLAY1),
+            (true, None) => (" ● live · waiting for Fractal ".to_owned(), theme::OVERLAY1),
             (false, Some(age)) => (
                 format!(" ○ paused · updated {age} · focus to follow "),
                 theme::YELLOW,
@@ -1549,7 +1549,7 @@ impl Ui {
                 }
                 if !self.world.stale.is_empty() {
                     self.flash(format!(
-                        "Out of date: st stopped serving {}",
+                        "Out of date: Fractal stopped serving {}",
                         self.world.stale.join("; ")
                     ));
                 }
@@ -1572,7 +1572,7 @@ impl Ui {
                 }
             }
             Link::Connecting => self.flash(format!(
-                "Connecting to {}: st has not answered yet",
+                "Connecting to {}: Fractal has not answered yet",
                 self.world.host
             )),
             Link::Offline(reason) => self.flash(reason),
@@ -3574,12 +3574,12 @@ impl Ui {
         let over = size > limit;
         let note = if over {
             format!(
-                "  {} is over the {} st takes: shorten it before sending",
+                "  {} is over the {} Fractal takes: shorten it before sending",
                 size_text(size),
                 size_text(limit)
             )
         } else {
-            format!("  {} of the {} st takes", size_text(size), size_text(limit))
+            format!("  {} of the {} Fractal takes", size_text(size), size_text(limit))
         };
         Some(Line::from(Span::styled(
             text::truncate(&note, width),
@@ -3690,7 +3690,7 @@ impl Ui {
             (
                 "?",
                 theme::QUIET,
-                "not started by st, so st cannot see inside it",
+                "not started by Fractal, so Fractal cannot see inside it",
             ),
             ("✉", theme::SAPPHIRE, "a Fractal message"),
         ] {
@@ -3750,7 +3750,7 @@ impl Ui {
                     "the selected subject's actions; ↑↓ and Enter choose",
                 ),
                 ("t", "Agents, Missions: the path tree or the groups"),
-                ("x", "Missions: show st's own missions"),
+                ("x", "Missions: show Fractal's own missions"),
                 ("n", "Agents: a new agent; Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
                 ("x", "Inbox: dismiss a request, update or message"),
@@ -3824,7 +3824,7 @@ impl Ui {
                 ("ctrl+v", "attach the clipboard's image"),
                 (
                     "ctrl+y",
-                    "speak instead of typing, with the box open or not (a Mac with SmallTalk.app's speech helper)",
+                    "speak instead of typing, with the box open or not (a Mac with the Fractal speech helper)",
                 ),
                 ("esc", "stop writing; the keys above work again"),
             ],
@@ -4139,11 +4139,17 @@ impl Ui {
     }
 
     /// Whether a held key may act again as a press. While text is being typed (a message box,
-    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may; outside
-    /// it only the keys that move. Never a pending confirmation or answer: Enter, y and the
+    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may;
+    /// the palette and focused sidebar own input even over a focused terminal.
+    /// Outside it only the keys that move.
+    /// Never a pending confirmation or answer: Enter, y and the
     /// commands that change things act once per press, so holding one can never repeat them.
     fn repeat_is_safe(&self, key: &KeyEvent) -> bool {
-        if self.confirm.is_some() || self.answering.is_some() || self.terminal_focused() {
+        if self.confirmation_open()
+            || (self.terminal_focused()
+                && !self.palette_open()
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused))
+        {
             return false;
         }
         let typing = self.editing
@@ -4194,6 +4200,7 @@ impl Ui {
             if self.terminal_focused()
                 && !self.palette_open()
                 && !self.help
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
                 && self.popover.is_none()
                 && self.voice.is_none()
                 && self.context.is_none()
@@ -4863,7 +4870,7 @@ impl Ui {
                             self.editing = true;
                         } else {
                             self.flash(
-                                "st does not say how to answer this here: answer it with st alerts",
+                                "Fractal does not say how to answer this here: answer it with fractal alerts",
                             );
                         }
                     }
@@ -4927,11 +4934,11 @@ impl Ui {
         if self.live {
             // st's client API lets a person neither retry a step nor restart an agent yet.
             let hint = match key {
-                'r' => "st work retry STEP",
-                _ => "st agents start AGENT",
+                'r' => "fractal work retry STEP",
+                _ => "fractal agents start AGENT",
             };
             self.flash(format!(
-                "{what}: st does not let Fractal TUI do this yet · use {hint}"
+                "{what}: Fractal does not let the Fractal terminal UI do this yet · use {hint}"
             ));
         } else {
             self.flash(format!("{what} · demo: nothing was sent"));
@@ -5349,7 +5356,7 @@ impl Ui {
         {
             self.flash_for(
                 format!(
-                    "Too long to send: {} where st takes {}. Shorten it or send it in parts; the text is still here",
+                    "Too long to send: {} where Fractal takes {}. Shorten it or send it in parts; the text is still here",
                     size_text(draft.len()),
                     size_text(limit)
                 ),
@@ -5463,7 +5470,7 @@ impl Ui {
                     }
                     self.flash("Sending…");
                 }
-                None => self.flash("This needs the st CLI for now"),
+                None => self.flash("This needs the fractal CLI for now"),
             }
             return;
         }
@@ -5703,7 +5710,7 @@ impl Ui {
                 });
                 self.flash("Sending…");
             } else {
-                self.flash(format!("st does not offer {name} here"));
+                self.flash(format!("Fractal does not offer {name} here"));
             }
             return;
         }
@@ -6309,7 +6316,7 @@ impl Ui {
             Hit::Pane(PaneIntent::Open(id)) => self.open(&id),
             Hit::Pane(PaneIntent::Image(image)) => {
                 self.flash(format!(
-                    "Reading {} from st…",
+                    "Reading {} from Fractal…",
                     image.name.as_deref().unwrap_or("the image")
                 ));
                 self.effects.push(Effect::OpenImage { image });
@@ -6431,6 +6438,7 @@ impl Ui {
                 self.world.machines = full.machines.clone();
                 self.world.usage = full.usage.clone();
                 self.world.usage_limits = full.usage_limits.clone();
+                self.world.usage_accounts = full.usage_accounts.clone();
                 self.world.agent_messages = full.agent_messages.clone();
                 self.world.worktrees = full.worktrees.clone();
                 self.world.conversations = full.conversations;
@@ -9598,7 +9606,7 @@ mod tests {
                 .map(|row| Line::from(format!("row {row}")))
                 .collect(),
             cursor: Some((5, 2)),
-            stale: Some("st closed the connection".into()),
+            stale: Some("Fractal closed the connection".into()),
             ended: None,
             native: None,
         });
@@ -9606,7 +9614,7 @@ mod tests {
         assert!(screen.contains("row 5"), "{screen}");
         assert!(!screen.contains("row 39"), "{screen}");
         assert!(
-            screen.contains("not current, reconnecting: st closed the connection"),
+            screen.contains("not current, reconnecting: Fractal closed the connection"),
             "{screen}"
         );
 

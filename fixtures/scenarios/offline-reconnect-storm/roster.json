@@ -101,6 +101,7 @@
         "workspace": "~/src/harbor/.worktrees/reviewer"
       }
     ],
+    "devices": [],
     "machines": [
       {
         "capacity": {
@@ -198,7 +199,8 @@
         "state": "running",
         "updated_at": "2030-01-01T11:57:00.000Z"
       }
-    ]
+    ],
+    "sessions": []
   },
   "timeline": [],
   "times": [

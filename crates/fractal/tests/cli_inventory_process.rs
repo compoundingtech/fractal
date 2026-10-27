@@ -120,6 +120,33 @@ fn run(root: &Path, arguments: &[&str]) -> Output {
 }
 
 #[test]
+fn early_instance_failures_preserve_native_driver_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    for arguments in [
+        vec!["driver", "claude", "--instance=bad/name"],
+        vec!["driver-hook", "--instance=bad/name"],
+        vec!["--instance=bad/name", "driver", "claude"],
+        vec!["--instance", "bad/name", "driver-hook"],
+    ] {
+        let output = run(root.path(), &arguments);
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.starts_with("st: --instance bad/name:"), "{arguments:?}: {stderr}");
+    }
+}
+
+#[test]
+fn option_values_do_not_select_native_driver_stderr() {
+    let root = tempfile::tempdir().unwrap();
+    for value in ["driver", "driver-hook"] {
+        let output = run(root.path(), &["--endpoint", value, "--instance=bad/name", "status"]);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.starts_with("fractal: --instance bad/name:"), "{stderr}");
+    }
+}
+
+#[test]
 fn standalone_inventory_exits_with_live_json_without_a_daemon() {
     let root = tempfile::tempdir().unwrap();
     let output = run(root.path(), &["--read-contract-inventory-json"]);
@@ -154,7 +181,7 @@ fn mixed_inventory_requests_exit_before_an_action() {
         assert!(output.stdout.is_empty(), "{output:?}");
         assert_eq!(
             output.stderr,
-            b"st: --read-contract-inventory-json must be used alone\n"
+            b"fractal: --read-contract-inventory-json must be used alone\n"
         );
     }
     assert!(!root.path().join("absent-daemon.sock").exists());
@@ -187,7 +214,7 @@ fn literal_inventory_names_after_terminator_reach_ordinary_dispatch() {
         assert!(output.stdout.is_empty(), "{output:?}");
         assert_eq!(
             output.stderr,
-            b"st: document input cannot be a symbolic link\n"
+            b"fractal: document input cannot be a symbolic link\n"
         );
         assert_eq!(
             std::fs::read_link(root.path().join(literal)).unwrap(),
