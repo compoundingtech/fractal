@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use st3_client::{Client, discover_unix_endpoint, set_client_name};
-use st3_client_tui::{App, send};
+use fractal_client::{Client, discover_unix_endpoint, set_client_name};
+use fractal_client_tui::{App, send};
 use std::{sync::mpsc, time::Duration};
 
 #[tokio::main]
@@ -9,12 +9,12 @@ async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--help") {
         println!(
-            "Usage: st3-client-tui person/NAME [UNIX_SOCKET]\n↑/↓ selects an agent; type then Enter sends; Esc clears; Ctrl-C quits."
+            "Usage: fractal-client-tui person/NAME [UNIX_SOCKET]\n↑/↓ selects an agent; type then Enter sends; Esc clears; Ctrl-C quits."
         );
         return Ok(());
     }
     if args.is_empty() || args.len() > 2 || !args[0].starts_with("person/") {
-        bail!("Use st3-client-tui person/NAME [UNIX_SOCKET]; --help shows keys");
+        bail!("Use fractal-client-tui person/NAME [UNIX_SOCKET]; --help shows keys");
     }
     let explicit = args
         .get(1)
@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
     ));
     let (updates, incoming) = mpsc::channel();
     let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::spawn(st3_feed::run(
+    let task = tokio::spawn(fractal_feed::run(
         Client::unix_as(socket, &args[0]),
         updates,
         receiver,

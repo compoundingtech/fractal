@@ -119,8 +119,8 @@ fn sealed_view_cache_invalidates_after_replication_receive_and_admission() {
     ).unwrap();
     assert_eq!(pending as usize, exchange.envelopes.len());
     let received = target.fleet_view_sealed().unwrap();
-    assert_eq!(*received, oracle(&target));
-    assert_eq!(*received, *first);
+    assert_eq!(received, oracle(&target));
+    assert_eq!(received, first);
     let claims_received: i64 = target.readers.get().query_row(
         "SELECT COUNT(*) FROM claims WHERE kind='fleet.member-endpoints'", [], |row| row.get(0),
     ).unwrap();
@@ -131,8 +131,8 @@ fn sealed_view_cache_invalidates_after_replication_receive_and_admission() {
         "SELECT COUNT(*) FROM replica_envelopes WHERE batch_id IS NOT NULL", [], |row| row.get(0),
     ).unwrap();
     assert_eq!(attached as usize, exchange.envelopes.len());
-    let admitted = refolded(&target, &received);
-    assert_eq!(*admitted, oracle(&source));
+    let admitted = refolded(&target);
+    assert_eq!(admitted, oracle(&source));
     assert_eq!(admitted.members.len(), 1);
     assert_eq!(admitted.members[0].endpoints, vec![json!({"url": "https://anchor-0.invalid"})]);
 }
@@ -146,7 +146,7 @@ fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
     source.seal_local_batches().unwrap();
     // Plain has no domain projections; capture needs the same retention roots as the trim test.
     source.connection.write().execute_batch(
-        "CREATE TABLE IF NOT EXISTS desired(claim_id TEXT);
+        /* sqlite-large-value: allow-for-now lv-h31c1774279ff owner=smallclaims::store::sealed_view_cache_tests::lifecycle_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS desired(claim_id TEXT);
          CREATE TABLE IF NOT EXISTS mission_definitions(claim_id TEXT);
          CREATE TABLE IF NOT EXISTS mission_revisions(claim_id TEXT);
          CREATE TABLE IF NOT EXISTS documents(binding_claim_id TEXT);",
@@ -198,7 +198,7 @@ fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
     };
     drop(sealed);
     source.publish_seal(&checkpoint, &terms, &identities, None).unwrap();
-    source.publish_verification(&checkpoint, &terms, &plan, &proof).unwrap();
+    source.publish_verification(&checkpoint, &terms, &checkpoint_staging::StagedPlan::of(&plan), &proof).unwrap();
 
     // The observer has the certified claim log and the soon-to-be-dropped fleet claim,
     // but did not participate in the certificate or apply the checkpoint locally.
@@ -221,17 +221,17 @@ fn sealed_view_cache_invalidates_after_verified_checkpoint_manifest_adoption() {
     assert!(matches!(adopted.last(), Some(CheckpointAction::Trimmed { .. })));
     assert!(target.claim_by_id(&claim_id).unwrap().is_none());
     assert_eq!(target.checkpoint_manifest(&checkpoint, cut).unwrap(), manifest);
-    let current = refolded(&target, &first);
+    let current = refolded(&target);
     assert_eq!(current.members.len(), 1);
     assert_eq!(current.members[0].endpoints, vec![json!({"url": "https://anchor-1.invalid"})]);
-    assert_eq!(*current, *first);
-    assert_eq!(*current, oracle(&source));
+    assert_eq!(current, first);
+    assert_eq!(current, oracle(&source));
     assert!(target.adopt_checkpoint(&manifest).unwrap().is_empty());
-    assert!(Arc::ptr_eq(&current, &target.fleet_view_sealed().unwrap()));
+    assert_eq!(current, target.fleet_view_sealed().unwrap());
 }
 
 #[test]
-fn sealed_view_cache_simultaneous_cold_misses_share_identical_arc() {
+fn sealed_view_cache_simultaneous_cold_misses_return_identical_views() {
     let (store, key) = fixture(32);
     append_endpoint(&store, &key, "https://unsealed.invalid");
     let expected = oracle(&store);
@@ -248,9 +248,9 @@ fn sealed_view_cache_simultaneous_cold_misses_share_identical_arc() {
     });
     barrier.wait();
     let [first, second] = workers.map(|worker| worker.join().unwrap());
-    assert!(Arc::ptr_eq(&first, &second));
-    assert_eq!(*first, expected);
+    assert_eq!(first, second);
+    assert_eq!(first, expected);
     assert_eq!(first.members.len(), 1);
     assert_eq!(first.members[0].endpoints, vec![json!({"url": "https://anchor-31.invalid"})]);
-    assert!(Arc::ptr_eq(&first, &store.fleet_view_sealed().unwrap()));
+    assert_eq!(first, store.fleet_view_sealed().unwrap());
 }

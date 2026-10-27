@@ -27,6 +27,16 @@
           "version": 0
         },
         {
+          "id": "read.arrangements",
+          "state": "granted",
+          "version": 0
+        },
+        {
+          "id": "arrangements",
+          "state": "granted",
+          "version": 1
+        },
+        {
           "id": "collections",
           "state": "granted",
           "version": 1

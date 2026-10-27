@@ -24,11 +24,11 @@ fn sealed_view_cache_measure_index_build_on_two_million_claims() {
     assert_eq!(BATCHES * CLAIMS_PER_BATCH, ROWS);
     {
         let mut connection = Connection::open(&path).unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
-        connection.execute_batch("DROP INDEX IF EXISTS claims_batch_kind;").unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h79b67f329d5d owner=smallclaims::store::sealed_view_cache_tests::index_cost_tests TODO=trace-statement-and-value-representation */ SCHEMA).unwrap();
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h97e1b46dc727 owner=smallclaims::store::sealed_view_cache_tests::index_cost_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX IF EXISTS claims_batch_kind;").unwrap();
         let tx = connection.transaction().unwrap();
         let batches = tx.execute(
-            "WITH RECURSIVE counters(n) AS (
+            /* sqlite-large-value: allow-for-now lv-h62c6f148a781 owner=smallclaims::store::sealed_view_cache_tests::index_cost_tests TODO=chunk-or-reference-exact-wire-values */ "WITH RECURSIVE counters(n) AS (
                  VALUES(1) UNION ALL SELECT n+1 FROM counters WHERE n<?1
              )
              INSERT INTO batches(id,origin,replica_sequence,previous_hash,hash,accepted_at_unix_ms)
@@ -39,7 +39,7 @@ fn sealed_view_cache_measure_index_build_on_two_million_claims() {
         ).unwrap();
         assert_eq!(batches, BATCHES);
         let rows = tx.execute(
-            "WITH RECURSIVE counters(n) AS (
+            /* sqlite-large-value: allow-for-now lv-hf0d539537e15 owner=smallclaims::store::sealed_view_cache_tests::index_cost_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE counters(n) AS (
                  VALUES(1) UNION ALL SELECT n+1 FROM counters WHERE n<?1
              )
              INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
@@ -74,7 +74,7 @@ fn sealed_view_cache_measure_index_build_on_two_million_claims() {
     ).unwrap();
     let started = Instant::now();
     connection.execute_batch(
-        "CREATE INDEX claims_batch_kind ON claims(batch_id,kind);",
+        /* sqlite-large-value: allow-for-now lv-h707dd277ce20 owner=smallclaims::store::sealed_view_cache_tests::index_cost_tests TODO=chunk-or-reference-variable-columns */ "CREATE INDEX claims_batch_kind ON claims(batch_id,kind);",
     ).unwrap();
     let elapsed = started.elapsed();
     // Read physical lengths while the writer remains open, before any explicit

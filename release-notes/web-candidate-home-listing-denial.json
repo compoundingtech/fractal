@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Deny listing the synthetic operator-home ancestor recreated by nested candidate sandbox mounts.",
+  "replay": { "status": "none", "detail": "No data replay." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "Candidate worktree and package-cache submounts remain accessible; the operator-home ancestor cannot be listed or chmodded." },
+  "downtime": { "status": "none", "detail": "No service activation." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "No production state changes." }
+}

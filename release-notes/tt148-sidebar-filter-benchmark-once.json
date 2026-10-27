@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Run the sidebar filter latency benchmark once in the desktop dark browser case, retain filter behavior in every viewport and theme, and omit two scheme-only strict-play aliases already covered by the runner's scheme override.",
+  "replay": { "status": "none", "detail": "Story test coverage only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "The full strict case set explicitly selects the desktop dark filter benchmark and omits only NoGreenAllStatesLight and FooterWidthBudgetLight; both remain available in Storybook, and their base stories still run both widths and schemes. Expected case counts, omission summaries and shard coverage use the same selection. The calibrated 30-sample filter/reference phases, 3x p90 budget and 4x busy-wait negative control are unchanged. FilterBehavior retains filter/unfilter behavior, retained identity and rebuild-control checks in every outer viewport and scheme." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Run the paid seat queue eval several times, one after another. Each run gets a
 # fresh isolated daemon started from BIN_DIR's st3 and st2. SEAT names the
 # harness of that run's seat: claude, codex or omp. Each harness gets its own
@@ -158,7 +159,8 @@ transcript() {
 # collect SEAT ROOT RUN_OUT: copy what a report needs out of the isolated daemon.
 collect() {
   local seat=$1 root=$2 dest=$3 st3="$2/bin/st3" workspace after page last run
-  export ST3_ENDPOINT="$root/st3.sock"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  export FRACTAL_ENDPOINT="$root/st3.sock" ST3_ENDPOINT="$root/st3.sock"
   workspace="$(ls -d "$root"/state/evals/*/* 2>/dev/null | head -1)"
   if [[ -n $workspace ]]; then
     cp -r "$workspace/controller-state.json" "$workspace/generated" "$dest/" 2>/dev/null || true
@@ -179,7 +181,7 @@ collect() {
   "$st3" agents show agent/eval/seat-queue/worker --all --json >"$dest/seat.json" 2>/dev/null || true
   transcript "$seat" "$root" "$workspace" "$dest"
   cp "$root/daemon.log" "$dest/" 2>/dev/null || true
-  unset ST3_ENDPOINT
+  unset FRACTAL_ENDPOINT ST3_ENDPOINT
 }
 
 # one_run N SEAT: run the eval once and record it. Call it in its own subshell,

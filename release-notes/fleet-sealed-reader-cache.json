@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "summary": "Reuse generation-keyed sealed fleet membership views across client and replication reads (#2444).",
+  "summary": "Install fleet-generation triggers atomically by version and cover sealed-cache lifecycle invalidation (#2444).",
   "replay": {
     "status": "none",
-    "detail": "No claim replay or fleet membership fold changes; the cache reuses the sealed view at the same fleet generation."
+    "detail": "Retains main's sealed fleet cache and fold semantics; adds migration and lifecycle regression coverage without replacing the cache."
   },
   "schema": {
     "status": "changed",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Fleet status and membership JSON retain their existing fields and sealed-reader semantics; sharing the view does not change client or peer protocols."
+    "detail": "Fleet status and membership JSON retain their existing fields and sealed-reader semantics; no client or peer API changes."
   },
   "downtime": {
     "status": "changed",
