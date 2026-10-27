@@ -5710,6 +5710,7 @@ mod device_stream_policy_tests {
                 device_key_chain: vec![],
                 device_key_proofs: vec![],
                 person_root_key_proof: None,
+                fabric_grant: None,
             },
         };
         let mut client = device.client().unwrap();

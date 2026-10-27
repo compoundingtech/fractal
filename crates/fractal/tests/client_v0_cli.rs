@@ -140,7 +140,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             device_name: "CLI device".into(),
             person_id: "person/avery".into(),
             full_control: Some(true),
-            scopes: None, })
+            scopes: None, fabric_gateway: None, })
                 .await
                 .unwrap()
                 .value;
@@ -289,7 +289,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -317,7 +317,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     assert!(loaded.devices[0].session.device_key_chain.is_empty());
     assert!(loaded.devices[0].person_root_fingerprint.is_some());
     let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
-    person_id: "person/avery".into(), full_control: Some(true), scopes: None, }).await.unwrap().value;
+    person_id: "person/avery".into(), full_control: Some(true), scopes: None, fabric_gateway: None, }).await.unwrap().value;
     let unpinned_profile = root.path().join("unpinned/devices.json");
     let output = run(vec!["devices".into(), "complete".into(), base.clone(), challenge.pairing_id,
         "--unpinned".into(), "--profile".into(), unpinned_profile.to_str().unwrap().into()], challenge.code).await.unwrap();
@@ -4719,7 +4719,7 @@ mission "orchid-actor" state="ready" {
                     String::from_utf8_lossy(&output.stderr)
                         .lines()
                         .collect::<Vec<_>>(),
-                    ["st: --as is ignored for this read; no actor is required"]
+                    ["fractal: --as is ignored for this read; no actor is required"]
                 );
                 if json {
                     let returned = value(&output);
@@ -4745,7 +4745,7 @@ mission "orchid-actor" state="ready" {
             String::from_utf8_lossy(&seat_read.stderr)
                 .lines()
                 .collect::<Vec<_>>(),
-            ["st: --as is ignored for this read; no actor is required"]
+            ["fractal: --as is ignored for this read; no actor is required"]
         );
         if command == "work" {
             assert_eq!(returned["value"], plain_json["value"]);

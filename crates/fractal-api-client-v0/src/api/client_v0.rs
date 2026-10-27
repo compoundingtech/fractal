@@ -1296,6 +1296,7 @@ struct ResolvedConversation {
     snapshot: ClientSnapshot,
     local_position: u64,
     managed: Option<super::ManagedSessionOwner>,
+    routing_owner: Option<super::ManagedSessionOwner>,
 }
 
 fn resolve_conversation(
@@ -1316,7 +1317,14 @@ fn resolve_conversation(
             .map_err(ApiError::internal)?;
         (session_id, managed)
     };
-    Ok((session_id, ResolvedConversation { snapshot, local_position, managed }))
+    let routing_owner = if crate::subagent_sessions::child_parts(&session_id).is_some() {
+        fractal_api_core::api::client_v0::routing_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).map_err(ApiError::internal)?
+    } else {
+        managed.clone()
+    };
+    Ok((session_id, ResolvedConversation { snapshot, local_position, managed, routing_owner }))
 }
 
 /// Where a conversation is read: here, or on the host that owns its session.
@@ -1363,7 +1371,7 @@ async fn open_conversation_subscription(
         crate::performance::task("conversation/admission", || {
             let target = request.conversation.as_deref().unwrap_or_default();
             let (session_id, resolved) = resolve_conversation(&state, target)?;
-            let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+            let remote = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())?;
             Ok((session_id, remote, Some(resolved)))
         })
     })
@@ -1508,7 +1516,7 @@ fn conversation_open_local_marked(
         Some(resolved) => resolved,
         None => resolve_conversation(state, session_id)?.1,
     };
-    let ResolvedConversation { snapshot, local_position, managed } = resolved;
+    let ResolvedConversation { snapshot, local_position, managed, .. } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
@@ -4864,7 +4872,7 @@ pub async fn conversation_changes(
             let session_id = conversation_session_id(&state, &id)?;
             let snapshot = new_client_snapshot(&state);
             let owner =
-                super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                fractal_api_core::api::client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
                     .map_err(ApiError::internal)?;
             Ok((session_id, owner))
         },
@@ -4935,7 +4943,7 @@ pub async fn conversation_stream(
         .to_owned();
     let session_id = conversation_session_id(&state, &id)?;
     let snapshot = new_client_snapshot(&state);
-    let remote = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+    let remote = fractal_api_core::api::client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
         .map_err(ApiError::internal)?
         .and_then(|(_, _, origin)| origin)
         .filter(|origin| origin != state.store.origin())
@@ -5061,6 +5069,10 @@ pub struct PairingBegin {
     full_control: Option<bool>,
     /// Narrows the default device grant; every entry must be a limited pairing scope.
     scopes: Option<Vec<String>>,
+    /// Let this one pairing grant the device the client gateway over Fabric. Off unless the
+    /// person asks (`st devices pair --fabric-gateway`).
+    #[serde(default)]
+    fabric_gateway: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -5111,6 +5123,7 @@ pub async fn pairing_begin(
     let subject = format!("custom/client/pairing-{}", &stable[..24]);
     let expires_at = client_now_ms() + 300_000;
     let person_id = request.person_id;
+    let fabric_gateway = request.fabric_gateway == Some(true);
     let scopes: Vec<&str> = match (request.full_control.unwrap_or(false), request.scopes) {
         (true, Some(_)) => {
             return Err(validation(
@@ -5140,20 +5153,24 @@ pub async fn pairing_begin(
                 .collect()
         }
     };
+    let mut begun_fields = BTreeMap::from([
+        ("pairing_id".into(), Value::String(pairing_id.clone())),
+        ("device_name".into(), Value::String(request.device_name)),
+        ("person_id".into(), Value::String(person_id.clone())),
+        ("scopes".into(), json!(scopes)),
+        ("code_hash".into(), Value::String(credential_digest(&code))),
+        ("expires_at_unix_ms".into(), json!(expires_at)),
+    ]);
+    if fabric_gateway {
+        begun_fields.insert("fabric_gateway".into(), Value::Bool(true));
+    }
     state
         .store
         .append_claim(&ClaimInput {
             subject,
             kind: "custom.client.pairing-begun".into(),
             actor: Some(person_id.clone()),
-            fields: BTreeMap::from([
-                ("pairing_id".into(), Value::String(pairing_id.clone())),
-                ("device_name".into(), Value::String(request.device_name)),
-                ("person_id".into(), Value::String(person_id)),
-                ("scopes".into(), json!(scopes)),
-                ("code_hash".into(), Value::String(credential_digest(&code))),
-                ("expires_at_unix_ms".into(), json!(expires_at)),
-            ]),
+            fields: begun_fields,
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
@@ -5181,6 +5198,10 @@ pub struct PairingComplete {
     /// Where the device keeps its signing key: `secure-enclave` or `software`.
     #[serde(default)]
     key_storage: Option<String>,
+    /// The device's Fabric NodeID. When this member exposes its client gateway over Fabric,
+    /// pairing grants that NodeID the gateway, inbound-only, and revoking the pairing removes it.
+    #[serde(default)]
+    fabric_node_id: Option<String>,
 }
 
 /// Proof bytes and their authorization model come from one pinned snapshot. The model
@@ -5271,6 +5292,40 @@ impl Drop for PreparedDeviceGrant<'_> {
     }
 }
 
+/// Whether a pairing other than `device`'s, issued here, unrevoked and unexpired, carries `node`.
+fn fabric_node_still_paired(
+    state: &AppState,
+    completed: &[ClaimRecord],
+    device: &str,
+    node: &str,
+) -> Result<bool, ApiError> {
+    let revoked = state
+        .store
+        .claims_for_kind_at("custom.client.pairing-revoked", None, true, 10_000)
+        .map_err(ApiError::internal)?
+        .claims
+        .into_iter()
+        .filter_map(|claim| {
+            claim
+                .body
+                .pointer("/fields/device_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<BTreeSet<_>>();
+    let now = client_now_ms();
+    Ok(completed.iter().any(|claim| {
+        let field = |name: &str| claim.body.pointer(&format!("/fields/{name}"));
+        let other = field("device_id").and_then(Value::as_str);
+        claim.origin == state.node
+            && field("fabric_node_id").and_then(Value::as_str) == Some(node)
+            && other.is_some_and(|other| other != device && !revoked.contains(other))
+            && field("expires_at_unix_ms")
+                .and_then(Value::as_u64)
+                .is_some_and(|expires| u128::from(expires) > now)
+    }))
+}
+
 // Proof preparation must not let simultaneous completions enroll a second key after another
 // request has consumed the same code. All checks and store writes follow this serialization.
 static PAIRING_COMPLETIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -5288,6 +5343,13 @@ pub async fn pairing_complete(
     }
     if let Some(completed) = assistant::complete(&state, &id, &request, session.transport).await? {
         return Ok(completed);
+    }
+    if let Some(node) = &request.fabric_node_id
+        && !crate::fabric_gateway::valid_node_id(node)
+    {
+        return Err(validation(
+            "the pairing completion's Fabric NodeID must be 64 lowercase hex characters",
+        ));
     }
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
@@ -5328,6 +5390,12 @@ pub async fn pairing_complete(
             "the pairing code is invalid, expired, or already used",
         ));
     }
+    // A Fabric grant needs the person's yes for this pairing, given when the code was made.
+    let fabric_wanted = begun
+        .body
+        .pointer("/fields/fabric_gateway")
+        .and_then(Value::as_bool)
+        == Some(true);
     let device_public_key = request.device_public_key.clone();
     let mut secret = [0_u8; 32];
     getrandom::fill(&mut secret).map_err(ApiError::internal)?;
@@ -5415,11 +5483,7 @@ pub async fn pairing_complete(
     } else {
         None
     };
-    let completed = state.store.append_claim(&ClaimInput {
-        subject: begun.subject.clone(),
-        kind: "custom.client.pairing-completed".into(),
-        actor: Some(person_id.clone()),
-        fields: BTreeMap::from([
+    let mut fields = BTreeMap::from([
             ("pairing_id".into(), Value::String(pairing_id)),
             ("device_id".into(), Value::String(device_id.clone())),
             ("session_actor".into(), Value::String(session_actor.clone())),
@@ -5436,7 +5500,15 @@ pub async fn pairing_complete(
             ("scopes".into(), json!(scopes)),
             ("delegated_scopes".into(), json!(scopes)),
             ("expires_at_unix_ms".into(), json!(expires_at)),
-        ]),
+    ]);
+    if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
+        fields.insert("fabric_node_id".into(), Value::String(node.clone()));
+    }
+    let completed = state.store.append_claim(&ClaimInput {
+        subject: begun.subject.clone(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some(person_id.clone()),
+        fields,
         evidence: vec![begun.id.clone()],
         expected_subject: Some(Some(begun.id.clone())),
         idempotency_key: None,
@@ -5460,6 +5532,19 @@ pub async fn pairing_complete(
     }
     if let Some(proof) = root_proof {
         session["person_root_key_proof"] = proof;
+    }
+    // The pairing stands whatever Fabric says: the device can still use another route, and
+    // the session reports what happened so the device can say it.
+    if let Some(node) = &request.fabric_node_id {
+        let grant = if fabric_wanted {
+            crate::fabric_gateway::grant(&state.state_dir, node).await
+        } else {
+            crate::fabric_gateway::Grant::NotRequested
+        };
+        if let crate::fabric_gateway::Grant::Failed { detail } = &grant {
+            tracing::warn!(%device_id, %detail, "could not grant a paired device the client gateway over Fabric");
+        }
+        session["fabric_grant"] = grant.to_json();
     }
     Ok(Json(session))
 }
@@ -8426,6 +8511,15 @@ async fn dispatch_action(
                     .store
                     .revoke_device_key(person, key, &format!("pairing of {device} revoked"))
                     .map_err(ApiError::bad)?;
+            }
+            // Its Fabric grant goes too, unless another live pairing of the same NodeID on this
+            // member still needs it. A grant left behind reaches only the paired-only gateway,
+            // which no longer accepts this device's credential.
+            if let Some(node) = field("fabric_node_id")
+                && !fabric_node_still_paired(state, &claims.claims, &device, node)?
+                && let Err(error) = crate::fabric_gateway::revoke(&state.state_dir, node).await
+            {
+                tracing::warn!(%device, error = %format!("{error:#}"), "could not remove a revoked device's Fabric grant");
             }
             signal_changed(state);
             Ok(vec![device])
@@ -11780,7 +11874,7 @@ mission "differential" state="ready" {
                                             .block_on(held.wait_for(|released| *released));
                                         let target = request.conversation.as_deref().unwrap_or_default();
                                         let (session_id, resolved) = resolve_conversation(&state, target)?;
-                                        let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+                                        let remote = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())?;
                                         Ok((session_id, remote, Some(resolved)))
                                     }).await.unwrap()
                                 }
@@ -17741,6 +17835,117 @@ mission "example/zero-run" state="ready" {
         assert!(history.iter().any(|item|
             item["body"]["text"] == "older native history message"));
         follower.abort();
+    }
+
+    fn remote_child_fixture(root: &Path) -> (AppState, String, String) {
+        let (mut owner, parent_id, _) =
+            conversation_first_frame_fixture(root, "conversation-owner", 1);
+        owner.native_session_home = None;
+        let (_, resolved) = resolve_conversation(&owner, &parent_id).unwrap();
+        let parent = conversation_blocks::source(&owner, &parent_id, resolved.managed.as_ref()).unwrap();
+        let directory = parent.transcript.with_extension("");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("child.jsonl"), concat!(
+            "{\"type\":\"session\",\"id\":\"child-native\",\"cwd\":\"/work\",\"timestamp\":\"2026-10-08T12:00:00Z\"}\n",
+            "{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-10-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"child only\"}]}}\n",
+        )).unwrap();
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "child", &parent_id);
+        (owner, parent_id, child_id)
+    }
+
+    #[tokio::test]
+    async fn remote_child_admission_without_relay_is_unavailable_not_parent_content() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let (owner, _, child_id) = remote_child_fixture(owner_root.path());
+        let gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
+        gateway.store.import_replication(
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
+        ).unwrap();
+        let (resolved_id, resolved) = resolve_conversation(&gateway, &child_id).unwrap();
+        assert_eq!(resolved_id, child_id);
+        assert!(resolved.managed.is_none());
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let request = serde_json::from_value(json!({
+            "kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":child_id,
+        })).unwrap();
+        let permits = ConversationAdmissionPermits {
+            _socket: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+            _daemon: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+        };
+        let error = open_conversation_subscription(gateway, session, request, permits)
+            .await.err().unwrap();
+        assert_eq!(error.code, "remote-unavailable");
+    }
+
+    #[tokio::test]
+    async fn two_host_child_admission_relays_child_identity_and_never_parent_content() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let (owner, parent_id, child_id) = remote_child_fixture(owner_root.path());
+        let mut gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
+        gateway.store.import_replication(
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
+        ).unwrap();
+        let owner_socket = owner_root.path().join("owner-st3.sock");
+        let served_owner = owner_socket.clone();
+        let owner_app = crate::api::router(owner);
+        tokio::spawn(async move { crate::api::serve_unix(&served_owner, owner_app).await });
+        for _ in 0..200 {
+            if tokio::net::UnixStream::connect(&owner_socket).await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        gateway.client_relay = crate::peer::conversation_gateway_relay(
+            &owner_socket, crate::api::raw_terminal_owner_splice, gateway_root.path(),
+        ).await.unwrap();
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let request = serde_json::from_value(json!({
+            "kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":child_id,
+        })).unwrap();
+        let permits = ConversationAdmissionPermits {
+            _socket: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+            _daemon: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+        };
+        let (resolved_id, remote, resolved) =
+            open_conversation_subscription(gateway.clone(), session.clone(), request, permits).await.unwrap();
+        assert_eq!(resolved_id, child_id);
+        assert!(resolved.as_ref().unwrap().managed.is_none());
+        assert_eq!(remote.as_deref(), Some("host/conversation-owner"));
+        let (start, page, _) = conversation_open_value(
+            &gateway, &session, &resolved_id, remote.as_deref(), resolved, 20,
+        ).await.unwrap();
+        assert_eq!(page["session_id"], child_id);
+        assert!(page.to_string().contains("child only"), "{page}");
+        assert!(!page.to_string().contains("entry 0 "), "{page}");
+        let cursor = start["next_cursor"].as_str().unwrap();
+        assert!(conversation_position(&gateway, &parent_id, cursor).is_err());
+        let (frame, _) = first_frame_and_older_history(
+            &gateway, &child_id, remote.as_deref(), Some(20),
+        ).await;
+        assert_eq!(frame["session_id"], child_id);
+        assert!(frame.to_string().contains("child only"), "{frame}");
+        assert!(!frame.to_string().contains("entry 0 "), "{frame}");
+        let changes = conversation_changes(
+            State(gateway.clone()), Extension(session.clone()), AxumPath(child_id.clone()),
+            Query(ConversationQuery { after: None, wait_ms: Some(0) }),
+        ).await.unwrap().0;
+        assert_eq!(changes["session_id"], child_id);
+        assert!(!changes.to_string().contains("entry 0 "), "{changes}");
+        let page = fractal_api_core::api::client_reads::client_sessions_detail(
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session.clone()),
+            AxumPath(format!("{}/timeline", child_id.trim_start_matches("session/"))),
+            Query(ClientListQuery::default()),
+        ).await.unwrap().0;
+        assert_eq!(page["session_id"], child_id);
+        assert!(page.to_string().contains("child only"), "{page}");
+        assert!(!page.to_string().contains("entry 0 "), "{page}");
+        let detail = fractal_api_core::api::client_reads::client_sessions_detail(
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session),
+            AxumPath(child_id.trim_start_matches("session/").to_owned()),
+            Query(ClientListQuery::default()),
+        ).await.unwrap().0;
+        assert_eq!(detail["id"], child_id);
+        assert_eq!(detail["managed"], false);
     }
 
     #[tokio::test]

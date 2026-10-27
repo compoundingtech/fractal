@@ -91,6 +91,7 @@ impl Harness {
             api_version: fractal_client::API_VERSION.into(), code: challenge["value"]["code"].as_str().unwrap().into(),
             device_public_key: "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc".into(),
             key_storage: Some("software".into()),
+            fabric_node_id: None,
         };
         let (status, value) = request(&self.fabric, "POST", &path, None, None, &complete).await;
         assert_eq!(status, StatusCode::OK, "{value}");

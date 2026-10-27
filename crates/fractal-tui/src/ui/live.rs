@@ -308,7 +308,7 @@ async fn legacy_inventory(client: &Client, inventory: Inventory) -> InventoryRea
         Inventory::Sessions => InventoryRead::Rows(inventory, model::read_native_sessions(client).await.map_err(|error| error.to_string())),
         Inventory::Terminals => InventoryRead::Terminals(client.terminals_list(None, Some(200), false).await.map(|reply| (reply.value.items, reply.value.page.has_more)).map_err(|error| error.human())),
         Inventory::Clients => InventoryRead::Clients(client.clients_list().await.map(|reply| reply.value).map_err(|error| match error {
-            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this Fractal does not list its clients yet: its daemon needs an update".into(),
+            ClientError::Api(fractal_client::ErrorCode::NotFound, ..) => "this version of Fractal does not list its clients yet: its daemon needs an update".into(),
             error => error.human(),
         })),
         Inventory::Usage(hours) => {
@@ -360,10 +360,10 @@ fn usage_error(error: &fractal_client::ClientError) -> String {
     match error {
         // A daemon from before the read answers its path with a bare 404.
         fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound, _, _) => {
-            "This Fractal does not serve usage yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
-            "This Fractal does not serve usage yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve usage yet: its daemon needs an update.".into()
         }
         error => format!("Could not read usage: {}", error.human()),
     }
@@ -3221,7 +3221,7 @@ mod tests {
         let start = Instant::now();
         let mut failing = BTreeMap::new();
         let mut errors = BTreeMap::new();
-        let why = "st did not answer".to_owned();
+        let why = "Fractal did not answer".to_owned();
         let stale = |errors: &BTreeMap<String, String>| {
             let extras = Extras { window_errors: errors.clone(), ..Extras::default() };
             adapt::world(&Model::default(), "person/avery", &extras).stale
@@ -3238,7 +3238,7 @@ mod tests {
         // One that has lasted is said, in the stale note.
         note_legacy_read(&mut failing, &mut errors, "machines", Some(&why), start + feed::REPORT_AFTER);
         assert_eq!(errors.get("machines"), Some(&why));
-        assert_eq!(stale(&errors), ["machines: st did not answer"]);
+        assert_eq!(stale(&errors), ["machines: Fractal did not answer"]);
 
         // A read that succeeds clears the error and the clock; the next failure starts over.
         note_legacy_read(&mut failing, &mut errors, "machines", None, start + feed::REPORT_AFTER * 2);
@@ -3270,7 +3270,7 @@ mod tests {
                 ));
             (outcome, said)
         };
-        let unsure = "st cannot tell yet which host runs this";
+        let unsure = "Fractal cannot tell yet which host runs this";
         // It works on the third try; each wait said why.
         let (outcome, said) = run(vec![unsure, "host/example cannot be reached right now"], 5);
         assert_eq!(outcome, Ok(7));
@@ -3313,7 +3313,7 @@ mod tests {
 
     #[test]
     fn a_shells_attach_stops_retrying_once_its_tab_is_closed() {
-        let unsure = "st cannot tell yet which host runs this";
+        let unsure = "Fractal cannot tell yet which host runs this";
         let wanted = std::cell::Cell::new(true);
         let attempts = std::cell::Cell::new(0);
         let mut said = 0;
@@ -3577,7 +3577,7 @@ mod tests {
         timeline.older.loading = true;
         assert!(!super::wants_fill(&timeline, 0));
         timeline.older.loading = false;
-        timeline.older.failed = Some("st is slow".into());
+        timeline.older.failed = Some("Fractal is slow".into());
         assert!(!super::wants_fill(&timeline, 0));
         timeline.older.failed = None;
         timeline.has_more = false;
@@ -3879,7 +3879,7 @@ mod tests {
         let later = requests::enqueue(&dir, "agent/garden/not-yet", Place::Tab, false, None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(350));
         answer_open_requests(&mut ui, &mut inbox, true);
-        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for st to know it");
+        assert!(dir.join(format!("{later}.json")).exists(), "still waiting for Fractal to know it");
         assert_eq!(inbox.waiting().count(), 1);
         inbox.waiting_since_for_test(&later, requests::GRACE);
         answer_open_requests(&mut ui, &mut inbox, true);
@@ -4900,8 +4900,8 @@ mod tests {
             has_more: true,
             ..Default::default()
         };
-        timeline.older_failed("st did not answer".into());
-        assert!(note(timeline).starts_with("Could not load earlier entries: st did not answer"));
+        timeline.older_failed("Fractal did not answer".into());
+        assert!(note(timeline).starts_with("Could not load earlier entries: Fractal did not answer"));
         timeline = fractal_conversation_ui::Timeline {
             items,
             ..Default::default()
@@ -4983,7 +4983,7 @@ mod tests {
             text: "hello".into(),
             at: "10:17".into(),
             message_id: message_id.map(str::to_owned),
-            failed: unconfirmed.then(|| "st did not answer".into()),
+            failed: unconfirmed.then(|| "Fractal did not answer".into()),
             unconfirmed,
             effect: Effect::Send {
                 in_reply_to: None,

@@ -1534,7 +1534,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
+          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}"
         if: needs.evidence-gate-typescript-client.outputs.skip != 'true'
       - name: Install the frozen workspace
         shell: bash
@@ -4082,7 +4082,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
       - name: Enable user namespaces for Buck TypeScript sandbox
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Restore the web shell closure
@@ -4105,7 +4105,7 @@ jobs:
           KIT_RECEIPT_DIRECTORY: "${{ runner.temp }}/kit-play-receipts"
           KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}
           KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}
-          KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}
+          KIT_PLAY_WALL_GUARD_SECONDS: ${{ github.event_name == 'pull_request' && '268' || '' }}
           APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}

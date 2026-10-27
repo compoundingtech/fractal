@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn github_watch_line_shows_throttling_without_a_new_wire_state() {
+    let view = serde_json::json!({
+        "thread": "acme/garden#12", "state": "active",
+        "reason": "throttled: local observer budget reached, next slot at 1000 (Unix ms)"
+    });
+    let line = gh_watch_line(&view, false);
+    assert!(line.contains("active (throttled: local observer budget reached"));
+    assert!(line.contains("next slot at 1000"));
+    assert!(!line.contains("degraded"));
+}
+
+#[test]
 fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
     let value = "fabric://devbox/st3-client-v0";
     let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
@@ -502,6 +514,17 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 }
 
 #[test]
+fn diagnostic_prefix_preserves_gate_and_native_driver_contracts() {
+    assert_eq!(ClientMessage::Human.product_name(), "Fractal");
+    assert_eq!(ClientMessage::Stable.product_name(), "st");
+    for legacy in ["st", "st3"] {
+        assert_eq!(ClientMessage::Human.diagnostic_prefix(legacy), "fractal");
+        assert_eq!(ClientMessage::Stable.diagnostic_prefix(legacy), legacy);
+        assert_eq!(ClientMessage::for_output(true).diagnostic_prefix(legacy), legacy);
+    }
+}
+
+#[test]
 fn gate_subprocess_stderr_keeps_stable_client_errors() {
     const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
     if std::env::var_os(CHILD).is_some() {
@@ -516,7 +539,7 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         let error = anyhow::Error::from(fractal_client::ClientError::Api(
             api.code.clone(), api.message.clone(), Box::new(api),
         ));
-        eprintln!("{}", cli_error_message(&error, false));
+        stderr_message("st", format_args!("{}", cli_error_message(&error, false)));
         let mut stalled = None;
         // Exercise the actual Resync notice sink, including duplicate suppression.
         for _ in 0..2 {
@@ -540,9 +563,9 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(stderr.trim(), if gate {
-            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+            "st: st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
         } else {
-            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
+            "fractal: Fractal hit a problem: the store failed (internal)\nfractal: Fractal hit a problem: the stream failed · trying again"
         });
     }
 }
@@ -2576,8 +2599,10 @@ fn every_cli_command_has_a_valid_help_surface() {
         );
         for line in help.render_long_help().to_string().lines() {
             // These describe real executable filenames, not the product identity.
-            if line.contains("Install st3, the st link")
-                || line.contains("Keep the installed st3, st,")
+            if line.contains("Install Fractal (st3 and the st link) and pty")
+                || line.contains(
+                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty)",
+                )
             {
                 continue;
             }

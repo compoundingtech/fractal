@@ -41,9 +41,9 @@
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.25",
-    "@effect/atom-react": "4.0.0",
+    "@effect/atom-react": "4.0.3",
     "@stylexjs/stylex": "0.19.0",
-    "effect": "4.0.0",
+    "effect": "4.0.3",
     "react": "19.2.3",
     "react-aria": "3.52.1",
     "react-aria-components": "1.21.1",
@@ -71,5 +71,5 @@
     "vite": "8.0.5",
     "vitest": "4.1.9"
   },
-  "packageManager": "pnpm@12.7.0"
+  "packageManager": "pnpm@12.15.0"
 }
