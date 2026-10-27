@@ -214,6 +214,8 @@ If a read's existing deadline or cancellation ends its wait for receipt capacity
 
 A crash or forced kill loses the receipts still in the queue: those reads were answered but leave no audit claim. The queue size limits how many can be lost; how long a receipt stays queued is not guaranteed. This is acceptable because caller-bound receipts are audit evidence, not authority: the grant authorizes each read, and no later check depends on a receipt being present. Approval-once receipts are authority, because they make each proof single-use, so they stay synchronous.
 
+The absence of a `read-used` claim is not proof that no read happened.
+
 ## C. Scoped native writes and recipient trust
 
 `POST /v1/client/assistant/propose` accepts closed typed native actions, not arbitrary daemon commands. `work.done` requires `write.assistant.answers`, `message.send` requires `write.assistant.messages`, and `custom.reply` requires `write.assistant.custom-reply`. A missing write scope fails closed; read scopes never authorize these writes. Successful proposals execute through the existing fenced action path, without creating a daemon-owned approval ask.
