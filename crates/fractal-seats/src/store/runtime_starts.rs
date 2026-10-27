@@ -1447,7 +1447,7 @@ mod tests {
             assert_eq!(admitted, RuntimeStartAdmission::Admitted);
             let control: ClaimRecord =
                 serde_json::from_value(start.body["control_request_receipt"].clone()).unwrap();
-            assert_eq!(control.actor, request.actor);
+            assert_eq!(control.actor.as_deref(), Some("agent/st3/reconciler"));
             assert_eq!(control.body["fields"]["operation"], start.id);
             assert_eq!(control.body["evidence"], json!([request.id]));
             assert!(control.operation_id.is_some());
