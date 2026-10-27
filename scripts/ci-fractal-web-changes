@@ -80,6 +80,9 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/coldOpen.fixtures.ts",
     # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
     "apps/fractal-web/src/web/ComposerImages.stories.tsx",
+    # The transcript image integration story exercises the app's production transcript image cache in kit Storybook.
+    "apps/fractal-web/src/web/TranscriptImages.stories.tsx",
+    "apps/fractal-web/src/web/transcriptImages.ts",
     # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
     "apps/fractal-web/.changelog/**",
     "packages/fractal-sdk/src/**",

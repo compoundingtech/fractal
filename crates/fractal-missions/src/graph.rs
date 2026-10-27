@@ -251,8 +251,7 @@ fn render_desired_tree(
             node.set_children(document);
         }
     } else if name == "harness" {
-        // Older normalized trees omitted empty children. A validated harness
-        // always has a body, so recover that required syntax when rendering it.
+        // Export explicit bodies so older releases can still consume normalized declarations.
         node.set_children(KdlDocument::new());
     }
     if name == "agent" {
@@ -592,7 +591,12 @@ mission "example/train" state="ready" {{
                 "version 2\nagent \"worker\" {{ workspace \"/work\"; harness {harness:?} {{}} }}\n"
             );
             let intent = parse_test_intent(&source, "node").unwrap();
-            assert!(parse_test_intent(&source.replace("{}", ""), "node").is_err());
+            let bare = parse_test_intent(&source.replace("{}", ""), "node").unwrap();
+            assert_eq!(
+                serde_json::to_value(&bare.subjects).unwrap(),
+                serde_json::to_value(&intent.subjects).unwrap(),
+                "bare and empty-body {harness} normalize identically"
+            );
             let desired = &intent.subjects["agent/node.worker"].desired;
             let body = desired["children"].as_array().unwrap()
                 .iter().find(|child| child["name"] == "harness").unwrap();
@@ -605,6 +609,14 @@ mission "example/train" state="ready" {{
                     body.as_object_mut().unwrap().insert("children".into(), json!([]));
                 }
                 let node = render_desired_node(&tree).unwrap();
+                let harness_node = render_desired_node(
+                    tree["children"].as_array().unwrap().iter()
+                        .find(|child| child["name"] == "harness").unwrap()
+                ).unwrap().to_string();
+                assert!(
+                    harness_node.contains('{') && harness_node.contains('}'),
+                    "empty harness must export explicit braces for older releases: {harness_node}"
+                );
                 let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
                 assert_eq!(restored.subjects["agent/node.worker"].desired, *desired);
             }

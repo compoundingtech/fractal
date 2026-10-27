@@ -275,14 +275,7 @@ pub async fn start(
     }
     // Resolve URI edges without converting explicit subject edges; a missing resource
     // retains its subject reference rather than silently dropping the customization.
-    let mut agent = fractal_daemon::graph::render_agent_node(&desired.desired, &uris)?;
-    // Typed harnesses require a body even when the provider has no default flags.
-    if let Some(body) = agent.children_mut()
-        && let Some(harness) = body.get_mut("harness")
-        && harness.children().is_none()
-    {
-        harness.set_children(KdlDocument::new());
-    }
+    let agent = fractal_daemon::graph::render_agent_node(&desired.desired, &uris)?;
     let mut run: KdlDocument = source.parse()?;
     run.nodes_mut()
         .retain(|node| node.name().value() != "agent");

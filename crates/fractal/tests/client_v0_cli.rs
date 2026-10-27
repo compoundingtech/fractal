@@ -3904,28 +3904,36 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     let subject = "agent/example/typed";
     let original = agent_declaration(&socket, subject).await;
     for (option, model, effort, arguments, driver) in [
-        (vec![], "old", "low", vec!["--old"], "omp"),
-        (vec!["--model", "new"], "new", "low", vec!["--old"], "omp"),
+        (vec![], Some("old"), Some("low"), vec!["--old"], "omp"),
+        (vec!["--model", "new"], Some("new"), Some("low"), vec!["--old"], "omp"),
         (
             vec!["--effort", "high"],
-            "new",
-            "high",
+            Some("new"),
+            Some("high"),
             vec!["--old"],
             "omp",
         ),
         (
             vec!["--arg=--new", "--arg", "value"],
-            "new",
-            "high",
+            Some("new"),
+            Some("high"),
             vec!["--new", "value"],
             "omp",
         ),
+        (vec!["--harness", "pi"], None, None, vec![], "pi"),
         (
-            vec!["--harness", "pi"],
-            "new",
-            "high",
-            vec!["--new", "value"],
+            vec!["--model", "pi-model", "--effort", "high", "--arg=--pi"],
+            Some("pi-model"),
+            Some("high"),
+            vec!["--pi"],
             "pi",
+        ),
+        (
+            vec!["--harness", "omp", "--model", "omp-model"],
+            Some("omp-model"),
+            None,
+            vec![],
+            "omp",
         ),
     ] {
         let mut args = vec!["agents", "start", subject, "--as", "person/avery"];
@@ -3940,12 +3948,15 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
         assert_eq!(member.environment, previous.environment);
         let nodes = current.desired["children"].as_array().unwrap();
         let harness = nodes.iter().find(|node| node["name"] == "harness").unwrap();
-        let children = harness["children"].as_array().unwrap();
-        let field =
-            |name: &str| &children.iter().find(|node| node["name"] == name).unwrap()["arguments"];
-        assert_eq!(field("model"), &serde_json::json!([model]));
-        assert_eq!(field("effort"), &serde_json::json!([effort]));
-        assert_eq!(field("args"), &serde_json::json!(arguments));
+        let children = harness["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let field = |name: &str| children.iter()
+            .find(|node| node["name"] == name).map(|node| &node["arguments"]);
+        assert_eq!(field("model"), model.map(|model| serde_json::json!([model])).as_ref());
+        assert_eq!(field("effort"), effort.map(|effort| serde_json::json!([effort])).as_ref());
+        assert_eq!(
+            field("args"),
+            (!arguments.is_empty()).then(|| serde_json::json!(arguments)).as_ref(),
+        );
         assert_eq!(harness["arguments"][0], driver);
     }
     server.abort();

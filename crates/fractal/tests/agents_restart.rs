@@ -351,6 +351,7 @@ async fn st(socket: &Path, args: &[&str]) -> std::process::Output {
     tokio::task::spawn_blocking(move || {
         fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
+            .env("HOME", socket.parent().unwrap())
             .args(["--endpoint", socket.to_str().unwrap()])
             .args(args)
             .output()
@@ -1856,6 +1857,107 @@ async fn every_restart_continues_the_seats_last_native_session() {
         daemon.reconcile_once().unwrap();
     }
     assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn harness_switch_retires_claude_before_starting_codex_and_can_stop() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    bind_session(&fixture, &subject, "fixture:1", "claude-session").await;
+    let source = format!(
+        "version 2\nagent \"example/worker\" {{ workspace {:?}; harness \"codex\" {{}}; restart \"always\"; }}",
+        fixture.root.path().to_str().unwrap(),
+    );
+    let intent = fractal_daemon::parse_intent(&source, "restart-test").unwrap();
+    let preview = fixture.store.mission(
+        &intent,
+        fractal_daemon::model::IntentInput { kdl: source, source_name: None },
+    ).unwrap();
+    fixture.store.apply_as(
+        &intent, &preview.subject_tokens, "switch-harness", Some("agent/example/operator"),
+    ).unwrap();
+    reconcile_ready(&fixture, &fixture.reconciler, &subject);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2, "the new harness must replace the incumbent");
+    assert_eq!(fixture.runtime.stops.lock().unwrap().as_slice(), ["fixture:1"]);
+    assert_eq!(starts[1].driver.as_deref(), Some("codex"));
+    assert_eq!(continued(&starts[1]), None, "Claude native IDs are not Codex sessions");
+    assert!(!launch(&starts[1]).contains(&"example-model".to_owned()));
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    let socket = fixture.root.path().join("st3.sock");
+    succeeded(&st(
+        &socket, &["agents", "stop", &subject, "--as", "agent/example/operator"],
+    ).await);
+    for _ in 0..4 {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.latest_actual_value(&subject).unwrap().unwrap()["status"], "stopped");
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
+    assert!(!succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_clears_a_failed_explicit_harness_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    hang_up(&fixture);
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    let request = fixture.request(&subject, "failed-before-stop").await;
+    reconcile_ready(&fixture, &fixture.reconciler, &subject);
+    assert_eq!(restart_result(&fixture, &request).kind, "runtime.action.failed");
+    assert!(fixture.store.member_reconcile_fault(&subject, None).unwrap().is_some());
+    succeeded(&st(
+        &fixture.root.path().join("st3.sock"),
+        &["agents", "stop", &subject, "--as", "agent/example/operator"],
+    ).await);
+    for _ in 0..4 {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.latest_actual_value(&subject).unwrap().unwrap()["status"], "stopped");
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..3 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    assert!(!succeeded(&st(
+        &fixture.root.path().join("st3.sock"), &["agents", "ls"],
+    ).await).contains(&subject));
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn harness_switch_does_not_keep_the_previous_provider_body() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "claude" { model "example-model"; effort "high"; args "--old-provider-flag"; }"#,
+        "always",
+    ).await;
+    let socket = fixture.root.path().join("st3.sock");
+    for (provider, model) in [("codex", None), ("claude", None), ("codex", Some("replacement-model"))] {
+        let mut args = vec![
+            "agents", "start", &subject, "--harness", provider, "--print-kdl",
+            "--as", "agent/example/operator",
+        ];
+        if let Some(model) = model {
+            args.extend(["--model", model]);
+        }
+        let source = succeeded(&st(&socket, &args).await);
+        assert!(source.contains(provider), "{source}");
+        let retained = provider == "claude";
+        for old in ["example-model", "high", "--old-provider-flag"] {
+            assert_eq!(source.contains(old), retained, "unexpected provider configuration:\n{source}");
+        }
+        assert_eq!(source.contains("replacement-model"), model.is_some(), "{source}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
