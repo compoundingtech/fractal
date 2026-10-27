@@ -15,7 +15,7 @@ import Speech
 //
 // The microphone prompt belongs to the process macOS holds responsible, which for a program run
 // from a terminal is the terminal app. So st-listen first starts itself again disclaimed, which
-// makes it responsible for itself: the prompt then names Small Talk, from this bundle's
+// makes it responsible for itself: the prompt then names Fractal, from this bundle's
 // Info.plist, whatever terminal st runs in.
 
 setvbuf(stdout, nil, _IOLBF, 0)
@@ -85,7 +85,7 @@ final class Listener {
 
   func start(locale wanted: Locale) async throws {
     guard await AVCaptureDevice.requestAccess(for: .audio) else {
-      fail("the microphone is off for Small Talk in System Settings › Privacy & Security › Microphone")
+      fail("the microphone is off for Fractal in System Settings › Privacy & Security › Microphone")
     }
     let locale = await SpeechTranscriber.supportedLocale(equivalentTo: wanted) ?? Locale(identifier: "en-US")
     let transcriber = SpeechTranscriber(

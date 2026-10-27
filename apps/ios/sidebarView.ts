@@ -1,4 +1,4 @@
-import type { Arrangement } from '../../clients/typescript/st3-client';
+import type { Arrangement } from '../../clients/typescript/fractal-client';
 import { sidebarArrangement } from './sidebarEdits';
 
 export type SidebarKind = 'Agents' | 'Missions' | 'Terminals' | 'Machines' | 'Pull requests' | 'Repositories' | 'Resources' | 'Unavailable';

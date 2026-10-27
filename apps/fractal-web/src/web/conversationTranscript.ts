@@ -4,18 +4,16 @@ import type {
   TranscriptEmptyState,
   TranscriptHistory,
   TranscriptTurn,
-} from '@smalltalk/fractal-ui/assistant-ui'
-import { workLogTurnFromItems, type WorkKind } from '@smalltalk/fractal-ui/assistant-ui/work-log'
-import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
+} from '@fractal/ui/assistant-ui'
+import { workLogTurnFromItems, type WorkKind } from '@fractal/ui/assistant-ui/work-log'
+import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import { Schema } from 'effect'
 import { ConversationItem, type RunStatus, type SendState } from '../conversation/model.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
-import { toolKindFor } from '../conversation/toolClassification.ts'
-export { toolKindFor } from '../conversation/toolClassification.ts'
 
-/** Unknown protocol events are hidden by default; explicit inspection uses payload-free notices. */
+/** Unknown protocol events are hidden by default; mixed messages retain an explicit body disclosure. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
 type KitTextItem = Extract<KitConversationItem, { _tag: 'Text' }>
 
@@ -52,24 +50,25 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
   item._tag === 'Text' && item.role === 'user'
 
 
-const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent'
+const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent' && item.mixedContent !== true
 
+/** The host owns work-log classification: how a tool reads, runs or edits. */
+const toolKindFor = (name: string): WorkKind => {
+  const tool = name.toLowerCase()
+  if (/(?:^|[/_.-])(?:bash|sh|shell|exec|execute|run|command|eval|task|infra)(?:$|[/_.-])/.test(tool)) return 'run'
+  return /(?:edit|write|patch|apply)/.test(tool) ? 'edit' : 'read'
+}
 
-/** Human intent belongs in the row title; absence keeps the verb/argument fallback explicit. */
-const toolIntent = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): string | undefined => {
+/** Human intent belongs in the header; raw paths and commands remain on the source tool item. */
+const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): string => {
   const input = typeof item.input === 'object' && item.input !== null ? item.input : {}
   for (const key of ['i', 'title', 'description']) {
     const value = key in input ? Reflect.get(input, key) : undefined
-    if (typeof value === 'string' && value.trim().length > 0)
+    if (typeof value === 'string' && value.trim().length > 0 && !/(?:[a-z]+:\/\/|\/[\w.-]+\/)/i.test(value))
       return value.trim().replace(/\s+/g, ' ').slice(0, 100)
   }
-  return undefined
-}
-const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>, intent: string | undefined): string => {
-  if (item.skipped) return 'Skipped'
-  if (intent !== undefined) return intent
-  const kind = toolKindFor(item)
-  return { read: 'Reading', search: 'Searching', run: 'Running', change: 'Changing', subagent: 'Delegating', web: 'Browsing', decision: 'Deciding', todo: 'Planning', wait: 'Waiting', message: 'Message sent', schedule: 'Scheduling', 'terminal-input': 'Terminal input', skill: 'Using skill', eval: 'Evaluating', unknown: item.name }[kind]
+  return toolKindFor(item.name) === 'run' ? 'Running a command'
+    : toolKindFor(item.name) === 'edit' ? 'Updating a file' : 'Reading information'
 }
 
 const activeRunStatuses: Record<RunStatus, boolean> = { queued: true, running: true, waiting: true, completed: false, failed: false, cancelled: false }
@@ -138,10 +137,10 @@ export const prepareTranscriptTurns = (
       if (caption !== undefined) senderCaptions[item.id] = caption
     }
     const work = workLogTurnFromItems(prompt === undefined ? turnItems : [prompt, ...turnItems], {
-      kindFor: (name, call) => toolKindFor(call ?? name),
+      kindFor: toolKindFor,
       ...workFactsFor(first.at ?? '', turnItems),
       ...(first.at === undefined ? {} : { startedAt: first.at }),
-      completeHistory: turns.length > 0 || options.firstTurnComplete,
+      ...(turns.length === 0 && !options.firstTurnComplete ? { completeHistory: false } : {}),
     })
     const tools = new Map(turnItems.flatMap(item => item._tag === 'ToolCall' ? [[item.id, item] as const] : []))
     turns.push({
@@ -150,23 +149,21 @@ export const prepareTranscriptTurns = (
       items: turnItems,
       work: { ...work, calls: work.calls.map(call => {
         const item = tools.get(call.id)
-        if (item === undefined) return call
-        const intent = toolIntent(item)
-        const summary = toolSummary(item, intent)
-        return { ...call, title: summary, summary, ...(intent === undefined ? {} : { intent }) }
+        return { ...call, title: item === undefined ? 'Working' : toolSummary(item), summary: item === undefined ? 'Working' : toolSummary(item), argsSummary: undefined }
       }) },
       ...(Object.keys(senderCaptions).length === 0 ? {} : { senderCaptions }),
     })
     turnItems = []
   }
   for (const sourceItem of items) {
+    // Unsupported is always retained: F2 markers are not a system-events preference.
     if (!options.showSystemEvents && isOmittedItem(sourceItem)) continue
-    // The runtime must not receive unknown protocol payloads either: its converter and fallback
-    // rows render the same short notice, never a raw JSON envelope or producer-specific kind.
-    const item: KitConversationItem = sourceItem._tag === 'UnknownEvent'
+    // Only mixed messages carry their full body to the kit's opt-in disclosure.
+    // Other unknown protocol rows remain payload-free notices under explicit inspection.
+    const item: KitConversationItem = sourceItem._tag === 'UnknownEvent' && sourceItem.mixedContent !== true
       ? { _tag: 'Notice', id: sourceItem.id, kind: 'event', text: 'An event this view cannot show yet.',
         ...(sourceItem.at === undefined ? {} : { at: sourceItem.at }) }
-      : hasKitSendState(sourceItem) ? sourceItem
+      : sourceItem._tag !== 'Text' || hasKitSendState(sourceItem) ? sourceItem
         : { ...sourceItem, sendState: sourceItem.sendState === undefined ? undefined : kitSendState(sourceItem.sendState) }
     if (isPrompt(item)) {
       flush()
@@ -207,14 +204,15 @@ export type ConversationTranscriptState =
     }
 
 /** Why the pane cannot show a conversation; `not-found` comes from the read error's code, never its message. */
-export type UnavailableClassification = 'ungranted' | 'unsupported' | 'not-found' | 'failed'
+export type UnavailableClassification = 'ungranted' | 'unsupported' | 'peer-too-old' | 'not-found' | 'failed'
 
 /** Fixed copy only: feed.detail carries source diagnostics and never reaches rendered or accessible text. */
 const unavailableCopy: Readonly<Record<UnavailableClassification, { readonly reason: string; readonly detail: string }>> = {
   ungranted: { reason: 'Conversation access not granted', detail: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
   unsupported: { reason: 'Conversation not supported', detail: 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.' },
   'not-found': { reason: 'Conversation not found', detail: 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
-  failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.' },
+  'peer-too-old': { reason: 'Host update required', detail: 'This host runs an older Fractal version; update it to open subagent conversations. Your draft is unchanged.' },
+  failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' },
 }
 
 /** Server codes are unrestricted strings: only a short lowercase slug may reach a data-wf attribute. */
@@ -228,7 +226,8 @@ export const mapConversationFeed = (
     case 'Waiting':
       return { _tag: 'Waiting' }
     case 'Unavailable': {
-      const classification: UnavailableClassification = feed.reason === 'failed' && feed.code === 'not-found' ? 'not-found' : feed.reason
+      const classification: UnavailableClassification = feed.code === 'peer-too-old' ? 'peer-too-old'
+        : feed.reason === 'failed' && feed.code === 'not-found' ? 'not-found' : feed.reason
       const code = feed.code !== undefined && diagnosticCode.test(feed.code) ? feed.code : undefined
       return { _tag: 'Unavailable', classification, code, availability: { _tag: 'Unavailable', ...unavailableCopy[classification] } }
     }
@@ -298,6 +297,37 @@ export const transcriptSyncStatus = (
 
 export const transcriptObservedAt = (observation: FeedSyncObservation | undefined, now: number): number =>
   observation?.observedAt ?? now
+
+/** What the last observation showed in flight: working with its newest running call, or idle. */
+export interface LastSeenActivity {
+  readonly activity: 'working' | 'idle'
+  /** The in-flight call's readable command, when the last observation had one. */
+  readonly detail: string | undefined
+}
+
+/**
+ * A stale conversation is last-known, not live: in-flight work stops reading as running, and each call still running
+ * at the last observation leaves the work log for the "Last seen" tail. Settled history is untouched.
+ */
+export const frozenTranscript = (turns: readonly TranscriptTurn[]): { readonly turns: readonly TranscriptTurn[]; readonly lastSeen: LastSeenActivity } => {
+  const lastRunning = turns.findLast(turn => turn.work.running)
+  const inFlight = lastRunning?.work.calls.findLast(call => call.status === 'running')
+  return {
+    turns: turns.map(turn => {
+      const running = new Set(turn.work.calls.filter(call => call.status === 'running').map(call => call.id))
+      if (!turn.work.running && running.size === 0) return turn
+      return {
+        ...turn,
+        items: turn.items.filter(item => !running.has(item.id) && (item._tag !== 'Status' || !activeRunStatuses[item.status])),
+        work: { ...turn.work, running: false, foldable: false, calls: turn.work.calls.filter(call => !running.has(call.id)) },
+      }
+    }),
+    lastSeen: {
+      activity: lastRunning === undefined ? 'idle' : 'working',
+      detail: inFlight === undefined ? undefined : inFlight.argsSummary ?? inFlight.title,
+    },
+  }
+}
 
 
 /** Agent text is untrusted: only plain web URLs may leave the app, never javascript:, data: or blob: targets. */

@@ -4,22 +4,16 @@
  * Cold mounting and switching agents follow through the real SDK and live source
  * (scripted gateway, real socket commands). Nothing here mocks the data hooks.
  */
-import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@smalltalk/st3-client'
+import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@fractal/client'
 import { webcrypto } from 'node:crypto'
 import { setTimeout as yieldIo } from 'node:timers/promises'
-import * as Native from '@smalltalk/st3-client/schema'
+import * as Native from '@fractal/client/schema'
 import { flushSync } from 'react-dom'
 import type { ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
-  props: () => ({}),
-}))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 import { liveSource, type LiveSource } from '../data/liveSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { ConversationPane } from './ConversationPane.tsx'
@@ -59,7 +53,7 @@ const entry = (sequence: number, text: string, role: 'user' | 'assistant' = 'ass
 /** The kit composition groups turns at user prompts, so scenarios pair prompts with replies. */
 const prompt = (sequence: number, text: string) => entry(sequence, text, 'user')
 
-/** A native scenario page as st delivers it: joined tool result, custom omp event, truncation. */
+/** A native scenario page as Fractal delivers it: joined tool result, custom omp event, truncation. */
 const nativeScenario = (): TimelineEntry[] => [
   prompt(1, 'Keep the row projection readable.'),
   {
@@ -357,8 +351,10 @@ describe('ConversationPane conversation demand', () => {
     expect(container.querySelector('[data-testid="agent-message"]')?.querySelector('strong')?.textContent).toBe('visible rows')
     expect(container.querySelector('[data-testid="work-log"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="history-boundary"]')?.textContent).toContain('Earlier messages not loaded')
-    // The unsupported omp event and the truncation marker never become rows or internal wording.
-    expect(paneText()).not.toContain('credential_pin')
+    // A block-less unsupported omp record remains an explicit inspectable marker.
+    expect(container.querySelector('[data-testid="unsupported-record"][data-record-kind="credential_pin"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="unsupported-record"]')?.textContent).toContain('Unsupported omp record')
+    expect(paneText()).not.toContain('[unrecognized omp')
     expect(paneText()).not.toContain('sequences')
     expect(paneText()).not.toContain('Older history unavailable')
   })
@@ -380,18 +376,16 @@ describe('ConversationPane conversation demand', () => {
     const workspace = container.querySelector('section[aria-label="Agent workspace"]')!
     expect(workspace.querySelector('[data-testid="transcript-turn"]')).not.toBeNull()
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
-    const summary = container.querySelector<HTMLButtonElement>('button[data-work-log-summary]')!
-    if (summary.getAttribute('aria-expanded') === 'false') flushSync(() => summary.click())
-    const raw = container.querySelector<HTMLButtonElement>('[data-tool-status="success"] > button')!
+    const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
     expect(raw).toBeDefined()
     flushSync(() => raw.click())
-    const button = container.querySelector('button[aria-label="Open Reading tool detail"]') as HTMLButtonElement
+    const button = container.querySelector('button[aria-label="Open Reading information tool detail"]') as HTMLButtonElement
     expect(button).not.toBeNull()
     flushSync(() => button.click())
-    await until(() => container.querySelector('aside[aria-label="Tool detail"]')?.textContent?.includes('export const rows = []') === true)
     const panel = container.querySelector('aside[aria-label="Tool detail"]')!
     expect(panel.textContent).toContain('export const rows = []')
-    expect(panel.parentElement).toBe(workspace.parentElement)
+    // The workspace now sits inside the stable Changes split; tool detail stays outside it.
+    expect(panel.parentElement).toBe(workspace.closest('[data-testid="live-agent-workspace"]'))
     expect(workspace.contains(panel)).toBe(false)
     flushSync(() => (panel.querySelector('button[aria-label="Close tool detail"]') as HTMLButtonElement).click())
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
@@ -448,7 +442,7 @@ describe('ConversationPane conversation demand', () => {
     expect(container.innerHTML).not.toContain('Unknown')
     expect(container.querySelector('[data-testid="sync-line"]')).toBeNull()
     const recovery = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="transcript-unavailable"] button')]
-      .filter(button => button.textContent === 'Try again')
+      .filter(button => button.textContent === 'Retry')
     expect(recovery).toHaveLength(1)
     expect(recovery[0]!.disabled).toBe(false)
     flushSync(() => recovery[0]!.click())
@@ -464,12 +458,14 @@ describe('LiveAgentWorkspace retained panes', () => {
   const ux: UxTelemetry = {
     activeSpan: () => undefined,
     traceContext: () => undefined,
+    beginOpen: () => ({ phase: () => {}, contentCommitted: () => () => {}, cancel: () => {} }),
     shellCommitted: () => () => {},
     rosterCommitted: () => () => {},
     beginSwitch: () => {},
     switchDataReady: () => {},
     transcriptCommitted: (ref) => { committed.push(ref); return () => {} },
     beginSendEcho: () => ({ committed: () => () => {}, cancel: () => {} }),
+    beginAlertAnswer: () => ({ landed: () => () => {}, cancel: () => {} }),
     observeSync: () => {},
     dispose: () => {},
   }
@@ -711,7 +707,7 @@ describe('ConversationPane composer/send binding', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the Sent row across a newer read that omits it (st #1977), with no resend', async () => {
+  it('keeps the Sent row across a newer read that omits it (Fractal #1977), with no resend', async () => {
     await prepareSendPane()
     const send = vi.spyOn(live!.source.attachments!, 'send')
     await submitDraft()

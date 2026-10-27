@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { keyBetween, folderCreate, placeResource, moveFolder, folderLocation, folderName, sidebarArrangement, sidebarRetired, sidebarSubject, uuid7 } from './sidebarEdits.ts';
-import { ClientError } from '../../clients/typescript/st3-client/index.ts';
+import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 const valid = key => /^[A-Za-z][0-9A-Za-z]+$/.test(key) && key.length <= 128 && key.length >= (key[0] >= 'a' ? key.charCodeAt(0) - 95 : 92 - key.charCodeAt(0)) && (key.length === (key[0] >= 'a' ? key.charCodeAt(0) - 95 : 92 - key.charCodeAt(0)) || !key.endsWith('0'));
 for (const [low, high] of [[null, null], [null, 'a0'], ['a0', null], ['Zz', 'a0'], ['a0', 'a1'], ['a0', 'a0V'], ['a0V', 'a1'], ['azz', 'b00'], ['Z0', 'Z1'], ['Yzz', 'Z0'], [null, 'Z0']]) {
   const key = keyBetween(low, high); assert.ok(valid(key), key); assert.ok(low === null || low < key); assert.ok(high === null || key < high);

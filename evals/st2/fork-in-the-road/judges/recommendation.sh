@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # JUDGE: recommendation — a justified recommendation reached the requester on the bus (fd.sup -> requester).
 set -uo pipefail
-ROOT="${CATALOG:-$PWD}"; SM="${ST_ROOT:?st2 eval must export ST_ROOT}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+ROOT="${CATALOG:-$PWD}"; SM="${FRACTAL_ROOT-${ST_ROOT:?st2 eval must export ST_ROOT}}"
 SUP_ID="${SUP_ID:-fd.sup}"; REQUESTER="${REQUESTER:-requester}"
 busdir(){ local id="$1" d; d="$(ls -d "$SM"/*."$id" "$SM/$id" 2>/dev/null | head -1)"; printf '%s\n' "${d:-$SM/$id}"; }
 owner="$(busdir "$REQUESTER")"

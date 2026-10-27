@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
-import { conversationEntries, simplify, headerLine } from '../../clients/typescript/st3-views/index.ts';
+import { conversationEntries, simplify, headerLine } from '../../clients/typescript/fractal-views/index.ts';
 
 if (process.argv.length !== 3) throw new Error('Usage: node render.mjs PAGE.json');
 const envelope = JSON.parse(readFileSync(process.argv[2], 'utf8'));

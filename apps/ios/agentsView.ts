@@ -1,9 +1,9 @@
-import type { Agent, Mission } from '../../clients/typescript/st3-client';
+import type { Agent, Mission } from '../../clients/typescript/fractal-client';
 import { ago } from './presentation';
-import type { SessionView } from '@smalltalk/st3-views';
+import type { SessionView } from '@fractal/views';
 import { harnessColor, theme } from './theme';
 
-// The Agents tab, drawn the way stui draws it (crates/stui/src/ui/screens.rs agents_list and
+// The Agents tab, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs agents_list and
 // agents_tree, adapt.rs agents): one row per seat, grouped by what it needs, with the sessions
 // st found running but did not start listed last.
 
@@ -19,6 +19,8 @@ export type AgentRowView = {
   name: string;
   harness: string;
   state: AgentState;
+  /** The state st reports, from an st too old to serve a presentation. */
+  reported?: string;
   unmanaged: boolean;
   /** How long since st last saw it change, e.g. `8h`. */
   activity: string;
@@ -61,30 +63,21 @@ export function harnessName(driver: string | null | undefined): string {
   return '?';
 }
 
-type StateAgent = Pick<Agent, 'state' | 'harness_state' | 'fault' | 'delivery'> & { activity?: string | null } & { harness_error_state?: string | null; reason?: string | null; observation?: string | null; reachability?: string | null };
-export function agentState(agent: StateAgent): AgentState {
-  if (agent.state === 'retired') return 'retired';
-  if (agent.fault) return 'fault';
-  // A seat whose message path runs a replaced binary or stopped polling takes no messages,
-  // however ready its harness looks.
-  if (agent.delivery?.state === 'stale') return 'fault';
-  switch (agent.state) {
-    case 'failed': return 'fault';
-    // st decides a seat with no session is down, since when; no app re-derives it.
-    case 'down': return 'down';
-    // A harness compacting its conversation is a status of the seat, never an alert.
-    case 'running': return agent.activity === 'compacting' ? 'compacting' : agent.harness_state === 'working' ? 'working' : 'idle';
-    // Signed out of its provider: a login on its host fixes it, without a restart (Nathan, 2026-10-04).
-    // st withdraws an idle claim it has not heard renewed lately: the harness reads "indeterminate"
-    // and the seat "waiting", though it is up and reachable. That is an idle seat nobody has
-    // spoken to, not one starting (Nathan, 2026-10-05).
-    case 'waiting': return agent.harness_error_state === 'needs-login' ? 'needs-login' : agent.harness_state === 'indeterminate' && agent.observation === 'stale' && (agent.reachability === 'reachable' || agent.reachability === 'local') ? 'idle' : agent.harness_state === 'unauthenticated' || agent.harness_state === 'needs-login' || agent.reason === 'providerAuth' ? 'needs-login' : agent.harness_state === 'blocked' ? 'needs-you' : 'starting';
-    case 'starting':
-    case 'desired': return 'starting';
-    case 'stopped': return 'stopped';
-    default: return 'unknown';
-  }
+/** The state st serves for an agent (`presentation.state`, a words.json id). A daemon too old to
+ *  serve one leaves it unknown; the phone keeps no derivation of its own. */
+export function agentState(agent: Pick<Agent, 'presentation'>): AgentState {
+  const state = agent.presentation?.state.replace('_', '-');
+  return (AGENT_STATES as readonly string[]).includes(state ?? '') ? state as AgentState : 'unknown';
 }
+
+/** The word for an agent from an st too old to serve its presentation: the state st reports,
+ *  marked so. Undefined when st serves a presentation. */
+export function agentReported(agent: Pick<Agent, 'presentation' | 'state'>): string | undefined {
+  return agent.presentation ? undefined : `${agent.state} · older Fractal`;
+}
+
+/** What the Agents list says when a row came from an older st. */
+export const OLDER_ST_NOTE = "This host runs an older Fractal version: agent states appear as reported.";
 
 export const SPINNER = '⠿';
 export function agentGlyph(state: AgentState, spinner = SPINNER): { glyph: string; color: string } {
@@ -119,7 +112,7 @@ export function agentWord(state: AgentState): string {
   }
 }
 
-export const UNMANAGED_GROUP = 'found running · not started by st';
+export const UNMANAGED_GROUP = 'found running · not started by Fractal';
 export function agentGroup(row: Pick<AgentRowView, 'state' | 'unmanaged'>): string {
   if (row.unmanaged) return UNMANAGED_GROUP;
   switch (row.state) {
@@ -178,6 +171,7 @@ export function agentRows(agents: Agent[], sessions: SessionView[], gatewayHost:
     name: agentName(agent),
     harness: harnessName(agent.driver),
     state: agentState(agent),
+    reported: agentReported(agent),
     unmanaged: false,
     activity: ago(agent.updated_at, now),
     path: agent.id.replace(/^agent\//, ''),
@@ -265,7 +259,7 @@ export function agentTreeLines(rows: AgentRowView[]): TreeLine[] {
 
 /**
  * Each path's folders, with a folder that holds only one folder joined to it on one line
- * (Nathan, 2026-10-01): `fleet/smalltalk/operations` rather than three nested folders.
+ * (Nathan, 2026-10-01): `fleet/fractal/operations` rather than three nested folders.
  */
 export function compactFolders(paths: string[][]): string[][] {
   const holds = new Map<string, Set<string>>();

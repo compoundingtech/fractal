@@ -29,7 +29,7 @@ the terminal UI offers; omit it for the limited default scopes: projection reads
 arrangement reads and controls, terminal output, attention, and launches. Pass `--read-only` for a device that may only observe projections, glasses, and terminal output.
 The terminal UI cannot expand the member's grant.
 
-On the laptop, install Smalltalk and run one setup command:
+On the laptop, install Fractal and run one setup command:
 
 ```sh
 st devices complete https://member.example pairing/CHALLENGE_ID --fingerprint sha256:FINGERPRINT
@@ -83,14 +83,16 @@ Credentials expire according to the member's API policy (currently thirty days).
 challenge and run the pairing command again to replace a route's grant. List and revoke devices
 on the member with `st devices --as person/avery ls` and
 `st devices --as person/avery revoke device/DEVICE_ID --reason "Retired laptop grant"`.
-Re-pairing creates a new grant; revoke any old grant that is no longer needed. Removing the
+Re-pairing creates a new grant; revoke any old grant that is no longer needed. A revocation is
+final: every member treats the grant as revoked, whatever order it received the pairing and the
+revocation in, and nothing pairs the same grant again. Removing the
 local profile makes the terminal UI select local mode again but does not revoke the server-side grants.
 
 ## Isolated verification
 
 ```sh
-cargo test -p st3 --locked --test integration client_only
-cargo run -p st3-client-codegen --locked -- --check
+cargo test -p fractal --locked --test integration client_only
+cargo run -p fractal-client-codegen --locked -- --check
 ```
 
 The `client_only` end-to-end test launches the actual st binary in a PTY with an isolated

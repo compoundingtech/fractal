@@ -12,7 +12,10 @@ import { semanticCoverageItems, syntheticMarkdown } from '../embrace-fixtures'
 
 type NewMessage = Parameters<NonNullable<ConversationRuntimeOptions['onNew']>>[0]
 /** Only the stateful story host can turn these facts into a resource with a real submit capability. */
-type FixtureThreadSnapshot = Omit<ThreadResource, 'runtime'> & { readonly runtime: Omit<ConversationRuntimeOptions, 'onNew'> }
+type FixtureThreadSnapshot = Omit<ThreadResource, 'runtime' | 'transcript'> & {
+  readonly runtime: Omit<ConversationRuntimeOptions, 'onNew'>
+  readonly transcript: ThreadResource['transcript'] & { readonly now: number }
+}
 
 export const decidedAppearance: WorkbenchAppearance = { width: 'W3', header: 'H1', chrome: 'P3', dropZones: 'D2' }
 export const fixtureNow = Date.parse('2026-10-09T12:00:30.000Z')
@@ -65,7 +68,7 @@ const idleSampleItems: readonly ConversationItem[] = [
   sampleText('design/next-request', 'user', 'Before we close this out, one more pass please: re-check the sample fixture family end to end, keep the diff minimal, note anything the reviewer should look at twice, and leave the working tree exactly as you found it so the next session starts clean.', sampleOperator),
 ]
 const idleSampleTurns: readonly TranscriptTurn[] = [
-  { id: 'design/review', prompt: idleSampleItems[0] as TextItem & { role: 'user' }, items: idleSampleItems.slice(1, -1), work: workLogTurnFromItems(idleSampleItems.slice(1, -1), { kindFor: name => name === 'read' ? 'read' : name === 'edit' ? 'change' : 'run', running: false, failed: false, interrupted: false, completeHistory: true }) },
+  { id: 'design/review', prompt: idleSampleItems[0] as TextItem & { role: 'user' }, items: idleSampleItems.slice(1, -1), work: workLogTurnFromItems(idleSampleItems.slice(1, -1), { kindFor: name => name === 'read' ? 'read' : name === 'edit' ? 'edit' : 'run', running: false, failed: false, interrupted: false, completeHistory: true }) },
   { id: 'design/next', prompt: idleSampleItems.at(-1) as TextItem & { role: 'user' }, items: [], work: { ...settledWork, durationMs: undefined } },
 ]
 // Exact route worker-2 seed: designItems('idle', 'peer') with `peer-` ids, one delivered review and its answer.

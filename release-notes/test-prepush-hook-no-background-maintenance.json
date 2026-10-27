@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The pre-push hook tests turn off git's automatic maintenance in their throwaway repositories, so a detached maintenance run no longer races the temporary directory's removal.",
+  "replay": {"status": "none", "detail": "Test script only; no claims or projections change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No rule change."},
+  "compatibility": {"status": "none", "detail": "The hook itself does not change."},
+  "downtime": {"status": "none", "detail": "No runtime code changes."},
+  "manual": {"status": "none", "detail": "Nothing to do."},
+  "recovery": {"status": "none", "detail": "Nothing to recover."}
+}

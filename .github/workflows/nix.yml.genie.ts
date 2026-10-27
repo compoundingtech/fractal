@@ -1,21 +1,17 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs } from './ready-pr.ts'
 import { defaultActionlintConfig, githubWorkflow, installNixStep } from '../../repos/effect-utils/genie/external.ts'
 import { readOnlyBinaryCaches } from './workspace-ci.ts'
 
 // ci1 retains its Nix store and per-runner GC roots. No Actions cache or FlakeHub service
 // participates in this build. Fork pull requests remain covered by the public Linux gate.
-export default githubWorkflow(readyPRJobs({
+export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs({
   actionlint: {
     ...defaultActionlintConfig,
     selfHostedRunnerLabels: [...(defaultActionlintConfig.selfHostedRunnerLabels ?? []), 'ci1'],
   },
   "name": "Nix",
   "on": {
-    "push": {
-      "tags": [
-        "**"
-      ]
-    },
     "schedule": [{ "cron": "17 1 * * *" }],
     // Optional Nix verification stays off PRs while the release owner repairs it.
     "workflow_dispatch": {}
@@ -27,7 +23,10 @@ export default githubWorkflow(readyPRJobs({
   },
   "jobs": {
     "nix-release-x86_64-linux": {
-      "if": "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository",
+      // Nathan/CoS 2026-10-15: optional Nix must not occupy merge-serving workers.
+      // Persistent-store verification cannot be relabelled to an ephemeral image.
+      // Restore only with a reviewed, qualified dedicated persistent-store pool.
+      "if": false,
       "runs-on": "ci1",
       "timeout-minutes": 180,
       "steps": [
@@ -60,4 +59,4 @@ export default githubWorkflow(readyPRJobs({
       ]
     }
   }
-}))
+})))

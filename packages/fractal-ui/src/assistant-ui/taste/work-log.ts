@@ -1,30 +1,19 @@
 /** Controlled presentation types for the work log. */
-import type { ConversationItem, ToolCallItem } from '../embrace-data/model'
+import type { ConversationItem } from '../embrace-data/model'
 import { toolHumanSummary, toolOutput } from '../embrace-tool-preview'
-export type WorkKind = 'read' | 'search' | 'run' | 'change' | 'subagent' | 'web' | 'decision' | 'todo' | 'wait' | 'message' | 'schedule' | 'terminal-input' | 'skill' | 'eval' | 'unknown'
+export type WorkKind = 'read' | 'run' | 'edit'
 export interface WorkLogCall {
   readonly id: string
   readonly kind: WorkKind
   readonly title: string
-  /** Host-recorded human intent, separate from the kind's fallback title. */
-  readonly intent?: string
   readonly argsSummary?: string
   readonly summary?: string
   readonly status: 'running' | 'success' | 'error' | 'interrupted'
-  readonly skipped?: boolean
   readonly startedAt: string
   readonly endedAt?: string
   readonly detail?: string
   /** Verbatim tool input (pretty JSON, or the raw string). Shown only in an expanded tool detail, never in the row label or failure overlay. */
   readonly rawInput?: string
-  /** Native tool identity and complete recorded payloads for host-owned inspection. */
-  readonly toolName?: string
-  readonly callId?: string
-  readonly input?: unknown
-  readonly output?: unknown
-  readonly view?: Readonly<Record<string, unknown>>
-  readonly metadata?: Readonly<Record<string, unknown>>
-  readonly mediaType?: string
   readonly outputLanguage?: string
   /** Observed edit/write path, not a guessed title. */
   readonly changedPath?: string
@@ -43,7 +32,6 @@ export interface WorkLogTurn {
   /** False keeps incomplete or multi-participant history expanded. */
   readonly foldable?: boolean
   readonly commands?: number
-  readonly messagesSent?: number
   readonly changedFiles?: number
 }
 export interface WorkLogProjection {
@@ -53,22 +41,10 @@ export interface WorkLogProjection {
   readonly items: readonly ConversationItem[]
   readonly turn: WorkLogTurn
 }
-const summarizeArgs = (input: unknown, kind: WorkKind, command?: string): string | undefined => {
+const summarizeArgs = (input: unknown): string | undefined => {
   if (typeof input !== 'object' || input === null) return undefined
   const record = input as Record<string, unknown>
-  if ((kind === 'run' || kind === 'eval') && command !== undefined) return command.split('\n').find(line => line.trim().length > 0)?.trim()
-  const path = ['path', 'file_path', 'filePath'].map(key => record[key]).find((value): value is string => typeof value === 'string' && value.length > 0)
-  const paths = Array.isArray(record['paths']) ? record['paths'].filter((value): value is string => typeof value === 'string').join(', ') : undefined
-  const cwd = typeof record['cwd'] === 'string' ? record['cwd'].split('/').filter(Boolean).slice(-2).join('/') : undefined
-  const scope = path ?? (paths || undefined) ?? cwd
-  const query = ['pattern', 'query'].map(key => record[key]).find((value): value is string => typeof value === 'string' && value.length > 0)
-  if (query !== undefined) return scope === undefined ? query : `${query} in ${scope}`
-  if (scope !== undefined) return scope
-  if (Array.isArray(record['tasks'])) {
-    const names = record['tasks'].flatMap(task => typeof task === 'object' && task !== null && 'name' in task && typeof task.name === 'string' ? [task.name] : [])
-    if (names.length > 0) return names.join(', ')
-  }
-  for (const key of ['command', 'url', 'target', 'name', 'task', 'question']) {
+  for (const key of ['path', 'command', 'pattern', 'query', 'url']) {
     const value = record[key]
     if (typeof value === 'string' && value.length > 0) return value
   }
@@ -152,7 +128,7 @@ export const readableCommand = (call: WorkLogCall): string | undefined =>
 
 /** Selected workshop call projection; the host owns classification, lifecycle and timing. */
 export function workLogTurnFromItems(items: readonly ConversationItem[], facts: {
-  readonly kindFor: (name: string, call?: ToolCallItem) => WorkKind
+  readonly kindFor: (name: string) => WorkKind
   readonly running: boolean
   readonly failed: boolean
   readonly interrupted: boolean
@@ -163,40 +139,33 @@ export function workLogTurnFromItems(items: readonly ConversationItem[], facts: 
 }): WorkLogTurn {
   const calls: WorkLogCall[] = items.flatMap(call => {
     if (call._tag !== 'ToolCall') return []
-    const kind = call.callSeen ? facts.kindFor(call.name, call) : 'unknown'
+    const kind = facts.kindFor(call.name)
     const input = typeof call.input === 'object' && call.input !== null ? call.input as Record<string, unknown> : undefined
     const path = [input?.['path'], input?.['file_path'], input?.['filePath']].find((value): value is string => typeof value === 'string' && value.length > 0)
     const media = call.result?.mediaType?.split(';')[0]?.trim().toLowerCase()
     const filename = path?.split('/').at(-1) ?? ''
     const dot = filename.lastIndexOf('.')
     const extension = dot > 0 ? filename.slice(dot + 1).toLowerCase() : undefined
-    const detail = toolOutput(call.result?.content) || undefined
-    const command = kind === 'run' || kind === 'eval' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined
-    const displayedCommand = kind === 'run' ? (detail === undefined ? undefined : failedCommandSource(detail)) ?? command : command
     return [{
-      id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input, kind, displayedCommand),
+      id: call.id, kind, title: call.name, summary: toolHumanSummary(call.input, call.name), argsSummary: summarizeArgs(call.input),
       // Empty input carries nothing to inspect, so it does not make a row expandable.
       rawInput: typeof call.input === 'string' ? call.input || undefined : call.input === undefined || call.input === null || typeof call.input === 'object' && Object.keys(call.input).length === 0 ? undefined : JSON.stringify(call.input, null, 2),
       status: call.status, startedAt: call.at, endedAt: call.result?.at,
-      ...(call.skipped === undefined ? {} : { skipped: call.skipped }),
-      detail,
-      toolName: call.name, callId: call.callId, input: call.input, output: call.result?.content, mediaType: call.result?.mediaType,
-      view: call.result?.view ?? call.view, metadata: call.result?.metadata,
+      detail: toolOutput(call.result?.content) || undefined,
       outputLanguage: (media === undefined ? undefined : outputMediaLanguages[media]) ?? (kind === 'run' ? 'bash' : kind === 'read' ? extension : undefined),
-      changedPath: kind === 'change' && call.callSeen && call.status === 'success' ? path : undefined,
-      command,
+      changedPath: kind === 'edit' && call.callSeen && call.status === 'success' ? path : undefined,
+      command: kind === 'run' ? ['command', 'code', 'script'].map(key => input?.[key]).find((value): value is string => typeof value === 'string' && value.trim().length > 0) : undefined,
     }]
   })
   const complete = facts.completeHistory === true
-  const edits = calls.filter(call => call.kind === 'change' && call.status === 'success')
+  const edits = calls.filter(call => call.kind === 'edit' && call.status === 'success')
   return {
     calls,
     durationMs: facts.durationMs !== undefined && Number.isFinite(facts.durationMs) && facts.durationMs >= 0 ? facts.durationMs : undefined,
     running: facts.running, failed: facts.failed, interrupted: facts.interrupted,
     failureNote: facts.failureNote, startedAt: facts.startedAt,
     foldable: facts.completeHistory === undefined ? undefined : complete,
-    commands: complete ? items.filter(item => item._tag === 'ToolCall' && item.callSeen && !item.skipped && facts.kindFor(item.name, item) === 'run').length : undefined,
-    messagesSent: complete ? calls.filter(call => call.kind === 'message' && !call.skipped).length : undefined,
+    commands: complete ? items.filter(item => item._tag === 'ToolCall' && item.callSeen && facts.kindFor(item.name) === 'run').length : undefined,
     changedFiles: complete && edits.every(call => call.changedPath !== undefined) ? new Set(edits.map(call => call.changedPath)).size : undefined,
   }
 }
@@ -217,9 +186,6 @@ const outputMediaLanguages: Readonly<Record<string, string>> = {
   'application/yaml': 'yaml', 'text/yaml': 'yaml', 'application/x-yaml': 'yaml',
 }
 export const workLogOutputLanguage = (call: WorkLogCall): string => call.outputLanguage ?? (call.kind === 'run' ? 'bash' : '')
-/** The readable text a call's result renders to; empty, image-only or absent results have none.
- * Rows, the default detail and the preview use this one rule to decide whether output exists. */
-export const renderedToolOutput = (call: WorkLogCall): string | undefined => call.detail || toolOutput(call.output) || undefined
 /** Never let a newer caller projection fold an older committed message snapshot. */
 export function committedWorkLogs(items: readonly ConversationItem[], projections: readonly WorkLogProjection[]): ReadonlyMap<number, WorkLogProjection> {
   const positions = new Map(items.map((item, index) => [item.id, index]))

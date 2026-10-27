@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Build the synthetic seat-queue graph once with the branch binary and keep its
 # claim store. Every measurement window starts from a copy of that store.
 #
@@ -26,7 +27,8 @@ operator=person/perf-operator
 mkdir -p "$root/workspace" "$root/kdl"
 perf_start_daemon "$st3_bin" "$root"
 trap 'perf_stop_daemon "$root"' EXIT
-export ST3_ENDPOINT="$root/st3.sock"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_ENDPOINT="$root/st3.sock" ST3_ENDPOINT="$root/st3.sock"
 st3="$root/bin/st3"
 
 seat() {

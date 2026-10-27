@@ -1,6 +1,6 @@
 // What the message box does around a send: how long the text may be, what to say when a send is
 // refused, and how the text comes back. Plain functions, so they are tested without the app.
-import { INLINE_MAX_BYTES, utf8Bytes } from '@smalltalk/st3-views';
+import { INLINE_MAX_BYTES, utf8Bytes } from '@fractal/views';
 
 /** How a send that did not go ended: `unconfirmed` means st may have taken it. */
 export type SendFailure = { reason: string; unconfirmed: boolean };
@@ -55,6 +55,6 @@ export function restoreDraft(current: string, failed: string): string {
 export function sendReason(reason: string, unconfirmed: boolean): string {
   if (unconfirmed) return `${reason}. It may have been sent: look in the conversation first. Sending again will not send it twice.`;
   // An st that predates long messages refuses with advice the phone cannot follow.
-  if (/cannot exceed 4 ?KiB|post a document first/i.test(reason)) return 'This st only takes messages up to 4 KiB. Shorten the message, or update st. Your text is kept.';
+  if (/cannot exceed 4 ?KiB|post a document first/i.test(reason)) return 'This Fractal version only takes messages up to 4 KiB. Shorten the message, or update Fractal. Your text is kept.';
   return `${reason}. Your text is kept.`;
 }

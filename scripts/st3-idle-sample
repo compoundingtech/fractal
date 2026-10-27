@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-: "${ST3_BIN:?set ST3_BIN to the installed st3 executable on this host}"
-JQ_BIN=${ST3_SOAK_JQ_BIN:-$(command -v jq)}
-host=${ST3_SOAK_HOST:-$(/bin/hostname)}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_BIN-${ST3_BIN:?set ST3_BIN to the installed st3 executable on this host}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+JQ_BIN=${FRACTAL_SOAK_JQ_BIN-${ST3_SOAK_JQ_BIN:-$(command -v jq)}}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+host=${FRACTAL_SOAK_HOST-${ST3_SOAK_HOST:-$(/bin/hostname)}}
 
 if [[ $(/usr/bin/uname -s) == Linux ]]; then
   pid=$(/usr/bin/systemctl --user show st3.service -p MainPID --value)
 else
-  pid=$(/usr/bin/pgrep -f "^${ST3_BIN} up" | /usr/bin/head -n 1)
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  pid=$(/usr/bin/pgrep -f "^${FRACTAL_BIN-${ST3_BIN}} up" | /usr/bin/head -n 1)
 fi
 [[ $pid =~ ^[1-9][0-9]*$ ]] || { echo 'st3 daemon PID is unavailable' >&2; exit 1; }
 read -r cpu_text rss_kib <<<"$(/bin/ps -p "$pid" -o time=,rss=)"
@@ -30,7 +35,8 @@ else
   [[ $raw =~ ^[0-9]+$ ]] && switches=$raw
 fi
 
-activity_json=$("$ST3_BIN" activity --limit 200 --json)
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+activity_json=$("${FRACTAL_BIN-${ST3_BIN-}}" activity --limit 200 --json)
 # Replication status computes an exact graph digest. A concurrent write can
 # delay one read long enough for the outer sampler alarm to record a false
 # missing sample. Bound each attempt and retry once; a sustained failure still
@@ -41,13 +47,15 @@ replication_read_ok=0
 for attempt in 1 2; do
   replication_read_attempts=$attempt
   if [[ $(/usr/bin/uname -s) == Darwin ]]; then
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     if replication_json=$(/usr/bin/perl -e 'alarm 10; exec @ARGV or die $!' \
-      "$ST3_BIN" replication status --json); then
+      "${FRACTAL_BIN-${ST3_BIN-}}" replication status --json); then
       replication_read_ok=1
       break
     fi
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   elif replication_json=$(/usr/bin/timeout -k 1s 10s \
-    "$ST3_BIN" replication status --json); then
+    "${FRACTAL_BIN-${ST3_BIN-}}" replication status --json); then
     replication_read_ok=1
     break
   fi

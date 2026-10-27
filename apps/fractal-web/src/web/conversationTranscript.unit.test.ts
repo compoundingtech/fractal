@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { convertConversationItem } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-converter.ts'
-import type { SyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
+import type { SyncStatus } from '@fractal/ui/assistant-ui/sync'
 import type { ConversationItem, SendState } from '../conversation/model.ts'
 import { mapConversationFeed, openableImageUrl, prepareTranscriptTurns, transcriptSendFailureReason, transcriptSyncStatus, transcriptTurnsForItems } from './conversationTranscript.ts'
-import { toolKindFor } from './conversationTranscript.ts'
 
 const at = (seconds: number) => `2026-10-08T12:00:${String(seconds).padStart(2, '0').slice(-2)}.000Z`
 const sender = { kind: 'human', label: 'Reader' } as const
@@ -53,12 +52,12 @@ describe('kit transcript turn mapping', () => {
     expect(turns[0]!.senderCaptions).toEqual({ process: 'Example Agent', 'agent-message': 'Agent' })
     expect(turns[0]!.items[0]).toMatchObject({ text: 'proc://example is mentioned in prose' })
   })
-  it('keeps human tool summaries separate from the scoped command target', () => {
+  it('uses one-line human tool summaries without exposing raw input in the header', () => {
     const turns = transcriptTurnsForItems([
       prompt('p', 'Run the check.', 0),
       { _tag: 'ToolCall', id: 'eval', callId: 'eval', name: 'functions.eval', input: { title: 'Checking generated output', command: 'echo /srv/example/private\npwd' }, status: 'running', callSeen: true, at: at(1) },
     ], { firstTurnComplete: true })
-    expect(turns[0]!.work.calls[0]).toMatchObject({ kind: 'eval', title: 'Checking generated output', argsSummary: 'echo /srv/example/private' })
+    expect(turns[0]!.work.calls[0]).toMatchObject({ kind: 'run', title: 'Checking generated output', argsSummary: undefined })
     expect(turns[0]!.items[0]).toMatchObject({ input: { command: 'echo /srv/example/private\npwd' } })
   })
   it('hides unfamiliar events after answers by default while allowing explicit event inspection', () => {
@@ -70,6 +69,36 @@ describe('kit transcript turn mapping', () => {
     const inspected = transcriptTurnsForItems(items, { firstTurnComplete: true, showSystemEvents: true })
     expect(inspected[0]!.items.filter(item => item._tag === 'Notice')).toHaveLength(2)
     expect(JSON.stringify(inspected)).not.toContain('private-event')
+  })
+  it('keeps mixed messages visible by default with their full body available only for explicit disclosure', () => {
+    const data = { text: 'Synthetic visible prose', blocks: [
+      { visibility: 'visible', payload: { text: 'Synthetic visible prose' } },
+      { visibility: 'internal', payload: { raw: 'synthetic-internal-sentinel' } },
+    ] }
+    const mixed: ConversationItem = { _tag: 'UnknownEvent', id: 'mixed', eventType: 'synthetic-kind', mixedContent: true, data }
+    const internal: ConversationItem = { ...mixed, id: 'internal', mixedContent: false }
+    const unspecified: ConversationItem = { _tag: 'UnknownEvent', id: 'unspecified', eventType: 'synthetic-kind', data }
+    for (const showSystemEvents of [false, true]) {
+      const state = mapConversationFeed({
+        _tag: 'Observed', freshness: 'live',
+        value: { items: [mixed, internal, unspecified], hasOlder: false, observation: { empty: false } },
+      }, { showSystemEvents })
+      expect(state._tag).toBe('Observed')
+      if (state._tag !== 'Observed') throw new Error('Expected observed mixed message')
+      expect(state.filteredEmpty).toBe(false)
+      expect(state.items[0]).toBe(mixed)
+      expect(state.items[0]!._tag === 'UnknownEvent' && state.items[0]!.data).toBe(data)
+      expect(state.items.slice(1).map(item => item._tag)).toEqual(showSystemEvents ? ['Notice', 'Notice'] : [])
+      const converted = convertConversationItem(state.items[0]!)
+      expect(converted.content).toEqual([{ type: 'text', text: 'Message with internal records' }])
+      expect(JSON.stringify(converted.content)).not.toContain('synthetic-internal-sentinel')
+      expect(JSON.stringify(converted.content)).not.toContain('synthetic-kind')
+    }
+    const control = mapConversationFeed({
+      _tag: 'Observed', freshness: 'live',
+      value: { items: [internal, unspecified], hasOlder: false, observation: { empty: false } },
+    }, {})
+    expect(control).toMatchObject({ _tag: 'Observed', filteredEmpty: true, items: [] })
   })
   it('prepares the leading assistant tail as a prompt-less turn without losing its work', () => {
     const leading = [scenario[1]!, scenario[2]!, scenario[3]!]
@@ -87,6 +116,16 @@ describe('kit transcript turn mapping', () => {
     expect(turns[0]!.prompt).toBe(scenario[0])
     expect(turns[0]!.items.map(item => item.id)).toEqual(['read', 'reasoning', 'answer', 'status'])
     expect(turns[1]!.items.map(item => item.id)).toEqual(['run'])
+  })
+  it('preserves native event identity without adding text send state', () => {
+    const event: ConversationItem = {
+      _tag: 'Event', id: 'harness', kind: 'harness-message', title: 'Harness',
+      text: 'Ready', data: { native: true }, sender: { kind: 'system', label: 'Harness' },
+    }
+    const prepared = prepareTranscriptTurns([event], { firstTurnComplete: true })
+    expect(prepared[0]!.items[0]).toBe(event)
+    expect(prepared[0]!.items[0]).not.toHaveProperty('sendState')
+    expect(prepared[0]!.items[0]).toHaveProperty('data', event.data)
   })
 
   it.each(['credential_pin', 'title_change', 'model_change', 'thinking_level_change'])('omits known internal kind %s', eventType => {
@@ -207,7 +246,7 @@ describe('kit transcript turn mapping', () => {
     const turns = transcriptTurnsForItems([unconfirmed], { firstTurnComplete: true })
     expect(turns[0]!.prompt?.sendState).toEqual({
       _tag: 'Unconfirmed',
-      detail: 'st may have taken this message and has not confirmed it yet. Sending it again is safe.',
+      detail: 'Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.',
     })
   })
 
@@ -225,8 +264,8 @@ describe('kit transcript turn mapping', () => {
   it('keeps a truncated page’s first turn expanded', () => {
     const turns = transcriptTurnsForItems(scenario, { firstTurnComplete: false })
     expect(turns[0]!.work.foldable).toBe(false)
-    // Later turns have a complete loaded boundary, so their fold counts are authoritative.
-    expect(turns[1]!.work.foldable).toBe(true)
+    // Later turns carry the kit default: foldable unless stated otherwise.
+    expect(turns[1]!.work.foldable).toBeUndefined()
   })
 
   it('renders every kept item through the kit converter unchanged', () => {
@@ -250,8 +289,9 @@ describe('conversation feed mapping', () => {
     ['ungranted', undefined, 'ungranted', 'Conversation access not granted', 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
     ['unsupported', undefined, 'unsupported', 'Conversation not supported', 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.'],
     ['failed', 'not-found', 'not-found', 'Conversation not found', 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.'],
-    ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.'],
-    ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.'],
+    ['failed', 'peer-too-old', 'peer-too-old', 'Host update required', 'This host runs an older Fractal version; update it to open subagent conversations. Your draft is unchanged.'],
+    ['failed', 'unavailable', 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
+    ['failed', undefined, 'failed', 'Conversation unavailable', 'The gateway could not load this conversation. Your draft is unchanged.'],
   ] as const)('classifies Unavailable(%s, code %s) as %s with one fixed reason', (reason, code, classification, title, detail) => {
     const sentinel = 'raw-read-diagnostic-sentinel: the requested resource was not found'
     const state = mapConversationFeed({ _tag: 'Unavailable', reason, detail: sentinel, ...(code === undefined ? {} : { code }) }, {})
@@ -267,7 +307,7 @@ describe('conversation feed mapping', () => {
   it.each(['not found', '<img src=x onerror=alert(1)>', 'Not-Found', '-leading', 'x'.repeat(41), ''])('omits a diagnostic code outside the allowlist (%s)', code => {
     const state = mapConversationFeed({ _tag: 'Unavailable', reason: 'failed', detail: 'diagnostic', code }, {})
     expect(state).toEqual({ _tag: 'Unavailable', classification: 'failed', code: undefined,
-      availability: { _tag: 'Unavailable', reason: 'Conversation unavailable', detail: 'The gateway could not load this surface. Reload to reconnect; your saved work is unchanged.' } })
+      availability: { _tag: 'Unavailable', reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' } })
   })
 
   it('keeps an allowlisted diagnostic code at the length limit', () => {
@@ -322,22 +362,4 @@ describe('image handoff', () => {
       expect(openableImageUrl(src)).toBeUndefined()
     }
   })
-})
-
-it('preserves all semantic tool kinds and their scoped targets', async () => {
-  for (const [name, kind] of [['read', 'read'], ['grep', 'search'], ['bash', 'run'], ['edit', 'change'], ['task', 'subagent'], ['web_search', 'web'], ['ask_question', 'decision'], ['todo', 'todo']]) expect(toolKindFor(name!)).toBe(kind)
-  const turns = prepareTranscriptTurns(scenario, { firstTurnComplete: true })
-  expect(turns[0]?.work.calls[0]?.argsSummary).toBe('src/rows.ts')
-})
-
-it('keeps run commands ahead of cwd and labels orphan results without inventing read intent', () => {
-  const inputs = [
-    { _tag: 'ToolCall', id: 'run/source', callId: 'run/source', name: 'run', input: { i: 'Open draft review', cwd: '/workspace/sample/packages/rows', command: 'gh pr create --draft\nprintf done' }, status: 'running', callSeen: true, at: at(1) },
-    { _tag: 'ToolCall', id: 'run/cwd', callId: 'run/cwd', name: 'run', input: { cwd: '/workspace/sample/packages/rows' }, status: 'running', callSeen: true, at: at(2) },
-    { _tag: 'ToolCall', id: 'orphan/result', callId: 'orphan/result', name: 'tool result', input: undefined, status: 'success', callSeen: false, at: at(3), result: { content: 'Captured result', isError: false, at: at(3) } },
-  ] as const
-  const calls = prepareTranscriptTurns(inputs, { firstTurnComplete: false })[0]!.work.calls
-  expect(calls[0]?.argsSummary).toBe('gh pr create --draft')
-  expect(calls[1]?.argsSummary).toBe('packages/rows')
-  expect(calls[2]).toMatchObject({ kind: 'unknown', title: 'tool result', argsSummary: undefined })
 })

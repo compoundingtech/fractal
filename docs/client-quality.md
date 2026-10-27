@@ -1,6 +1,6 @@
 # Device-local client quality
 
-stui records client experience in `$XDG_CACHE_HOME/st3/stui/slo` (otherwise
+Fractal TUI records client experience in `$XDG_CACHE_HOME/st3/stui/slo` (otherwise
 `~/.cache/st3/stui/slo`). `st ui --slo` prints the retained hours and exits before
 configuration, connections or terminal setup. It creates no directory. These
 measurements never leave the device. The summary contains no person, conversation
@@ -22,7 +22,7 @@ Each JSON line has exactly these fields:
 Buckets have inclusive upper bounds. Fractional milliseconds round upward. The
 last bucket holds everything over 32768 ms. Percentiles printed by `--slo` are
 bucket upper bounds, not interpolated times. The starting targets are guesses for
-a week of measurement, listed together in `crates/stui/src/ui/slo.rs`.
+a week of measurement, listed together in `crates/fractal-tui/src/ui/slo.rs`.
 
 The counters are `active_ms`, `panics`, `silent_exits`, `launches`,
 `first_screen_top_bar_flips`, `first_screen_placeholder_flips`,
@@ -43,7 +43,7 @@ entries are visible after successful presentation; cancelled opens have no succe
 sample. Open failures retain the feed's typed refusal or transcript-not-bound notice.
 Focused input keys have individual timestamps in a fixed array. Freshness starts
 when the feed receives a decoded window, before maintaining its view, and ends
-after a frame displays that window's rows (or the classic alert badge). Hidden
+after a frame displays that window's rows. Hidden
 windows produce no latency sample. Reconnects end when live state is presented.
 Direct attempts count only devices with a local daemon; ordinary paired-device
 gateway routes do not reduce the direct-route success percentage. Terminal opens
@@ -68,7 +68,7 @@ clients contribute active time separately, as active client hours. A build field
 names the most recent contributor to that hour. Fixed timestamp-array exhaustion
 increments `measurement_overflow`; it never allocates extra hot-path storage.
 
-Allocation verification uses stui's thread-local counting global allocator:
+Allocation verification uses Fractal TUI's thread-local counting global allocator:
 compare one hundred identical warmed terminal draws with and without quality
 recording. The renderer's existing allocations must be identical, so the new
 input and presentation accounting adds zero. Histogram boundary, fixed line
@@ -78,8 +78,8 @@ run alongside it.
 ## Phone
 
 The iOS app writes the same version-1 line with shared bucket and target definitions
-in `clients/typescript/st3-views/slo.ts`. A test compares its complete empty summary
-against stui's golden JSON fixture. `host` is the generic device class `ios`; `build`
+in `clients/typescript/fractal-views/slo.ts`. A test compares its complete empty summary
+against Fractal TUI's golden JSON fixture. `host` is the generic device class `ios`; `build`
 is the app version and build. Member names and gateway addresses never enter a
 quality line. Quality has its own recorder and storage ports, separate from the
 existing observations reporter; it has no network, client or graph port.
@@ -141,3 +141,30 @@ the actor clears stored drafts. Serialization runs after composer changes and on
 background events, outside the key handler. One write is in flight; further edits
 maintain one latest pending view instead of queuing full draft snapshots. `drafts_restored_unclean` counts the
 saved drafts actually hydrated after a stale foreground or panic marker.
+
+## Fractal web workflow latency
+
+Fractal web publishes content-free platform User Timing measures, without a kit
+dependency. Observe them with `new PerformanceObserver(callback).observe({
+type: 'measure', buffered: true })` or the browser Performance panel:
+
+| Measure | Start → completion |
+| --- | --- |
+| `fractal:sidebar_interactive` | Document time zero → first observed, interactive sidebar roster |
+| `fractal:switch_to_tail` | Sidebar agent selection → selected transcript content at the tail |
+| `fractal:open_transcript` | Direct `/w/agent/…` document navigation → first transcript content |
+| `fractal:keystroke_paint` | Composer textarea input event → next paint opportunity |
+| `fractal:resources_panel` | Resources open → both queue and resource content observed |
+
+Completion uses an animation frame followed by a task, not a compositor
+presentation timestamp. Transcript empty states count as real content; waiting
+and unavailable placeholders do not. Switching cancels an unfinished selection.
+Leaving the transcript for another workspace view also cancels pending direct-open
+and switch samples; returning to Thread does not resume the abandoned interval.
+A restored reading position is not a tail sample until the tail is shown.
+Rapid composer input coalesces while awaiting paint. Each workflow retains at
+most 100 measures, clearing its own buffer at the cap; live observers still
+receive every completed sample. Starts without completion produce no measure.
+Agent identifiers remain only in local matching state, never timing entry names
+or details. These browser measures complement, rather than replace, the existing
+UX trace spans and transport diagnostics.
