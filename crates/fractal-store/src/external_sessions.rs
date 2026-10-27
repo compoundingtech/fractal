@@ -2553,12 +2553,13 @@ use super::*;
         let session = transcript_session(ExternalDriver::Codex, &path);
         let mut fold = LineTimelineFold::default();
         let original = fold.read(&session).unwrap();
-        let first = fold.slice(&session, TimelineOrder::TimestampSequence, None, 2).unwrap();
+        // Each Codex record emits a message marker and a content entry.
+        let first = fold.slice(&session, TimelineOrder::TimestampSequence, None, 4).unwrap();
         assert_eq!(texts(&first.items), ["equal-late", "late"]);
         assert!(first.has_more);
         let before = timeline_key(first.items.last().unwrap(), 0);
         let older = fold.slice(
-            &session, TimelineOrder::TimestampSequence, Some(&before), 2,
+            &session, TimelineOrder::TimestampSequence, Some(&before), 4,
         ).unwrap();
         assert_eq!(texts(&older.items), ["early", "oldest"]);
         assert!(!older.has_more);
@@ -2570,11 +2571,11 @@ use super::*;
         fs::OpenOptions::new().append(true).open(&path).unwrap()
             .write_all(record("newest", "2026-10-04T21:40:19.000000300Z").as_bytes()).unwrap();
         let after_append = fold.slice(
-            &session, TimelineOrder::TimestampSequence, Some(&before), 2,
+            &session, TimelineOrder::TimestampSequence, Some(&before), 4,
         ).unwrap();
         assert_eq!(after_append.generation, first.generation);
         assert_eq!(after_append.items, older.items, "appends do not move a frozen page boundary");
-        let newest = fold.slice(&session, TimelineOrder::TimestampSequence, None, 2).unwrap();
+        let newest = fold.slice(&session, TimelineOrder::TimestampSequence, None, 4).unwrap();
         assert_eq!(texts(&newest.items), ["newest", "equal-late"]);
     }
 
