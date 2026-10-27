@@ -103,6 +103,8 @@ fn raw_app(root: &Path, node: &str) -> crate::api::AppState {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 
@@ -473,6 +475,8 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
             harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         }
     });
     states[0]
@@ -1326,6 +1330,8 @@ async fn a_gateway_streams_a_remote_terminal_through_owner_long_polls() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1497,6 +1503,8 @@ async fn a_cli_attach_from_another_host_paints_screens_and_delivers_input() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1711,6 +1719,8 @@ async fn the_owning_host_names_a_new_agents_default_workspace() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1805,6 +1815,8 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -1990,6 +2002,8 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = app_state(owner_root.path(), "owner-node");
     let mut gateway = app_state(gateway_root.path(), "gateway-node");
@@ -2229,6 +2243,8 @@ async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let mut gateway = make_state(roots[0].path(), "chain-gateway");
     let mut relay = make_state(roots[1].path(), "chain-relay");
@@ -2479,6 +2495,8 @@ async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_i
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let mut gateway = make_state(roots[0].path(), "lag-gateway");
     let owner = make_state(roots[1].path(), "lag-owner");
@@ -2663,6 +2681,8 @@ async fn a_relaying_worker_refuses_a_forged_path_and_a_spent_hop_limit() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let secret = root.path().join("fleet-secret");
     fs::write(&secret, [5_u8; 32]).unwrap();
@@ -2777,6 +2797,8 @@ async fn a_followed_conversation_says_why_while_its_owner_cannot_be_reached() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = make_state(owner_root.path(), "conversation-owner");
     let mut gateway = make_state(gateway_root.path(), "conversation-gateway");
@@ -2886,6 +2908,8 @@ async fn gateway_fetches_authenticated_owner_record_chunks_and_propagates_invali
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let mut owner = make_state(owner_root.path(), "conversation-owner");
     let mut gateway = make_state(gateway_root.path(), "conversation-gateway");
@@ -3077,6 +3101,8 @@ async fn a_gateway_receives_remote_conversation_changes_without_idle_data() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let owner = make_state(owner_root.path(), "conversation-owner");
     let mut gateway = make_state(gateway_root.path(), "conversation-gateway");
@@ -3293,6 +3319,8 @@ async fn signed_client_read_returns_an_owner_local_native_timeline() {
         native_session_home: Some(home),
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -3434,6 +3462,8 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
         native_session_home: None,
         planner_default: crate::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     });
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -3581,6 +3611,8 @@ async fn inbound_only_peer_syncs_both_ways_between_isolated_daemons() {
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
             harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         });
         let served = socket.clone();
         servers.push(tokio::spawn(async move {
@@ -3701,13 +3733,12 @@ async fn signed_inventory_read_preserves_owner_unavailable_http_status() {
     fs::create_dir_all(&observations).unwrap();
     fs::write(observations.join(fractal_drivers::harness_events::DATABASE), "invalid native spool").unwrap();
     let socket = root.path().join("st3.sock");
-    let main = crate::api::AppState {
-    owning_person: None,
+    let main = crate::api::AppState { owning_person: None,
         store, notify: Arc::new(tokio::sync::Notify::new()), event_notify: watch::channel(0_u64).0,
         node: "owner".into(), state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
         fleet_id: None, configured_peers: vec!["source".into()], client_relay: None,
-        native_session_home: None, harness_question_sink: None, planner_default: crate::model::PlannerSpec::default(),
+        native_session_home: None, harness_question_sink: None, assistant_receipts: Default::default(), private_notes: Default::default(), planner_default: crate::model::PlannerSpec::default(),
     };
     let serving = socket.clone();
     let server = tokio::spawn(async move {

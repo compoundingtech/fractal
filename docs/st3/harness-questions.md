@@ -136,7 +136,10 @@ Keep the same action id, key and parameters for an uncertain retry; the request 
 excludes the fence, so fresh fences do not change request identity. Exact retained
 retries return `harness_answer.status: accepted` without settling again. Reusing an
 actor's key with another id, type or parameters returns `idempotency-conflict`,
-including reuse across generic client actions and harness answers in either direction.
+including reuse across generic client actions, private-notes writes and harness answers
+in either direction. Private-notes writes retain their owner-local exact-request recovery,
+current ownership checks and fence validation; the shared graph reservation never replays
+private content or private fences.
 Harness receipts stay solely in the existing compact resolution. An unknown key is
 new; a new key after resolution returns `already_resolved` before adapter or answer
 validation, but still requires current authority, snapshot provenance and question/runtime

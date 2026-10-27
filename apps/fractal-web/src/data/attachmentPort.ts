@@ -108,7 +108,7 @@ export const gatewayMessageSend =
       if (cause instanceof ClientError && cause.response.code === 'stale-fence') {
         return { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
       }
-      // st could not confirm the send in time, and it may still complete: only the identical
+      // Fractal could not confirm the send in time, and it may still complete: only the identical
       // request (same id, key and parameters) is safe to send again.
       if (cause instanceof ClientError && appliedAnswer(cause) === 'unknown') {
         return { _tag: 'Refused', reason: 'unconfirmed', detail: cause.response.message, error: cause.response }

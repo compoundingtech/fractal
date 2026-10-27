@@ -30,6 +30,8 @@ mod tests {
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
             harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         };
         claim(
             &state,

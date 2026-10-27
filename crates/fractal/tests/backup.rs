@@ -64,6 +64,8 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
         native_session_home: None,
         planner_default: Default::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {

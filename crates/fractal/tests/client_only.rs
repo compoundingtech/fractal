@@ -158,6 +158,8 @@ fn state(root: &Path, node: &str) -> AppState {
         native_session_home: None,
         planner_default: Default::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
@@ -241,7 +243,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
     device_name: "Demo laptop".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -282,7 +284,7 @@ async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
+async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
     use fractal_client::{Fence, MessageSendParameters, device::Profile};
     use std::os::unix::fs::PermissionsExt as _;
     let member = tempfile::tempdir().unwrap();
@@ -382,7 +384,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: Some(vec!["read.projections".into()]), })
+    scopes: Some(vec!["read.projections".into()]), fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -409,7 +411,7 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member() {
+async fn daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member() {
     let member = tempfile::tempdir().unwrap();
     let device = tempfile::tempdir().unwrap();
     let state = state(member.path(), "member-cedar");

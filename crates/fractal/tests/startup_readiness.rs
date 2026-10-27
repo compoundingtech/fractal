@@ -220,7 +220,7 @@ fn replay_is_visible_before_the_api_serves_and_stale_files_are_ignored() {
     // a base projection, while target still names the full uncommitted source frontier.
     assert_eq!(readiness.total, Some(0));
     let early_log = std::fs::read_to_string(&log_path).unwrap();
-    assert!(early_log.contains("st: projection full replay phase=startup/project-replication-backlog reason=missing-health"), "fallback must be logged before the replay finishes: {early_log}");
+    assert!(early_log.contains("fractal: projection full replay phase=startup/project-replication-backlog reason=missing-health"), "fallback must be logged before the replay finishes: {early_log}");
     assert!(!early_log.contains("st3: startup phases "), "{early_log}");
     // Both addresses exist early, but neither is listening or queueing a request
     // while projection is uncommitted. Keep the main refusal/phase contract.
@@ -359,7 +359,7 @@ fi
     eprintln!("st3: startup phases {}", timing_lines[0]);
     let fallbacks = log
         .lines()
-        .filter(|line| line.starts_with("st: projection full replay"))
+        .filter(|line| line.starts_with("fractal: projection full replay"))
         .collect::<Vec<_>>();
     assert_eq!(fallbacks.len(), 1, "{log}");
     assert!(

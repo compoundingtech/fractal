@@ -119,8 +119,6 @@ const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 /// much worse unnoticed. Each breaks the daemon's rule that no query's cost grows with the whole
 /// store and is owed a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // Attention reads every person ask (11.8x full-scan steps).
-    ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
     ("GET /v1/checkpoint/status", 15.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
@@ -132,8 +130,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Reviews scan every claim of their kinds (19.6x steps, 25.0x full-scan steps).
-    ("GET /v1/reviews", 38.0),
     // Sessions read every harness observation (11.5x full-scan steps).
     ("GET /v1/sessions", 17.5),
 ];
@@ -141,6 +137,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "GET /v1/client/private-notes/{*uri}",
+        "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
+    ),
     (
         "POST /v1/deploy/verify-go",
         "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
@@ -358,6 +358,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     // Writes that need a live runtime or a person's approval the generated store lacks.
     ("POST /v1/agents/rename", "renames a declared agent"),
+    (
+        "POST /v1/persons/rename",
+        "explicit identity repair enumerates the old person's current work and reviews once; requires that person's authority and is not a steady-state daemon request; covered by api::tests::human_review_list_and_decisions_use_exact_current_requests",
+    ),
     ("POST /v1/agents/restart", "restarts a live seat"),
     (
         "POST /v1/agents/rollout",
@@ -905,6 +909,10 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get(
+        "GET /v1/resource-references/{*subject}",
+        "/v1/resource-references/resource/bench/cost",
+    ),
     get("GET /v1/events", "/v1/events?after={event_after}&limit=100"),
     get(
         "GET /v1/events/page",
@@ -965,6 +973,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/mission-runs/{run}/revision-proposal",
         "/v1/mission-runs/{run}/revision-proposal",
     ),
+    get("GET /v1/mission-runs/{run}/waiting-on", "/v1/mission-runs/{run}/waiting-on"),
     get("GET /v1/mission-runs/{run}", "/v1/mission-runs/{run}"),
     get(
         "GET /v1/run-generations/{generation}",
@@ -1526,6 +1535,8 @@ mission "cost/history" state="ready" {
         native_session_home: Some(root.path().join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     });
     let mut measurements = Vec::new();
     for run in 0..100 {
@@ -2471,6 +2482,8 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         native_session_home: Some(root.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let harness_sink = Arc::new(CostHarnessQuestionSink(
         std::sync::atomic::AtomicBool::new(false),

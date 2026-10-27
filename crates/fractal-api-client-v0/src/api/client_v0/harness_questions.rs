@@ -305,6 +305,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn harness_and_private_notes_share_action_keys_in_both_orders() {
+        for harness_first in [false, true] {
+            let (root, mut state, _session, _question, request) = fixture();
+            let session = ClientSession::for_tests_scoped("person/alex", "person/alex",
+                &["terminal.control", "read.projections", "control.work"]);
+            let sink = Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:false });
+            state.harness_question_sink = Some(sink.clone());
+            let catalog = root.path().join("catalog");
+            let subject = catalog.join("agents/q0/ada");
+            std::fs::create_dir_all(subject.join("resources")).unwrap();
+            let uri = "dev.schickling.agent-private-notes://q0/ada";
+            std::fs::write(subject.join("agent.kdl"), format!(
+                "agent \"ada\" {{\n host \"q0\"\n resource \"notes\" uri=\"{uri}\"\n}}\n"
+            )).unwrap();
+            state.private_notes = Arc::new(crate::private_notes::Authority { catalogs:vec![catalog] });
+            let notes = super::super::private_notes::detail(
+                State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session.clone()), AxumPath(uri.into()),
+            ).await.unwrap().0;
+            let notes_request: ActionRequest = serde_json::from_value(json!({
+                "api_version":CLIENT_API_VERSION, "id":"action/notes-test",
+                "type":"private-notes.write", "idempotency_key":request.idempotency_key,
+                "fence":notes["actions"][0]["fence"],
+                "parameters":{"uri":uri,"markdown":"Owner-local context.\n"},
+            })).unwrap();
+            let (first, second) = if harness_first {
+                (&request, &notes_request)
+            } else {
+                (&notes_request, &request)
+            };
+            let _ = invoke(&state, &session, first).await.unwrap();
+            let before = state.store.index().unwrap();
+            assert_eq!(invoke(&state, &session, second).await.unwrap_err().code,
+                "idempotency-conflict");
+            assert_eq!(state.store.index().unwrap(), before);
+            assert_eq!(sink.calls.load(Ordering::SeqCst), usize::from(harness_first));
+            // The losing family cannot poison exact-key recovery in the winning family.
+            let _ = invoke(&state, &session, first).await.unwrap();
+            assert_eq!(state.store.index().unwrap(), before);
+            assert_eq!(sink.calls.load(Ordering::SeqCst), usize::from(harness_first));
+        }
+    }
+
+    #[tokio::test]
     async fn legacy_action_receipts_refuse_harness_answers_before_settlement() {
         for actor in [None, Some("person/alex".to_owned())] {
             let (_root, mut state, session, _question, request) = fixture();

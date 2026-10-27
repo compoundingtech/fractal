@@ -76,6 +76,8 @@ Use these documents for implementation details:
   recorded, the log format, and what the recorder cannot see.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
+- [What a run waits on](waiting-on.md) explains `st missions waiting-on RUN`: each open step's
+  wait and a run's stalled verdict, read in milliseconds from published state.
 - [Operational queries](operational-queries.md) explains bounded mission lists, outcome history,
   mission run summaries, and the five-minute performance report in `st doctor`.
 - [Agent migration](agent-migration.md) defines isolated rehearsal, cutover, and rollback.

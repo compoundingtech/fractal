@@ -161,6 +161,8 @@ fn state(root: &Path, node: &str) -> AppState {
         native_session_home: None,
         planner_default: Default::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 
@@ -343,7 +345,7 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     let missing = seat_opens(root.path(), &socket, &["agent/seat-one.ghost"]).await;
     assert!(!missing.status.success(), "{}", said(&missing));
     assert!(
-        said(&missing).contains("st has no agent/seat-one.ghost"),
+        said(&missing).contains("fractal: Fractal has no agent/seat-one.ghost"),
         "{}",
         said(&missing)
     );

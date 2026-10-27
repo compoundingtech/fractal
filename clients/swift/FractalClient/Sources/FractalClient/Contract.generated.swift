@@ -33,6 +33,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case missionRevise = "mission.revise"
     case missionStart = "mission.start"
     case pairingRevoke = "pairing.revoke"
+    case privateNotesWrite = "private-notes.write"
     case promptRespond = "prompt.respond"
     case reviewApprove = "review.approve"
     case reviewReject = "review.reject"
@@ -68,6 +69,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case notesList = "notes.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
+    case privateNotesGet = "private-notes.get"
     case hostRepositories = "host.repositories"
     case setsList = "sets.list"
     case setsGet = "sets.get"
@@ -152,6 +154,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
+    .privateNotesGet: "/v1/client/private-notes/{uri}",
     .hostRepositories: "/v1/client/hosts/{id}/repositories",
     .setsList: "/v1/client/sets",
     .setsGet: "/v1/client/sets/{id}",

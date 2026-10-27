@@ -421,10 +421,9 @@ pub async fn report_native_session(
             fields,
             evidence: Vec::new(),
             expected_subject: None,
-            idempotency_key: Some(format!(
-                "native-session:{subject}:{}:{}",
-                request.incarnation_id, request.session_id
-            )),
+            // Binding observations may revisit a session within one incarnation. The writer
+            // deduplicates only an unchanged current binding, not every prior use of its ID.
+            idempotency_key: None,
         })
         .map_err(ApiError::bad)?;
     signal_changed(&state);
@@ -459,6 +458,15 @@ pub async fn rename_agent(
         request.name.as_deref(),
         &request.idempotency_key,
     ).map_err(ApiError::bad)?;
+    signal_changed(&state);
+    Ok(Json(response))
+}
+
+pub async fn rename_person(
+    State(state): State<AppState>,
+    Json(request): Json<PersonRenameRequest>,
+) -> Result<Json<PersonRenameReport>, ApiError> {
+    let response = state.store.rename_person(&request, &state.configured_peers).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(response))
 }

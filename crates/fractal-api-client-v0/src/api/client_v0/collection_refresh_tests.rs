@@ -1184,7 +1184,7 @@ fn paired_session() -> ClientSession {
         peer_process: None,
         custom_forms: false,
         conversation_blocks: false,
-        conversation_delivery_links: false,
+        conversation_delivery_links: false, conversation_message_participants: false,
         assistant_content_handles: false,
         messages_paging: false,
         scopes: ["read.projections".into()].into_iter().collect(),

@@ -4,12 +4,12 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
+import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
-import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/st-device-key';
-import { REPAIR_WARNING, validatePairingTrust, verifyPairing } from './pairingProof';
+import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
+import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
 import { rememberBounded } from './boundedCache';
@@ -19,7 +19,7 @@ import { sendFences } from './sendFence';
 import { Feed } from './feed';
 import { watchSync, type SyncRead } from './syncWatch';
 import { quality, localDrafts } from './qualityNative';
-import { nativeCollectionSocket } from './modules/st-collections';
+import { nativeCollectionSocket } from './modules/fractal-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
 import { buildFabricDefault, builtFabricMembers, credentialFor, defaultMemberName, fabricGatewayId, fabricMembers, fabricTargetFromText, isFabricGatewayId, MAX_FABRIC_MEMBERS, memberName, memberPairing, memberProfileKey, readFabricMembers, sameFabricTarget, sameName, storedFabricMembers, walkableMembers, type FabricMember } from './fabricTarget';
@@ -46,8 +46,8 @@ import { nativePushPorts, pushWrite } from './pushNative';
 export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
-/** A message.send request as sent, kept whole so an unconfirmed one can be sent again unchanged. */
-export type MessageRequest = Parameters<FractalClient['messageSend']>[0];
+/** The exact request and its original member's transport; never rebound on failover. */
+export type MessageRequest = BoundMessage<Parameters<FractalClient['messageSend']>[0]>;
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
@@ -71,7 +71,7 @@ const PUSH_KEY = 'st3.push.enabled';
 const OBSERVATIONS_KEY = 'st3.observations';
 const CARRIER_KEY = 'st3.carrier', FABRIC_TARGET_KEY = 'st3.fabric.target', FABRIC_MEMBERS_KEY = 'st3.fabric.members', FABRIC_FALLBACK_KEY = 'st3.fabric.fallback';
 
-/** An error as a person reads it: st's errors in plain words (the SDK's plainError). */
+/** An error as a person reads it: Fractal's errors in plain words (the SDK's plainError). */
 export function errorText(error: unknown): string {
   if (error instanceof ClientError) {
     const refused = signatureRefusal(error.response.code, 'phone');
@@ -153,7 +153,7 @@ function useAppStore(proof?: FabricProfile) {
   const [missionsLoaded, setMissionsLoaded] = useState(false);
   const [error, setError] = useState(''), [pairingIssue, setPairingIssue] = useState(''), [busy, setBusy] = useState(false);
   const [historicalSessions, setHistoricalSessions] = useState<SessionView[]>([]);
-  // The Agents list shows a list or a tree, as stui's `t` toggles.
+  // The Agents list shows a list or a tree, as the Fractal terminal UI's `t` toggles.
   const [treeView, setTreeView] = useState(false);
   const [simpleOn, setSimpleOn] = useState(true);
   const [arrangements, setArrangements] = useState<Arrangement[]>([]), [arrangementsIssue, setArrangementsIssue] = useState('');
@@ -183,11 +183,11 @@ function useAppStore(proof?: FabricProfile) {
     return () => { current = false; };
   }, [proof, caps?.session_actor]);
   useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
-  // The request of a send st never confirmed, so sending the same message again repeats it instead of making a second.
-  // Attention the person acted on from here: st closing it is their doing, not a vanishing.
+  // The request of a send Fractal never confirmed, so sending the same message again repeats it instead of making a second.
+  // Attention the person acted on from here: Fractal closing it is their doing, not a vanishing.
   const acted = useRef(new Set<string>());
   // Whether this connection has delivered its first attention window: what a stored copy held
-  // and st no longer lists was not on screen while it closed, so only later windows keep items.
+  // and Fractal no longer lists was not on screen while it closed, so only later windows keep items.
   const attentionLive = useRef(false);
   const missionDetailCache = useRef(new Map<string, Mission>());
   // The carrier. The saved gateway `url` is this device's identity and its fallback route; the URL the
@@ -484,9 +484,9 @@ function useAppStore(proof?: FabricProfile) {
           if (name === 'attention') { quality.received(1, received); quality.attentionWindow(rows as Attention[], hasMore); }
           if (name === 'agents') quality.received(2, received);
         }
-        // Home decides what of attention to show, as stui does; agents drop only history.
+        // Home decides what of attention to show, as the Fractal terminal UI does; agents drop only history.
         const shown = name === 'agents' ? (rows as Array<{ operational?: { layer?: string } }>).filter(currentAgent) : rows;
-        // Nothing leaves Home by itself: what st closes while it is shown stays until cleared.
+        // Nothing leaves Home by itself: what Fractal closes while it is shown stays until cleared.
         const seen = attentionLive.current;
         if (name === 'attention') attentionLive.current = true;
         setData(previous => ({ ...previous, [name]: name === 'attention' && seen ? keepClosed(previous.attention, shown as Attention[], acted.current, capsRef.current?.session_actor) : shown }));
@@ -662,7 +662,7 @@ function useAppStore(proof?: FabricProfile) {
     return { snapshot_id: capability.snapshot.id, subject_revisions: revisions };
   }
   /**
-   * Run an action, trying again (with a fresh fence each time) while st refused it only because it
+   * Run an action, trying again (with a fresh fence each time) while Fractal refused it only because it
    * raced a busy store, as `retryable` says.
    */
   async function runAction(action: () => Promise<unknown>, reload: readonly OnDemand[] = [], retryable: (error: unknown) => boolean = notApplied): Promise<boolean> {
@@ -690,7 +690,7 @@ function useAppStore(proof?: FabricProfile) {
     // gateway typed (or saved) stays this device's identity and its fallback route.
     const requestUrl = member ? fabricSnapshot.bridgeUrl : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
     if (isFabricGatewayId(gateway) && requestUrl === gateway) throw new Error('Fabric is not connected yet, so there is nowhere to pair. Wait a moment and try again, or check the member\'s fabric grant for this phone.');
-    const response = await requestFetch(`${requestUrl}/v1/client/capabilities`);
+    const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
     if (!response.ok || text.length > 8192) throw new Error('Member cannot advertise pairing proofs; upgrade it. The code was not submitted.');
     let advertisement: { api_version?: string; capabilities?: Array<{ id: string; version: number; state: string }> };
@@ -698,6 +698,9 @@ function useAppStore(proof?: FabricProfile) {
     if (advertisement.api_version !== API_VERSION || !Array.isArray(advertisement.capabilities) || !advertisement.capabilities.some(c => c.id === 'device-key-proofs' && c.version === 1 && c.state === 'granted')) {
       throw new Error('Member does not support verifiable device grants; upgrade it. The code was not submitted.');
     }
+    // A member that grants paired phones its gateway over Fabric learns this phone's NodeID here.
+    const node = fabricBuilt ? fabricNode || await fabricIdentity().catch(() => '') : '';
+    const fabricFields = pairingFabricNode(advertisement.capabilities, node);
     const made = await createDeviceKey();
     if (!made) throw new Error('This build cannot make a device key; update the phone app.');
     let consumed = false;
@@ -706,7 +709,7 @@ function useAppStore(proof?: FabricProfile) {
       if (old && !await push.forgetIssuer(profileKey)) throw new Error('Notification cleanup is incomplete. Reconnect to the paired member before replacing its pairing.');
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
       const gatewayClient = new FractalClient({ baseUrl: requestUrl, fetchImpl: requestFetch, client: clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) });
-      const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage });
+      const result = await gatewayClient.completePairing(id, { api_version: API_VERSION, code, device_public_key: made.key, key_storage: made.storage, ...fabricFields });
       consumed = true; deviceId = result.value.device_id;
       if (result.value.kind !== 'paired-session') throw new Error('A phone profile cannot enroll an external assistant.');
       await verifyPairing(result.value, made.key, pin, {
@@ -722,16 +725,17 @@ function useAppStore(proof?: FabricProfile) {
       await SecureStore.setItemAsync(profileKey, JSON.stringify(next), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
       if (!signs) await removeDeviceKey(made.handle).catch(() => {});
       if (old?.signing?.handle) await removeDeviceKey(old.signing.handle).catch(() => {});
+      const grantProblem = fabricGrantProblem(result.value.fabric_grant);
       if (member) {
         setOwnProfiles(held => new Map(held).set(profileKey, next));
-        setPairingMember(null); setError('');
+        setPairingMember(null); setError(grantProblem);
         return;
       }
       if (!oldRaw) await removeDeviceKey().catch(() => {});
       await SecureStore.deleteItemAsync(CREDENTIAL_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(SIGNING_KEY).catch(() => {});
       await clearCachedProjection().catch(() => {});
-      setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError('');
+      setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
       // Paired over fabric alone: that member uses this device's own pairing.
       if (isFabricGatewayId(gateway) && fabricTarget && fabricGatewayId(fabricTarget) === gateway && !fabricTarget.device) {
         await saveFabricMembers(fabricMemberList.map(m => (sameFabricTarget(m, fabricTarget) ? { ...m, device: true as const } : m)));
@@ -931,7 +935,7 @@ function useAppStore(proof?: FabricProfile) {
         return true;
       } finally { if (qualityToken) quality.answerConfirmed(item.id, qualityToken, qualityAccepted); setBusy(false); }
     },
-    /** Clear an item st closed: only the person's own word removes it from Home. */
+    /** Clear an item Fractal closed: only the person's own word removes it from Home. */
     clearClosed(id: string) {
       acted.current.add(id);
       setData(previous => ({ ...previous, attention: previous.attention.filter(item => item.id !== id) }));
@@ -945,7 +949,7 @@ function useAppStore(proof?: FabricProfile) {
     /**
      * Answer a native prompt from its alert with one of the answers it offers: a question's
      * `answer` sends `sent`, its choices (see `questionAnswer`). Only the prompt still waiting is
-     * answered, once; an answer in the terminal wins, and a prompt st says is gone is not sent again.
+     * answered, once; an answer in the terminal wins, and a prompt Fractal says is gone is not sent again.
      */
     async respondPrompt(item: Attention, answer: string, sent: string = answer) {
       if (!client) return false;
@@ -957,7 +961,7 @@ function useAppStore(proof?: FabricProfile) {
       if (qualityToken) quality.answerConfirmed(item.id, qualityToken, accepted);
       return accepted;
     },
-    /** An image a message carries, as a data URI; st reads it from the member that has it. */
+    /** An image a message carries, as a data URI; Fractal reads it from the member that has it. */
     image(image: { sha256: string; message: string; mediaType: string }): Promise<string> {
       return IMAGES.read(imageKey(image), () => {
         if (!client || status !== 'online') return Promise.reject(new Error(status === 'online' ? 'not connected' : 'offline'));
@@ -970,11 +974,18 @@ function useAppStore(proof?: FabricProfile) {
       const answer = (await client.messageBodyGet(message)).value;
       return { text: answer.text, complete: answer.complete };
     },
-    /** Send Fractal to an agent, as stui does: fenced to a fresh snapshot, once more if it moved. */
+    /** Send Fractal to an agent, as the Fractal terminal UI does: fenced to a fresh snapshot, once more if it moved. */
     async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
       if (!client || !uploader) return { how: 'failed', error: 'not connected' };
       if (status !== 'online' || (proof && !proof.ready)) return { how: 'failed', error: 'offline' };
-      // Images are kept on this member first; the message names them, and st fetches each from
+      const signingProfile = signingKeyRef.current;
+      // A closed loopback listener's port may be reused by a later dial. Never use
+      // that address after its original carrier snapshot has been replaced.
+      const originalFabric = selected.route.kind === 'fabric' ? carrier.snapshot : null;
+      const originalAvailable = () => {
+        if (originalFabric && carrier.snapshot !== originalFabric) throw new TypeError('Original member connection is no longer available');
+      };
+      // Images are kept on this member first; the message names them, and Fractal fetches each from
       // here for a reader on another machine (docs/st3/attachments.md).
       const attachments: AttachmentInput[] = [];
       for (const image of images) {
@@ -988,35 +999,30 @@ function useAppStore(proof?: FabricProfile) {
       }
       const began = performance.now();
       // The first try goes on the snapshot a window frame already brought, with no capabilities read;
-      // each try after st said the last applied nothing reads a fresh one.
+      // each try after Fractal said the last applied nothing reads a fresh one.
       const fences = sendFences(lastSnapshot.current, fence);
-      const outcome = await sendMessage<MessageRequest>({
+      const outcome = await sendBoundMessage(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
         build: async () => {
           const id = actionId();
           const unsigned = { to, content, ...(sessionId ? { session_id: sessionId } : {}), ...(tags?.length ? { tags } : {}), ...(attachments.length ? { attachments } : {}) };
-          const parameters = proof ? unsigned : await signMessage(id, unsigned, signingKeyRef.current);
+          const parameters = proof ? unsigned : await signMessage(id, unsigned, signingProfile);
           return { id, idempotency_key: id, fence: await fences(), parameters };
         },
-        send: request => client.messageSend(request),
+        fence: async () => { originalAvailable(); return fence(); },
+        send: request => { originalAvailable(); return client.messageSend(request); },
         wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
       });
       if (outcome.how !== 'sent') { proof?.record(outcome.how === 'unconfirmed' ? 'message-unconfirmed' : 'message-failed', { elapsedMs: performance.now() - began }); return sentAs(outcome); }
       proof?.record('message-accepted', { elapsedMs: performance.now() - began });
-      // The person's wait, fence read and any repeat included, to st's acknowledgement.
+      // The person's wait, fence read and any repeat included, to Fractal's acknowledgement.
       if (!proof) observations.observe('ios-message-ack', performance.now() - began);
       return outcome;
     },
-    /** Send an unconfirmed message again as the same request (id, key, signature and nonce), freshly fenced. */
+    /** Retry only through the transport captured by the original send. Fabric listeners are per-dial. */
     async resend(request: MessageRequest): Promise<Sent> {
-      // Offline it stays as it was, ready to send again.
-      if (!client || status !== 'online' || (proof && !proof.ready)) return { how: 'unconfirmed', request };
-      return sentAs(await resendMessage<MessageRequest>({
-        fence: sendFences(lastSnapshot.current, fence),
-        send: next => client.messageSend(next),
-        wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
-      }, request));
+      return sentAs(await resendBoundMessage(request));
     },
-    /** A plain shell, named as stui names one; its terminal id, or null with the reason shown. */
+    /** A plain shell, named as the Fractal terminal UI names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {
       if (!client) return null;
       let created: string | null = null;
@@ -1026,7 +1032,7 @@ function useAppStore(proof?: FabricProfile) {
         created = result.value.affected_ids?.find(affected => affected.startsWith('terminal/')) ?? null;
       });
       if (!done || !created) return null;
-      // The shell starts a moment after st declares it: open it once st can show its screen.
+      // The shell starts a moment after Fractal declares it: open it once Fractal can show its screen.
       for (let tries = 0; tries < 30; tries++) {
         try { await client.terminalScreen(created); return created; } catch { await new Promise(resolve => setTimeout(resolve, 500)); }
       }
@@ -1067,7 +1073,7 @@ function useAppStore(proof?: FabricProfile) {
       // Typed keys need no screen fence, and an agent's spinner moves the screen faster than a read
       // and a send can race it (Nathan, 2026-10-06: nothing typed ever arrived). So one request,
       // on the snapshot the windows last showed (any earlier one of this host is accepted), fenced
-      // by the incarnation only. An st that still asks for the screen's sequence says so, and the
+      // by the incarnation only. A Fractal version that still asks for the screen's sequence says so, and the
       // old way is used.
       if ((mode === 'raw' || mode === 'key') && lastSnapshot.current) {
         const id = actionId();
@@ -1099,7 +1105,7 @@ function useAppStore(proof?: FabricProfile) {
         }, older, oldest);
       } catch (e) { throw new Error(errorText(e)); }
     },
-    /** What was said in conversations, as st's search finds it; a string says why not. */
+    /** What was said in conversations, as Fractal's search finds it; a string says why not. */
     async searchConversations(text: string): Promise<ConversationSearch | string> {
       if (!client || status !== 'online') return 'offline';
       try { return (await client.conversationSearch(text, { limit: 20 })).value; } catch (e) { return errorText(e); }

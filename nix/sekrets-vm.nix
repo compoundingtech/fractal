@@ -112,7 +112,7 @@ pkgs.testers.runNixOSTest {
     ];
     environment.etc."st-sekrets/gateway.toml".source = gatewayConfig;
     systemd.services.st-sekrets = {
-      description = "st sekrets gateway";
+      description = "Fractal sekrets gateway";
       serviceConfig = {
         User = "sekrets";
         Group = "sekrets";

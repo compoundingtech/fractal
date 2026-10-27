@@ -414,6 +414,8 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     let ingesting = tokio::spawn(fractal_daemon::recorder_receipts::run(
         store.clone(),
@@ -599,6 +601,8 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     };
     std::fs::create_dir_all(root.join("daemon")).unwrap();
     // The receipt consumer is part of the daemon's idle cost. Its own scans must

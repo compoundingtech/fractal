@@ -36,6 +36,8 @@ fn test_state(root: &Path) -> AppState {
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
         harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
     }
 }
 

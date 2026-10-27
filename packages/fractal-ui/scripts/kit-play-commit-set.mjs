@@ -20,10 +20,38 @@ export const MERGE_ONLY = [
   'fractal-ui-transcript--no-green-all-states',
   // 10 s of case time: renders a hundred agents; a render-cost check rather than a contract.
   'fractal-ui-sidebar-roster--hundred-agent-render',
+  // Attachment contract probes are batched in --contract to avoid 24 separate page bootstraps per commit.
+  // Keep individual state/phone/key-depth stories in the full merge matrix; --loaded still checks both widths.
+  'fractal-app-transcript-images--assistant-image',
+  'fractal-app-transcript-images--assistant-image-phone',
+  'fractal-app-transcript-images--decode-failed',
+  'fractal-app-transcript-images--decode-failed-phone',
+  'fractal-app-transcript-images--failed',
+  'fractal-app-transcript-images--failed-phone',
+  'fractal-app-transcript-images--keyboard-failed',
+  'fractal-app-transcript-images--keyboard-failed-phone',
+  'fractal-app-transcript-images--keyboard-loaded',
+  'fractal-app-transcript-images--keyboard-loaded-phone',
+  'fractal-app-transcript-images--keyboard-navigate-away',
+  'fractal-app-transcript-images--keyboard-navigate-away-phone',
+  'fractal-app-transcript-images--keyboard-unauthorized',
+  'fractal-app-transcript-images--keyboard-unauthorized-phone',
+  'fractal-app-transcript-images--loaded-phone',
+  'fractal-app-transcript-images--loading',
+  'fractal-app-transcript-images--loading-phone',
+  'fractal-app-transcript-images--mailbox-image',
+  'fractal-app-transcript-images--mailbox-image-phone',
+  'fractal-app-transcript-images--unauthorized',
+  'fractal-app-transcript-images--unauthorized-phone',
+  'fractal-app-transcript-images--unavailable',
+  'fractal-app-transcript-images--unavailable-phone',
 ]
 export const BOTH_WIDTHS = [
   'fractal-app-composer-images--several-images',
-  'fractal-ui-composer--footer-width-budget',
+  'fractal-app-transcript-images--loaded',
+  'fractal-ui-composer--footer-width-budget-narrow',
+  'fractal-ui-composer--footer-width-budget-medium',
+  'fractal-ui-composer--footer-width-budget-wide',
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
   'fractal-ui-sidebar-agent-row--densities-and-children',
@@ -40,7 +68,9 @@ const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
 // in only one outer browser case. FilterBehavior retains functional coverage in all four cases.
 export const KIT_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
-  ['fractal-ui-composer--footer-width-budget-light', []],
+  ['fractal-ui-composer--footer-width-budget-narrow-light', []],
+  ['fractal-ui-composer--footer-width-budget-medium-light', []],
+  ['fractal-ui-composer--footer-width-budget-wide-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
   // Portal theme inheritance must run in light as well as dark on every commit.
   ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],

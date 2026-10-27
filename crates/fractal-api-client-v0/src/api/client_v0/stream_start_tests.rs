@@ -144,7 +144,7 @@ async fn conversation_first_frame_profile_lifecycle() {
     assert_eq!(profiles(), records);
     socket.close(None).await.unwrap();
     // Cancellation/replacement before data delivery must not claim successful completion.
-    let canceled = subscription_first_frame("conversation", "canceled", None).unwrap();
+    let canceled = subscription_first_frame("conversation", "canceled", None, None).unwrap();
     drop(canceled);
     let records = profiles();
     assert_eq!(records.len(), 2);

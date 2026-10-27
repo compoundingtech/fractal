@@ -181,6 +181,8 @@ mod tests {
             node:"diagnostic-test".into(),state_dir:root.into(),pty_root:root.join("pty"),pty_binary:root.join("unused-pty"),
             fleet_id:None,configured_peers:Vec::new(),client_relay:None,native_session_home:None,harness_question_sink: None, planner_default:Default::default(),
             owning_person:None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         }
     }
     fn pair(state: &AppState, credential: &str, actor: &str, scopes: Value, expires: u64) {

@@ -383,11 +383,14 @@
         "clients/typescript/fractal-views/package.json",
         "flake.lock",
         "flake.nix",
+        "nix/typescript-client-deps.hash",
+        "nix/typescript-client.nix",
         "nix/web-shell.nix",
         "package.json",
         "pnpm-lock.yaml",
         "pnpm-source-inputs.json",
         "pnpm-workspace.yaml",
+        "scripts/ci-nix-fixed-outputs",
         "scripts/ci-typescript-client"
       ],
       "tree_inputs": [

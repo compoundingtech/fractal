@@ -61,10 +61,34 @@ pub use crate::store::agent_queue_values::{
     AGENT_QUEUE_FIELDS, agent_queue_fields, agent_queue_metadata,
 };
 use crate::model::ClientReplicated;
-use crate::model::{ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput, ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer, ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest, DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord, GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest, LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption, LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest, LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt, MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest, MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest, MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView, OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec, PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningRevisionRequest, PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse, ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest, SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView, WorkRequest, WorkRetryRequest, WorkWakeRequest};
+use crate::model::{
+    ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
+    ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer,
+    ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest,
+    DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord,
+    GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest,
+    LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption,
+    LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest,
+    LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
+    MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
+    MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView,
+    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec,
+    PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
+    PlanningProposalRequest, PlanningRevisionRequest,
+    PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
+    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse,
+    ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
+    ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
+    RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
+    RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest,
+};
+use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
-use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
 pub mod wire_names;
@@ -123,6 +147,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
@@ -207,6 +232,7 @@ pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
+    pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
     pub node: String,
@@ -220,6 +246,9 @@ pub struct AppState {
     pub planner_default: PlannerSpec,
     /// Native answering is unavailable unless an adapter is explicitly installed.
     pub harness_question_sink: Option<Arc<dyn HarnessQuestionSettleSink>>,
+    /// Caller-bound assistant read receipts committed off the request path. Shut it down before
+    /// the store closes; the last state reference to drop commits what remains.
+    pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
@@ -414,6 +443,9 @@ impl ApiError {
             | "retirement-upgrade-required"
             | "custody-pending"
             | "stale-subject"
+            | "stale-fence"
+            | "idempotency-conflict"
+            | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -423,12 +455,16 @@ impl ApiError {
             | "stale-launch-preview"
             | "fleet-leaving"
             | "glass-deleted"
+            | "person-rename-conflict"
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
+            | "forbidden"
             | "lane-approval-denied"
+            | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
@@ -628,6 +664,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
         .route("/v1/agents/restart", post(agents::restart_agent))
@@ -719,6 +756,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
         .route("/v1/doctor", get(operations::doctor))
@@ -818,6 +856,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/mission-runs/{run}/report-to",
             post(runs::set_mission_run_report),
+        )
+        .route(
+            "/v1/mission-runs/{run}/waiting-on",
+            get(waiting_on::get_run_waiting_on),
         )
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
@@ -950,11 +992,19 @@ async fn response_envelope_unbounded(
         && request.uri().path() == "/v1/client/capabilities"
         && !request.headers().contains_key(axum::http::header::AUTHORIZATION)
     {
-        return Json(json!({
-            "api_version": CLIENT_API_VERSION,
-            "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-        }))
-        .into_response();
+        // The second capability goes only to a client that says it understands it
+        // (`?accepts=fabric-gateway-grant`): an older client validating this answer as exactly
+        // one `device-key-proofs` entry keeps getting exactly that.
+        let mut capabilities = vec![json!({"id":"device-key-proofs", "version":1, "state":"granted"})];
+        if request
+            .uri()
+            .query()
+            .is_some_and(|query| query.split('&').any(|pair| pair == "accepts=fabric-gateway-grant"))
+        {
+            capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
+        }
+        return Json(json!({"api_version": CLIENT_API_VERSION, "capabilities": capabilities}))
+            .into_response();
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
@@ -1349,8 +1399,6 @@ fn request_trace(
     if !crate::otel::export_enabled() {
         return None;
     }
-    use opentelemetry::trace::TraceContextExt as _;
-    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
     let span_name = format!("{} {route}", method.as_str());
     let span = tracing::info_span!(
         target: "st3::http",
@@ -1376,16 +1424,7 @@ fn request_trace(
         "st.writer.wait_ms" = tracing::field::Empty,
         "st.writer.ops" = tracing::field::Empty,
     );
-    let remote = crate::otel::extract_remote_context(headers);
-    let parent = remote.span();
-    let context = parent.span_context();
-    if context.is_valid() {
-        span.record(
-            "st.parent.sampled",
-            context.is_sampled() && context.trace_state().get("st").is_none(),
-        );
-    }
-    span.set_parent(remote);
+    crate::otel::set_remote_parent(&span, crate::otel::extract_remote_context(headers));
     Some(span)
 }
 
@@ -1442,6 +1481,68 @@ pub fn request_latency_target_windows() -> Value {
 /// Every target's live windows, and every path's: see `slo/targets.toml`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
+}
+
+/// Note what keeps this minute of the member's CPU from being idle.
+fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
+    request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
+}
+
+/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
+/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// the `workers` replication workers this member runs has sent, note a replication catch-up, and
+/// check the seats of the minute closed one boundary earlier, once every harness observation
+/// stamped inside it has committed. The first boundary is this daemon's start.
+pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
+    use smallclaims::windows::cpu_minutes::Busy;
+    // This member's seats as of `seats_until`, which each minute's check carries into the next.
+    let mut seats = None;
+    let mut seats_until = 0;
+    let mut unsettled = None;
+    loop {
+        let minute = client_now_ms() as u64 / 60_000;
+        let (at, daemon_ns) = (Instant::now(), smallclaims::windows::process_cpu_ns());
+        let catching_up = store.replication_catching_up();
+        let closed = {
+            let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cpu = meter.cpu_minutes();
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            let closed = cpu.boundary(minute, at, daemon_ns, workers);
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            closed
+        };
+        if let Some(closed) = closed
+            && let Some(check) = unsettled.replace(closed)
+        {
+            let (from, until) = (check * 60_000, (check + 1) * 60_000);
+            let carried = seats.take().filter(|_| seats_until == from);
+            let reading = store.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                smallclaims::task_cpu::blocking("slo.cpu_minutes", || {
+                    reading.local_seats_busy(from, until, carried)
+                })
+            })
+            .await;
+            let busy = match checked {
+                Ok(Ok((busy, newest))) => {
+                    (seats, seats_until) = (Some(newest), until);
+                    Some(busy)
+                }
+                _ => None,
+            };
+            request_latency()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cpu_minutes()
+                .settle(check, busy);
+        }
+        let now = client_now_ms() as u64;
+        tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
+    }
 }
 
 pub use crate::peer::track_remote_reads;
@@ -1796,6 +1897,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
+        | "private-notes-unreachable"
+        | "private-notes-carrier-conflict"
+        | "private-notes-indeterminate"
         | "inventory-unavailable"
         | "conversation-content-invalidated"
         | "transcript-unavailable"
@@ -1820,12 +1924,15 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
         "lane-not-found" => "not-found".into(),
         "invalid-person-ask"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"
+        | "invalid-person-rename"
+        | "unknown-person"
         | "answer-required"
         | "unsupported-person-request"
         | "missing-ask-owner"
@@ -1839,6 +1946,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-review-decision"
         | "feedback-gate-needs-step" => "validation-failed".into(),
         "wrong-reviewer" => "forbidden".into(),
+        "person-rename-conflict" => "conflict".into(),
         "stale-work-ask"
         | "stale-subject"
         | "missing-subject-token"
@@ -3173,8 +3281,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     })
 }
 
-/// Each seat's running subagents: open, with a lease that runs past this read. A lease runs out
-/// without a claim, so this is read per request rather than cached with the agents.
+/// Each observing seat's running subagents: open, with a lease that runs past this read. A lease
+/// runs out without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -3207,6 +3315,12 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
             }));
     }
     for item in items {
+        if !item["driver"]
+            .as_str()
+            .is_some_and(fractal_drivers::subagents::driver_observes_subagents)
+        {
+            continue;
+        }
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
         let subagents = running.remove(id).unwrap_or_default();
         item["subagents"] = Value::Array(subagents);
@@ -3417,6 +3531,15 @@ fn client_agent_cards_presented(
             })
             .collect::<Vec<_>>(),
     );
+    let declared_resources = status
+        .subjects
+        .iter()
+        .filter_map(|subject| {
+            let references = crate::graph::declared_resources(subject.desired.as_ref()?);
+            (!references.is_empty()).then(|| (subject.subject.clone(), references))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let resource_uris = store.declared_resource_uris(declared_resources.values().flatten())?;
     let mut agents = status
         .subjects
         .into_iter()
@@ -3690,6 +3813,10 @@ fn client_agent_cards_presented(
                     "agent_id": relationship.agent,
                     "reason": relationship.reason
                 })).collect::<Vec<_>>(),
+                "resources": client_declared_resources(
+                    declared_resources.get(&subject.subject).map_or(&[][..], Vec::as_slice),
+                    &resource_uris,
+                ),
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
@@ -3730,6 +3857,36 @@ fn client_agent_cards_presented(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(agents.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Read-only edges with an explicit authored kind and URI resolution state.
+/// Subject edges do not require a URI locator; missing URI locators are omitted, not null.
+pub fn client_declared_resources(
+    references: &[crate::model::DeclaredResourceReference],
+    uris: &BTreeMap<String, String>,
+) -> Vec<Value> {
+    references
+        .iter()
+        .map(|reference| {
+            let mut value = json!({
+                "name": reference.name,
+                "subject": reference.subject,
+                "kind": reference.kind,
+                "resolution": match reference.kind {
+                    crate::model::ResourceReferenceKind::Subject => "not-applicable",
+                    crate::model::ResourceReferenceKind::Uri if uris.contains_key(&reference.subject) => "resolved",
+                    crate::model::ResourceReferenceKind::Uri => "unresolved",
+                },
+                "reason": reference.reason,
+            });
+            if reference.kind == crate::model::ResourceReferenceKind::Uri
+                && let Some(uri) = uris.get(&reference.subject)
+            {
+                value["uri"] = json!(uri);
+            }
+            value
+        })
+        .collect()
 }
 
 fn desired_harness_driver(desired: &Value) -> Option<String> {
@@ -5786,6 +5943,7 @@ pub fn remote_read_error(host: &str, error: anyhow::Error) -> ApiError {
             | "stale-fence"
             | "validation-failed"
             | "forbidden"
+            | "peer-too-old"
             | "idempotency-conflict"
     ) {
         return remote_unavailable(host);
@@ -6702,6 +6860,7 @@ pub async fn guard_bound_request(
         "/v1/sets/",
         "/v1/agent-queue-moves",
         "/v1/agents/rename",
+        "/v1/persons/rename",
         "/v1/agents/restart",
         "/v1/agents/rollout",
         "/v1/agents/start",
@@ -7986,6 +8145,12 @@ fn doctor_report_with_operation_drift(
         }),
     }
     checks.push(first_readiness_scheduler_check(&state.store, &state.node));
+    if state.fleet_id.is_some() {
+        checks.push(crate::replication_worker_build::check(
+            &state.state_dir,
+            fractal_drivers::version::build_commit(),
+        ));
+    }
     match state.store.idempotency_conflicts(5) {
         Ok((0, _)) => checks.push(DoctorCheck {
             name: "idempotency-keys".into(),
@@ -8226,12 +8391,24 @@ fn replication_receive_has_new_data(received: usize) -> bool {
 }
 
 /// Pure local memory update. Older daemons answer 404 rather than interpreting worker
-/// progress as a failed exchange during a worker/daemon rolling restart.
+/// progress as a failed exchange during a worker/daemon rolling restart. A report of the
+/// worker's process CPU, which carries no peer, feeds the member's CPU minutes instead.
 async fn replication_worker_status(
     State(state): State<AppState>,
     Json(request): Json<smallclaims::replication::ReplicationWorkerStatusRequest>,
 ) -> Json<Value> {
-    state.store.record_replication_worker(&request.peer, request.worker);
+    if let Some(worker) = request.worker {
+        state.store.record_replication_worker(&request.peer, worker);
+    }
+    if let Some(process) = request.process {
+        let catching_up = state.store.replication_catching_up();
+        let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cpu = meter.cpu_minutes();
+        cpu.note_worker((process.pid, process.started_at_unix_ms), process.cpu_ns, Instant::now());
+        if catching_up {
+            cpu.note(smallclaims::windows::cpu_minutes::Busy::CatchUp);
+        }
+    }
     Json(json!({ "recorded": true, "changed": false }))
 }
 
@@ -8365,6 +8542,30 @@ async fn refuse_while_leaving(
     next.run(request).await
 }
 
+/// Mission-only routes may publish the shared targets synthesized from their URI edges,
+/// but never an explicitly authored immediate declaration (even one with the same ID).
+fn mission_only_subjects(intent: &crate::model::NormalizedIntent) -> bool {
+    if intent.subjects.is_empty() {
+        return true;
+    }
+    let mission_roots = intent.normalized["declarations"].as_array().is_some_and(|nodes| {
+        nodes.iter().all(|node| node["name"] == "mission")
+    });
+    mission_roots && intent.subjects.values().all(|subject| {
+        subject.kind == "resource"
+            && subject.subject.starts_with("resource/uri/")
+            && subject.owner_run.is_none()
+            && subject.owner_generation.is_none()
+            && subject.owner_step.is_none()
+            && intent.missions.values().any(|mission| {
+                mission.resources.iter().any(|edge| {
+                    edge.kind == crate::model::ResourceReferenceKind::Uri
+                        && edge.subject == subject.subject
+                })
+            })
+    })
+}
+
 fn launch_candidate_mission<'a>(
     intent: &'a crate::model::NormalizedIntent,
     expected: &str,
@@ -8379,7 +8580,7 @@ fn launch_candidate_mission<'a>(
     };
     let published_closure = crate::mission::mission_closure_ids(mission);
     let published = intent.missions.keys().cloned().collect::<BTreeSet<_>>();
-    if !intent.subjects.is_empty() || published != published_closure {
+    if !mission_only_subjects(intent) || published != published_closure {
         return Err(St3Error::new(
             "wrong-launch-mission",
             format!(
@@ -9916,7 +10117,9 @@ fn scope_eval_desired_subjects(
     let mut shared = Vec::new();
     for (subject, desired) in &mut intent.subjects {
         let Some(current) = selected.get(subject.as_str()) else {
-            desired.owner_run = Some(owner_run.to_owned());
+            if crate::graph::declared_uri(&desired.desired).is_none() {
+                desired.owner_run = Some(owner_run.to_owned());
+            }
             continue;
         };
         if *current == desired {
@@ -10150,6 +10353,20 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+}
+
+/// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
+/// hierarchy, queue, timing, summaries and wake a reader would fold for it after COMMIT.
+async fn work_action_response_viewing(
+    state: AppState,
+    action: String,
+    subject: String,
+    request: WorkRequest,
+    extend_ms: Option<u64>,
+    handoff: Option<crate::model::WorkHandoffRequest>,
+    lease_view: bool,
+) -> Result<Json<StepRunView>, ApiError> {
     let actor = request
         .actor
         .as_deref()
@@ -10177,7 +10394,7 @@ async fn work_action_response(
         if let Some(input) = handoff.as_ref() {
             state.store.handoff_retry(&subject, input).map_err(ApiError::bad)?;
         }
-        if action == "renew" {
+        if action == "renew" && !lease_view {
             // A renewal caches its view without the fields the writer no longer folds.
             let store = state.store.clone();
             response = blocking_action(move || {
@@ -10212,10 +10429,11 @@ async fn work_action_response(
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_extending(&subject, &action, &request, extend_ms)?
+            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
         };
-
-        work_response::enrich_under(&store, &mut response)?;
+        if !lease_view {
+            work_response::enrich_under(&store, &mut response)?;
+        }
         Ok(response)
     })
     .await?;
