@@ -52,3 +52,41 @@ async fn canonical_aliases_share_admission_and_reuse_one_descriptor() {
     let entry = record_lock_entry(&real.join(LOCK_NAME)).unwrap();
     assert_eq!(Arc::strong_count(&entry), 1);
 }
+
+#[test]
+fn slow_initializer_leaves_cached_admission_responsive_and_keeps_one_race_winner() {
+    let root = tempfile::tempdir().unwrap();
+    let cached_dir = root.path().join("cached");
+    let cached = record_lock_entry(&cached_dir.join(LOCK_NAME)).unwrap();
+    let slow_path = root.path().join("slow").join(LOCK_NAME);
+    let initializer_path = slow_path.clone();
+    let (entered, waiting) = std::sync::mpsc::sync_channel(0);
+    let (release, released) = std::sync::mpsc::sync_channel(0);
+    let initializer = std::thread::spawn(move || {
+        record_lock_entry_open_with(&initializer_path, crate::flock::Open::Create, |path, create| {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            crate::flock::open(path, create)
+        }).unwrap()
+    });
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    let (completed, completion) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let admission = runtime.block_on(record_lock_admission(&cached_dir)).unwrap();
+        completed.send(Arc::ptr_eq(&cached, &admission._entry)).unwrap();
+    });
+    let responsive = completion.recv_timeout(Duration::from_secs(2));
+    // Always release before asserting, so a regression cannot strand either worker.
+    // A second synchronous initializer wins this key while the first is paused.
+    let winner = if responsive.is_ok() {
+        Some(record_lock_entry(&slow_path).unwrap())
+    } else {
+        None
+    };
+    release.send(()).unwrap();
+    let initialized = initializer.join().unwrap();
+    worker.join().unwrap();
+    assert!(responsive.unwrap(), "cached admission must reuse its entry during a slow open");
+    assert!(Arc::ptr_eq(&initialized, &winner.unwrap()), "racing opens must publish one entry");
+}

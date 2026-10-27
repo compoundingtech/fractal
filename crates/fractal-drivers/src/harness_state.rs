@@ -793,6 +793,14 @@ fn record_lock_entry_with(
     lock_path: &Path,
     create: crate::flock::Open,
 ) -> anyhow::Result<Arc<RecordLockEntry>> {
+    record_lock_entry_open_with(lock_path, create, crate::flock::open)
+}
+
+fn record_lock_entry_open_with(
+    lock_path: &Path,
+    create: crate::flock::Open,
+    open: impl FnOnce(&Path, crate::flock::Open) -> std::io::Result<fs::File>,
+) -> anyhow::Result<Arc<RecordLockEntry>> {
     if let Some(entry) = cached_record_lock(lock_path)? {
         return Ok(entry);
     }
@@ -811,12 +819,18 @@ fn record_lock_entry_with(
         }
         return Ok(entry);
     }
-    let entry = Arc::new(RecordLockEntry {
+    // Filesystem initialization must not hold the registry: async cache lookups
+    // take this mutex before their first await, including unrelated active paths.
+    drop(entries);
+    let candidate = Arc::new(RecordLockEntry {
         admission: Arc::new(tokio::sync::Mutex::new(())),
-        file: Arc::new(tokio::sync::Mutex::new(Some(crate::flock::open(
-            &path, create,
-        )?))),
+        file: Arc::new(tokio::sync::Mutex::new(Some(open(&path, create)?))),
     });
+    let mut entries = RECORD_LOCKS.lock()
+        .map_err(|_| anyhow::anyhow!("record lock registry poisoned"))?;
+    // Synchronous initializers can race. Only the winner's descriptor/admission
+    // may be published; dropping the unused candidate closes its unlocked fd.
+    let entry = entries.get(&path).and_then(Weak::upgrade).unwrap_or(candidate);
     entries.insert(path, Arc::downgrade(&entry));
     if lock_path.is_absolute() {
         entries.insert(lock_path.to_path_buf(), Arc::downgrade(&entry));
