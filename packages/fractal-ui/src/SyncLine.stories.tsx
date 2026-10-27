@@ -65,12 +65,31 @@ const subscriptionLimitPlay: NonNullable<StoryObj<SyncArgs>['play']> = async ({ 
   }
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sync Line',
   render: StoryRender,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Portable SyncStatus tagged union with epoch-ms timestamps and the syncLine vocabulary. Every status/stage, derived stalled observations, both themes, and fixed-height existing header/status slots. The all-observations matrix stacks theme columns on narrow viewports so each row and its actions remain on their own theme surface. Last-known content remains present. Local and Server subscription-limit failures share plain vocabulary; only reported caps appear, including zero. HTTP Usage reads exclude subscription-limit failures and their actions. Dedicated dark/light stories cover those exclusions and the full transition sequence. No byte-progress or invented stage is shown.' } } },
   args: { scheme: 'dark', sequence: 0 }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, sequence: { control: { type: 'number', min: 0, max: syncObservations.length - 1 } } },
 } satisfies Meta<SyncArgs>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'InlineHeader:contract-fixture',
+  'InlineHeaderLight:contract-fixture',
+  'LocalFailureWithoutCap:contract-fixture',
+  'LocalFailureZeroCap:contract-fixture',
+  'NarrowFailure:contract-fixture',
+  'NarrowFailureLight:contract-fixture',
+  'ServerFailureSubscriptionLimit:contract-fixture',
+  'SubscriptionLimitsDark:contract-fixture',
+  'SubscriptionLimitsLight:contract-fixture',
+  'TransitionSequence:contract-fixture',
+  'TransitionSequenceLight:contract-fixture',
+  'UnknownReason:contract-fixture',
+  'UnknownReasonLastLive:contract-fixture',
+]
 type Story = StoryObj<SyncArgs>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local sync observations and clock transitions exercise status vocabulary and geometry.' } } } satisfies Story
 export const AllStates: Story = { ...contractFixture, tags: ['critical'], render: AllStatesStory, play: async ({ canvasElement }) => {

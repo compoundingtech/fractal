@@ -214,6 +214,20 @@ st devices --as person/operator grant read-trust GRANT --issuer person/operator 
 
 This calls `POST /v1/client/assistant/grants/{id}/read-trust` with `AssistantReadTrustRequest` (`api_version`, `issuer`, `key_id`, `attestor_public_key`, `shim_public_key`, optional `default_response_bytes` ≤ 4096 and `max_response_bytes` ≤ 16384). Keys are 32-byte Ed25519 public keys in unpadded base64url. The attestor key must differ from the shim key, so a shim-signed request cannot authorize a read. Pinning increments the policy revision and returns `AssistantGrant` with `read_trust`; outstanding proofs for the old revision stop verifying. Public fixtures use placeholder pins and an intentionally invalid signature, never real keys.
 
+### Read receipts
+
+Every assistant read leaves two audit claims: `custom.client.assistant.v1.read-used` and `custom.client.assistant.v1.read-outcome`. Their kinds and body fields are unchanged. What differs between the two read modes is when the claims are written.
+
+`approval-once` reads write their receipts synchronously, as before. The read-used claim consumes the proof's nonce before st reads any source data, and the outcome claim is written before the response is sent. If either write fails, the read fails.
+
+For `caller-bound-allow` reads, the response does not wait for the receipts to be committed. st still checks the grant, scope, expiry, revocation, and policy revision before it builds the projection, and again just before it returns the response; a failed check denies the read as before. After that final check, once the response is serialized, st puts the receipts on a bounded in-memory queue and returns the response. When the queue is full, the next read waits for space; it never skips its receipt. A single writer commits everything waiting in the queue in one transaction (group commit). It starts as soon as receipts are waiting, with no timer or flush interval, so a receipt may be committed before or after the response reaches the caller; neither order is guaranteed. A graceful daemon shutdown writes every queued receipt before the store closes.
+
+If a read's existing deadline or cancellation ends its wait for receipt capacity, it discloses no response bytes and writes neither a receipt nor a synchronous denial audit for that abandoned admission; other deadline errors keep their existing audit behavior.
+
+A crash or forced kill loses the receipts still in the queue: those reads were answered but leave no audit claim. The queue size limits how many can be lost; how long a receipt stays queued is not guaranteed. This is acceptable because caller-bound receipts are audit evidence, not authority: the grant authorizes each read, and no later check depends on a receipt being present. Approval-once receipts are authority, because they make each proof single-use, so they stay synchronous.
+
+The absence of a `read-used` claim is not proof that no read happened.
+
 ## C. Scoped native writes and recipient trust
 
 `POST /v1/client/assistant/propose` accepts closed typed native actions, not arbitrary daemon commands. `work.done` requires `write.assistant.answers`, `message.send` requires `write.assistant.messages`, and `custom.reply` requires `write.assistant.custom-reply`. A missing write scope fails closed; read scopes never authorize these writes. Successful proposals execute through the existing fenced action path, without creating a daemon-owned approval ask.

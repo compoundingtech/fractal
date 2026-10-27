@@ -31,6 +31,7 @@ fn test_state(root: &Path) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     }
 }
 
@@ -569,6 +570,11 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
     );
     // A single response already published has no pending token change. Its late native
     // binding must still be captured at stop, without publishing at binding time.
+    // A driver's binding is accepted only while its incarnation is the running one.
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"inc-one"}),
+    );
     append(
         "harness.session-file",
         json!({"harness":"codex","session_id":"native-example",

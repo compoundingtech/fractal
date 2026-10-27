@@ -119,6 +119,7 @@ function SingleComposer(args: ComposerArgs) {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Composer',
   component: SingleComposer,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'editable composer and outbox state are host-owned local contracts that no world slice models' }, layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
@@ -134,6 +135,44 @@ const meta = {
   },
 } satisfies Meta<typeof SingleComposer>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'DurableDraft:contract-fixture',
+  'EffortAllStates:contract-fixture',
+  'EffortSupported:contract-fixture',
+  'EffortUnknown:contract-fixture',
+  'EffortUnsupported:contract-fixture',
+  'FailedSendRestored:contract-fixture',
+  'FooterWidthBudget320:contract-fixture',
+  'FooterWidthBudget320Light:contract-fixture',
+  'FooterWidthBudget360:contract-fixture',
+  'FooterWidthBudget360Light:contract-fixture',
+  'FooterWidthBudget451:contract-fixture',
+  'FooterWidthBudget451Light:contract-fixture',
+  'Geometry:contract-fixture',
+  'Idle:contract-fixture',
+  'IdleLight:contract-fixture',
+  'ImageAttached:contract-fixture',
+  'ImeComposition:contract-fixture',
+  'KitLabelResize:contract-fixture',
+  'LayoutShapes:contract-fixture',
+  'MentionPopup:contract-fixture',
+  'MentionPopupLight:contract-fixture',
+  'OfflineDraft:contract-fixture',
+  'PlainImageAttachments:contract-fixture',
+  'PlainImageAttachmentsLight:contract-fixture',
+  'PlainTextAdapter:contract-fixture',
+  'QueuedTwice:contract-fixture',
+  'Running:contract-fixture',
+  'ShiftEnterNewline:contract-fixture',
+  'SlashCommands:contract-fixture',
+  'TargetTooltips:contract-fixture',
+  'TargetTooltipsLight:contract-fixture',
+  'TypingMultiLine:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 /** Non-interacting fixtures let the source geometry gate measure real composer state, before any play mutates it. */

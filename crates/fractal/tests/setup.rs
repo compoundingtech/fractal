@@ -917,6 +917,7 @@ async fn onboarding_api(
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        assistant_receipts: Default::default(),
     };
     // These declarations use a simulated provider; no host provider or daemon is touched.
     let router = fractal_daemon::api::router(state).layer(axum::middleware::from_fn(
@@ -1307,7 +1308,7 @@ fn skipping_sets_up_st_and_no_agent() {
     // Name, machine, login box, the Pi row, then the two buttons: Tab to Skip for now.
     let (success, output) = play(
         command,
-        &[("Fractal setup", "\t\t\t\t\t\r"), ("st is set up", "\r")],
+        &[("Fractal setup", "\t\t\t\t\t\r"), ("Fractal is set up", "\r")],
         &mut fixture,
     );
     assert!(success, "{output}");
