@@ -2,3 +2,4 @@ record 0f015c11a6a1cf4cfc20cea0e3c7bd1cd73a9c85 typescript-client 0 host/forge 2
 record b8345cdcf198ab80421b666f57dac2481239187f genie-freshness 0 host/forge 2026-10-27T22:32:56Z
 record f7d7aefdd1c37255e1cc041f4a8fa40271e34549 ci-script-tests 0 host/forge 2026-10-27T22:36:16Z
 record 3b9d17c4a4a7f0df511d244626b33a9f3615dc88 linux-gate 0 host/forge 2026-10-27T23:36:40Z
+record 4dd883f654de0f77e042f310cae41d334fa73ec1 fractal-web 0 host/forge 2026-10-27T23:57:22Z
