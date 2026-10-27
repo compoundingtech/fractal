@@ -2,7 +2,7 @@
   "generated": "Do not edit; run nix develop .#web -c python3 scripts/ci-fractal-web-licenses",
   "source": "pnpm-lock.yaml packages; installed package.json license (legacy licenses fallback); missing manifests from lock-integrity-verified npm archives",
   "schemaVersion": 1,
-  "lockfileSha256": "25955580891eda091dd7b8ec5d6cb9cf07ab662e5fa1ee760636976700d31982",
+  "lockfileSha256": "7d9c908d521c0bbf892cd3359ce84849190eb873bd3dceaf9f48d8e1429f116e",
   "packages": [
     {
       "name": "@adobe/css-tools",
@@ -396,27 +396,27 @@
     },
     {
       "name": "@effect/atom-react",
-      "version": "4.0.0",
+      "version": "4.0.3",
       "license": "MIT"
     },
     {
       "name": "@effect/opentelemetry",
-      "version": "4.0.0",
+      "version": "4.0.3",
       "license": "MIT"
     },
     {
       "name": "@effect/platform-node",
-      "version": "4.0.0",
+      "version": "4.0.3",
       "license": "MIT"
     },
     {
       "name": "@effect/platform-node-shared",
-      "version": "4.0.0",
+      "version": "4.0.3",
       "license": "MIT"
     },
     {
       "name": "@effect/vitest",
-      "version": "4.0.0",
+      "version": "4.0.3",
       "license": "MIT"
     },
     {
@@ -1071,7 +1071,7 @@
     },
     {
       "name": "@playwright/test",
-      "version": "1.64.0",
+      "version": "1.64.1",
       "license": "Apache-2.0"
     },
     {
@@ -2656,7 +2656,7 @@
     },
     {
       "name": "effect",
-      "version": "4.0.0",
+      "version": "4.0.3",
       "license": "MIT"
     },
     {
@@ -4106,12 +4106,12 @@
     },
     {
       "name": "playwright",
-      "version": "1.64.0",
+      "version": "1.64.1",
       "license": "Apache-2.0"
     },
     {
       "name": "playwright-core",
-      "version": "1.64.0",
+      "version": "1.64.1",
       "license": "Apache-2.0"
     },
     {
@@ -4992,11 +4992,6 @@
     {
       "name": "vite",
       "version": "8.2.2",
-      "license": "MIT"
-    },
-    {
-      "name": "vite",
-      "version": "8.3.3",
       "license": "MIT"
     },
     {

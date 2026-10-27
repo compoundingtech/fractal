@@ -2,6 +2,7 @@
 //! Setup uses only this HOME, state directory and sockets; no host daemon or service.
 
 use fractal_daemon::MissionsStore;
+use fractal_daemon::SeatsStoreCore;
 use std::fs;
 use std::io::{Read as _, Write as _};
 use std::os::unix::fs::{PermissionsExt as _, symlink};
@@ -1092,6 +1093,162 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_assistant
         stopped
     );
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onboarding_preserves_customized_assistant_resource_references() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    use fractal_daemon::model::{DeclaredResourceReference, ResourceReferenceKind};
+    use sha2::Digest as _;
+
+    // One authored declaration and one typed oracle cover every republication entrypoint.
+    // Relocation is `agents start --host`, not a separate CLI verb.
+    for path in ["onboarding", "start", "relocate", "print-kdl", "mission-apply"] {
+        let fixture = Fixture::new();
+        let (store, client, server) = onboarding_api(&fixture).await;
+        let uri = "https://github.com/acme/garden/issues/42";
+        let resource = format!("resource/uri/{}", hex::encode(sha2::Sha256::digest(uri)));
+        let references = vec![
+            DeclaredResourceReference {
+                name: "issue".into(),
+                subject: resource.clone(),
+                kind: ResourceReferenceKind::Uri,
+                reason: Some("Track onboarding work".into()),
+            },
+            DeclaredResourceReference {
+                name: "explicit".into(),
+                subject: resource.clone(),
+                kind: ResourceReferenceKind::Subject,
+                reason: Some("Keep an explicit subject edge".into()),
+            },
+            DeclaredResourceReference {
+                name: "unresolved".into(),
+                subject: "resource/example/not-yet-published".into(),
+                kind: ResourceReferenceKind::Subject,
+                reason: Some("Keep unresolved work".into()),
+            },
+        ];
+        let agent = format!(
+            r#"agent "st/assistant" {{
+  name "My customized assistant"
+  description "Keep the person's existing seat."
+  workspace {}
+  harness "codex" {{}}
+  env {{ CUSTOMIZED "kept" }}
+  resource "issue" uri="{uri}" reason="Track onboarding work"
+  resource "explicit" subject="{resource}" reason="Keep an explicit subject edge"
+  resource "unresolved" subject="resource/example/not-yet-published" reason="Keep unresolved work"
+}}"#,
+            serde_json::to_string(&fixture.path("assistant-workspace")).unwrap(),
+        );
+        let source = format!("version 2\n{agent}\n");
+        let intent = fractal_daemon::parse_intent(&source, "studio").unwrap();
+        let expected = intent.subjects["agent/st/assistant"].desired.clone();
+        assert_eq!(fractal_daemon::graph::declared_resources(&expected), references);
+        if path != "mission-apply" {
+            let preview = store
+                .mission(
+                    &intent,
+                    fractal_daemon::model::IntentInput {
+                        kdl: source,
+                        source_name: None,
+                    },
+                )
+                .unwrap();
+            store
+                .apply_as(
+                    &intent,
+                    &preview.subject_tokens,
+                    "customized-assistant",
+                    Some("person/ada"),
+                )
+                .unwrap();
+        }
+
+        let mut command = fixture.cli();
+        match path {
+            "onboarding" => {
+                command.args([
+                    "setup", "--person", "ada", "--node", "studio", "--yes",
+                    "--install", "false", "--service", "false", "--start", "false",
+                ]);
+            }
+            "mission-apply" => {
+                // Exercise the real apply CLI and mission declaration extraction, not just
+                // the agent renderer. Read the stored mission's extracted KDL back below.
+                let mission = format!(
+                    "version 2\nmission \"example/resources\" state=\"ready\" {{\n\
+                     goal \"Preserve the person's resource edges.\"\n\
+                     resource \"issue\" uri=\"{uri}\" reason=\"Track onboarding work\"\n{agent}\n\
+                     step \"work\" {{ goal \"Keep the mission open.\" }}\n}}\n"
+                );
+                fs::write(fixture.path("mission.kdl"), mission).unwrap();
+                command.arg("apply").arg(fixture.path("mission.kdl"));
+                command.args(["--as", "person/ada", "--no-gate-check"]);
+            }
+            _ => {
+                command.args(["agents", "start", "agent/st/assistant", "--as", "person/ada"]);
+                if path == "relocate" {
+                    command.args(["--host", "elsewhere"]);
+                } else if path == "print-kdl" {
+                    command.arg("--print-kdl");
+                }
+            }
+        }
+        let before = store.selected_desired_token("agent/st/assistant").unwrap();
+        let output = tokio::task::spawn_blocking(move || command.output().unwrap())
+            .await
+            .unwrap();
+        let text = success(&output);
+        let actual = match path {
+            "print-kdl" => {
+                assert_eq!(
+                    store.selected_desired_token("agent/st/assistant").unwrap(),
+                    before,
+                    "printing must not publish"
+                );
+                let parsed = fractal_daemon::parse_intent(&text, "studio").unwrap();
+                parsed.subjects["agent/st/assistant"].desired.clone()
+            }
+            "mission-apply" => {
+                let spec = store.mission_spec("example/resources", None).unwrap().unwrap();
+                assert_eq!(spec.resources, references[..1], "{path}");
+                let extracted = spec.declarations_kdl.expect("mission retains its agent declaration");
+                let parsed = fractal_daemon::parse_intent(&extracted, "studio").unwrap();
+                let agents = parsed.subjects.values().filter(|subject| subject.kind == "agent")
+                    .collect::<Vec<_>>();
+                assert_eq!(agents.len(), 1, "{path}");
+                agents[0].desired.clone()
+            }
+            _ => {
+                let token = store.selected_desired_token("agent/st/assistant").unwrap().unwrap();
+                let claim: fractal_daemon::model::ClaimRecord = client
+                    .get(&format!("/v1/claims/by-id/{token}"))
+                    .await
+                    .unwrap();
+                let actual: fractal_daemon::model::DesiredSubject =
+                    serde_json::from_value(claim.body).unwrap();
+                if path == "relocate" {
+                    assert_eq!(actual.member.as_ref().unwrap().host, "elsewhere");
+                }
+                actual.desired
+            }
+        };
+        // Typed equality covers target, authored edge kind, name, reason and authored order.
+        // In particular an explicit edge to a known URI must not become a URI edge.
+        assert_eq!(fractal_daemon::graph::declared_resources(&actual), references, "{path}");
+        let uris = store.declared_resource_uris(&references).unwrap();
+        assert_eq!(uris.get(&resource).map(String::as_str), Some(uri), "{path}");
+        assert!(!uris.contains_key("resource/example/not-yet-published"), "{path}");
+        if path == "onboarding" {
+            assert!(text.contains("Started mission/st/onboarding"));
+            assert_eq!(actual, expected);
+            assert!(store.mission_run("st/onboarding").unwrap().is_some());
+        }
+        server.abort();
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

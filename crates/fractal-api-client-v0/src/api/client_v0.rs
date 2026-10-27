@@ -1294,6 +1294,7 @@ struct ResolvedConversation {
     snapshot: ClientSnapshot,
     local_position: u64,
     managed: Option<super::ManagedSessionOwner>,
+    routing_owner: Option<super::ManagedSessionOwner>,
 }
 
 fn resolve_conversation(
@@ -1314,7 +1315,14 @@ fn resolve_conversation(
             .map_err(ApiError::internal)?;
         (session_id, managed)
     };
-    Ok((session_id, ResolvedConversation { snapshot, local_position, managed }))
+    let routing_owner = if crate::subagent_sessions::child_parts(&session_id).is_some() {
+        fractal_api_core::api::client_v0::routing_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).map_err(ApiError::internal)?
+    } else {
+        managed.clone()
+    };
+    Ok((session_id, ResolvedConversation { snapshot, local_position, managed, routing_owner }))
 }
 
 /// Where a conversation is read: here, or on the host that owns its session.
@@ -1361,7 +1369,7 @@ async fn open_conversation_subscription(
         crate::performance::task("conversation/admission", || {
             let target = request.conversation.as_deref().unwrap_or_default();
             let (session_id, resolved) = resolve_conversation(&state, target)?;
-            let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+            let remote = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())?;
             Ok((session_id, remote, Some(resolved)))
         })
     })
@@ -1506,7 +1514,7 @@ fn conversation_open_local_marked(
         Some(resolved) => resolved,
         None => resolve_conversation(state, session_id)?.1,
     };
-    let ResolvedConversation { snapshot, local_position, managed } = resolved;
+    let ResolvedConversation { snapshot, local_position, managed, .. } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
@@ -2550,10 +2558,16 @@ pub async fn agent_declaration(
     let lookup_subject = subject.clone();
     let store = state.store.clone();
     let revision = query.revision;
-    let (declaration, revisions) = blocking_store(move || {
+    let (declaration, revisions, uris) = blocking_store(move || {
         let declaration = store.agent_declaration(&lookup_subject, revision.as_deref())?;
         let revisions = store.agent_declaration_revisions(&lookup_subject)?;
-        Ok((declaration, revisions))
+        let uris = match &declaration {
+            Some((_, tree)) => {
+                store.declared_resource_uris(&crate::graph::declared_resources(tree))?
+            }
+            None => BTreeMap::new(),
+        };
+        Ok((declaration, revisions, uris))
     })
     .await?;
     let Some((revision, mut tree)) = declaration else {
@@ -2562,7 +2576,7 @@ pub async fn agent_declaration(
     if !query.show_env_values {
         crate::graph::redact_agent_env_values(&mut tree);
     }
-    let kdl = crate::graph::render_agent_desired_kdl(&tree).map_err(ApiError::bad)?;
+    let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).map_err(ApiError::bad)?;
     let accountable = fractal_schema::accountable::from_desired(&tree)
         .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
     let mut value = json!({
@@ -2669,7 +2683,8 @@ pub async fn subject_definition(
             if !show_env_values {
                 crate::graph::redact_agent_env_values(&mut desired);
             }
-            let kdl = crate::graph::render_agent_desired_kdl(&desired)?;
+            let uris = store.declared_resource_uris(&crate::graph::declared_resources(&desired))?;
+            let kdl = crate::graph::render_agent_desired_kdl(&desired, &uris)?;
             let revision = status.desired_revision
                 .ok_or_else(|| anyhow::anyhow!("an applied definition has no desired revision"))?;
             let token = status.desired_token
@@ -2902,6 +2917,11 @@ fn mission_resources_filtered(
     for mission in definitions.keys() {
         missions.entry(mission.clone()).or_default();
     }
+    let resource_uris = store.declared_resource_uris(
+        definitions
+            .values()
+            .flat_map(|(definition, _)| &definition.resources),
+    )?;
     let page_runs = missions
         .values()
         .flatten()
@@ -3212,6 +3232,10 @@ fn mission_resources_filtered(
                 "run_generations": run_generations,
                 "visualization": visualization,
                 "usage": usage,
+                "resources": crate::api::client_declared_resources(
+                    definition.map_or(&[][..], |(definition, _)| definition.resources.as_slice()),
+                    &resource_uris,
+                ),
                 "operational": {
                     "layer": if historical { "history" } else { "current" },
                     "actionable": !historical,
@@ -4846,7 +4870,7 @@ pub async fn conversation_changes(
             let session_id = conversation_session_id(&state, &id)?;
             let snapshot = new_client_snapshot(&state);
             let owner =
-                super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                fractal_api_core::api::client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
                     .map_err(ApiError::internal)?;
             Ok((session_id, owner))
         },
@@ -4917,7 +4941,7 @@ pub async fn conversation_stream(
         .to_owned();
     let session_id = conversation_session_id(&state, &id)?;
     let snapshot = new_client_snapshot(&state);
-    let remote = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+    let remote = fractal_api_core::api::client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
         .map_err(ApiError::internal)?
         .and_then(|(_, _, origin)| origin)
         .filter(|origin| origin != state.store.origin())
@@ -8198,8 +8222,12 @@ async fn dispatch_action(
                     serde_json::to_string(&agent).map_err(ApiError::internal)?
                 )
             } else {
-                let mut node =
-                    crate::graph::render_desired_node(&declared.desired).map_err(ApiError::bad)?;
+                let uris = state
+                    .store
+                    .declared_resource_uris(&crate::graph::declared_resources(&declared.desired))
+                    .map_err(ApiError::internal)?;
+                let mut node = crate::graph::render_agent_node(&declared.desired, &uris)
+                    .map_err(ApiError::bad)?;
                 let identity = agent.trim_start_matches("agent/");
                 let mut body = node.children_mut().take().unwrap_or_default();
                 if let Some(child) = body
@@ -11828,7 +11856,7 @@ mission "differential" state="ready" {
                                             .block_on(held.wait_for(|released| *released));
                                         let target = request.conversation.as_deref().unwrap_or_default();
                                         let (session_id, resolved) = resolve_conversation(&state, target)?;
-                                        let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+                                        let remote = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())?;
                                         Ok((session_id, remote, Some(resolved)))
                                     }).await.unwrap()
                                 }
@@ -12478,7 +12506,7 @@ mission "differential" state="ready" {
                 "children": [{ "name": "child", "arguments": [null] }],
             }],
         });
-        let rendered = crate::graph::render_agent_desired_kdl(&desired).unwrap();
+        let rendered = crate::graph::render_agent_desired_kdl(&desired, &BTreeMap::new()).unwrap();
         let document = rendered.parse::<kdl::KdlDocument>().unwrap();
         assert_eq!(document.nodes()[0].name().value(), "version");
         assert_eq!(document.nodes()[1].name().value(), "agent");
@@ -16047,6 +16075,87 @@ mission "example/steps" state="ready" {
     }
 
     #[test]
+    fn missions_show_the_resources_their_published_revision_names() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "resource-node");
+        let uri = "https://github.com/compoundingtech/smalltalk/issues/752";
+        let source = format!(
+            "version 2\nmission \"example/tracked\" state=\"ready\" {{\n  goal \"Track the issue.\"\n  resource \"tracker\" uri=\"{uri}\" reason=\"tracking issue\"\n}}\n"
+        );
+        let intent = crate::graph::parse_intent(&source, "resource-node").unwrap();
+        let preview = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply_as(&intent, &preview.subject_tokens, "publish", Some("person/ada"))
+            .unwrap();
+        let expected = json!([{
+            "name": "tracker",
+            "subject": format!("resource/uri/{}", hex::encode(Sha256::digest(uri))),
+            "kind": "uri",
+            "resolution": "resolved",
+            "uri": uri,
+            "reason": "tracking issue",
+        }]);
+        let index = state.store.index().unwrap();
+        let detail =
+            mission_resources(&state.store, index, true, Some("mission/example/tracked")).unwrap();
+        assert_eq!(detail[0]["resources"], expected);
+        let cards =
+            mission_list_cards(&state.store, &["mission/example/tracked".to_owned()]).unwrap();
+        assert_eq!(cards[0]["resources"], expected);
+        let typed: fractal_client::Resource = serde_json::from_value(cards[0].clone()).unwrap();
+        let fractal_client::Resource::Mission(typed) = typed else {
+            panic!("a mission resource");
+        };
+        assert_eq!(typed.resources[0].uri.as_deref(), Some(uri));
+
+        // Republish without the edge: both client views use the current revision, while the
+        // URI subject remains available to other declarations that still reference it.
+        let source =
+            "version 2\nmission \"example/tracked\" state=\"ready\" {\n  goal \"Track the issue.\"\n}\n";
+        let intent = crate::graph::parse_intent(source, "resource-node").unwrap();
+        let preview = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.to_owned(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply_as(&intent, &preview.subject_tokens, "remove", Some("person/ada"))
+            .unwrap();
+        let detail = mission_resources(
+            &state.store,
+            state.store.index().unwrap(),
+            true,
+            Some("mission/example/tracked"),
+        )
+        .unwrap();
+        assert_eq!(detail[0]["resources"], json!([]));
+        let cards =
+            mission_list_cards(&state.store, &["mission/example/tracked".to_owned()]).unwrap();
+        assert_eq!(cards[0]["resources"], json!([]));
+        let subject = format!("resource/uri/{}", hex::encode(Sha256::digest(uri)));
+        assert_eq!(
+            state.store.selected_desired_kind(&subject).unwrap().as_deref(),
+            Some("resource")
+        );
+    }
+
+    #[test]
     fn mission_resources_include_published_definitions_without_runs() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "zero-run-node");
@@ -17709,6 +17818,117 @@ mission "example/zero-run" state="ready" {
         assert!(history.iter().any(|item|
             item["body"]["text"] == "older native history message"));
         follower.abort();
+    }
+
+    fn remote_child_fixture(root: &Path) -> (AppState, String, String) {
+        let (mut owner, parent_id, _) =
+            conversation_first_frame_fixture(root, "conversation-owner", 1);
+        owner.native_session_home = None;
+        let (_, resolved) = resolve_conversation(&owner, &parent_id).unwrap();
+        let parent = conversation_blocks::source(&owner, &parent_id, resolved.managed.as_ref()).unwrap();
+        let directory = parent.transcript.with_extension("");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("child.jsonl"), concat!(
+            "{\"type\":\"session\",\"id\":\"child-native\",\"cwd\":\"/work\",\"timestamp\":\"2026-10-08T12:00:00Z\"}\n",
+            "{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-10-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"child only\"}]}}\n",
+        )).unwrap();
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "child", &parent_id);
+        (owner, parent_id, child_id)
+    }
+
+    #[tokio::test]
+    async fn remote_child_admission_without_relay_is_unavailable_not_parent_content() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let (owner, _, child_id) = remote_child_fixture(owner_root.path());
+        let gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
+        gateway.store.import_replication(
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
+        ).unwrap();
+        let (resolved_id, resolved) = resolve_conversation(&gateway, &child_id).unwrap();
+        assert_eq!(resolved_id, child_id);
+        assert!(resolved.managed.is_none());
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let request = serde_json::from_value(json!({
+            "kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":child_id,
+        })).unwrap();
+        let permits = ConversationAdmissionPermits {
+            _socket: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+            _daemon: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+        };
+        let error = open_conversation_subscription(gateway, session, request, permits)
+            .await.err().unwrap();
+        assert_eq!(error.code, "remote-unavailable");
+    }
+
+    #[tokio::test]
+    async fn two_host_child_admission_relays_child_identity_and_never_parent_content() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let (owner, parent_id, child_id) = remote_child_fixture(owner_root.path());
+        let mut gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
+        gateway.store.import_replication(
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
+        ).unwrap();
+        let owner_socket = owner_root.path().join("owner-st3.sock");
+        let served_owner = owner_socket.clone();
+        let owner_app = crate::api::router(owner);
+        tokio::spawn(async move { crate::api::serve_unix(&served_owner, owner_app).await });
+        for _ in 0..200 {
+            if tokio::net::UnixStream::connect(&owner_socket).await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        gateway.client_relay = crate::peer::conversation_gateway_relay(
+            &owner_socket, crate::api::raw_terminal_owner_splice, gateway_root.path(),
+        ).await.unwrap();
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let request = serde_json::from_value(json!({
+            "kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":child_id,
+        })).unwrap();
+        let permits = ConversationAdmissionPermits {
+            _socket: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+            _daemon: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+        };
+        let (resolved_id, remote, resolved) =
+            open_conversation_subscription(gateway.clone(), session.clone(), request, permits).await.unwrap();
+        assert_eq!(resolved_id, child_id);
+        assert!(resolved.as_ref().unwrap().managed.is_none());
+        assert_eq!(remote.as_deref(), Some("host/conversation-owner"));
+        let (start, page, _) = conversation_open_value(
+            &gateway, &session, &resolved_id, remote.as_deref(), resolved, 20,
+        ).await.unwrap();
+        assert_eq!(page["session_id"], child_id);
+        assert!(page.to_string().contains("child only"), "{page}");
+        assert!(!page.to_string().contains("entry 0 "), "{page}");
+        let cursor = start["next_cursor"].as_str().unwrap();
+        assert!(conversation_position(&gateway, &parent_id, cursor).is_err());
+        let (frame, _) = first_frame_and_older_history(
+            &gateway, &child_id, remote.as_deref(), Some(20),
+        ).await;
+        assert_eq!(frame["session_id"], child_id);
+        assert!(frame.to_string().contains("child only"), "{frame}");
+        assert!(!frame.to_string().contains("entry 0 "), "{frame}");
+        let changes = conversation_changes(
+            State(gateway.clone()), Extension(session.clone()), AxumPath(child_id.clone()),
+            Query(ConversationQuery { after: None, wait_ms: Some(0) }),
+        ).await.unwrap().0;
+        assert_eq!(changes["session_id"], child_id);
+        assert!(!changes.to_string().contains("entry 0 "), "{changes}");
+        let page = fractal_api_core::api::client_reads::client_sessions_detail(
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session.clone()),
+            AxumPath(format!("{}/timeline", child_id.trim_start_matches("session/"))),
+            Query(ClientListQuery::default()),
+        ).await.unwrap().0;
+        assert_eq!(page["session_id"], child_id);
+        assert!(page.to_string().contains("child only"), "{page}");
+        assert!(!page.to_string().contains("entry 0 "), "{page}");
+        let detail = fractal_api_core::api::client_reads::client_sessions_detail(
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session),
+            AxumPath(child_id.trim_start_matches("session/").to_owned()),
+            Query(ClientListQuery::default()),
+        ).await.unwrap().0;
+        assert_eq!(detail["id"], child_id);
+        assert_eq!(detail["managed"], false);
     }
 
     #[tokio::test]

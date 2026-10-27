@@ -931,6 +931,11 @@ pub fn mission_list_cards_with(
         .into_iter()
         .map(|d| (d.mission.subject.clone(), d))
         .collect::<BTreeMap<_, _>>();
+    let resource_uris = store.declared_resource_uris(
+        definitions
+            .values()
+            .flat_map(|definition| &definition.mission.resources),
+    )?;
     ids.iter().map(|id| {
         let overview = crate::performance::task("mission_collection/overview", || store.mission_overview(id, 3))?;
         let newest = overview["newest"].as_array().expect("overview previews");
@@ -993,6 +998,8 @@ pub fn mission_list_cards_with(
             "run_details":details,"active_runs":active,"total_runs":overview["total_runs"],
             "run_counts":overview["counts"],"runs_truncated":overview["total_runs"].as_u64().unwrap_or(0)>newest.len() as u64,
             "run_generations":generations,"must_act":must_act,
+            "resources":crate::api::client_declared_resources(
+                definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
             "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
     }).collect()
 }
@@ -3212,21 +3219,14 @@ pub fn timeline_first_page(
                 }
                 conversation_blocks::read(&external, session, &session_id)?
             }
-            // A subagent conversation id resolves beside its parent before it is unknown.
-            other => match crate::subagent_sessions::resolve_child(
-                state.native_session_home.as_deref(),
-                &session_id,
-            )
-            .map_err(ApiError::internal)?
-            {
-                Some(child) => {
-                    if child.driver != crate::external_sessions::ExternalDriver::OpenCode {
-                        return native_slice_page(state, snapshot, session, &session_id, query, &child);
-                    }
-                    conversation_blocks::read(&child, session, &session_id)?
+            _ if crate::subagent_sessions::child_parts(&session_id).is_some() => {
+                let child = conversation_blocks::source(state, &session_id, None)?;
+                if child.driver != crate::external_sessions::ExternalDriver::OpenCode {
+                    return native_slice_page(state, snapshot, session, &session_id, query, &child);
                 }
-                None => external_conversation_items(other, &session_id)?,
-            },
+                conversation_blocks::read(&child, session, &session_id)?
+            }
+            other => external_conversation_items(other, &session_id)?,
         };
         return native_timeline_page(state, snapshot, session, &session_id, query, items, managed);
     };
@@ -3663,6 +3663,16 @@ pub fn timeline_first_page(
         page_value["header"] = header;
     }
     Ok(Json(page_value))
+}
+
+/// Resolve only where a conversation is read, without making a child a managed session.
+pub fn routing_session_owner_at(
+    store: &Store, index: u64, session_id: &str,
+) -> anyhow::Result<Option<super::ManagedSessionOwner>> {
+    let child = crate::subagent_sessions::child_parts(session_id);
+    let routing_id = child.as_ref()
+        .map_or(session_id, |parts| parts.routing_parent_session_id.as_str());
+    super::managed_session_owner_at(store, index, routing_id)
 }
 
 pub fn conversation_session_id(state: &AppState, id: &str) -> Result<String, ApiError> {

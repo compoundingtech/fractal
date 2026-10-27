@@ -146,6 +146,9 @@ pub enum ClientReadOperation {
         limit: usize,
         cursor: Option<String>,
     },
+    SessionDetail {
+        session_id: String,
+    },
     TerminalScreen {
         terminal_id: String,
         /// Ask the owner for its best-effort session facts too.
@@ -1361,6 +1364,9 @@ async fn receive_client_read(
                 }
                 let value = answer?.value;
                 relay_trace::result(Phase::Envelope, || Ok(serde_json::to_value(value)?))
+            }
+            ClientReadOperation::SessionDetail { session_id } => {
+                Ok(serde_json::to_value(client.sessions_get(&session_id).await?.value)?)
             }
             ClientReadOperation::TerminalScreen { terminal_id, facts } => {
                 let value = if facts {

@@ -1014,7 +1014,7 @@ jobs:
         uses: actions/cache@v5
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.7.0-${{ steps.lockfiles.outputs.hash }}"
+          key: "typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}"
       - name: Fill missing dependencies
         shell: bash
         run: "nix develop '.#web' -c pnpm fetch"
@@ -1074,7 +1074,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
           lookup-only: true
       - name: Restore the web shell closure
         id: web-shell
@@ -1106,7 +1106,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: "${{ runner.temp }}/pnpm-store"
-          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
+          key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}"
         if: steps.pnpm-store.outputs.cache-hit != 'true'
       - name: Fill the web shell closure
         shell: bash
