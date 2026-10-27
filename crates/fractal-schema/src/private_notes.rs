@@ -149,8 +149,15 @@ pub(crate) fn validate_observation(
         if operation.len() != 24 || !operation.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
             return Err(invalid());
         }
-        for name in ["authority_actor", "session_actor"] {
-            let actor = fields.get(name).and_then(serde_json::Value::as_str).ok_or_else(invalid)?;
+        let authority = fields.get("authority_actor").and_then(serde_json::Value::as_str).ok_or_else(invalid)?;
+        let subject = super::registry().validate_subject(authority)?;
+        if !matches!(subject.family.as_str(), "person" | "agent") {
+            return Err(invalid());
+        }
+        let actor = fields.get("session_actor").and_then(serde_json::Value::as_str).ok_or_else(invalid)?;
+        // Paired clients retain their client/... session identity while acting
+        // under a concrete person's authority.
+        if !actor.strip_prefix("client/").is_some_and(|name| !name.is_empty()) {
             let subject = super::registry().validate_subject(actor)?;
             if !matches!(subject.family.as_str(), "person" | "agent") {
                 return Err(invalid());
@@ -179,11 +186,16 @@ mod tests {
             ("action".into(), json!("private-notes.write")),
             ("operation_id".into(), json!("operation/private-notes-0123456789abcdef01234567")),
             ("stage".into(), json!("requested")),
-            ("authority_actor".into(), json!("person/operator")),
-            ("session_actor".into(), json!("person/operator")),
+            ("authority_actor".into(), json!("person/ada")),
+            ("session_actor".into(), json!("person/ada")),
             ("transport".into(), json!("unix")),
         ]);
         validate_observation("resource.observed", &fields).unwrap();
+        let mut paired = fields.clone();
+        paired.insert("session_actor".into(), json!("client/paired-example"));
+        validate_observation("resource.observed", &paired).unwrap();
+        paired.insert("authority_actor".into(), json!("client/paired-example"));
+        assert!(validate_observation("resource.observed", &paired).is_err());
         for name in ["markdown", "revision", "carrier_generation", "digest", "size", "path"] {
             let mut private = fields.clone();
             private.insert(name.into(), json!("private"));

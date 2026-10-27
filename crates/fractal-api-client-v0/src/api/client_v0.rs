@@ -8471,6 +8471,13 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
         .as_object_mut()
         .expect("an action is an object")
         .remove("fence");
+    if request.action_type == "private-notes.write" {
+        // The shared receipt reserves the cross-action key, not the private
+        // mutation. Content matching and recovery stay in the owner-local ledger.
+        if let Some(parameters) = content["parameters"].as_object_mut() {
+            parameters.remove("markdown");
+        }
+    }
     Ok(hex::encode(Sha256::digest(
         serde_json::to_vec(&content).map_err(ApiError::internal)?,
     )))
@@ -8626,16 +8633,13 @@ async fn action_inner(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
-    Json(request): Json<ActionRequest>,
+    Json(mut request): Json<ActionRequest>,
     reserved_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Json<Value>, ApiError> {
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
     if reserved_gate.is_none() {
         validate_action_admission(&session, &request)?;
-    }
-    if request.action_type == "private-notes.write" {
-        return private_notes::write(&state, &session, request).await.map(Json);
     }
     let gate = action_gate(&state, &session, &request.idempotency_key);
     let _guard = match reserved_gate {
@@ -8683,6 +8687,12 @@ async fn action_inner(
                 message: "the idempotency key was already used for a different action".into(),
                 details: Box::default(),
             });
+        }
+        if request.action_type == "private-notes.write" {
+            // Never replay a private fence from the graph or bypass current
+            // ownership checks and owner-local exact-request recovery.
+            validate_fence(&state, &request.fence)?;
+            return private_notes::write(&state, &session, &mut request).await.map(Json);
         }
         let mut result = receipt
             .body
@@ -8880,6 +8890,11 @@ async fn action_inner(
     } else {
         None
     };
+    let notes_result = if request.action_type == "private-notes.write" {
+        Some(private_notes::write(&state, &session, &mut request).await?)
+    } else {
+        None
+    };
     let affected = if let Some(attachment) = &terminal_attachment {
         vec![
             attachment["attachment_id"]
@@ -8889,11 +8904,16 @@ async fn action_inner(
         ]
     } else if let Some(claim) = &arrangement_claim {
         vec![claim.subject.clone()]
+    } else if notes_result.is_some() {
+        Vec::new()
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
     let operation_id = format!("operation/client-{}", &request_digest[..24]);
     let mut result = json!({ "kind": "action-result", "action_id": request.id, "operation_id": operation_id, "status": "completed", "affected_ids": affected });
+    if let Some(notes) = notes_result {
+        result = notes;
+    }
     if let Some(attachment) = terminal_attachment {
         result["terminal_attachment"] = attachment;
     }
@@ -8911,6 +8931,9 @@ async fn action_inner(
         .as_object_mut()
         .expect("action result is an object")
         .remove("terminal_attachment");
+    // Private recovery fences belong only to the owner-local receipt.
+    persisted_result.as_object_mut().expect("action result is an object").remove("private_notes");
+    persisted_result.as_object_mut().expect("action result is an object").remove("snapshot_id");
     let receipt_write = state.store.append_claim(&ClaimInput {
         subject: receipt_subject.clone(),
         kind: "client.action-result".into(),
@@ -8953,6 +8976,10 @@ async fn action_inner(
                 message: "the idempotency key was already used for a different action".into(),
                 details: Box::default(),
             });
+        }
+        if request.action_type == "private-notes.write" {
+            result["snapshot_id"] = Value::String(new_client_snapshot(&state).id);
+            return Ok(Json(result));
         }
         let mut replay = receipt
             .body

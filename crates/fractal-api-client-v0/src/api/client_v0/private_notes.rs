@@ -65,15 +65,14 @@ fn publish_observation(state: &AppState, input: &mut ClaimInput) -> Result<(), S
     Ok(())
 }
 
-pub(super) async fn write(state: &AppState, session: &ClientSession, request: ActionRequest) -> Result<Value, ApiError> {
+pub(super) async fn write(state: &AppState, session: &ClientSession, request: &mut ActionRequest) -> Result<Value, ApiError> {
     require_scope(session, "control.work")?;
     if !acting_party(session) {
         return Err(forbidden("client mutations require a concrete person or a local agent"));
     }
-    validate_fence(state, &request.fence)?;
-    let parameters: WriteParameters = serde_json::from_value(request.parameters).map_err(|_| validation("notes write requires only a canonical URI and complete Markdown"))?;
+    let parameters: WriteParameters = serde_json::from_value(std::mem::take(&mut request.parameters)).map_err(|_| validation("notes write requires only a canonical URI and complete Markdown"))?;
     fractal_schema::private_notes::PrivateNotesUri::parse(&parameters.uri).map_err(|error| validation(error.message))?;
-    let fence: NotesFence = request.fence.private_notes.ok_or_else(|| validation("notes write requires its carrier generation and revision fence"))?;
+    let fence: NotesFence = request.fence.private_notes.take().ok_or_else(|| validation("notes write requires its carrier generation and revision fence"))?;
     let write = NotesWrite { uri: parameters.uri, markdown: parameters.markdown, fence };
     let operation = operation_key(&session.actor, &request.idempotency_key).map_err(ApiError::bad)?;
     // No supported write can change bytes without a durable attributed intent.
@@ -101,7 +100,7 @@ pub(super) async fn write(state: &AppState, session: &ClientSession, request: Ac
     let audit = std::cell::RefCell::new(audit);
     let writer = state.clone();
     let actor = session.actor.clone();
-    let key = request.idempotency_key;
+    let key = request.idempotency_key.clone();
     let mut result = super::super::blocking_action(move || {
         writer.private_notes.write_with_audit(
             &writer.node, &writer.state_dir, &actor, &key, &write,
@@ -114,7 +113,7 @@ pub(super) async fn write(state: &AppState, session: &ClientSession, request: Ac
             },
         )
     }).await?;
-    result["action_id"] = request.id.into();
+    result["action_id"] = request.id.clone().into();
     result["snapshot_id"] = new_client_snapshot(state).id.into();
     Ok(result)
 }
@@ -158,13 +157,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ordinary_person_and_agent_share_fenced_private_notes_permissions() {
+    async fn ordinary_person_agent_and_paired_client_share_fenced_private_notes_permissions() {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let read_only = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
         assert_eq!(read(&state, &read_only).await["actions"], json!([]));
-        for (index, actor) in ["person/ada", "agent/example/worker"].into_iter().enumerate() {
-            let session = ClientSession::for_tests_scoped(actor, actor, &["read.projections", "control.work"]);
+        for (index, (actor, authority)) in [
+            ("person/ada", "person/ada"),
+            ("agent/example/worker", "agent/example/worker"),
+            ("client/paired-example", "person/ada"),
+        ].into_iter().enumerate() {
+            let session = ClientSession::for_tests_scoped(actor, authority, &["read.projections", "control.work"]);
             let notes = read(&state, &session).await;
             let request = action(&notes, &format!("notes-write-{index}-00000001"), &format!("Private owner context {index}.\n"));
             assert_eq!(invoke(&state, &read_only, request.clone()).await.unwrap_err().status, StatusCode::FORBIDDEN);
@@ -172,6 +175,11 @@ mod tests {
             assert_eq!(written["affected_ids"], json!([]));
             let retried = invoke(&state, &session, request.clone()).await.unwrap();
             assert_eq!(written["private_notes"], retried["private_notes"]);
+            let mut changed = request.clone();
+            changed.parameters["markdown"] = json!("different private bytes");
+            assert_eq!(super::super::action_request_digest(&request).unwrap(),
+                super::super::action_request_digest(&changed).unwrap());
+            assert_eq!(invoke(&state, &session, changed).await.unwrap_err().code, "idempotency-conflict");
             let mut stale = request;
             stale.idempotency_key = format!("notes-stale-{index}-00000001");
             stale.parameters["markdown"] = "stale replacement".into();
@@ -181,10 +189,50 @@ mod tests {
             let completed = claims.iter().filter(|claim| claim.body["fields"]["stage"] == "completed"
                 && claim.body["fields"]["session_actor"] == actor).collect::<Vec<_>>();
             assert_eq!(completed.len(), 1);
-            assert_eq!(completed[0].actor.as_deref(), Some(actor));
+            assert_eq!(completed[0].actor.as_deref(), Some(authority));
             let wire = serde_json::to_string(&claims).unwrap();
             for private in ["Private owner context", "stale replacement", "carrier_generation", "revision", "markdown"] {
                 assert!(!wire.contains(private), "private audit field: {private}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn notes_and_other_actions_share_idempotency_conflicts_without_private_receipts() {
+        for notes_first in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let session = ClientSession::local(Some("person/ada")).unwrap();
+            let notes = read(&state, &session).await;
+            let request = action(&notes, "notes-cross-action-key-0001", "Private shared-key context.\n");
+            let send = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(),
+                id: "action/notes-cross-action-send".into(),
+                action_type: "message.send".into(),
+                idempotency_key: request.idempotency_key.clone(),
+                fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+                parameters: json!({"to":"agent/worker","content":"ordinary message"}),
+            };
+            let (first, second) = if notes_first { (request.clone(), send) } else { (send, request) };
+            invoke(&state, &session, first).await.unwrap();
+            let index = state.store.index().unwrap();
+            let before = read(&state, &session).await["data"].clone();
+            let error = invoke(&state, &session, second).await.unwrap_err();
+            assert_eq!(error.code, "idempotency-conflict");
+            assert_eq!(error.status, StatusCode::CONFLICT);
+            assert_eq!(state.store.index().unwrap(), index);
+            assert_eq!(read(&state, &session).await["data"], before);
+            let receipt_digest = hex::encode(Sha256::digest(
+                format!("{}:notes-cross-action-key-0001", session.actor).as_bytes(),
+            ));
+            let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+            let receipts = state.store.observations_for(&receipt_subject, "client.action-result").unwrap();
+            assert_eq!(receipts.len(), 1);
+            if notes_first {
+                let wire = serde_json::to_string(&receipts).unwrap();
+                for private in ["Private shared-key context", "private_notes", "carrier_generation", "revision", "markdown"] {
+                    assert!(!wire.contains(private), "private receipt field: {private}");
+                }
             }
         }
     }
