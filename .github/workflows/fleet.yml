@@ -3884,6 +3884,7 @@ jobs:
               "apps/fractal-web/src/web/detailsSupplement.ts",
               "apps/fractal-web/src/web/lastObserved.tsx",
               "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
+              "apps/fractal-web/src/web/useTabMetadata.ts",
               "apps/fractal-web/src/web/liveSidebarTree.ts",
               "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/NativeTurnFooter.tsx",
