@@ -12,7 +12,7 @@ fn refused(reason: impl Into<String>) -> St3Error {
     St3Error::new("stale-mailbox-session", reason)
 }
 
-fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
+pub(crate) fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
     crate::hooks::claude_agent_dir(
         &state.state_dir.join("drivers"),
         &fence.subject,

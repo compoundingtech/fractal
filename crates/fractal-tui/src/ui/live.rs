@@ -3727,7 +3727,7 @@ mod tests {
     #[test]
     fn attach_deadline_retry_key_reopens_the_same_terminal() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let mut ui = Ui::new(crate::ui::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::test_world());
         ui.live = true;
         let agent = "terminal/attach-deadline-test";
         ui.open_in_glass(
@@ -3851,7 +3851,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("requests");
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3892,7 +3892,7 @@ mod tests {
     fn a_name_another_process_wrote_cannot_put_control_characters_in_the_flash() {
         use super::super::pane::Pane;
         use super::super::requests::Place;
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3917,7 +3917,7 @@ mod tests {
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let mut assistant = world.agents.items()[0].clone();
         assistant.id = "agent/st/assistant".into();
         assistant.name = "Fractal Assistant".into();
@@ -3957,7 +3957,7 @@ mod tests {
 
     #[test]
     fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let mut missing = Some("agent/st/assistant".to_owned());
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut missing, true, true);
@@ -3985,7 +3985,7 @@ mod tests {
     #[test]
     fn no_initial_subject_preserves_the_restored_space() {
         use super::super::pane::Pane;
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         ui.open_home();
@@ -4554,7 +4554,7 @@ mod tests {
             fractal_conversation_ui::Density::Full,
         );
         let body_start = doc.messages[0].1.start as u16;
-        let ui = Ui::new(super::super::demo::world());
+        let ui = Ui::new(super::super::demo::test_world());
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(90, body_start)).unwrap();
         terminal
@@ -4641,7 +4641,7 @@ mod tests {
                 images: Vec::new(),
             },
         };
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let agent = world.agents.items()[0].clone();
         let agent_id = agent.id.clone();
         world.agents = Load::Ready(vec![agent]);
@@ -4772,7 +4772,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         for child in [false, true] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             ui.live = true;
             let target = if child {
                 "session/tester-child".to_owned()

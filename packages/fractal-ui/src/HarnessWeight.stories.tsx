@@ -69,6 +69,7 @@ const assertFirstLineAccessories = async (notice: HTMLElement, wrapped = false) 
 export const Dark: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    await expect(getComputedStyle(canvas.getByRole('region', { name: 'Harness event weight comparison' })).alignContent).toBe('start')
     for (const weight of ['row', 'card']) {
       const column = within(canvas.getByTestId(`harness-weight-${weight}`))
       await expect(column.getAllByTestId('harness-notice')).toHaveLength(harnessWeightExamples.length)
@@ -199,6 +200,7 @@ const mixedOutcomes = (scheme: Scheme, width: 'narrow' | 'wide'): Story => ({
   render: () => <MixedJobOutcomes scheme={scheme} width={width} />,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    await expect(getComputedStyle(canvas.getByRole('region', { name: 'Mixed job outcomes' })).alignContent).toBe('start')
     const row = (weight: HarnessWeight, id: string) => canvas.getByTestId(`mixed-outcomes-${weight}`).querySelector<HTMLElement>(`[data-item-id="${id}"]`)!
     const pill = (weight: HarnessWeight, id: string) => within(row(weight, id)).getByTestId('harness-kind')
     const icon = (weight: HarnessWeight, id: string) => row(weight, id).querySelector('svg path')?.getAttribute('d')
@@ -242,7 +244,7 @@ export const MixedJobOutcomesDark1440: Story = mixedOutcomes('dark', 'wide')
 export const MixedJobOutcomesLight440: Story = mixedOutcomes('light', 'narrow')
 
 const styles = stylex.create({
-  root: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(22rem, 1fr))', gap: s.section, minHeight: '100vh', padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
+  root: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(22rem, 1fr))', alignContent: 'start', gap: s.section, minHeight: '100vh', padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
   mixedRoot: { gridTemplateColumns: 'repeat(auto-fit, minmax(min(22rem, 100%), 1fr))', maxWidth: '100%', boxSizing: 'border-box' },
   forcedWrap: { maxWidth: '18rem' },
   wide: { width: g.polishWide, maxWidth: '100%' },

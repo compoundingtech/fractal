@@ -2623,6 +2623,50 @@ are current; each affected card keeps its previous `fault`, including a known nu
 A card with no previous value reports `"fault status unknown"` in that same field. The next
 refresh retries those faults even if no claim changed.
 
+### Immutable current publications
+
+The existing background roster refresher uses the shared generation-fenced published-list
+owner for one latest immutable complete presented roster, replacing it and notifying readers atomically.
+Rows, order, metadata and the encoded body belong to the same publication. Startup chunks and history rosters do not obtain
+a current publication revision. A failed refresh retains the previous publication and its
+original metadata. The failed-only `fresh=true` fallback described above is unchanged.
+
+An active revisioned subscription, a recent agents list read, or an explicit roster refresh
+request keeps source, presence and presentation refreshes active. Summary and assistant reads
+register demand through the refresh request itself; dropping the last subscription does not
+create an ordinary-read grace period. The single existing paced owner checks time-sensitive
+presentation at a one-second scheduling bound (plus admission and fold time), rather than adding
+a timer per subscriber. It rechecks demand after admission and again when its blocking worker
+starts. A new revisioned subscription requests a complete view. Without demand, including after
+queued notifications are consumed, inputs remain dirty but catch-up and trim do not refold the
+roster. Full projection reset clears the current publication and changes its epoch even while idle.
+Startup queues one complete publication after its bounded head, even before any read.
+An explicit or local-activity refresh request remains demand until that attempt answers it,
+including across admission and blocking-worker queues. A subscription wake alone is not such
+a request: dropping its last receiver can still cancel an otherwise unrequested refresh.
+Request capture and failed-fold restoration are serialized with projection reset, so a reset
+cannot resurrect a pending request belonging to the discarded generation.
+
+`AgentsPublicationMetadata` identifies the publication with an opaque UUID `node_epoch` and
+an increasing epoch-local `revision`. Restart, full projection reset or revision exhaustion starts a new epoch;
+no current publication is available until a complete roster is ready. Revisions can skip
+numbers. They are not history positions or replay cursors and cannot be compared across epochs.
+The `status_watermark` contains the node-local graph `store_index` and the roster-relevant
+`local_frontier`. It is not a cross-node freshness measure.
+
+The server fixes the presentation clock and retains delivery-presence assessments with the rows.
+It reads graph-backed subagents at the final pinned source cut. Later clock, presence or graph changes do not alter published
+rows. `materialized_at_ms` is that server presentation time in Unix milliseconds. It is not
+producer observation time, evidence receipt time or proof of row age.
+
+The canonical `AgentsPublication` definition contains `publication`, `items`, `order` and
+`has_more: false`. It is a complete current view, with no core row-count or encoded-byte cap.
+Legacy HTTP response budgets, pagination and HTTP and WebSocket wire grammars are unchanged.
+These definitions add no endpoint, WebSocket field or transport opt-in. The future descriptor
+name `collections.agents.revisioned.v1` does not announce availability and is not advertised.
+Atomic WebSocket snapshot chunking is separate work. No history, replay or producer-age
+transport is provided by these definitions.
+
 ## Missions and work window freshness
 
 The `missions` and `work` collection streams answer from lists the daemon's background
