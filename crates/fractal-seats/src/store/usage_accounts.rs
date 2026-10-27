@@ -202,10 +202,22 @@ agent "keyed" { workspace "/tmp"; harness "omp" {}; }
 "#;
 
     fn spend(store: &Store, seat: &str, driver: &str, account: Option<&str>, model: &str, id: &str) {
+        spend_in(store, seat, driver, account, model, id, "inc-one");
+    }
+
+    fn spend_in(
+        store: &Store,
+        seat: &str,
+        driver: &str,
+        account: Option<&str>,
+        model: &str,
+        id: &str,
+        incarnation: &str,
+    ) {
         let mut fields = serde_json::from_value::<BTreeMap<String, Value>>(json!({
             "operation": "append", "entry_id": id, "source_id": id, "sequence": 1, "revision": 1,
             "role": "system", "entry_type": "usage", "final": true, "driver": driver,
-            "incarnation_id": "inc-one", "observed_at_unix_ms": now_ms() as u64,
+            "incarnation_id": incarnation, "observed_at_unix_ms": now_ms() as u64,
             "body": {"semantics": "response", "model": model, "input_tokens": 1_000_000, "output_tokens": 1000, "total_tokens": 1_001_000}
         }))
         .unwrap();
@@ -286,6 +298,40 @@ agent "keyed" { workspace "/tmp"; harness "omp" {}; }
         let ends = month_rows(&store, start, until).unwrap();
         assert_eq!(key(&ends).len(), 2, "{ends:?}");
         assert_eq!(key(&ends), key(&daily));
+    }
+
+    #[test]
+    fn a_counter_that_restarts_mid_month_is_read_whole_by_the_two_ended_read() {
+        let store = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_internal_intent(DECLARATIONS, "alder").unwrap();
+        store.apply_internal(&intent, "declare-accounts").unwrap();
+        let model = "claude-sonnet-5-5";
+        // One incarnation spends twice, then the seat starts over as a new incarnation whose
+        // counter begins at zero, and spends again. Each incarnation is its own series.
+        spend_in(&store, "agent/alder.keyed", "omp", None, model, "c1", "inc-one");
+        spend_in(&store, "agent/alder.keyed", "omp", None, model, "c2", "inc-one");
+        spend_in(&store, "agent/alder.keyed", "omp", None, model, "c3", "inc-two");
+
+        let until = now_ms() as u64 + 1;
+        let start = month_start_ms(until);
+        let totals = |rows: &[Value]| {
+            let mut totals = rows
+                .iter()
+                .map(|row| (row["agent"].as_str().unwrap().to_owned(), row["total_tokens"].as_u64().unwrap()))
+                .collect::<Vec<_>>();
+            totals.sort();
+            totals
+        };
+        let (daily, _) = store.usage_period_data(start, until).unwrap();
+        let ends = month_rows(&store, start, until).unwrap();
+        // The first incarnation's two spends and the second's one: nothing before the restart is
+        // lost and nothing after it is counted twice.
+        assert_eq!(
+            totals(&ends),
+            [("agent/alder.keyed".to_owned(), 1_001_000), ("agent/alder.keyed".to_owned(), 2_002_000)],
+            "{ends:?}"
+        );
+        assert_eq!(totals(&ends), totals(&daily));
     }
 
     #[test]
