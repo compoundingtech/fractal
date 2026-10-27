@@ -2555,9 +2555,11 @@ a current publication revision. A failed refresh retains the previous publicatio
 original metadata. The failed-only `fresh=true` fallback described above is unchanged.
 
 An active revisioned subscription or a recent agents list read keeps source, presence and
-presentation-deadline refreshes active. A new revisioned subscription requests a complete view.
-Without that demand, inputs remain dirty but catch-up and trim do not refold the roster.
-Full projection reset clears the current publication and changes its epoch even while idle.
+presentation refreshes active. The single existing paced owner checks time-sensitive presentation
+at a one-second scheduling bound (plus admission and fold time), rather than adding a timer per
+subscriber. A new revisioned subscription requests a complete view. Without demand, including
+after queued notifications are consumed, inputs remain dirty but catch-up and trim do not refold
+the roster. Full projection reset clears the current publication and changes its epoch even while idle.
 
 `AgentsPublicationMetadata` identifies the publication with an opaque UUID `node_epoch` and
 an increasing epoch-local `revision`. Restart, full projection reset or revision exhaustion starts a new epoch;

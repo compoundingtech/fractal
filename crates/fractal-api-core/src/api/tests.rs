@@ -1,3 +1,5 @@
+#[path = "agents_publication_tests.rs"]
+mod agents_publication_tests;
 mod roster_fresh;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -12452,4 +12454,3 @@ mission "overview-renamed" state="ready" {
     }
 }
 
-include!("agents_publication_tests.rs");

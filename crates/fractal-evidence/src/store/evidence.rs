@@ -6,16 +6,16 @@ pub use fractal_attention::store::evidence::*;
 
 /// A roster head: its cut, every agent's refs, the first cards in order, and when published.
 pub type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);
-use fractal_store::store::published_list::PublicationBuild;
+use crate::store::published_list::PublicationBuild;
 
 pub struct AgentsPublicationSource {
-    pub watermark: fractal_store::store::agents_publication::AgentsStatusWatermark,
+    pub watermark: crate::store::agents_publication::AgentsStatusWatermark,
     pub rows: Arc<Vec<Value>>,
     pub valid_until_ms: Option<u64>,
 }
 
 pub trait EvidenceStore {
-    fn agents_publication(&self) -> Option<Arc<fractal_store::store::agents_publication::AgentsPublication>>;
+    fn agents_publication(&self) -> Option<Arc<crate::store::agents_publication::AgentsPublication>>;
     fn subscribe_agents_publications(&self) -> tokio::sync::watch::Receiver<u64>;
     fn agents_publication_build(&self) -> Result<PublicationBuild>;
     fn agents_publication_demand(&self) -> bool;
@@ -96,9 +96,9 @@ pub trait EvidenceStore {
 }
 
 impl EvidenceStore for Store {
-    fn agents_publication(&self) -> Option<Arc<fractal_store::store::agents_publication::AgentsPublication>> {
+    fn agents_publication(&self) -> Option<Arc<crate::store::agents_publication::AgentsPublication>> {
         match self.fractal.presented_agents.current() {
-            fractal_store::store::published_list::ListRead::Served(publication, _) => Some(publication),
+            crate::store::published_list::ListRead::Served(publication, _) => Some(publication),
             _ => None,
         }
     }
@@ -126,7 +126,7 @@ impl EvidenceStore for Store {
             && !entry.history && entry.covered.is_none())
             .context("the complete current agents source is unavailable")?;
         Ok(AgentsPublicationSource {
-            watermark: fractal_store::store::agents_publication::AgentsStatusWatermark {
+            watermark: crate::store::agents_publication::AgentsStatusWatermark {
                 store_index: index, local_frontier: local,
             },
             rows: Arc::clone(&entry.items),
@@ -142,7 +142,7 @@ impl EvidenceStore for Store {
         valid_until: Option<u64>,
         rows: Vec<Value>,
     ) -> Result<()> {
-        use fractal_store::store::{agents_publication::PresentedAgents, published_list::Publication};
+        use crate::store::{agents_publication::PresentedAgents, published_list::Publication};
         if let Some(current) = self.agents_publication()
             && current.metadata().status_watermark == source.watermark && current.rows() == rows
             && self.fractal.presented_agents.retain_materialization(build, &current)

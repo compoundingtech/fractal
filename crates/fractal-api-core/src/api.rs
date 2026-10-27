@@ -5479,7 +5479,7 @@ pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> 
 }
 
 struct CapturedPresentedAgents {
-    source: fractal_evidence::store::evidence::AgentsPublicationSource,
+    source: crate::store::evidence::AgentsPublicationSource,
     subagents: Vec<crate::store::SubagentView>,
     now: u64,
 }
@@ -6274,11 +6274,20 @@ pub fn start_agent_roster(state: &AppState) {
             }
             // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
             // paced by the existing refresh pause, never a timer per subscriber.
-            if !store.agents_publication_demand() || store.agent_roster_refresh_failed() {
+            if store.agent_roster_refresh_failed() {
                 wake.notified().await;
             }
+            wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {
+    // Notifications may have been queued while readers were present. Recheck demand
+    // after consuming them rather than doing one last presentation fold on an idle node.
+    while !store.agents_publication_demand() {
+        wake.notified().await;
+    }
 }
 
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
