@@ -362,11 +362,11 @@ mod tests {
     const MIB: usize = 1_048_576;
 
     fn snapshot() -> ClientSnapshot {
-        ClientSnapshot {
-            id: "snapshot/host-a/1842/2fc9".into(), host_id: "host/host-a".into(), store_index: 1842,
-            projection_version: "client-projection.v0".into(), created_at: "2026-10-10T12:00:00.000Z".into(),
-            published_at: Some("2026-10-10T12:00:00.000Z".into()),
-        }
+        serde_json::from_value(json!({
+            "id": "snapshot/host-a/1842/2fc9", "host_id": "host/host-a", "store_index": 1842,
+            "projection_version": "client-projection.v0", "created_at": "2026-10-10T12:00:00.000Z",
+            "published_at": "2026-10-10T12:00:00.000Z",
+        })).unwrap()
     }
 
     fn publish(owner: &Owner, marker: u64, rows: Vec<Value>) -> Arc<AgentsPublication> {
@@ -544,7 +544,6 @@ mod tests {
         let prepared = prepare(publication, snapshot(), "agents", None, MIB).unwrap();
         let delivered = prepared.delivered();
         drop(prepared);
-        drop(owner);
         assert!(weak.upgrade().is_none());
         assert_eq!(delivered.revision(), 1);
         assert_eq!(delivered.rows.keys().map(String::as_str).collect::<Vec<_>>(), ["a"]);

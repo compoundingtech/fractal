@@ -3771,6 +3771,7 @@ mod tests {
             store_index,
             projection_version: "1".into(),
             created_at: "2026-10-16T11:00:00Z".into(),
+            published_at: None,
         }
     }
 
