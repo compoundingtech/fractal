@@ -262,7 +262,7 @@ The web app is the most capable display, so it leads the conversation view:
 3. **Every derivation runs the fixtures.** Rust runs them in `crates/fractal-conversation-ui` and
    `crates/fractal-tui` (`contract`), the phone through `@fractal/views`
    (`tests/transcripts.test.mjs`), and Fractal in its own unit tests, either by importing
-   `st3-views` or by running the fixtures through its own derivation
+   `@fractal/views` or by running the fixtures through its own derivation
    (`apps/fractal-web/src/conversation/*.unit.test.ts`). A fixture change fails every derivation
    that does not follow it yet.
 4. **The terminal UI and the phone follow as best they can.** They take the fixture change when
@@ -271,7 +271,7 @@ The web app is the most capable display, so it leads the conversation view:
 
 Today only Rust and the phone run the fixtures; `noise` and `claude-skill` run only in Rust,
 and only the phone runs `conversation-style.json`. Fractal cleans conversations in
-`apps/fractal-web/src/conversation/` without `st3-views` and runs none of them. Adding that
+`apps/fractal-web/src/conversation/` without `@fractal/views` and runs none of them. Adding that
 test is the first step of this rule
 ([#2647](https://github.com/compoundingtech/fractal/issues/2647)).
 Once the [conversation projection](#conversation-stream) is served, it is the derivation the
@@ -640,7 +640,7 @@ clients that have not moved. The transcript fixtures pin `entries`, and the web 
 [above](#who-leads-the-conversation). It is a `person-read` path already. It ships last, after a
 Fractal test runs the fixtures.
 
-Today the terminal UI cleans with `fractal-conversation-ui`, the phone with `st3-views`
+Today the terminal UI cleans with `fractal-conversation-ui`, the phone with `@fractal/views`
 (`conversationView.ts`, 1032 lines), and Fractal with its own
 `apps/fractal-web/src/conversation/` modules.
 
