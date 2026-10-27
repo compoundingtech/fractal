@@ -2786,15 +2786,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let transcript = root.path().join("external.jsonl");
         fs::write(&transcript, "{\"type\":\"session\",\"id\":\"one\"}\n").unwrap();
+        let provider_script = root.path().join("provider.sh");
+        fs::write(&provider_script, "sleep 30\n:\n").unwrap();
         let bash = path_executable("bash");
         let runtime = Runtime {
             driver: std::process::Command::new(&bash)
                 .args([
                     "-c",
-                    r#""$1" -c 'exec -a omp "$1" -c "sleep 30; :" --resume "$2"' provider "$1" "$2" & wait"#,
+                    r#"exec -a omp "$1" "$3" --resume "$2" & wait"#,
                     "driver",
                     bash.to_str().unwrap(),
                     transcript.to_str().unwrap(),
+                    provider_script.to_str().unwrap(),
                     "driver", "omp", "--subject", "agent/seat",
                 ])
                 .env("ST3_ACCOUNT", "test-account")

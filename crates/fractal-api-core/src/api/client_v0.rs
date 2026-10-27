@@ -3043,12 +3043,24 @@ mod pi_family_binding_tests {
         let store = crate::store::Store::open(&root.path().join("graph.db"), "test").unwrap();
         let owner = "agent/binding-test";
         let append = |incarnation: Option<&str>, source: Option<&str>, agent: &str| {
+            if let Some(incarnation) = incarnation {
+                store.append_claim(&crate::model::ClaimInput {
+                    subject: owner.into(), kind: "runtime.observed".into(),
+                    actor: Some("person/robin".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("running")),
+                        ("incarnation_id".into(), json!(incarnation)),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
             store.append_claim(&crate::model::ClaimInput {
                 subject: owner.into(),
                 kind: "harness.session-file".into(),
-                actor: Some(owner.into()),
+                actor: Some("person/robin".into()),
                 fields: BTreeMap::from([
                     ("harness".into(), json!("omp")),
+                    ("session_id".into(), json!("native-binding")),
                     ("agent".into(), json!(agent)),
                     ("incarnation_id".into(), json!(incarnation)),
                     ("source_session".into(), json!(source)),

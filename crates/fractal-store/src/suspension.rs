@@ -504,6 +504,16 @@ mod tests {
         let store = Store::open_memory("legacy-path").unwrap();
         store.append_claim(&crate::model::ClaimInput {
             subject: "agent/example".into(),
+            kind: "runtime.observed".into(),
+            actor: Some("agent/example".into()),
+            fields: std::collections::BTreeMap::from([
+                ("status".into(), Value::from("running")),
+                ("incarnation_id".into(), Value::from("captured")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.append_claim(&crate::model::ClaimInput {
+            subject: "agent/example".into(),
             kind: "harness.session-file".into(),
             actor: Some("agent/example".into()),
             fields: std::collections::BTreeMap::from([
