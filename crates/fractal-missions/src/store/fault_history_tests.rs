@@ -463,14 +463,19 @@ fn fault_snapshot_reference_preserves_effective_readiness_after_lease_expiry() {
     ).unwrap();
     assert_eq!(stored.0, "claimed", "the snapshot must derive readiness, not read it raw");
     assert_eq!(effective.readiness_epoch, stored.1 + 1);
-    // Claiming work is a harness activity transition. Report idle again after
-    // expiry so the wake's independent harness-ready fence is satisfied too.
+    // Claiming work overlays harness activity. A changed ready report clears
+    // that overlay; repeating the earlier idle heartbeat is intentionally coalesced.
     append_snapshot_fixture_claim(
         &store, "agent/node.worker", "harness.observed",
-        json!({"state": "idle", "driver": "codex", "incarnation_id": "worker-current"}),
-        "snapshot-idle-after-lease-expiry",
+        json!({"state": "ready", "driver": "codex", "incarnation_id": "worker-current"}),
+        "snapshot-ready-after-lease-expiry",
     );
     append_snapshot_wake(&store, &effective, "expired-lease");
+    let revalidated = store.step_run(&step.subject).unwrap().unwrap();
+    assert_eq!(revalidated.status, "ready");
+    assert_eq!(revalidated.readiness_epoch, effective.readiness_epoch);
+    let harness = store.current_harness("agent/node.worker").unwrap().unwrap();
+    assert!(matches!(harness.state.as_str(), "ready" | "idle"), "{harness:?}");
     let faults = assert_reference_snapshot_parity(&store, now_ms());
     let wakes = faults.iter()
         .filter(|fault| fault.item.title.starts_with("exhausted wake"))
