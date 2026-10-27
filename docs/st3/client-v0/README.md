@@ -1628,7 +1628,12 @@ and does not substitute ordinary person grants on older servers.
 The original slice-B proof-gated mode remains a legacy branch capability; the standalone
 adapter does not use it, does not send its proof header, and has no SCG dependency.
 In consent-at-grant mode, the same six scoped reads authorize against the current grant on
-every request and revalidate it immediately before returning the response. Envelope budgets
+every request and revalidate it immediately before returning the response. The response does not
+wait for their read-used and read-outcome receipts: after that final check they are queued in a
+bounded queue that a single writer commits in batches without a timer; a crash can lose receipts
+still queued. Proof-gated
+`approval-once` reads keep writing both receipts before the response. See
+[read receipts](../external-assistants.md#read-receipts). Envelope budgets
 default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
 `response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
 

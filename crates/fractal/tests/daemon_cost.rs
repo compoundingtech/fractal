@@ -1497,6 +1497,7 @@ mission "cost/history" state="ready" {
         fleet_id: None, configured_peers: Vec::new(), client_relay: None,
         native_session_home: Some(root.path().join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     });
     let mut measurements = Vec::new();
     for run in 0..100 {
@@ -2417,6 +2418,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         client_relay: relay,
         native_session_home: Some(root.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
     let seeded_cut = store.index().unwrap();

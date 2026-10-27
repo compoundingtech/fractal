@@ -1870,6 +1870,7 @@ fn run(
         client_relay: None,
         native_session_home: Some(root.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let subjects = {
         let _entered = daemon.enter();

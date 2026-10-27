@@ -58,6 +58,7 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -620,6 +621,14 @@ impl fractal_daemon::reconcile::RuntimeControl for RolloutRuntime {
 }
 
 fn native_observation(store: &Store, subject: &str, incarnation: &str) {
+    // The fixture producer retries on each reconciliation pass, just as the native
+    // report waits for the graph to acknowledge the newly started runtime.
+    if !store.latest_claim(subject, Some("runtime.observed")).unwrap()
+        .is_some_and(|runtime| runtime.body["fields"]["status"] == "running"
+            && runtime.body["fields"]["incarnation_id"].as_str() == Some(incarnation))
+    {
+        return;
+    }
     append(
         store,
         subject,

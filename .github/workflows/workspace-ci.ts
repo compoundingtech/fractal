@@ -921,7 +921,7 @@ export const fractalWebJobs = {
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
-    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
+    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.skip == 'true') }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
@@ -997,9 +997,8 @@ export const fractalWebJobs = {
   'fractal-web': {
     name: 'fractal-web',
     needs: ['fractal-web-changes', 'fractal-web-execution', 'evidence-gate-fractal-web'],
-    // A failed, cancelled or unexpectedly skipped execution must fail this check. Under an evidence skip the execution
-    // shards end in success with their steps skipped (fleet.yml.genie.ts), so the verdict passes and the cost steps,
-    // which have no receipts to read, do not run.
+    // Only a PR's explicit evidence decision permits job-level skipping. Queue and manual runs
+    // still require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
@@ -1012,6 +1011,8 @@ export const fractalWebJobs = {
           CHANGES_RESULT: '${{ needs.fractal-web-changes.result }}',
           RELEVANT: '${{ needs.fractal-web-changes.outputs.relevant }}',
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
+          EVIDENCE_SKIP: '${{ needs.evidence-gate-fractal-web.outputs.skip }}',
+          EVENT_NAME: '${{ github.event_name }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),
       },
