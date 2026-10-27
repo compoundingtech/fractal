@@ -26,7 +26,7 @@ overrides:
   "@overeng/utils": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils"
   "@overeng/utils-dev": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-dev"
   "@overeng/utils-storybook": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils-storybook"
-  "@effect/platform-node>@effect/platform-node-shared": 4.0.0
+  "@effect/platform-node>@effect/platform-node-shared": 4.0.3
 
 peerDependencyRules:
   allowedVersions:

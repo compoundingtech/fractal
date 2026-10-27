@@ -82,6 +82,9 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/ComposerImages.stories.tsx",
     # NativeTranscript exercises the real ConversationPane over synthetic native wire records.
     "apps/fractal-web/src/web/NativeTranscript.stories.tsx",
+    # The transcript image integration story exercises the app's production transcript image cache in kit Storybook.
+    "apps/fractal-web/src/web/TranscriptImages.stories.tsx",
+    "apps/fractal-web/src/web/transcriptImages.ts",
     # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
     "apps/fractal-web/.changelog/**",
     "packages/fractal-sdk/src/**",

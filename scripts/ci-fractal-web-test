@@ -300,7 +300,7 @@ assert "BASE_REF: ${{ github.event.merge_group.base_ref || 'refs/heads/main' }}"
 assert "KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}" in execution
 assert "KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}" in execution, "PRs run the per-commit set"
 assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}" in execution, "merge groups keep axe"
-assert "KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}" in execution, "the per-commit budget"
+assert "KIT_PLAY_WALL_GUARD_SECONDS: ${{ github.event_name == 'pull_request' && '268' || '' }}" in execution, "the per-commit wall hang guard"
 assert "APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}" in execution, "PRs run the related app tests, merge groups all"
 assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
 assert "needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]" in execution
@@ -563,6 +563,8 @@ composer_story = ["apps/fractal-web/src/web/ComposerImages.stories.tsx", "apps/f
 assert detector_kit_paths(composer_story) == composer_story, "the composer image integration story and live adapter select kit plays"
 native_transcript_story = ["apps/fractal-web/src/web/NativeTranscript.stories.tsx", "apps/fractal-web/src/web/ConversationPane.tsx"]
 assert detector_kit_paths(native_transcript_story) == native_transcript_story, "the native transcript story and production pane select kit plays"
+transcript_story = ["apps/fractal-web/src/web/TranscriptImages.stories.tsx", "apps/fractal-web/src/web/transcriptImages.ts"]
+assert detector_kit_paths(transcript_story) == transcript_story, "the transcript image integration story and production image cache select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"

@@ -81,6 +81,19 @@ const conversationItems = (live: LiveSource) => {
 }
 
 describe('scenario replay through the real live source', () => {
+  it.live('classifies an unmodelled replay usage read as unsupported', () =>
+    withReplay(world, (live, clock) => Effect.gen(function* () {
+      const usage = live.source.nativeDetails!.usagePeriod(world.slices.roster.state.agents[0]!.id)
+      const release = live.registry.mount(usage)
+      try {
+        yield* settle(clock)
+        expect(live.registry.get(usage)).toMatchObject({ _tag: 'Unavailable', reason: 'unsupported' })
+      } finally {
+        release()
+      }
+    })),
+  )
+
   it.live('decodes the world roster and conversation, then publishes a timed append', () =>
     withReplay(world, (live, clock) => Effect.gen(function* () {
       expect(catalog.some((entry) => entry.id === world.id)).toBe(true)

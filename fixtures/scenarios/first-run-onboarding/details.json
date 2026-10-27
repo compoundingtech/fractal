@@ -9,6 +9,8 @@
     "seed": 4
   },
   "state": {
+    "launch_variants": [],
+    "launches": [],
     "missions": [],
     "work": []
   },
