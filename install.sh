@@ -38,9 +38,10 @@ esac
 refuse_nix_path() (
     path=$1
     hops=0
+    xdg_profiles=${XDG_STATE_HOME:-$HOME/.local/state}/nix/profiles
     while :; do
         case "$path" in
-            /nix/store|/nix/store/*|/nix/var/nix/profiles|/nix/var/nix/profiles/*|"$HOME/.nix-profile"|"$HOME/.nix-profile/"*)
+            /nix/store|/nix/store/*|/nix/var/nix/profiles|/nix/var/nix/profiles/*|"$HOME/.nix-profile"|"$HOME/.nix-profile/"*|"$HOME/.local/state/nix/profiles"|"$HOME/.local/state/nix/profiles/"*|"$xdg_profiles"|"$xdg_profiles/"*)
                 printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
                 exit 1 ;;
         esac
@@ -49,11 +50,20 @@ refuse_nix_path() (
             resolved="$(cd "$parent" && pwd -P)/$(basename "$path")"
             if [ "$resolved" != "$path" ]; then path=$resolved; continue; fi
         fi
-        [ -L "$path" ] || break
+        # A GC'd generation can leave an ancestor dangling while the leaf itself
+        # is not a symlink. Resolve the nearest symlink component, retaining the
+        # missing suffix, rather than treating a missing parent as unowned.
+        component=$path
+        suffix=
+        while [ ! -L "$component" ] && [ "$component" != / ] && [ "$component" != . ]; do
+            suffix="/$(basename "$component")$suffix"
+            component=$(dirname "$component")
+        done
+        [ -L "$component" ] || break
         hops=$((hops + 1))
         [ "$hops" -le 40 ] || { printf 'install: cannot resolve installation link %s\n' "$1" >&2; exit 1; }
-        link=$(readlink "$path")
-        case "$link" in /*) path=$link ;; *) path="$(dirname "$path")/$link" ;; esac
+        link=$(readlink "$component")
+        case "$link" in /*) path=$link$suffix ;; *) path="$(dirname "$component")/$link$suffix" ;; esac
     done
 )
 for name in st3 st pty fractal; do refuse_nix_path "$bin_dir/$name"; done

@@ -156,6 +156,25 @@ exec "{real}" "$@"
     (installed / 'st3').unlink()
     (installed / 'st3').write_bytes(original)
     (installed / 'st3').chmod(0o755)
+    # The managed generation can be a dangling ancestor, not the leaf symlink.
+    for mode in ['default', 'custom', 'ancestor']:
+        state = root / ('xdg-' + mode)
+        if mode == 'default':
+            state = root / 'home/.local/state'
+        profile = state / 'nix/profiles/home-manager'
+        if mode == 'ancestor':
+            profile = root / 'arbitrary-generation'
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        profile.symlink_to('/nix/store/gc-collected-fractal')
+        destination = root / ('dangling-' + mode) / 'bin'
+        destination.mkdir(parents=True)
+        (destination / 'st3').symlink_to(profile / 'bin/st3')
+        result = install('--no-run', '--bin-dir', str(destination),
+                         extra={'XDG_STATE_HOME': '' if mode == 'default' else str(state)})
+        assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+        assert (destination / 'st3').readlink() == profile / 'bin/st3'
+        assert profile.readlink() == Path('/nix/store/gc-collected-fractal')
+        assert not (destination / 'pty').exists()
     # Exact published v0.3.17 installer from source f4cec96e414fee2a780910730b019fe6bdbddc1d.
     # It rejects --quiet and requires the historical four-command payload.
     payload_installer = payload / 'install.sh'
