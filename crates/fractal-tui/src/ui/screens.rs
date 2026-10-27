@@ -2899,7 +2899,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
                 span(format!("{} ", step.name), theme::text()),
                 span(word, theme::fg(color)),
                 span(
-                    format!("  {}", step.owner.as_deref().unwrap_or("nobody")),
+                    format!("  {}", step.owner_identity().as_deref().unwrap_or("nobody")),
                     theme::dim(),
                 ),
             ]));
@@ -3512,7 +3512,7 @@ mod tree_tests {
         let shown = mission_detail(&world, Some(&id), 120, "", None, &Default::default())
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
         assert!(shown.contains("Fractal keeps this open"), "{shown}");
-        assert!(shown.contains("Fractal           "), "{shown}");
+        assert!(shown.contains(" Fractal "), "{shown}");
         let Load::Ready(missions) = &world.missions else {
             unreachable!();
         };
@@ -3766,6 +3766,8 @@ mod mission_golden {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    // Regenerate after intended rendering changes with:
+    // STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui mission_golden
     #[test]
     fn mission_stories_golden() {
         let world = super::super::demo::world();
@@ -3796,6 +3798,14 @@ mod mission_golden {
                     }
                 }
             }
+        }
+        if std::env::var_os("STUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                test_env!("CARGO_MANIFEST_DIR", "/tests/fixtures/mission-stories.golden"),
+                &actual,
+            )
+            .unwrap();
+            return;
         }
         assert_eq!(
             actual,

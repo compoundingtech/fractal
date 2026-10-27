@@ -265,6 +265,64 @@ Generated clients decode an unfamiliar value as `Unknown` without dropping the r
 this differs from an absent field, which means no lifecycle was declared.
 See [agent declarations](../../site/reference/configuration.md#definitions-do-not-start-work).
 
+
+### Owner-local private notes
+
+`GET /v1/client/private-notes/{uri}` accepts one fully percent-encoded canonical
+`dev.schickling.agent-private-notes://HOST/IDENTITY` URI. The pure canonical URI
+contract lives in `fractal-schema::private_notes`; clients never send a filesystem path or UID.
+The response is a `PrivateNotesSubject` envelope value with `ref`, `family`,
+`schema`, `data`, `actions`, and `live`. Its data contains the current Markdown and
+the carrier-generation/revision fence; `live` is null. Missing bytes are empty
+only when the declaration and owned resource directory already exist.
+
+The daemon's `private_notes_catalogs` configuration lists absolute owner-local
+catalog roots. Each source must declare the exact self URI in
+`agents/HOST/IDENTITY/agent.kdl`; its filesystem byte authority remains
+`resources/private-notes.md`. Resolution refuses divergent carriers, symlink
+traversal, foreign ownership, and group/world-writable sources or destinations.
+No Markdown, notes revision, content digest, or local recovery receipt enters
+fleet claims, collections, or replication.
+
+Private notes are ordinary subjects: reads require `read.projections`, and writes
+require `control.work` plus a concrete person or local agent acting party.
+The same ordinary Unix actor admission and paired-session authentication used by
+other subjects apply. Pairing keeps its normal limited default, optional narrowing
+to ordinary limited scopes, and explicit `full_control` grant; notes add no
+credentials, scopes, or bootstrap endpoints.
+Public claim writes cannot create, complete, or revoke pairings, and paired
+sessions retain their stored-scope, expiry, and revocation checks.
+
+Agents are instructed by policy not to write private notes. This is not a
+person-only credential boundary: a permitted agent request is attributed as an
+agent, never as the configured person. Write observations identify the exact
+URI, action, operation, stage, authority actor, session actor, and transport
+without publishing Markdown or content-derived metadata.
+
+The ordinary URI resource receives an idempotent `resource.observed` requested
+observation before bytes can change, and a completed observation only after its
+durable local receipt. Audit-publication failure is not completed success:
+exact-key retry reconciles the same outcome without another replacement.
+Cross-listener retries of a paired session preserve the original intent's
+transport and actor metadata. URI facts contain only the URI; attribution is
+observation metadata, not a second authority for private bytes.
+
+
+`private-notes.write` requires `control.work`, an acting party, the returned
+action fence, a stable idempotency key, the canonical URI, and complete Markdown.
+Supported writers must use this API: writes serialize across daemon processes,
+compare carrier generation and revision, then durably record intent before an
+atomic owned sibling replacement.
+Exact retries recover the private outcome without overwriting a newer edit.
+The local-only result carries its successor fence as `ActionResult.private_notes`.
+Its `affected_ids` is empty because a canonical notes URI is not a generic graph ID;
+unrelated collection projections do not receive notes invalidations.
+Changed key reuse conflicts; stale editors and replaced carriers are refused.
+An interrupted replacement remains `private-notes-indeterminate` until its exact
+key is reconciled. External filesystem editors are not coordinated writers;
+changes between operations invalidate the next revision fence.
+Markdown must fit the existing 1 MiB encoded response bound, with room reserved
+for URI/fence and snapshot metadata; writes cannot create an unreadable oversized response.
 ### Agent activity and human blocking
 
 A declaration-driven relaunch reports `state: "restarting"` while the previous runtime stops
@@ -1097,8 +1155,8 @@ for combined families, and `run` for an `after-run` step.
 ## Harness-neutral session timeline
 
 The timeline schema deliberately contains no Claude, Codex, Pi, OMP, or transcript-file types. A
-session has ordered entries with a strictly increasing `sequence`, stable entry ID, RFC 3339
-timestamp, `role` (`system`, `user`, `assistant`, or `tool`), and one typed body:
+session has chronologically ordered entries with a source-local `sequence`, stable entry ID,
+RFC 3339 timestamp, `role` (`system`, `user`, `assistant`, or `tool`), and one typed body:
 
 - `message`: logical turn metadata;
 - `content`: text or an attachment reference with a media type;
@@ -1114,6 +1172,25 @@ Incremental timeline events use `append`, `replace`, or `finalize`. `replace` ta
 entry and increments its revision; it cannot change the entry's ID, sequence, role, or type.
 `finalize` makes the entry immutable. Tool results must refer to a preceding tool call. Timeline
 pages and updates are bounded by the negotiated byte and item limits.
+
+Presentation order is numeric timestamp, then source sequence, then stable entry ID. Native
+harness counters and graph-derived counters are separate namespaces: comparing them without
+time can put a new tool call before an hours-old status. The gateway preserves both counters
+as source evidence; clients must not re-sort merged entries by sequence alone. `replace` and
+`finalize` also preserve the original append timestamp, so a revision changes content rather
+than moving the entry. A graph delivery header and its content share a timestamp and retain
+their adjacent sequence slots.
+
+HTTP opens at the newest bounded chronological window; its page cursor walks backward (a keyset
+cursor for a native transcript, a frozen projection for a stored timeline). Conversation changes
+and WebSocket follow frames use the same chronology. The conversation cursor independently
+tracks graph-store position, local-observation position, and native-source high-water sequence.
+Its native mark is the source's newest native sequence, not just the latest display window's, so
+graph-only windows cannot rewind it: when the 200-entry window is truncated, the gateway reads
+the newest native entries by sequence beside it (at most one window more). A change omitted by
+the byte/item-bounded replay window, native or graph, is still a `cursor-gap` requiring
+resynchronization; new native activity is never silently discarded merely because graph
+counters are larger.
 
 Pi-family native replay recognizes OMP's message-level `role: "toolResult"` records: the
 `toolCallId` correlates the result with its call, `isError` selects error or success status, and

@@ -254,22 +254,19 @@ mission "orchid" state="ready" {
     )
     .unwrap();
     store.apply_internal(&intent, "cli-output-fixture").unwrap();
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "cli-output".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "cli-output".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
     let (ready, started) = oneshot::channel();

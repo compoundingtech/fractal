@@ -313,6 +313,9 @@
       "content-not-text",
       "invalid-document-reference",
       "document-not-synced",
+      "private-notes-unreachable",
+      "private-notes-carrier-conflict",
+      "private-notes-indeterminate",
       "internal"
     ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
@@ -371,6 +374,30 @@
     "Timestamp": { "x-st-codec": "timestamp", "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.", "examples": ["2026-10-01T10:00:00.000Z"], "type": "string", "format": "date-time" },
     "Cursor": { "x-st-brand": "Cursor", "description": "Opaque, snapshot-bound page/event cursor.", "type": "string", "minLength": 8, "maxLength": 2048 },
     "Revision": { "x-st-brand": "Revision", "description": "Opaque per-subject revision; compare for equality, echo in fences.", "type": "string", "minLength": 1, "maxLength": 256 },
+    "PrivateNotesUri": { "x-st-brand": "PrivateNotesUri", "type": "string", "pattern": "^dev\\.schickling\\.agent-private-notes://[^/]+/[^/]+$", "description": "Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile." },
+    "PrivateNotesFence": {
+      "type": "object", "additionalProperties": false, "required": ["carrier_generation", "revision"],
+      "properties": { "carrier_generation": { "$ref": "#/$defs/Revision" }, "revision": { "$ref": "#/$defs/Revision" } }
+    },
+    "PrivateNotesData": {
+      "type": "object", "additionalProperties": false, "required": ["uri", "markdown", "fence"],
+      "properties": { "uri": { "$ref": "#/$defs/PrivateNotesUri" }, "markdown": { "type": "string" }, "fence": { "$ref": "#/$defs/PrivateNotesFence" } }
+    },
+    "PrivateNotesAction": {
+      "type": "object", "additionalProperties": false, "required": ["id", "fence"],
+      "properties": { "id": { "const": "private-notes.write" }, "fence": { "allOf": [{ "$ref": "#/$defs/Fence" }, { "required": ["private_notes"] }] } }
+    },
+    "PrivateNotesSubject": {
+      "type": "object", "additionalProperties": false, "required": ["ref", "family", "schema", "data", "actions", "live"],
+      "properties": {
+        "ref": { "$ref": "#/$defs/PrivateNotesUri" }, "family": { "const": "private-notes" }, "schema": { "const": "fractal.private-notes@1" },
+        "data": { "$ref": "#/$defs/PrivateNotesData" }, "actions": { "type": "array", "maxItems": 1, "items": { "$ref": "#/$defs/PrivateNotesAction" } }, "live": { "type": "null" }
+      }
+    },
+    "PrivateNotesWriteParameters": {
+      "type": "object", "additionalProperties": false, "required": ["uri", "markdown"],
+      "properties": { "uri": { "$ref": "#/$defs/PrivateNotesUri" }, "markdown": { "type": "string" } }
+    },
     "Snapshot": {
       "description": "The complete projected state at one local store index and projection version.",
       "examples": [{"id": "snapshot/host-a/1842/2fc9", "host_id": "host/host-a", "store_index": 1842, "projection_version": "client-projection.v0", "created_at": "2026-09-20T12:00:00.000Z"}],
@@ -436,6 +463,7 @@
           "oneOf": [
             { "$ref": "#/$defs/DirectiveNotes" },
             { "$ref": "#/$defs/Capabilities" },
+            { "$ref": "#/$defs/PrivateNotesSubject" },
             { "$ref": "#/$defs/DocumentContent" },
             { "$ref": "#/$defs/DocumentsPage" },
             { "$ref": "#/$defs/SchedulesPage" },
@@ -2714,7 +2742,8 @@
         "runtime_incarnation": { "type": "string" },
         "runtime_desired_revision": { "type": "string" },
         "terminal_sequence": { "type": "integer", "minimum": 0 },
-        "preview_token": { "x-st-brand": "PreviewToken", "type": "string", "pattern": "^lpv0:[0-9a-f]{64}$" }
+        "preview_token": { "x-st-brand": "PreviewToken", "type": "string", "pattern": "^lpv0:[0-9a-f]{64}$" },
+        "private_notes": { "$ref": "#/$defs/PrivateNotesFence" }
       }
     },
     "ActionCommon": {
@@ -2728,6 +2757,7 @@
           "enum": [
             "arrangement.edit",
             "custom.reply",
+            "private-notes.write",
             "prompt.respond",
             "attention.resolve",
             "review.approve",
@@ -2919,6 +2949,7 @@
       "oneOf": [
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
+        {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
         {"properties": {"type": {"const": "agent.create"}, "parameters": {"$ref": "#/$defs/AgentCreateParameters"}}},
         {"properties": {"type": {"const": "agent.retire"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_desired_revision"]}]}, "parameters": {"$ref": "#/$defs/AgentRetireParameters"}}},
@@ -3168,6 +3199,7 @@
         "status": { "enum": ["accepted", "completed", "rejected"] },
         "affected_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "uniqueItems": true },
         "snapshot_id": { "$ref": "#/$defs/Id" },
+        "private_notes": { "$ref": "#/$defs/PrivateNotesFence" },
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
         "arrangement_revision": { "$ref": "#/$defs/Revision" }
       }
