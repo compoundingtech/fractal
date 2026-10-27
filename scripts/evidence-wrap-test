@@ -252,6 +252,52 @@ def main(argv):
             f'refs/notes/evidence/{head_tree}/{record} {record}\nrefs/tags/evidence/{head_tree}/{record} {record}'
         print('passed: --push sends the record as a tag and a note, the token through the environment, not an argument, and never prints it')
 
+        # The agent's HTTPS remote may be an environment override of an SSH checkout.
+        # Resolve that configuration in git itself, including pushurl and insteadOf.
+        https_sink = tmp / 'https-sink.git'
+        git(tmp, 'init', '-q', '--bare', str(https_sink))
+        git(repo, 'remote', 'add', 'https-sink', 'git@invalid.example:owner/repo.git')
+        https_url = 'https://evidence.invalid/owner/repo.git'
+        transport = {
+            'GIT_CONFIG_COUNT': '3',
+            'GIT_CONFIG_KEY_0': 'remote.https-sink.url', 'GIT_CONFIG_VALUE_0': https_url,
+            'GIT_CONFIG_KEY_1': f'url.{https_sink.as_uri()}.insteadOf', 'GIT_CONFIG_VALUE_1': https_url,
+            'GIT_CONFIG_KEY_2': 'protocol.file.allow', 'GIT_CONFIG_VALUE_2': 'always',
+        }
+        # Thousands of unrelated cached refs must never enter this publication.
+        git(repo, 'update-ref', '--stdin', stdin=''.join(
+            f'update refs/tags/evidence/{"a" * 40}/cached-{i} {record}\n' for i in range(2000)))
+        for token in ('', 'secret-token-xyz'):
+            pushed = run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain,
+                          '--signer', signer, '--keys', str(signers), '--push', 'https-sink',
+                          '--input', f'source_inputs={head_tree}', '--attempt', '2' if token else '1', '--', 'true'],
+                         repo, home, EVIDENCE_PUSH_TOKEN=token, **transport)
+            assert pushed.returncode == 0, pushed.stderr.decode()
+            published = json.loads(pushed.stderr.decode()[pushed.stderr.decode().index('{'):])
+            assert published['verified'] and published['pushed'], published
+            expected = {
+                published['tag'], published['ref'],
+                f'refs/tags/evidence/input/linux-gate/{head_tree}/{published["record"]}',
+                f'refs/notes/evidence-input/linux-gate/{head_tree}/{published["record"]}',
+            }
+            actual = set(git(https_sink, 'for-each-ref', '--format=%(refname)').splitlines())
+            if not token:
+                assert actual == expected, actual
+                previous = actual
+            else:
+                assert actual == previous | expected, actual
+        print('passed: HTTPS environment overrides and insteadOf survive publication, including with a token; only the current record and its input indexes are pushed, not 2000 cached refs')
+
+        push_sink = tmp / 'pushurl-sink.git'
+        git(tmp, 'init', '-q', '--bare', str(push_sink))
+        git(repo, 'remote', 'add', 'pushurl-sink', 'https://unreachable.invalid/fetch.git')
+        git(repo, 'remote', 'set-url', '--push', 'pushurl-sink', push_sink.as_uri())
+        pushed = wrap(['sh', '-c', 'exit 3'], '--push', 'pushurl-sink')
+        assert pushed.returncode == 3, pushed.stderr.decode()
+        published = json.loads(pushed.stderr.decode()[pushed.stderr.decode().index('{'):])
+        assert set(git(push_sink, 'for-each-ref', '--format=%(refname)').splitlines()) == {published['tag'], published['ref']}
+        print('passed: a configured pushurl is used instead of the fetch URL')
+
         (repo / 'a').write_text('dirty\n')
         assert wrap(['true']).returncode == 1
         git(repo, 'checkout', '--', 'a')

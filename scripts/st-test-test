@@ -1165,6 +1165,39 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(len(pushed('tags')), 1)
 
+    def test_https_publication_keeps_transport_config_and_only_pushes_the_heads_records(self):
+        self.commit('b.txt', 'old head')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        old_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        old_record = git(self.work, 'for-each-ref', '--format=%(objectname)', f'refs/tags/evidence/{old_tree}/')
+        git(self.work, 'update-ref', '--stdin', stdin=''.join(
+            f'update refs/tags/evidence/{old_tree}/cached-{n} {old_record}\n' for n in range(2000)).encode())
+        self.commit('c.txt', 'published head')
+        tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        origin = Path(self.tmp.name) / 'origin.git'
+        url = 'https://evidence.invalid/org/repo.git'
+        env = {
+            'GIT_CONFIG_COUNT': '4',
+            'GIT_CONFIG_KEY_0': 'remote.origin.url', 'GIT_CONFIG_VALUE_0': url,
+            'GIT_CONFIG_KEY_1': f'url.{origin.as_uri()}.insteadOf', 'GIT_CONFIG_VALUE_1': url,
+            'GIT_CONFIG_KEY_2': 'protocol.file.allow', 'GIT_CONFIG_VALUE_2': 'always',
+            'GIT_CONFIG_KEY_3': 'gc.auto', 'GIT_CONFIG_VALUE_3': '0',
+            'EVIDENCE_PUSH_TOKEN': 'test-https-token',
+        }
+        for already_signed in (False, True):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env=env)
+            self.assertEqual(code, 0, out + err)
+            if already_signed:
+                self.assertIn('already signed', out)
+            else:
+                self.assertIn('st-test: evidence-wrap argv:', err)
+                self.assertIn('--push origin', err)
+                self.assertIn("-- sh -c 'echo ran'", err)
+                self.assertNotIn('test-https-token', err)
+            refs = git(origin, 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/', 'refs/notes/evidence/').splitlines()
+            self.assertEqual(len(refs), 2, refs)
+            self.assertTrue(all(f'/{tree}/' in ref for ref in refs), refs)
+
     def test_an_already_signed_note_that_cannot_be_pushed_is_a_failure(self):
         self.commit('b.txt', 'two')
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
@@ -2252,6 +2285,19 @@ class PerCrate(StTest):
             self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
         self.assertEqual(sorted(self.remote_refs()), sorted(refs))
         self.assertEqual(len(calls.read_text().split()), 4, 'three chunks of at most 40, and the one that failed once again')
+
+    def test_batched_publication_only_sends_selected_refs_not_the_cached_namespace(self):
+        refs = self.push_refs(85)
+        head = git(self.work, 'rev-parse', 'HEAD')
+        git(self.work, 'update-ref', '--stdin', stdin=''.join(
+            f'update refs/notes/pushtest/cached-{n} {head}\n' for n in range(2000)).encode())
+        calls = Path(self.tmp.name) / 'batch-sizes'
+        self.hook(f'count=0\nwhile read -r old new ref; do count=$((count + 1)); done\n'
+                  f'echo "$count" >> {calls}\n[ "$count" -le {st_test.PUSH_CHUNK} ]\n')
+        with contextlib.chdir(self.work):
+            self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
+        self.assertEqual(sorted(self.remote_refs()), sorted(refs))
+        self.assertEqual(calls.read_text().split(), ['40', '40', '5'])
 
     def test_a_ref_the_remote_keeps_rejecting_is_named_with_its_reason_after_the_tries(self):
         refs = self.push_refs(3)
