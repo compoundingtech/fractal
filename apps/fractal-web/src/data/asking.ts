@@ -2,7 +2,7 @@ import type { Attention } from '@fractal/client/schema'
 import type { DecodedAgent as AgentRow } from '@fractal/sdk/effect'
 import * as Option from 'effect/Option'
 
-/** Open st attention about an agent: it raised, requested, or owns or shows the card in its conversation, or the card is on one of its current missions. */
+/** Open Fractal attention about an agent: it raised, requested, or owns or shows the card in its conversation, or the card is on one of its current missions. */
 export const attentionAboutAgent = ({
   card,
   ref,
@@ -19,15 +19,15 @@ export const attentionAboutAgent = ({
     card.conversation_ids?.some((id) => id === ref) === true ||
     (card.mission_id !== undefined && missionIds.has(card.mission_id)))
 
-/** Missions of the agent's current work, as st names them on the agent row. */
+/** Missions of the agent's current work, as Fractal names them on the agent row. */
 export const currentMissionIds = (row: AgentRow | undefined): ReadonlySet<string> =>
   new Set(row?.current_work?.map((work) => work.mission_id) ?? [])
 
-/** st reports an ask-tool question: the seat's structured ask kind is `question`. st's harness writer sets
+/** Fractal reports an ask-tool question: the seat's structured ask kind is `question`. Fractal's harness writer sets
  * `ask` only while `blocked_on` is `human` (fractal-drivers harness_state), so `ask` alone decides. */
 export const asksQuestion = (row: AgentRow): boolean => Option.getOrUndefined(row.ask) === 'question'
 
-/** "Waiting for answer" reads only st: an ask-tool question OR open attention, never Fractal's status heuristics. */
+/** "Waiting for answer" reads only Fractal: an ask-tool question OR open attention, never Fractal's status heuristics. */
 export const askingAgentRefs = ({
   rows,
   attention,

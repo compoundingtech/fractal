@@ -433,7 +433,7 @@ function assertScenarioPanes(root:HTMLElement,names:readonly ScenarioName[]) {
  mounted.forEach(element=>requireContract(!/\bUnknown\b/.test(element.textContent??''), 'Literal Unknown escaped the fact boundary'))
 }
 function assertTracedDescendantTitle(root:HTMLElement) {
- // Observed st rows precede the traced breakdown, so select the traced card by its session identity.
+ // Observed Fractal rows precede the traced breakdown, so select the traced card by its session identity.
  const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('subagent-session'))
  requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · subagent-session', 'Traced role, model or identity is hidden behind Open')
 }

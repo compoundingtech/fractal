@@ -8,7 +8,7 @@ import type { AgentControl, AgentControlResult } from '../agents/agent-control-p
 import { useDataSource } from '../data/react.tsx'
 import type { Agent } from '../data/source.ts'
 
-// An agent's actions, as stui's agent actions menu offers them (crates/fractal-tui/src/ui/screens.rs,
+// An agent's actions, as the Fractal terminal UI's agent actions menu offers them (crates/fractal-tui/src/ui/screens.rs,
 // `agent_actions`): what can be done to it now, in the same order and words. What changes the
 // seat asks to confirm first; starting or resuming does not. Interrupt only stops the current turn,
 // as the composer's Stop and Esc do, so it does not ask either.
@@ -23,7 +23,7 @@ export type AgentActionRow = {
   readonly confirm: boolean
 }
 
-/** st states in which a seat has (or is getting) a process, as stui reads them. */
+/** Fractal states in which a seat has (or is getting) a process, as the Fractal terminal UI reads them. */
 const RUNNING = new Set(['running', 'waiting', 'starting', 'desired'])
 
 export const agentActions = (agent: { readonly state?: string; readonly activity?: Agent['activity'] }): readonly AgentActionRow[] => {

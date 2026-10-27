@@ -2,7 +2,7 @@
 // chose fabric and the build links the bridge.
 import { FabricRefusal, type CarrierPorts, type FabricPath } from './carrier';
 import { nativeRefusalAfter } from './fabricSession';
-import { dialFabric, fabricAvailable, fabricIdentity, fabricStats, stopFabric } from './modules/st-fabric';
+import { dialFabric, fabricAvailable, fabricIdentity, fabricStats, stopFabric } from './modules/fractal-fabric';
 
 export { fabricAvailable, fabricIdentity };
 

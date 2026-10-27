@@ -128,11 +128,11 @@ Browser `WebSocket` cannot set headers. A browser socket factory must move the c
 Import `@fractal/client/schema` (or `Schema.generated.ts` directly) for Effect 4 `Schema.Struct` codecs and their `typeof X.Type` decoded types. Rich consumers must provide the pinned `effect@4.0.0` stable peer dependency. The raw client entry point does not import Effect, so existing fetch/Expo consumers need no dependency or API migration.
 
 ```ts
-import * as St3Schema from '@fractal/client/schema'
+import * as FractalSchema from '@fractal/client/schema'
 
-const unknown = St3Schema.decodeUnknownSync(St3Schema.ErrorCode)('future-error')
+const unknown = FractalSchema.decodeUnknownSync(FractalSchema.ErrorCode)('future-error')
 // { _tag: "Unknown", raw: "future-error" }; encoding restores the wire string.
-const strictDecode = St3Schema.decodeUnknownEffect(St3Schema.ErrorCode, 'strict')
+const strictDecode = FractalSchema.decodeUnknownEffect(FractalSchema.ErrorCode, 'strict')
 ```
 
 The synchronous and effectful decode helpers default to tolerant mode: unknown enum values survive as `UnknownCase`, excess struct keys are ignored, and `null` on an optional nonnullable field becomes absence. Strict mode rejects unknown enum cases, excess struct keys, and those optional nonnullable nulls. Declared nullable fields decode to `Option` in both modes; optional nullable fields equate missing with null, and `None` encodes as null. Required nonnullable fields reject null in both modes. Arbitrary JSON bags are not interpreted as unknown enum cases merely because they contain `_tag` and `raw`.

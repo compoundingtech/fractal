@@ -3,44 +3,44 @@ import { ago } from './presentation';
 import type { SessionView } from '@fractal/views';
 import { harnessColor, theme } from './theme';
 
-// The Agents tab, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs agents_list and
+// The Agents tab, drawn the way the Fractal terminal UI draws it (crates/fractal-tui/src/ui/screens.rs agents_list and
 // agents_tree, adapt.rs agents): one row per seat, grouped by what it needs, with the sessions
-// st found running but did not start listed last.
+// Fractal found running but did not start listed last.
 
-// Declaration order is the sort order, as in stui's AgentState.
+// Declaration order is the sort order, as in the Fractal terminal UI's AgentState.
 export const AGENT_STATES = ['needs-you', 'needs-login', 'fault', 'working', 'compacting', 'idle', 'starting', 'down', 'stopped', 'retired', 'unknown'] as const;
 export type AgentState = typeof AGENT_STATES[number];
 
 export type AgentRowView = {
   /** The agent id, or the session id of an undeclared session. */
   id: string;
-  /** What a conversation follows: the agent, or the session st found. */
+  /** What a conversation follows: the agent, or the session Fractal found. */
   target: string;
   name: string;
   harness: string;
   state: AgentState;
-  /** The state st reports, from an st too old to serve a presentation. */
+  /** The state Fractal reports, from a Fractal version too old to serve a presentation. */
   reported?: string;
   unmanaged: boolean;
-  /** How long since st last saw it change, e.g. `8h`. */
+  /** How long since Fractal last saw it change, e.g. `8h`. */
   activity: string;
   /** The graph path under the name. */
   path: string;
-  /** What the step it holds last reported (`st work progress`), on one line: the status read first. */
+  /** What the step it holds last reported (`fractal work progress`), on one line: the status read first. */
   progress?: string;
   host: string;
   parent?: string;
 };
 
-const labelWords: Record<string, string> = { st3: 'ST', cos: 'COS', ios: 'iOS', tui: 'TUI', pty: 'PTY', omp: 'OMP' };
+const labelWords: Record<string, string> = { st3: 'ST', fractal: 'Fractal', cos: 'COS', ios: 'iOS', tui: 'TUI', pty: 'PTY', omp: 'OMP' };
 function label(slug: string): string {
   return slug.split('-').map(word => labelWords[word.toLowerCase()] ?? word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
 }
 
-/** An agent's readable name, as stui names it: the last path segment, and `Parent · OMP` for an omp seat. */
+/** An agent's readable name, as the Fractal terminal UI names it: the last path segment, and `Parent · OMP` for an omp seat. */
 export function agentName(agent: Pick<Agent, 'id' | 'name'> & { host_id?: string | null }): string {
   const parts = (agent.name || agent.id).split('/').filter(Boolean);
-  // `st agents new NAME` names a seat HOST.NAME; the host shows beside it, so the label is NAME.
+  // `fractal agents new NAME` names a seat HOST.NAME; the host shows beside it, so the label is NAME.
   const host = agent.host_id?.replace(/^host\//, '').toLowerCase();
   const dotted = parts.at(-1) ?? agent.id;
   const dot = dotted.indexOf('.');
@@ -49,7 +49,7 @@ export function agentName(agent: Pick<Agent, 'id' | 'name'> & { host_id?: string
   return label(slug);
 }
 
-// The model its harness last reported using, as reported ("claude-sonnet-5-5"); null when st says none.
+// The model its harness last reported using, as reported ("claude-sonnet-5-5"); null when Fractal says none.
 export function agentModel(agent: { usage?: { context?: { model?: string | null } | null } | null }): string | null {
   return agent.usage?.context?.model?.trim() || null;
 }
@@ -63,20 +63,20 @@ export function harnessName(driver: string | null | undefined): string {
   return '?';
 }
 
-/** The state st serves for an agent (`presentation.state`, a words.json id). A daemon too old to
+/** The state Fractal serves for an agent (`presentation.state`, a words.json id). A daemon too old to
  *  serve one leaves it unknown; the phone keeps no derivation of its own. */
 export function agentState(agent: Pick<Agent, 'presentation'>): AgentState {
   const state = agent.presentation?.state.replace('_', '-');
   return (AGENT_STATES as readonly string[]).includes(state ?? '') ? state as AgentState : 'unknown';
 }
 
-/** The word for an agent from an st too old to serve its presentation: the state st reports,
- *  marked so. Undefined when st serves a presentation. */
+/** The word for an agent from a Fractal version too old to serve its presentation: the state Fractal reports,
+ *  marked so. Undefined when Fractal serves a presentation. */
 export function agentReported(agent: Pick<Agent, 'presentation' | 'state'>): string | undefined {
   return agent.presentation ? undefined : `${agent.state} · older Fractal`;
 }
 
-/** What the Agents list says when a row came from an older st. */
+/** What the Agents list says when a row came from an older Fractal. */
 export const OLDER_ST_NOTE = "This host runs an older Fractal version: agent states appear as reported.";
 
 export const SPINNER = '⠿';
@@ -160,7 +160,7 @@ function host(id: string | null | undefined): string {
 }
 
 /**
- * Every seat st declares, then every running session st found but did not start. Undeclared
+ * Every seat Fractal declares, then every running session Fractal found but did not start. Undeclared
  * sessions are named `driver in workspace` and belong to the gateway's host.
  */
 export function agentRows(agents: Agent[], sessions: SessionView[], gatewayHost: string, now = Date.now(), missions: Mission[] = []): AgentRowView[] {
@@ -196,7 +196,7 @@ export function agentRows(agents: Agent[], sessions: SessionView[], gatewayHost:
   return sortAgentRows([...declared, ...found]);
 }
 
-/** stui's order: managed before found, then by state, then by name. */
+/** The Fractal terminal UI's order: managed before found, then by state, then by name. */
 export function sortAgentRows(rows: AgentRowView[]): AgentRowView[] {
   return [...rows].sort((a, b) =>
     Number(a.unmanaged) - Number(b.unmanaged)
@@ -229,7 +229,7 @@ export function agentSections(rows: AgentRowView[]): AgentSection[] {
 
 export type TreeLine = { kind: 'folder'; key: string; depth: number; name: string } | { kind: 'row'; key: string; depth: number; row: AgentRowView };
 /**
- * The tree view: each agent under the folders of its graph path, the way stui's tree listing
+ * The tree view: each agent under the folders of its graph path, the way the Fractal terminal UI's tree listing
  * draws it. Folders open once, in path order; a row sits one level below its last folder.
  */
 export function agentTreeLines(rows: AgentRowView[]): TreeLine[] {
@@ -289,7 +289,7 @@ export function compactFolders(paths: string[][]): string[][] {
 
 export { harnessColor };
 
-/** What a person does for an agent signed out of its provider, as stui says it. */
+/** What a person does for an agent signed out of its provider, as the Fractal terminal UI says it. */
 export function loginGuidance(agent: { driver?: string | null; host_id?: string | null }): string {
   const host = agent.host_id?.replace(/^host\//, '') ?? 'its host';
   const harness = harnessName(agent.driver);

@@ -5,7 +5,7 @@ import * as Fiber from 'effect/Fiber'
 import * as Stream from 'effect/Stream'
 import { describe, expect } from 'vitest'
 import { makeAdmission } from './admission.ts'
-import { collectionWindow, followKey, St3, St3Live, type FollowDescriptor } from './mod.ts'
+import { collectionWindow, followKey, Fractal, FractalLive, type FollowDescriptor } from './mod.ts'
 
 const snapshot = {
   id: 'snapshot/1', created_at: '2026-10-21T00:00:00Z', host_id: 'host/test',
@@ -35,7 +35,7 @@ describe('host-independent SDK', () => {
       queueMicrotask(() => socket.onopen?.())
       return socket
     }
-    const layer = St3Live({
+    const layer = FractalLive({
       baseUrl: 'http://gateway.test', maxFollows: 2,
       credential: () => 'paired-test-credential', client: 'sdk-node-test', socket: factory,
       fetch: async (_input, init) => {
@@ -47,7 +47,7 @@ describe('host-independent SDK', () => {
       expect('window' in globalThis).toBe(false)
       expect('document' in globalThis).toBe(false)
       yield* Effect.gen(function* () {
-        const sdk = yield* St3
+        const sdk = yield* Fractal
         const first = yield* Effect.forkChild(sdk.watch(collectionWindow({ _tag: 'Window', collection: 'agents', limit: 50 })).pipe(Stream.runDrain))
         // A descriptor can choose its decoded value without another projection or socket.
         const descriptor: FollowDescriptor<{ readonly identity: string }> = {

@@ -80,7 +80,7 @@ export type Feed<A> =
       readonly retryable?: boolean
     }
 
-/** Which adapter feeds the tree: the deterministic fixture world or the st gateway. */
+/** Which adapter feeds the tree: the deterministic fixture world or the Fractal gateway. */
 export type DataMode = 'fixtures' | 'live'
 
 /**
@@ -213,7 +213,7 @@ export type ConversationPortResult<T> =
   | { readonly _tag: 'Success'; readonly value: T }
   | {
       readonly _tag: 'Refused'
-      /** `unconfirmed`: st said `applied: "unknown"`; the identical request may still complete. */
+      /** `unconfirmed`: Fractal said `applied: "unknown"`; the identical request may still complete. */
       readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed'
       readonly detail: string
       /** Preserve the daemon's complete refusal, including its retry policy. */
@@ -245,7 +245,7 @@ type MessageSendFields = Omit<MessageSendInput, 'parameters' | 'idempotency_key'
  * A first send (`Send`) never carries a caller-owned key: the data layer generates one
  * and paints the optimistic row synchronously. `Resend` is an explicit retry of an
  * uncertain send with its original key; its authoritative identity is reconciled
- * before any optimistic row can duplicate mail the stream already shows. st deduplicates
+ * before any optimistic row can duplicate mail the stream already shows. Fractal deduplicates
  * a key by its whole request except the fence, so a Resend repeats the original action
  * id and parameters; a source that recorded the key's first send substitutes them.
  */
@@ -334,7 +334,7 @@ export interface DataSource {
   readonly retryTerminal?: (terminalRef: string) => void
   /** Restart, suspend, retire, start, resume or interrupt a seat (`agent.*`, Esc to its terminal). */
   readonly agentControls?: AgentControlPort
-  /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
+  /** Fractal documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
   /** Explicit geometry action; never tied to the browser pane dimensions. */
   readonly terminalResize?: TerminalResizePort
