@@ -183,6 +183,8 @@ export const decodedRoster: RosterDecode = { undecodable: [], decodeStale: false
 /** The loaded conversation window; older history is a boundary, not an available fetch operation. */
 export interface ConversationPage {
   readonly items: readonly ConversationItem[]
+  /** Header values include their native source and as_of; absence is not inferred. */
+  readonly header?: Readonly<Record<string, unknown>>
   readonly hasOlder: boolean
   /** Native page provenance; filtered items cannot establish emptiness. */
   readonly observation?: { readonly empty: boolean }

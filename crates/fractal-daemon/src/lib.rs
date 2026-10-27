@@ -114,6 +114,7 @@ pub use fractal_telemetry::startup_telemetry;
 pub use fractal_evidence::store;
 pub mod subagents;
 pub use fractal_seats::suspension;
+pub use fractal_seats::external_sessions::omp_process_transcript;
 pub use fractal_reconcile::seat_snapshot;
 pub use fractal_telemetry::telemetry;
 pub use smallclaims::task_cpu;

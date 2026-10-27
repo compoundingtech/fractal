@@ -122,6 +122,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  resources?: Array<DeclaredResource>;
   rollout?: {
 
 } | null;
@@ -1368,6 +1369,15 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DeclaredResource = {
+  kind: "uri" | "subject";
+  name: string;
+  reason?: string | null;
+  resolution: "resolved" | "unresolved" | "not-applicable";
+  subject: Id;
+  uri?: string;
+};
+
 export type DelegationProof = {
   episode: string;
   message: string;
@@ -1946,6 +1956,7 @@ export type Mission = ResourceHeader & {
   mission_revision: Revision;
   must_act?: MustAct;
   presentation?: MissionPresentation;
+  resources?: Array<DeclaredResource>;
   run_counts?: {
   [key: string]: number;
 };

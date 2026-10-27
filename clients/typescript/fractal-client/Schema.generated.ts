@@ -849,6 +849,23 @@ export const AgentTodo = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentTodo = typeof AgentTodo.Type
 export type AgentTodoEncoded = typeof AgentTodo.Encoded
 
+/** A named edge from a seat or mission declaration to an ordinary resource subject in the graph. */
+export const DeclaredResource = /*#__PURE__*/ (() => Schema.Struct({
+  /** Whether the edge was authored with uri= or subject=. */
+  "kind": Schema.Literals(["uri","subject"]).annotate({ description: "Whether the edge was authored with uri= or subject=." }),
+  /** Unique within the declaration. */
+  "name": Schema.String.annotate({ description: "Unique within the declaration." }),
+  "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** URI locator availability. Subject references use not-applicable; this is not a subject existence check. */
+  "resolution": Schema.Literals(["resolved","unresolved","not-applicable"]).annotate({ description: "URI locator availability. Subject references use not-applicable; this is not a subject existence check." }),
+  /** The ordinary resource subject targeted by this edge. URI references use resource/uri/SHA256 of the exact URI. */
+  "subject": Id,
+  /** The exact absolute URI, any scheme. Present only for resolved URI references. */
+  "uri": optionalKey(Schema.String).annotate({ description: "The exact absolute URI, any scheme. Present only for resolved URI references." })
+}).annotate({ identifier: "DeclaredResource", description: "A named edge from a seat or mission declaration to an ordinary resource subject in the graph." }))()
+export type DeclaredResource = typeof DeclaredResource.Type
+export type DeclaredResourceEncoded = typeof DeclaredResource.Encoded
+
 export const HostId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host").annotate({ identifier: "HostId" }))()
 export type HostId = typeof HostId.Type
 export type HostIdEncoded = typeof HostId.Encoded
@@ -986,6 +1003,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "reachability": AgentReachability,
   /** Diagnostic harness reason, not a machine-readable verdict. */
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Diagnostic harness reason, not a machine-readable verdict." }),
+  /** The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field. */
+  "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
   /** Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons. */
   "rollout": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE).annotate({ description: "Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons." }),
@@ -994,8 +1013,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When this observed state began in this runtime incarnation. Same-state observations never reset it. */
   "since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When this observed state began in this runtime incarnation. Same-state observations never reset it." }),
   "state": AgentState,
-  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field. */
-  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field." }),
+  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents. */
+  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents." }),
   /** The seat's latest suspend or resume and its phase. An older daemon omits the field. */
   "suspension": Schema.OptionFromOptionalNullOr(AgentSuspension, NULL_NONE).annotate({ description: "The seat's latest suspend or resume and its phase. An older daemon omits the field." }),
   /** Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible. */
@@ -2689,6 +2708,8 @@ export const Mission = /*#__PURE__*/ (() => Schema.Struct({
   "operational": optionalKey(Operational),
   /** st's presentation of this mission: its word, who must act, each step, the stuck step and what a person can do (docs/clients/ui-contract.md, Mission). Absent on older daemons and until st has a published agents roster. */
   "presentation": optionalKey(MissionPresentation),
+  /** The resources the current published revision names, in authored order. Read-only. An older daemon omits the field. */
+  "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the current published revision names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
   "run_counts": optionalKey(Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))),
   "run_details": optionalKey(Schema.Array(MissionRunSummary)),

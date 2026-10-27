@@ -947,12 +947,20 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
         {"account": "claude/bbbb", "weekly_percent": 50.0, "five_hour_percent": null, "exempt": false,
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
-    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": []}});
+    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": [], "keep": ["agent/example/coordinator", "agent/example/lead"], "keep_retired": ["agent/example/lead"]}});
     let output_exempt = render_usage_report(&exempt, 24, None);
     assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
     assert!(output_exempt.contains("claude/bbbb\n"), "{output_exempt}");
     assert!(
         output_exempt.contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  seats this node never stops at the weekly limit ([limits] keep) · agent/example/coordinator, agent/example/lead\n"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  1 of those seats are no longer declared and keep nothing; remove them from keep when convenient · agent/example/lead\n"),
         "{output_exempt}"
     );
     let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));
@@ -1620,6 +1628,85 @@ fn pi_family_channel_logs_unhandled_frames_without_claiming_or_panicking() {
         assert!(state.pending.state.is_none());
         assert!(state.pending.native_session.is_none());
     }
+}
+
+#[tokio::test]
+async fn pi_family_publication_verifies_the_exact_external_frame_path() {
+    use axum::{Json, Router, routing::post};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
+    let client = Client::new(Endpoint::Unix(socket.clone()));
+    let store = std::sync::Arc::new(
+        Store::open(&root.path().join("graph.db"), "test").unwrap(),
+    );
+    store.append_claim(&ClaimInput {
+        subject: "agent/external".into(),
+        kind: "runtime.observed".into(),
+        actor: Some("agent/external".into()),
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("external-incarnation")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let graph = store.clone();
+    let app = Router::new().route("/v1/agents/native-session", post(move |Json(report): Json<Value>| {
+        let store = graph.clone();
+        async move {
+            assert_eq!(report["subject"], "agent/external");
+            assert_eq!(report["actor"], "agent/external");
+            assert_eq!(report["incarnation_id"], "external-incarnation");
+            assert_eq!(report["session_id"], "external-native");
+            let record = store.append_claim(&ClaimInput {
+                subject: "agent/external".into(),
+                kind: "harness.session-file".into(),
+                actor: Some("agent/external".into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("omp")),
+                    ("agent".into(), report["subject"].clone()),
+                    ("incarnation_id".into(), report["incarnation_id"].clone()),
+                    ("session_id".into(), report["session_id"].clone()),
+                    ("path".into(), report["path"].clone()),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            Json(json!({"api_version":"st3.v1", "value":record}))
+        }
+    }));
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let selected = root.path().join("arbitrary-external-name.jsonl");
+    // A sibling with the same native ID must never rescue the reported file.
+    fs::write(root.path().join("fallback_external-native.jsonl"),
+        "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    let mut pending = PiFamilyReports {
+        native_session: Some(("external-native".into(), Some(selected.to_string_lossy().into_owned()))),
+        ..Default::default()
+    };
+    for content in [None, Some("{}\n"), Some("{\"type\":\"session\",\"id\":\"foreign\"}\n")] {
+        if let Some(content) = content { fs::write(&selected, content).unwrap(); }
+        pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+            .await.unwrap();
+        assert!(pending.native_session.is_some());
+        assert!(store.claims_for("agent/external", Some("harness.session-file")).unwrap().is_empty());
+    }
+    fs::write(&selected, "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+        .await.unwrap();
+    assert!(pending.native_session.is_none());
+    let claim = store.latest_claim("agent/external", Some("harness.session-file")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["path"], json!(fs::canonicalize(selected).unwrap()));
+    server.abort();
 }
 
 #[tokio::test]
@@ -5743,6 +5830,43 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
 }
 
 #[test]
+fn generic_declaration_rendering_preserves_nested_agent_resource_references() {
+    use fractal_daemon::graph::{declared_resources, render_desired_node};
+    let source = r#"version 2
+agent "example/worker" {
+  workspace "/tmp"
+  command "sleep 1000"
+  resource "explicit" subject="resource/example/known" reason="Keep the explicit edge"
+  resource "unresolved" subject="resource/example/not-yet-published" reason="Keep unresolved work"
+}
+"#;
+    let original = fractal_daemon::parse_intent(source, "studio").unwrap();
+    let desired = &original.subjects["agent/example/worker"].desired;
+    let expected = declared_resources(desired);
+    assert_eq!(expected.len(), 2);
+    for tree in [
+        desired.clone(),
+        serde_json::json!({
+            "name": "host",
+            "arguments": ["studio"],
+            "properties": {},
+            "children": [desired],
+        }),
+    ] {
+        let rendered = render_desired_node(&tree).unwrap();
+        let parsed = fractal_daemon::parse_intent(
+            &format!("version 2\n{rendered}\n"),
+            "studio",
+        )
+        .unwrap();
+        assert_eq!(
+            declared_resources(&parsed.subjects["agent/example/worker"].desired),
+            expected,
+        );
+    }
+}
+
+#[test]
 fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() {
     assert!(Cli::try_parse_from(["st3", "agents"]).is_err());
 
@@ -5796,7 +5920,7 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     else {
         panic!("agents start did not parse");
     };
-    let kdl = agent_start_document(&args, None).unwrap();
+    let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
