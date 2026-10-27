@@ -134,6 +134,40 @@
                                         │  ● connected ◐ through another○ offline
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
+=== Worktrees unavailable ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  list:worktrees   +
+ ▾ Everything else 7                    │
+ ▾ Agents 4                             │  Could not load: The scenario kit does not model worktrees
+   Atlas Builder                        │
+   Atlas Docs                           │
+   Atlas Migrator                       │
+   Atlas Reviewer                       │
+ ▾ Missions 1                           │
+   example/atlas · Rename fetchUser to l│
+ ▾ Machines 2                           │
+   foundry                              │
+   meadow                               │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │ ─────────────────────────────────────────────────────────────────────────────
+                                        │  ↑ ahead     ↓ behind    ± changed
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
 === Machine and devices ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────

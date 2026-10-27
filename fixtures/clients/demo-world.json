@@ -545,7 +545,7 @@
   "person": "person/robin",
   "quiet_missions": 1,
   "worktrees": {
-    "state": "ready",
-    "value": []
+    "state": "failed",
+    "value": "The scenario kit does not model worktrees"
   }
 }
