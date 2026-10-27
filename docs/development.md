@@ -319,6 +319,46 @@ stage `main` using the same Cloudflare account and remote state.
 These instructions describe the deployment configuration, not evidence of a
 successful live deployment or a recorded approval for public hosting.
 
+### Production app stories
+
+The kit Storybook loads app stories only by the explicit file entries in
+`packages/fractal-ui/.storybook/stories.ts`. A story titled `Fractal/App/<Module>` is a
+production module suite: its `meta.component` is that app module, imported from its
+production file and mounted by the story. `Fractal/App/LiveAgentWorkspace` and
+`Fractal/App/ConversationPane` mount the real modules under `DataSourceProvider` over
+`fixtureSource` feeds of the deterministic fixture world (`src/fixtures/appStoryStates.ts`);
+they never start the live runtime or contact a gateway. Each suite has one story per state,
+with a scheme control for light and dark: loading, empty, populated, failed tool, offline (stale
+feeds, reconnecting socket, browser offline), unavailable and the streaming repair session. Each
+story mounts exactly one production boundary; its play waits for the real transcript, composer
+and, for the workspace, the workspace root, then marks the canvas `data-proof="passed"`. The
+responsive phone layout stays in `Fractal/Narrow layout`.
+
+These states do not depend on width or scheme, so `APP_CASE_OVERRIDES` in
+`packages/fractal-ui/scripts/kit-play-commit-set.mjs` runs each of the 14 stories in one case,
+dark at 1440 px: 14 merge-gate cases instead of the full four-case matrix. A state whose
+behaviour does depend on width needs its own reviewed override. The suites carry no `critical`
+tag, so the per-commit set does not run them; they run in the merge gate (`KIT_PLAY_SET=all`).
+Every file they bundle is listed in `KIT_PATTERNS` in `scripts/ci-fractal-web-changes`, so a
+change to any of them selects kit plays.
+
+`LiveAgentWorkspace.graph.integration.test.ts` keeps the eager startup boundary and adds a
+lazy-inclusive identity check: it follows literal `import()` edges from `main.tsx` without
+evaluating modules, resolves every configured module suite's `meta.component` through imports,
+aliases and `React.lazy`, and requires both directions: each suite mounts a module of that
+production graph whose name matches its title, and `LiveAgentWorkspace.tsx` and
+`ConversationPane.tsx` each have a configured suite. Planted story-local, lazily imported,
+renamed and missing suites must fail. `appStoryAssertions.unit.test.ts` is the negative
+control for the play assertion: a stubbed production module or a gallery of boundaries fails.
+
+The synthetic-fixture privacy scanner
+(`apps/fractal-web/scripts/synthetic-fixtures/scan.mjs`) scans a root inside Git by its
+publication inputs, `git ls-files --cached --others --exclude-standard`: committed and
+untracked non-ignored files, including tracked files under an ignored directory. Git-ignored
+build output such as `storybook-static` or installed dependencies is not a publication input.
+Roots outside Git are scanned in full, and a root reached through a symlinked directory is
+matched by its resolved path. This adds no filename, vendor or content-hash exemptions.
+
 ## Continuous integration
 
 Workspace CI runs on pull requests and merge groups. The four required checks are `linux-gate`,

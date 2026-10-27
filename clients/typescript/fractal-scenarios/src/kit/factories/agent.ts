@@ -29,6 +29,8 @@ export interface AgentFactoryResult {
   readonly runtime: Runtime | null
 }
 
+const SUBAGENT_OBSERVING_DRIVERS: Readonly<Partial<Record<CastAgent['driver'], true>>> = { claude: true, codex: true, omp: true }
+
 const revision = (ctx: FactoryContext, prefix: string) => `${prefix}${int(ctx.rng, 1, 40)}`
 
 /** An `Agent` resource with joined work labels and its `Runtime` when it runs. */
@@ -73,7 +75,7 @@ export const agent = (ctx: FactoryContext, member: CastAgent, options: AgentOpti
     upcoming_work: upcoming,
     queued_work_count: upcoming.length,
     under: [],
-    subagents: [],
+    ...(Object.hasOwn(SUBAGENT_OBSERVING_DRIVERS, member.driver) ? { subagents: [] } : {}),
     workspace: member.workspace,
     checkout: { repository: ctx.cast.repository, base: 'origin/main', branch: member.branch },
   }

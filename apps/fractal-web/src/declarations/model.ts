@@ -3,14 +3,14 @@ import type { AgentDeclaration, PublicationDefinition } from '@fractal/client/sc
 import type { DeclarationPanelState } from '@fractal/ui/assistant-ui/shell'
 import type { Feed } from '../data/source.ts'
 
-/** st's placeholder for an environment value it did not disclose. */
+/** Fractal's placeholder for an environment value it did not disclose. */
 export const REDACTED = '<redacted>'
-/** Embedded declaration text is KDL st does not redact; the web client never shows it. */
+/** Embedded declaration text is KDL Fractal does not redact; the web client never shows it. */
 export const WITHHELD_DECLARATIONS = '<withheld: embedded declarations can carry environment values>'
 
 /**
  * Which canonical source serves a subject. Agents: `GET /v1/client/agent-declarations/{id}` with
- * `show_env_values=false`, KDL rendered and redacted by st. Missions: st keeps no canonical
+ * `show_env_values=false`, KDL rendered and redacted by Fractal. Missions: Fractal keeps no canonical
  * mission KDL, so `GET /v1/client/publication-definition` serves the structured definition,
  * shown as JSON and redacted here because that read has no `show_env_values` switch.
  */
@@ -30,12 +30,12 @@ const patch = (value: unknown, fields: Fields): unknown =>
   Predicate.isObject(value) ? Object.fromEntries(Object.entries(value).map(([key, child]) => [key, Object.hasOwn(fields, key) ? fields[key]!(child) : child])) : value
 const each = (redact: (item: unknown) => unknown) => (list: unknown): unknown => Array.isArray(list) ? list.map(redact) : list
 
-/** An environment map keeps its names, as st's agent redaction does; a malformed one is hidden whole. */
+/** An environment map keeps its names, as Fractal's agent redaction does; a malformed one is hidden whole. */
 const hideEnvironment = (environment: unknown): unknown =>
   Predicate.isObject(environment) ? Object.fromEntries(Object.keys(environment).map(name => [name, REDACTED])) : REDACTED
 const withhold = (kdl: unknown): unknown => typeof kdl === 'string' ? WITHHELD_DECLARATIONS : kdl
 
-// The positions below mirror st's MissionSpec serde shape (crates/fractal-kernel/src/model.rs): environment
+// The positions below mirror Fractal's MissionSpec serde shape (crates/fractal-kernel/src/model.rs): environment
 // values live only in mechanical/llm `GateSpec.environment` and exec `MetricSource.environment`;
 // embedded declaration text in `MissionSpec`/`StepSpec.declarations_kdl`.
 const gate = (value: unknown): unknown => patch(value, { environment: hideEnvironment })
@@ -78,7 +78,7 @@ const unread = (feed: Unread): DeclarationPanelState =>
     : feed.reason === 'unsupported' ? { _tag: 'Unavailable', message: `This connection cannot read declarations. ${feed.detail}` }
     : { _tag: 'Failed', message: `The declaration could not be loaded: ${feed.detail.replace(/\.$/, '')}. Nothing was changed; close and try again.` }
 
-/** The agent's canonical KDL exactly as st rendered it. */
+/** The agent's canonical KDL exactly as Fractal rendered it. */
 export const agentDeclarationState = (feed: Feed<AgentDeclaration>): DeclarationPanelState =>
   feed._tag === 'Waiting' ? { _tag: 'Loading' }
     : feed._tag === 'Unavailable' ? unread(feed)

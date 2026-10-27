@@ -69,7 +69,7 @@ fn write_agent(root: &Path) {
 /// The pty root the in-process `SystemRunner` uses for `root`, handed to each `st2` so the CLI retires
 /// the sessions the runner spawned: the catalog's own, or PTY_ROOT when the test process has one. The
 /// other CLI tests remove PTY_ROOT, but this file's runner reads it in-process, so removing it only
-/// from `st2` would split the two. scripts/st-test drops an agent seat's PTY_ROOT (its live root).
+/// from `st2` would split the two. scripts/fractal-test drops an agent seat's PTY_ROOT (its live root).
 fn pty_root(root: &Path) -> std::path::PathBuf {
     fractal_legacy_runner::run::effective_pty_root(root)
 }

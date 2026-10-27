@@ -61,15 +61,15 @@ class PresignNotice(unittest.TestCase):
         text = self.run_notice([line('typescript-client'), line('genie-freshness'), line('linux-gate')], Runner(files=['crates/a.rs']))
         self.assertIn('::notice title=Not pre-signed::These jobs ran in full because no pre-signed note covered this head: '
                       'genie-freshness, typescript-client.', text)
-        self.assertIn('`scripts/st-test --push origin`', text)
+        self.assertIn('`scripts/fractal-test --push origin`', text)
         self.assertIn('never fails a check or blocks a merge', text)
         self.assertIn('evidence-presign-notice v1 pr=7 listed=genie-freshness,typescript-client passed_over=-', text)
         self.assertIn('ran in full', self.summary)
 
     def test_every_check_asks_for_the_same_command(self):
-        # No heavy or light split: st-test with no flag runs and signs the whole per-PR suite.
+        # No heavy or light split: fractal-test with no flag runs and signs the whole per-PR suite.
         text = self.run_notice([line('stage-lane')], Runner(files=['crates/a.rs']))
-        self.assertIn('`scripts/st-test --push origin`', text)
+        self.assertIn('`scripts/fractal-test --push origin`', text)
         self.assertNotIn('--all', text)
 
     def test_covered_sampled_shadow_and_skipped_checks_are_not_listed(self):
