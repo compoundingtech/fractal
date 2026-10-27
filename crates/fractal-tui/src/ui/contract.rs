@@ -226,16 +226,19 @@ fn scenario_demo_first_frames_match_golden() {
     let world = demo::contract_world();
     let mut actual = String::new();
     for (title, pane) in [
-        ("Now", Pane::Home(None)),
+        ("Now", Pane::List(0)),
         ("Roster", Pane::List(1)),
         ("Mission", Pane::Mission(Some(world.missions.items()[0].id.clone()))),
         ("Fleet", Pane::List(3)),
+        ("Machine and devices", Pane::Machine(Some("machine/meadow".into()))),
         ("Conversation", Pane::Agent(Some("agent/example/atlas/builder".into()))),
+        ("Agent details", Pane::Agent(Some("agent/example/atlas/builder".into()))),
         ("Terminal", Pane::Terminal("agent/example/atlas/builder".into())),
     ] {
         let mut ui = Ui::new(world.clone());
         ui.glasses = glass::Glasses::open(None, None);
         ui.glasses.sidebar.shown = true;
+        if title == "Agent details" { ui.details_here.insert("agent/example/atlas/builder".into()); }
         if matches!(pane, Pane::Terminal(_)) { ui.attach_terminal("agent/example/atlas/builder"); }
         ui.open_in_glass(pane, glass::Open::Tab);
         let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();

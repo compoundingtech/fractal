@@ -1,35 +1,35 @@
 === Now ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- / Filter:                          +New│  I home:   +
- ▾ Everything else 7                    │
- ▾ Agents 4                             │ ✓ No alerts right now.
-   Atlas Builder                        │
-   Atlas Docs                           │ 0 missions are running without you. They are on the Missions tab.
-   Atlas Migrator                       │
-   Atlas Reviewer                       │
- ▾ Missions 1                           │
-   example/atlas · Rename fetchUser to l│
- ▾ Machines 2                           │
-   foundry                              │
-   meadow                               │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
-                                        │
+ / Filter:                          +New│  I ◆1 Inbox   +
+ ▾ Everything else 7                    │   somebody is stopped on you  │ ╭─ UNPLACED · WAITING 1M ─────────────────╮
+ ▾ Agents 4                             │ ▌ ? unplaced Worker typech…   │ │                                         │
+   Atlas Builder                        │ ▌   waited 1m                 │ │ Worker typecheck fails after the rename │
+   Atlas Docs                           │                               │ │ ? unplaced · 1m ago                     │
+   Atlas Migrator                       │                               │ │ mission  example/atlas · Rename fetchUser
+   Atlas Reviewer                       │                               │ │                                         │
+ ▾ Missions 1                           │                               │ │ syncAvatars calls loadUser without the  │
+   example/atlas · Rename fetchUser to l│                               │ │ session. Thread the session through, or │
+ ▾ Machines 2                           │                               │ │ keep a one-argument overload?           │
+   foundry                              │                               │ │                                         │
+   meadow                               │                               │ │ Fractal does not say what this is: this │
+                                        │                               │ │ host's Fractal is older, or has not     │
+                                        │                               │ │ presented it yet. Answer it with        │
+                                        │                               │ │ fractal alerts.                         │
+                                        │                               │ │                                         │
+                                        │                               │ │  c Reply with fields                    │
+                                        │                               │ │                                         │
+                                        │                               │ │ related ─────────────────────────────── │
+                                        │                               │ │ agent     agent/example/atlas/builder   │
+                                        │                               │ │                                         │
+                                        │                               │ │  t Chat about this    g Go to the mission
+                                        │                               │ │                                         │
+                                        │                               │ ╰─────────────────────────────────────────╯
+                                        │                               │
+                                        │                               │
+                                        │                               │
+                                        │ ──────────────────────────────│
+                                        │  ◆ decide    ✕ fault     ✉ mes│
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
 === Roster ===
@@ -134,6 +134,40 @@
                                         │  ● connected ◐ through another○ offline
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
+=== Machine and devices ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  meadow   +
+ ▾ Everything else 7                    │  ● meadow  this machine
+ ▾ Agents 4                             │    2 running runtimes
+   Atlas Builder                        │
+   Atlas Docs                           │ ╭─ REACHES ────────────────────────────────────────────────────────────────╮
+   Atlas Migrator                       │ │ This is the machine the Fractal terminal UI is talking to.               │
+   Atlas Reviewer                       │ ╰──────────────────────────────────────────────────────────────────────────╯
+ ▾ Missions 1                           │ ╭─ AGENTS HERE ────────────────────────────────────────────────────────────╮
+   example/atlas · Rename fetchUser to l│ │ ? Atlas Builder        codex   worktree · branch builder/load-user-rename
+ ▾ Machines 2                           │ │ ? Atlas Migrator       claude  worktree · branch migrator/load-user-rename
+   foundry                              │ ╰──────────────────────────────────────────────────────────────────────────╯
+   meadow                               │ ╭─ CONNECTED CLIENTS ──────────────────────────────────────────────────────╮
+                                        │ │ Loading connected clients…                                               │
+                                        │ ╰──────────────────────────────────────────────────────────────────────────╯
+                                        │ ╭─ YOUR DEVICES ───────────────────────────────────────────────────────────╮
+                                        │ │ ● Review phone          read                    expires 2030-01-02T12:00:0
+                                        │ │   Revoke                                                                 │
+                                        │ │ ● Fleet tablet          read                    expires 2030-01-02T12:00:0
+                                        │ │   Revoke                                                                 │
+                                        │ ╰──────────────────────────────────────────────────────────────────────────╯
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
 === Conversation ===
  ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -165,6 +199,40 @@
                                         │                                                                             ┃
                                         │ ─────────────────────────────────────────────────────────────────────────────
                                         │ › Message Atlas Builder · type or click
+                                        │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
+=== Agent details ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  A~ Atlas Builder   +
+ ▾ Everything else 7                    │  i back to the conversation
+ ▾ Agents 4                             │ details                                                            × close
+   Atlas Builder                        │ now ──────────────────────────────────────────────────────────────────────
+   Atlas Docs                           │ example/atlas · Rename fetchUser to loadUser › step-3
+   Atlas Migrator                       │ held since 38m ago
+   Atlas Reviewer                       │
+ ▾ Missions 1                           │ next 0 ───────────────────────────────────────────────────────────────────
+   example/atlas · Rename fetchUser to l│ Nothing queued.
+ ▾ Machines 2                           │
+   foundry                              │ runs as ──────────────────────────────────────────────────────────────────
+   meadow                               │ ? running · older Fractal
+                                        │ harness  codex
+                                        │ model    Fractal has not said
+                                        │ state    blocked
+                                        │ runtime  Fractal has not said
+                                        │ host     meadow
+                                        │ worktree worktree · branch builder/load-user-rename · ~/src/atlas
+                                        │
+                                        │ agent/example/atlas/builder
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
                                         │
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
