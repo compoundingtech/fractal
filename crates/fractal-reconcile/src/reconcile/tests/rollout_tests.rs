@@ -538,7 +538,15 @@ fn rollout_provider_switch_starts_fresh_and_verifies_the_replacement_provider() 
         let expected = if reported_provider == "codex" { "running" } else { "failed" };
         assert_eq!(seat.operation().phase, expected, "{:?}", seat.operation().reason);
         seat.reopen();
-        seat.step();
+        let reconciler = Reconciler::new(
+            seat.store.clone(), seat.runtime.clone(), "amber".into(), Arc::new(Notify::new()),
+        );
+        let observed = seat.runtime.observation.lock().unwrap().clone();
+        assert_eq!(
+            reconciler.reconcile_rollout(&seat.desired(), observed.as_ref(), None).unwrap(),
+            expected != "running",
+            "a completed rollout releases ordinary reconciliation after reopening",
+        );
         assert_eq!(seat.operation().phase, expected);
         assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
         assert_eq!(
