@@ -13,7 +13,8 @@ pub use fractal_missions::store::harness_questions::{HarnessQuestion, QuestionRe
 pub struct QuestionObservation {
     pub agent: String,
     pub session: String,
-    /// Raw native call identity, hashed by the store before persistence or subject derivation.
+    /// Raw native call identity for `observe_harness_question`; the digest variant requires
+    /// the already-hashed identity emitted by the native outbox.
     pub native_id: String,
     pub runtime_incarnation: String,
     pub questions: Vec<Question>,
@@ -35,6 +36,11 @@ pub trait HarnessQuestionsStore {
     /// its revision holds; new content is a new revision. A resolved question takes no new
     /// observation.
     fn observe_harness_question(
+            &self,
+            observation: &QuestionObservation,
+        ) -> Result<HarnessQuestion, St3Error>;
+    /// Ingest an already-hashed native identity from the text-free native outbox.
+    fn observe_harness_question_digest(
             &self,
             observation: &QuestionObservation,
         ) -> Result<HarnessQuestion, St3Error>;
@@ -80,43 +86,14 @@ impl HarnessQuestionsStore for Store {
             after_read: impl FnOnce(),
         ) -> Result<HarnessQuestion, St3Error> {
         let native_id = fractal_schema::harness_questions::native_id_digest(&observation.native_id);
-        let subject = subject(&observation.agent, &observation.session, &native_id);
-        let current = self.harness_question_held(&subject)?;
-        // Fence the observation we inspected, not a head that may already contain a
-        // concurrent resolution or replacement observation.
-        let expected = current.as_ref().map(|question| question.revision.clone());
-        after_read();
-        if let Some(current) = current {
-            if current.resolution.is_some() {
-                return Err(St3Error::new(
-                    "harness-question-resolved",
-                    "a resolved question takes no new observation",
-                )
-                .with_detail("question", subject));
-            }
-            if current.runtime_incarnation == observation.runtime_incarnation
-                && current.questions == observation.questions
-            {
-                return Ok(current);
-            }
-        }
-        self.append_claim(&ClaimInput {
-            subject: subject.clone(),
-            kind: OBSERVED.into(),
-            actor: None,
-            fields: json_fields(json!({
-                "agent": observation.agent,
-                "session": observation.session,
-                "native_id": native_id,
-                "runtime_incarnation": observation.runtime_incarnation,
-                "questions": observation.questions,
-            })),
-            evidence: Vec::new(),
-            expected_subject: Some(expected),
-            idempotency_key: None,
-        })?;
-        self.harness_question_held(&subject)?
-            .ok_or_else(|| St3Error::new("internal", "the observed question did not fold"))
+        observe_identity(self, observation, &native_id, after_read)
+    }
+
+    fn observe_harness_question_digest(
+            &self,
+            observation: &QuestionObservation,
+        ) -> Result<HarnessQuestion, St3Error> {
+        observe_identity(self, observation, &observation.native_id, || {})
     }
 
     fn resolve_harness_question(
@@ -184,6 +161,44 @@ impl HarnessQuestionsStore for Store {
             .ok_or_else(|| St3Error::new("internal", "the resolved question did not fold"))?;
         Ok((resolved, true))
     }
+}
+
+fn observe_identity(
+    store: &Store,
+    observation: &QuestionObservation,
+    native_id: &str,
+    after_read: impl FnOnce(),
+) -> Result<HarnessQuestion, St3Error> {
+    let subject = subject(&observation.agent, &observation.session, native_id);
+    let current = store.harness_question_held(&subject)?;
+    let expected = current.as_ref().map(|question| question.revision.clone());
+    after_read();
+    if let Some(current) = current {
+        if current.resolution.is_some() {
+            return Err(St3Error::new(
+                "harness-question-resolved", "a resolved question takes no new observation",
+            ).with_detail("question", subject));
+        }
+        if current.runtime_incarnation == observation.runtime_incarnation
+            && current.questions == observation.questions
+        {
+            return Ok(current);
+        }
+    }
+    store.append_claim(&ClaimInput {
+        subject: subject.clone(),
+        kind: OBSERVED.into(),
+        actor: None,
+        fields: json_fields(json!({
+            "agent": observation.agent, "session": observation.session, "native_id": native_id,
+            "runtime_incarnation": observation.runtime_incarnation, "questions": observation.questions,
+        })),
+        evidence: Vec::new(),
+        expected_subject: Some(expected),
+        idempotency_key: None,
+    })?;
+    store.harness_question_held(&subject)?
+        .ok_or_else(|| St3Error::new("internal", "the observed question did not fold"))
 }
 
 
