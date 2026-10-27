@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 /// The one sentence that authorises the setup shown on screen. Login, folder trust and
 /// permission mode are separate choices and are not part of it.
-pub const CONSENT: &str = "Set up st for the selected agents, adding its local integrations and required workspace configuration?";
+pub const CONSENT: &str = "Set up Fractal for the selected agents, adding its local integrations and required workspace configuration?";
 
 /// A fact that may not be known.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -697,7 +697,7 @@ impl Screen {
                 theme::text(),
             ));
             lines.extend(wrap(
-                "Codex gets the same access every agent st starts gets: it writes its own workspace and reaches st and the network, with no approval prompts. Unticked, Codex asks.",
+                "Codex gets the same access every agent Fractal starts gets: it writes its own workspace and reaches Fractal and the network, with no approval prompts. Unticked, Codex asks.",
                 6,
                 theme::dim(),
             ));
@@ -733,11 +733,11 @@ impl Screen {
                     let none_found = self.form.rows.iter().all(|row| row.facts.found.is_none());
                     lines.extend(wrap(
                         if self.skipped {
-                            "st is set up. No agent was set up; run fractal setup to add one."
+                            "Fractal is set up. No agent was set up; run fractal setup to add one."
                         } else if none_found {
-                            "st is set up. No agent is installed yet, so no Assistant was started. Install Claude Code or Codex, then run fractal setup again."
+                            "Fractal is set up. No agent is installed yet, so no Assistant was started. Install Claude Code or Codex, then run fractal setup again."
                         } else if ready == 0 {
-                            "st is set up."
+                            "Fractal is set up."
                         } else {
                             "Everything you selected is ready."
                         },
@@ -806,7 +806,7 @@ fn facts_summary(row: &Row) -> String {
         None => "not installed".to_owned(),
         Some(path) => format!(
             "found {path} · {} · {}",
-            tri(row.facts.integration, "st integration ready", "st integration not set up", "st integration not checked"),
+            tri(row.facts.integration, "Fractal integration ready", "Fractal integration not set up", "Fractal integration not checked"),
             tri(row.facts.signed_in, "signed in", "not signed in", "sign-in not checked"),
         ),
     }
@@ -1002,7 +1002,7 @@ mod tests {
         Form {
             name: "ada".into(),
             machine: "studio".into(),
-            login_label: "Start st when I log in".into(),
+            login_label: "Start Fractal when I log in".into(),
             login: true,
             login_note: "Installs a user service. Remove it with fractal service uninstall.".into(),
             linger: Some(false),
@@ -1058,7 +1058,7 @@ mod tests {
             "ada",
             "This machine",
             "studio",
-            "[x] Start st when I log in",
+            "[x] Start Fractal when I log in",
             "Keep running after I log out",
             "Agents work in /home/ada/st, so none of them has to look through your home folder.",
             "[x] Claude",
@@ -1068,7 +1068,7 @@ mod tests {
             "not installed",
             "Install OpenCode from its own site",
             "Let Codex work without asking",
-            "Set up st for the selected agents, adding its local integrations and required",
+            "Set up Fractal for the selected agents, adding its local integrations and required",
             "configuration?",
             "Set up",
             "Skip for now",
@@ -1084,8 +1084,8 @@ mod tests {
         screen.form.rows[0].facts.integration = Tri::Yes;
         screen.form.rows[0].facts.signed_in = Tri::No;
         let shown = frame(&mut screen, 120, 60);
-        assert!(shown.contains("st integration ready · not signed in"), "{shown}");
-        assert!(shown.contains("st integration not checked · sign-in not checked"), "{shown}");
+        assert!(shown.contains("Fractal integration ready · not signed in"), "{shown}");
+        assert!(shown.contains("Fractal integration not checked · sign-in not checked"), "{shown}");
     }
 
     #[test]
@@ -1169,14 +1169,14 @@ mod tests {
     fn each_row_ends_on_its_own_and_full_errors_stay_on_screen() {
         let mut screen = Screen::new(form());
         screen.phase = Phase::Running;
-        screen.event(Event_::Row("claude".into(), Outcome::Ready("The st channel is installed.".into())));
+        screen.event(Event_::Row("claude".into(), Outcome::Ready("The Fractal channel is installed.".into())));
         let long = "claude plugin install failed: ".to_owned() + &"the marketplace could not be reached; ".repeat(6) + "THE END";
         screen.event(Event_::Row("codex".into(), Outcome::Failed(long)));
         screen.event(Event_::Done(Ok(())));
         assert!(matches!(screen.phase, Phase::Done { .. }));
         assert!(!screen.leave, "a failure keeps the screen up for the person");
         let shown = frame(&mut screen, 110, 70);
-        assert!(shown.contains("✓ Ready. The st channel is installed."), "{shown}");
+        assert!(shown.contains("✓ Ready. The Fractal channel is installed."), "{shown}");
         assert!(shown.contains("✗ Failed. claude plugin install failed"), "{shown}");
         assert!(shown.contains("THE END"), "the whole error is visible:\n{shown}");
         assert!(shown.contains("1 agent did not finish"), "{shown}");

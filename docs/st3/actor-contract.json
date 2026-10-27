@@ -1389,6 +1389,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st missions waiting-on": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st note": {
         "actor": "none",
         "accepts_person": false,
@@ -2530,6 +2539,9 @@
       ],
       "st changes list": [
         "ls"
+      ],
+      "st ui": [
+        "tui"
       ]
     }
   }

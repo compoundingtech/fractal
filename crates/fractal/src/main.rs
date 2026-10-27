@@ -103,6 +103,7 @@ mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
 mod work_cli;
+mod waiting_on_cli;
 use agents_cli::run_agents;
 use attention_cli::run_attention;
 use conversations_cli::{run_message, upload_attachments};
@@ -116,7 +117,7 @@ use work_cli::{run_wait, run_work};
 
 use presentation::{
     OutputStyle, follow_snapshot, glance, mission_run_signature, relative_time,
-    render_attention_show, render_generation, render_generations, render_host_facts,
+    render_attention_show, render_claim_lease, render_generation, render_generations, render_host_facts,
     render_human_value, render_mission_run_page, render_revision_proposal, render_step_run,
     shell_argument,
 };
@@ -261,7 +262,7 @@ enum Command {
     /// Configure this machine and start fractal, with flags for unattended setup.
     Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
-    #[command(version = fractal_drivers::version::display_version())]
+    #[command(alias = "tui", version = fractal_drivers::version::display_version())]
     Ui(fractal_tui::Args),
     /// Open the daemon's local web session in a browser.
     ///
@@ -1202,6 +1203,19 @@ enum MissionViewCommand {
     },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
+    /// What one run waits on: each open step, whom it waits on and since when, open asks, the
+    /// steps not ready and finished, and whether the run has stalled and why.
+    ///
+    /// Reads the daemon's published work and missions lists, never claim history, so it
+    /// answers in milliseconds. A held step with no progress, or a ready step nobody claims,
+    /// for longer than --quiet counts as stuck.
+    WaitingOn {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
+        run: String,
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        #[arg(long)]
+        quiet: Option<String>,
+    },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
@@ -4598,7 +4612,7 @@ fn cli_main() -> ExitCode {
     if let Some(program) = fractal_daemon::recorder::invoked_program() {
         fractal_daemon::recorder::run(program);
     }
-    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    let arguments = std::env::args_os().collect::<Vec<_>>();
     // Parse the local launcher before any raw scanner can mistake its state path
     // for an unrelated option. Inspect clap's value sources, never raw tokens.
     if arguments.get(1).is_some_and(|argument| argument == "web") {
@@ -4631,7 +4645,6 @@ fn cli_main() -> ExitCode {
         }
         None => {}
     }
-    fractal::dispatch(arguments.as_mut_slice());
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
@@ -6359,6 +6372,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        assistant_receipts: Default::default(),
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));
@@ -6420,6 +6434,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
             },
         )));
     }
+    // The member's CPU by closed minute, for the CPU targets. A member in a fleet runs one
+    // replication worker, whose CPU counts with the daemon's; `run_worker` needs a fleet.
+    tokio::spawn(fractal_daemon::task_cpu::account("slo.cpu_minutes", fractal_daemon::api::run_cpu_minutes(
+        store.clone(),
+        usize::from(config.fleet_id.is_some()),
+    )));
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
         store.clone(),
         fractal_daemon::recorder::receipt_path(&config.state_dir),
@@ -6583,20 +6603,55 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ).await?;
     let web_status = axum::Extension(web.status.clone());
     let web_state = state.clone();
-    tokio::try_join!(
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            local_reserved,
-            router(state.clone()).layer(web_status.clone()),
-            Some(state.store.clone()),
-            ready
-        ),
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            gateway_reserved, fabric_router(state).layer(web_status), None, ready,
-        ),
-        web.serve(web_state),
-    )?;
+    let receipts = state.assistant_receipts.clone();
+    // A stop signal first commits the assistant read receipts of reads that already returned,
+    // then ends the process by that signal as it did before the daemon handled it.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let serving = async {
+        tokio::try_join!(
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                local_reserved,
+                router(state.clone()).layer(web_status.clone()),
+                Some(state.store.clone()),
+                ready
+            ),
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+            ),
+            web.serve(web_state),
+        )
+    };
+    let stopped = tokio::select! {
+        served = serving => Err(served),
+        _ = terminate.recv() => Ok(libc::SIGTERM),
+        _ = interrupt.recv() => Ok(libc::SIGINT),
+    };
+    // Shutdown refuses receipts from connections still being served, then waits for the writer
+    // to commit every admitted one however long it takes. Only a second stop signal, an
+    // explicit forced stop, ends the daemon before they commit.
+    tokio::select! {
+        flushed = receipts.shutdown() => if let Err(error) = flushed {
+            eprintln!("st3: assistant read receipts failed to commit at shutdown: {}", error.message);
+        },
+        _ = terminate.recv() => eprintln!("st3: forced stop before assistant read receipts committed"),
+        _ = interrupt.recv() => eprintln!("st3: forced stop before assistant read receipts committed"),
+    }
     telemetry.shutdown();
-    Ok(())
+    match stopped {
+        Ok(signal) => end_by_signal(signal),
+        Err(served) => served.map(|_| ()),
+    }
+}
+
+/// Ends this process by `signal` with its default disposition, as if no handler had caught it.
+fn end_by_signal(signal: libc::c_int) -> Result<()> {
+    // SAFETY: both calls take a valid signal number and no pointers.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+    anyhow::bail!("signal {signal} did not end the daemon")
 }
 
 /// Links `git` and `gh` to this executable for the daemon and its members. The daemon still
@@ -13373,7 +13428,7 @@ feedback and a custom choice need text. The resumed step's `person_answers` carr
 as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
 act on `id` and `outcome`, not on the words."##;
 
-fn render_client_work_detail(work: &fractal_client::Work) -> String {
+fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();
@@ -13394,6 +13449,12 @@ fn render_client_work_detail(work: &fractal_client::Work) -> String {
     }
     if let Some(incarnation) = &work.submitted_incarnation {
         let _ = writeln!(output, "Submitted incarnation: {incarnation}");
+    }
+    if let Some(expires) = work.claim_expires_at_unix_ms {
+        let _ = writeln!(output, "Lease: {}", render_claim_lease(
+            &work.header.id, work.claimant.as_deref(), work.claim_incarnation.as_deref(),
+            u128::from(expires), driver_held,
+        ));
     }
     if let Some(nudged) = work
         .nudged_at_unix_ms
@@ -16711,16 +16772,41 @@ fn renewal_lost_its_claim(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Lease guidance is optional enrichment: Fabric cannot expose the legacy status route.
+/// A failed lookup must neither hide successful work output nor assert unmanaged ownership.
+async fn claim_has_driver(
+    client: &Client,
+    claimant: Option<&str>,
+    incarnation: Option<&str>,
+) -> Option<bool> {
+    let Some(subject) = claimant.filter(|subject| subject.starts_with("agent/")) else {
+        return Some(false);
+    };
+    let Some(incarnation) = incarnation else {
+        return Some(false);
+    };
+    let status: StatusResponse = client.get(&format!(
+        "/v1/status?subject={}&harness_only=true", urlencoding::encode(subject),
+    )).await.ok()?;
+    let harness = status.subjects.iter()
+        .find(|candidate| candidate.subject == subject)
+        .and_then(|candidate| candidate.harness.as_ref());
+    Some(claim_has_active_harness(Some(incarnation), harness))
+}
+
 fn work_claim_has_active_harness(
     step: &StepRunView,
     subject: &str,
     harness: Option<&CurrentHarnessView>,
 ) -> bool {
     step.work_claim_is_held_by(subject)
-        && harness.is_some_and(|harness| {
-            harness.state != "ended"
-                && step.claim_incarnation.as_deref() == Some(harness.incarnation_id.as_str())
-        })
+        && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
+}
+
+fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {
+    harness.is_some_and(|harness| {
+        harness.state != "ended" && incarnation == Some(harness.incarnation_id.as_str())
+    })
 }
 
 /// Seconds into each minute at which this seat renews its work leases, 0 to 49, fixed per seat.

@@ -77,11 +77,21 @@ function Critique({ scheme = 'dark', narrow = false, failure = 'none' }: { schem
   </main>
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Live critique r2', component: Critique, parameters: { scenario: { _tag: 'contract-fixture', reason: "Local regression toggles and fixed prose isolate critique acceptance contracts." }, layout: 'fullscreen' },
   args: { scheme: 'dark', narrow: false, failure: 'none' },
   argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, narrow: { control: 'boolean' }, failure: { control: 'select', options: failures, description: 'Select one old behavior. Its production-component play must fail after Apply selected regression re-renders the tree.' } },
 } satisfies Meta<typeof Critique>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Dark440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 export const Dark1440: Story = { play: async ({ canvasElement }) => {

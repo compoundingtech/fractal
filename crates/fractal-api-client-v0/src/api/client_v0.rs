@@ -70,6 +70,8 @@ mod alert_action_tests;
 mod stream_start_tests;
 #[cfg(test)]
 mod conversation_delivery_tests;
+#[cfg(test)]
+mod conversation_participants_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -12627,7 +12629,7 @@ mission "differential" state="ready" {
             .claims_for(&sent.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        let body = session_message_body(&state, &claim);
+        let body = session_message_body(&state, &claim, false);
         assert_eq!(
             body["attachments"],
             json!([{
@@ -12660,10 +12662,10 @@ mission "differential" state="ready" {
             .claims_for(&plain.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        assert!(session_message_body(&state, &claim).get("attachments").is_none());
+        assert!(session_message_body(&state, &claim, false).get("attachments").is_none());
         // What a person wrote carries its provenance (here no signature: the fixture seals
         // nothing); what an agent wrote carries none.
-        let provenance = session_message_body(&state, &claim)["provenance"].clone();
+        let provenance = session_message_body(&state, &claim, false)["provenance"].clone();
         assert_eq!(provenance["verdict"], "unsigned", "{provenance}");
         assert!(provenance.get("signer").is_none());
         let agent_claim = state
@@ -12673,7 +12675,7 @@ mission "differential" state="ready" {
             .remove(0);
         let mut agent_claim = agent_claim;
         agent_claim.body["fields"]["from"] = json!("agent/terminal-test.seat");
-        assert!(session_message_body(&state, &agent_claim).get("provenance").is_none());
+        assert!(session_message_body(&state, &agent_claim, false).get("provenance").is_none());
     }
 
     #[test]
@@ -12892,6 +12894,7 @@ mission "differential" state="ready" {
             client_relay: None,
             native_session_home: None,
             planner_default: crate::model::PlannerSpec::default(),
+            assistant_receipts: Default::default(),
         }
     }
 
@@ -20662,13 +20665,25 @@ mission "example/zero-run" state="ready" {
                     .transcript
                     .is_err()
             );
-            // Neither a stale binding nor no binding can justify guessing in a linked inventory.
+            // A previously accepted binding becomes stale when the successor starts;
+            // it cannot justify guessing another seat's transcript in the linked inventory.
+            write_session(
+                &authored,
+                id,
+                "2026-09-25T14:00:00Z",
+                "Seat A's bound conversation",
+            );
+            let successor = "successor-incarnation";
             append(
-                "harness.session-file",
-                json!({"harness":driver,"agent":owner,"incarnation_id":"old-incarnation","session_id":sibling_id,"path":legacy.join(format!("2026-09-25T16-00-00-000Z_{sibling_id}.jsonl"))}),
+                "runtime.observed",
+                json!({"status":"running","runtime_id":"example.resumed","incarnation_id":successor}),
+            );
+            append(
+                "harness.observed",
+                json!({"state":"idle","driver":driver,"incarnation_id":successor}),
             );
             assert!(
-                managed_transcript(&state, owner, incarnation)
+                managed_transcript(&state, owner, successor)
                     .unwrap()
                     .unwrap()
                     .transcript
@@ -22524,7 +22539,7 @@ mission "example/zero-run" state="ready" {
             peer_process: None,
             custom_forms: false,
             conversation_blocks: false,
-            conversation_delivery_links: false,
+            conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),

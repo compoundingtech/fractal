@@ -863,7 +863,8 @@ const embeddedPython = (script: string) =>
 // SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
 // full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
 // per-commit set unsharded on shard 0.
-const kitShardCount = 2
+// Four shards leave room for shard 0's non-play lanes within the unchanged 25-minute job budget.
+const kitShardCount = 4
 const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
 // What one run of the lane covers, written once: the matrix, the run step, each shard's note and the whole-check note
 // all read these, so a note can never claim more shards or a fuller test set than the run had.
@@ -920,7 +921,7 @@ export const fractalWebJobs = {
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
-    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
+    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.skip == 'true') }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
@@ -996,9 +997,8 @@ export const fractalWebJobs = {
   'fractal-web': {
     name: 'fractal-web',
     needs: ['fractal-web-changes', 'fractal-web-execution', 'evidence-gate-fractal-web'],
-    // A failed, cancelled or unexpectedly skipped execution must fail this check. Under an evidence skip the execution
-    // shards end in success with their steps skipped (fleet.yml.genie.ts), so the verdict passes and the cost steps,
-    // which have no receipts to read, do not run.
+    // Only a PR's explicit evidence decision permits job-level skipping. Queue and manual runs
+    // still require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
@@ -1011,6 +1011,8 @@ export const fractalWebJobs = {
           CHANGES_RESULT: '${{ needs.fractal-web-changes.result }}',
           RELEVANT: '${{ needs.fractal-web-changes.outputs.relevant }}',
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
+          EVIDENCE_SKIP: '${{ needs.evidence-gate-fractal-web.outputs.skip }}',
+          EVENT_NAME: '${{ github.event_name }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),
       },

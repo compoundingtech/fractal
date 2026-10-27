@@ -22,6 +22,11 @@ test('validates all entries before selecting stories', () => {
     assert.throws(() => storyIdsFromIndex({ entries: { story, malformed } }), /Invalid Storybook index entry/)
   }
 })
+test('story identity and required importPath come from values, not index keys', () => {
+  const entries = { differentKey: story, anotherKey: { ...story, id: 'kit--other', importPath: './Other.stories.tsx' } }
+  assert.deepEqual(storyIdsFromIndex({ entries }), ['kit--other', 'kit--sample'])
+  assert.throws(() => storyIdsFromIndex({ entries: { ...entries, anotherKey: { ...entries.anotherKey, importPath: undefined } } }), /Invalid Storybook index entry "anotherKey"/)
+})
 test('selects a tagged set from the validated index and fails on an empty one', () => {
   const critical = { ...story, id: 'kit--critical', tags: ['dev', 'critical'] }
   const other = { ...story, id: 'kit--other', tags: ['dev'] }
