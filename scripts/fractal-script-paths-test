@@ -10,24 +10,25 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 BRIDGES = {
-    "idle-soak": "bash",
-    "message-soak": "bash",
-    "delivery-probe": "python3",
-    "discord-bridge": "python3",
-    "discord-probe": "python3",
+    "idle-soak": ("bash", 0o755),
+    "message-soak": ("bash", 0o644),
+    "delivery-probe": ("python3", 0o755),
+    "discord-bridge": ("python3", 0o755),
+    "discord-probe": ("python3", 0o644),
 }
 
 
 class ScriptPathBridges(unittest.TestCase):
     def test_direct_and_interpreter_invocations(self):
-        for name, interpreter in BRIDGES.items():
-            for direct in (True, False):
+        for name, (interpreter, mode) in BRIDGES.items():
+            # Preserve non-executable installed scripts: their callers use an interpreter.
+            for direct in ((True, False) if mode & 0o111 else (False,)):
                 with self.subTest(bridge=name, direct=direct), tempfile.TemporaryDirectory() as tmp:
                     directory = Path(tmp)
                     old = directory / ("st3-" + name)
                     canonical = directory / ("fractal-" + name)
                     shutil.copy2(HERE / old.name, old)
-                    self.assertEqual(old.stat().st_mode & 0o777, 0o755)
+                    self.assertEqual(old.stat().st_mode & 0o777, mode)
                     self.assertIn("arn:lmig:smalltalk:2026-10-27-script-paths", old.read_text())
                     # A real executable sibling records the observable process contract.
                     if interpreter == "bash":
@@ -48,7 +49,7 @@ class ScriptPathBridges(unittest.TestCase):
                             'sys.exit(37)\n'
                         )
                         expected = json.dumps(["unchanged environment", ["argument with spaces", "--flag=value"], "stdin payload\n"]) + "\n"
-                    canonical.chmod(0o755)
+                    canonical.chmod(mode)
                     command = [str(old)] if direct else [interpreter, str(old)]
                     result = subprocess.run(
                         command + ["argument with spaces", "--flag=value"],
