@@ -25,7 +25,7 @@ const plainMessages: Readonly<Record<string, string>> = {
   unavailable: 'the server is unavailable',
   'subscription-limit': 'too many active subscriptions; close an unused pane and retry',
 }
-/** Shared vocabulary home for the workshop; intended to become the SDK-independent st3-views export. */
+/** Shared Fractal sync vocabulary for the workshop, independent of the SDK. */
 export function syncLine({ status, label, now, observedAt, gateway, socket = false }: SyncLineInput): SyncLineValue | undefined {
   const since = Math.max(0, now - observedAt)
   // These surface contracts do not carry subscription stages or socket diagnostics.

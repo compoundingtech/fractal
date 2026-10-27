@@ -4,10 +4,10 @@ import { missionLabel, missionWord, wordStyle } from './missionsView';
 import { missionLabels } from './presentation';
 import type { MachineView } from './projectionCache';
 
-// Spaces on the phone (kept as glasses by st): the person's
-// named workspaces from stui, read from st. Each space has panes with their own tabs;
+// Spaces on the phone (kept as glasses by Fractal): the person's
+// named workspaces from the Fractal terminal UI, read from Fractal. Each space has panes with their own tabs;
 // choosing a space lists its tabs grouped by pane. A tab opens its pane full screen.
-// Pane keys are stui's
+// Pane keys are the Fractal terminal UI's
 // (crates/fractal-tui/src/ui/pane.rs): `agent:agent/…`, `mission:mission/…`, `machine:machine/…`.
 
 /** What a pane opens on the phone. */
@@ -19,14 +19,14 @@ export type PaneTarget = {
   title: string;
   /** Something about this subject waits on the person. */
   needsYou: boolean;
-  /** st no longer lists the subject. */
+  /** Fractal no longer lists the subject. */
   gone: boolean;
   /** An agent's or mission's state, marked as the Agents and Missions lists mark it. */
   status?: { glyph: string; color: string; word: string };
 };
 
 export type GlassTabRow = {
-  /** Its split, counted left to right and top to bottom, as stui counts them. */
+  /** Its split, counted left to right and top to bottom, as the Fractal terminal UI counts them. */
   group: number;
   index: number;
   title: string;
@@ -52,7 +52,7 @@ export function groups(layout: GlassLayout): GlassTab[][] {
 }
 
 /** Each group's place in the glass as fractions of its width and height, in `groups` order. A split
- * shares its room by its ratio (st keeps it from glasses version 2), evenly without one. */
+ * shares its room by its ratio (Fractal keeps it from glasses version 2), evenly without one. */
 export type GroupBox = { x: number; y: number; width: number; height: number };
 export function groupBoxes(layout: GlassLayout, box: GroupBox = { x: 0, y: 0, width: 1, height: 1 }): GroupBox[] {
   if ('tabs' in layout) return [box];
