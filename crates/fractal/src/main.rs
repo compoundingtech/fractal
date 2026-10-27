@@ -3715,7 +3715,7 @@ enum WorkCommand {
     ///
     /// Records progress in the graph without messaging another agent; people read it in stui.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
-    Progress(WorkActionArgs),
+    Progress(WorkProgressArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
     /// Stop the execution clock while claimed work waits for something outside this agent.
@@ -3965,6 +3965,19 @@ struct WorkWaitArgs {
     /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
+}
+
+#[derive(Args)]
+struct WorkProgressArgs {
+    #[command(flatten)]
+    action: WorkActionArgs,
+    /// Estimated finish: a positive duration from now or a future RFC3339 timestamp.
+    ///
+    /// Adds a self-reported ETA to this progress note, not an execution deadline.
+    /// The next nonempty summary replaces it. Use --summary without --eta to withdraw it.
+    /// Handoff clears it; revisions do not carry it. Work show prints its age and author.
+    #[arg(long)]
+    eta: Option<String>,
 }
 
 #[derive(Args)]
@@ -5656,8 +5669,9 @@ fn guard_mutating_cli_actor(
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
-            WorkCommand::Claim(args) | WorkCommand::Renew(args) | WorkCommand::Progress(args)
+            WorkCommand::Claim(args) | WorkCommand::Renew(args)
             | WorkCommand::Complete(args) | WorkCommand::Fail(args) | WorkCommand::Release(args) => args.actor.as_deref(),
+            WorkCommand::Progress(args) => args.action.actor.as_deref(),
             WorkCommand::Wake(args) => args.actor.as_deref(),
             WorkCommand::PublishMission(args) => args.actor.as_deref(),
             WorkCommand::Revise(args) => args.actor.as_deref(),
@@ -12152,7 +12166,12 @@ fn agent_start_document(
             ));
         }
         let harness = body.get_mut("harness").expect("harness was inserted");
-        if let Some(driver) = &args.harness {
+        if let Some(driver) = &args.harness
+            && harness.entries()[0].value().as_string() != Some(driver.as_str())
+        {
+            // Models, effort and native arguments belong to their provider. A harness
+            // replacement starts with its own body, then takes the explicit options below.
+            harness.set_children(KdlDocument::new());
             harness.entries_mut()[0] = KdlEntry::new(driver.as_str());
         }
         let harness_body = harness.ensure_children();
@@ -13479,6 +13498,12 @@ fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bo
     }
     for blocker in &work.blockers {
         let _ = writeln!(output, "Blocker: {blocker}");
+    }
+    if let Some(progress) = &work.last_progress {
+        let age = work.progress_at.as_deref()
+            .map(|at| ago(at, now_ms()))
+            .unwrap_or_else(|| "age unknown".to_owned());
+        let _ = writeln!(output, "Progress ({age}): {progress}");
     }
     for goal in &work.goals {
         let _ = writeln!(output, "Goal: {goal}");
@@ -16712,9 +16737,10 @@ async fn renew_claimed_work(
         .into_iter()
         .filter(|step| work_claim_has_active_harness(step, subject, harness))
     {
+        // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
-                &format!("/v1/work/renew/{}", urlencoding::encode(&step.subject)),
+                &format!("/v1/work/renew/{}?view=lease", urlencoding::encode(&step.subject)),
                 &WorkRequest {
                     wait_ms: None,
                     actor: Some(subject.into()),

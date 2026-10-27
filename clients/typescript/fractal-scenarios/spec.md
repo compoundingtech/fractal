@@ -196,8 +196,8 @@ after it (see [Store versions](#store-versions)).
 
 | Slice | State | Timeline events |
 | --- | --- | --- |
-| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `order: Id[]`, optional `arrangements: Arrangement[]` (omission means empty) | `changes {upserts, removes, order?}` for roster resources; arrangements are snapshot-only |
-| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them) | `changes {upserts, removes, order?}` |
+| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `sessions: Session[]`, `devices: Device[]`, `order: Id[]`, optional `arrangements: Arrangement[]` (omission means empty) | `changes {upserts, removes, order?}` for roster resources; arrangements are snapshot-only |
+| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them), `launches: Launch[]`, `launch_variants: LaunchVariant[]` | `changes {upserts, removes, order?}` |
 | `attention` | `attention: Attention[]`, `messages: Message[]` (sources the cards load) | `changes {upserts, removes, order?}` |
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
@@ -778,6 +778,17 @@ replay.actions  // actions the client submitted, in order, for test assertions
   socket accepts. Other actions are recorded in `replay.actions` and answered with an accepted
   `ActionResult` and an operation that completes; a world may declare a different answer per
   action. Replay does not simulate the effects of actions.
+  The complete modeled route set is listed below. An unmodelled route or route shape returns
+  an `ErrorEnvelope` with code `unsupported-capability` and HTTP 501, never an empty successful
+  page or the resource at a recognized parent path.
+- **Inventories:** session and device list/detail reads use `roster.state.sessions` and
+  `roster.state.devices`; launch and variant reads use `details.state.launches` and
+  `details.state.launch_variants`. These required arrays are independent inventories:
+  sessions are not synthesized from conversation threads, and launches are not inferred from
+  missions. Lists, details, generic resource observations and timeline folds share these rows.
+  Nested variant reads filter by the parent launch before paging or resolving a detail, so a
+  variant belonging to another launch is not returned. In recording-backed replay, these new
+  inventory routes use the synthetic inventory overlay rather than requiring captured HTTP.
 - **Arrangements:** `GET /v1/client/arrangements?person=…`, the arrangement detail route, and
   `collection: 'arrangements'` subscriptions all read `roster.arrangements`. Lists and
   subscriptions require an explicit person selector; they never infer an owner from an agent.
@@ -813,6 +824,46 @@ replay.actions  // actions the client submitted, in order, for test assertions
   `replay.flush()` before asserting socket output. It waits until the delivery queue is idle,
   including replies queued by handlers, but neither advances the clock nor releases future
   timeline events. Awaiting only a microtask is insufficient.
+
+### Served HTTP routes
+
+These are replay's modeled routes, not an assertion that replay implements every daemon
+operation in the [client-v0 manifest](../../../docs/st3/client-v0/schemas/operations.json).
+Every path below is relative to `/v1/client`; `{id}` and `{variant_id}` are URL-encoded
+resource IDs occupying one path segment. Session and launch reads also accept the routed
+ID suffix emitted by the generated client (without `session/` or `launch/`).
+List reads support bounded cursor pagination.
+
+| Method | Path | Source |
+| --- | --- | --- |
+| `GET` | `/capabilities` | `sync` capabilities |
+| `GET` | `/agents`, `/agents/{id}` | `roster` agents |
+| `GET` | `/runtimes`, `/runtimes/{id}` | `roster` runtimes and terminal runtimes |
+| `GET` | `/machines`, `/machines/{id}` | `roster` machines |
+| `GET` | `/sessions`, `/sessions/{id}` | `roster` sessions |
+| `GET` | `/devices`, `/devices/{id}` | `roster` devices |
+| `GET` | `/missions`, `/missions/{id}` | `details` missions |
+| `GET` | `/work`, `/work/{id}` | `details` work |
+| `GET` | `/launches`, `/launches/{id}` | `details` launches |
+| `GET` | `/launches/{id}/variants` | `details` launch variants belonging to this launch |
+| `GET` | `/launches/{id}/variants/{variant_id}` | A `details` launch variant belonging to this launch |
+| `GET` | `/attention`, `/attention/{id}` | `attention` cards |
+| `GET` | `/messages`, `/messages/{id}` | `attention` messages |
+| `GET` | `/terminals`, `/terminals/{id}` | Terminal runtimes |
+| `GET` | `/terminals/{id}/screen` | Current terminal screen |
+| `GET` | `/sessions/{id}/timeline` | `conversation` thread entries and seeded older history |
+| `GET` | `/arrangements?person=…` | Person-scoped `roster` arrangements |
+| `GET` | `/arrangements/{person_name}/{uuid}` | Person-scoped `roster` arrangement detail |
+| `GET` | `/resources` | Generic observations over modeled resource inventories |
+| `GET` | `/operations`, `/operations/{id}` | Operations created by replay actions |
+| `GET` | `/events` | Empty event page with the advertised event cursors |
+| `POST` | `/actions` | Action handling described above, including `terminal.attach` |
+
+WebSocket collection, conversation and terminal subscriptions use `replay.socket`, not
+additional HTTP fetch routes. Recording-backed replay also retains explicitly captured HTTP
+responses at their recorded request and clock offset; that evidence does not add a generic
+synthetic implementation of those routes. In particular, launch decisions and approvals and
+unmodelled agent subroutes are unsupported, not empty inventories.
 
 ### Store versions
 

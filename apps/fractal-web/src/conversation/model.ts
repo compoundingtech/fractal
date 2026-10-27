@@ -20,11 +20,14 @@ export const Sender = Schema.Struct({
 })
 export type Sender = typeof Sender.Type
 
-/** A user-supplied file or image. Fractal only carries an opaque `attachment_id` today (open Q3). */
+/** A file or image; mailbox headers supply metadata absent from native attachment-only content. */
 export const Attachment = Schema.Struct({
   id: Schema.String,
   mediaType: Schema.String,
   name: Schema.optional(Schema.String),
+  size: Schema.optional(Schema.Number),
+  /** Native message carrier, independent of the transcript row's presentation identity. */
+  messageId: Schema.optional(Schema.String),
 })
 export type Attachment = typeof Attachment.Type
 

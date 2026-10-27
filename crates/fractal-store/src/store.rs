@@ -18174,7 +18174,12 @@ pub fn enrich_step_summaries_at(
                 continue;
             };
             if kind == "work.progress" && view.progress_summary.is_none() {
-                view.progress_summary = Some(summary.to_owned());
+                view.progress_summary = Some(if subject == view.subject {
+                    summary.to_owned()
+                } else {
+                    crate::work_eta::without_eta_on_revision(summary)
+                        .unwrap_or_else(|| summary.to_owned())
+                });
                 view.progress_at_unix_ms = Some(accepted);
             } else if kind == "work.submitted" && view.completion_summary.is_none() {
                 view.completion_summary = Some(summary.to_owned());
