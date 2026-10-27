@@ -289,3 +289,24 @@ fn scenarios_strict_preserves_sibling_device_variant_constraints() {
         assert!(incomplete.decode().is_err(), "an assistant device requires {field}");
     }
 }
+
+#[test]
+fn scenarios_schema_engine_enforces_combinators() {
+    // Use the same standards-based validator and options as the scenario reader, not
+    // a hand-written union matcher: oneOf must reject two matching branches.
+    let schema = serde_json::json!({
+        "allOf": [
+            {"type": "integer"},
+            {"anyOf": [{"minimum": 0}, {"maximum": -10}]},
+            {"not": {"const": 12}}
+        ],
+        "oneOf": [{"minimum": 0}, {"maximum": 10}]
+    });
+    let validator = jsonschema::options().should_validate_formats(true).build(&schema).unwrap();
+    assert!(validator.is_valid(&serde_json::json!(11)));
+    assert!(validator.is_valid(&serde_json::json!(-10)));
+    assert!(!validator.is_valid(&serde_json::json!(5)), "two oneOf branches match");
+    assert!(!validator.is_valid(&serde_json::json!(-5)), "neither anyOf branch matches");
+    assert!(!validator.is_valid(&serde_json::json!(11.5)), "allOf requires an integer");
+    assert!(!validator.is_valid(&serde_json::json!(12)), "not excludes its matching value");
+}
