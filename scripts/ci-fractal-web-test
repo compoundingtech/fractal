@@ -145,6 +145,20 @@ else:
 del packages["@fixture/uncovered"]
 print("passed: workspace dependency fixture runs kit lanes; uncovered dependencies fail the scope guard")
 
+# Keep the raw terminal's bundled dependencies in kit scope without selecting its unit tests.
+raw_terminal_kit_inputs = (
+    "apps/fractal-web/src/terminal/RawTerminal.tsx",
+    "apps/fractal-web/src/terminal/actionTerminalInput.ts",
+    "apps/fractal-web/src/terminal/ghosttyVt.ts",
+    "apps/fractal-web/src/terminal/rawTerminalInput.ts",
+    "apps/fractal-web/src/terminal/rawTerminalState.ts",
+    "apps/fractal-web/src/terminal/terminalMetrics.stylex.ts",
+    "apps/fractal-web/src/terminal/terminalTyping.ts",
+)
+assert detector_contract["kit_paths"](raw_terminal_kit_inputs) == list(raw_terminal_kit_inputs)
+assert not detector_contract["kit_paths"](["apps/fractal-web/src/terminal/rawTerminalInput.unit.test.ts"])
+print("passed: raw terminal runtime dependencies select kit lanes, unit tests do not")
+
 
 with tempfile.TemporaryDirectory() as scratch:
     repo = Path(scratch)
