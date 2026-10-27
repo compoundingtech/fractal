@@ -180,6 +180,19 @@ exec "{real}" "$@"
         assert (destination / 'st3').readlink() == profile / 'bin/st3'
         assert profile.readlink() == Path(target)
         assert not (destination / 'pty').exists()
+    # Profile anchors and candidates must use the same physical HOME spelling.
+    logical_home = root / 'logical-home'
+    logical_home.symlink_to(root / 'home', target_is_directory=True)
+    destination = root / 'alias-bin'
+    destination.mkdir()
+    for relative in ['.nix-profile/bin/st3', '.local/state/nix/profiles/home-manager/bin/st3']:
+        target = logical_home / relative
+        (destination / 'st3').symlink_to(target)
+        result = install('--no-run', '--bin-dir', str(destination),
+                         extra={'HOME': str(logical_home), 'XDG_STATE_HOME': ''})
+        assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+        assert (destination / 'st3').readlink() == target
+        (destination / 'st3').unlink()
     # Exact published v0.3.17 installer from source f4cec96e414fee2a780910730b019fe6bdbddc1d.
     # It rejects --quiet and requires the historical four-command payload.
     payload_installer = payload / 'install.sh'

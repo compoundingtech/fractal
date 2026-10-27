@@ -108,6 +108,17 @@ for mode in default custom ancestor relative; do
   test "$(readlink "$profile")" = "$target"
   test ! -e "$bin/pty"
 done
+# macOS temporary HOME paths can use /var while pwd -P returns /private/var.
+mkdir -p "$work/physical-home" "$work/alias-bin"
+ln -s "$work/physical-home" "$work/logical-home"
+for relative in .nix-profile/bin/st3 .local/state/nix/profiles/home-manager/bin/st3; do
+  target="$work/logical-home/$relative"
+  ln -s "$target" "$work/alias-bin/st3"
+  if HOME="$work/logical-home" XDG_STATE_HOME= install_fixture --bin-dir "$work/alias-bin" > "$work/alias.out" 2> "$work/alias.err"; then exit 1; fi
+  grep -q 'Nix-owned path' "$work/alias.err"
+  test "$(readlink "$work/alias-bin/st3")" = "$target"
+  rm "$work/alias-bin/st3"
+done
 # Similar directory names outside Nix's actual roots are ordinary archive targets.
 for relative in profiles/per-user/alice/bin profiles/home-manager/bin unmanaged/.nix-profile/bin; do
   bin="$work/non-nix/$relative"

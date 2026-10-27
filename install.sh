@@ -37,12 +37,35 @@ esac
 # preflight here too, so choosing an older tag cannot overwrite a Nix installation.
 refuse_nix_path() (
     # Safety net for real Nix/Home Manager layouts (normally absolute links), not a hardened path resolver.
+    normalize_path() (
+        prefix=$1
+        missing=
+        while [ ! -d "$prefix" ]; do
+            missing="/$(basename "$prefix")$missing"
+            prefix=$(dirname "$prefix")
+        done
+        normalized=$(cd "$prefix" && pwd -P)
+        while [ -n "$missing" ]; do
+            part=${missing%%/*}
+            if [ "$missing" = "$part" ]; then missing=; else missing=${missing#*/}; fi
+            case "$part" in
+                ''|.) ;;
+                ..) normalized=${normalized%/*} ;;
+                *) normalized=${normalized%/}/$part ;;
+            esac
+        done
+        printf '%s\n' "${normalized:-/}"
+    )
     path=$1
     hops=0
-    xdg_profiles=${XDG_STATE_HOME:-$HOME/.local/state}/nix/profiles
+    # Compare roots and candidates in the same physical spelling (/var is a
+    # symlink to /private/var on macOS), even when a profile leaf is missing.
+    home_root=$(normalize_path "$HOME")
+    default_profiles=$home_root/.local/state/nix/profiles
+    xdg_profiles=$(normalize_path "${XDG_STATE_HOME:-$HOME/.local/state}/nix/profiles")
     while :; do
         case "$path" in
-            /nix/store|/nix/store/*|/nix/var/nix/profiles|/nix/var/nix/profiles/*|"$HOME/.nix-profile"|"$HOME/.nix-profile/"*|"$HOME/.local/state/nix/profiles"|"$HOME/.local/state/nix/profiles/"*|"$xdg_profiles"|"$xdg_profiles/"*)
+            /nix/store|/nix/store/*|/nix/var/nix/profiles|/nix/var/nix/profiles/*|"$home_root/.nix-profile"|"$home_root/.nix-profile/"*|"$default_profiles"|"$default_profiles/"*|"$xdg_profiles"|"$xdg_profiles/"*)
                 printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
                 exit 1 ;;
         esac
@@ -65,25 +88,7 @@ refuse_nix_path() (
         [ "$hops" -le 40 ] || { printf 'install: cannot resolve installation link %s\n' "$1" >&2; exit 1; }
         link=$(readlink "$component")
         case "$link" in /*) path=$link$suffix ;; *) path="$(dirname "$component")/$link$suffix" ;; esac
-        # Resolve the existing directory prefix physically; normalize only its
-        # missing suffix lexically, including relative targets containing ../.
-        prefix=$path
-        missing=
-        while [ ! -d "$prefix" ]; do
-            missing="/$(basename "$prefix")$missing"
-            prefix=$(dirname "$prefix")
-        done
-        normalized=$(cd "$prefix" && pwd -P)
-        while [ -n "$missing" ]; do
-            part=${missing%%/*}
-            if [ "$missing" = "$part" ]; then missing=; else missing=${missing#*/}; fi
-            case "$part" in
-                ''|.) ;;
-                ..) normalized=${normalized%/*} ;;
-                *) normalized=${normalized%/}/$part ;;
-            esac
-        done
-        path=${normalized:-/}
+        path=$(normalize_path "$path")
     done
 )
 for name in st3 st pty fractal; do refuse_nix_path "$bin_dir/$name"; done
