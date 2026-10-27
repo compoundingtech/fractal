@@ -6197,6 +6197,9 @@ pub fn start_agent_roster(state: &AppState) {
                 Err(error) => eprintln!("st3: agents roster refresh stopped: {error}"),
             }
             if first {
+                // The bounded startup head is not the complete roster. Queue exactly one
+                // complete publication even when no client has read yet, without a read grace.
+                store.fractal.request_roster_refresh();
                 continue;
             }
             // Pause as long as the refresh took, so refreshing stays under about half a core
