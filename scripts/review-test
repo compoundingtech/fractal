@@ -26,6 +26,9 @@ import json, os, sys
 prompt = sys.stdin.read()
 folder = os.environ["FAKE_DIR"]
 count = len([name for name in os.listdir(folder) if name.startswith("prompt-")])
+inputs = ".review-input"
+listing = sorted(os.path.join(root, name)[len(inputs) + 1:] for root, _, names in os.walk(inputs) for name in names) if os.path.isdir(inputs) else []
+open(os.path.join(folder, f"inputs-{count}.txt"), "w").write("\\n".join(listing))
 open(os.path.join(folder, f"prompt-{count}.txt"), "w").write(prompt)
 answer = json.load(open(os.path.join(folder, "answer.json")))
 if os.path.exists(os.path.join(folder, "claude-envelope")):
@@ -220,6 +223,8 @@ class Review(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(len(self.prompts()), 2)
         self.assertIn("+both", self.prompts()[1])
+        self.assertIn("remerge.patch", (self.fake / "inputs-1.txt").read_text().split("\n"))
+        self.assertIn(".review-input/remerge.patch", self.prompts()[1])
 
     def test_a_reviewer_of_the_authors_family_is_refused(self):
         done, verdict = self.review("--author-family", "anthropic")
@@ -307,8 +312,27 @@ class Review(unittest.TestCase):
         for command in (["omp", "-p"], ["omp", "-p", "--tools", "read,bash", "--no-extensions"], ["omp", "-p", "--tools", "read"],
                         ["codex", "exec", "--sandbox", "workspace-write"], ["codex", "exec", "--sandbox", "read-only", "--yolo"],
                         ["claude", "-p", "--allowedTools", "Read Bash(git log:*) Bash"], ["claude", "-p", "--allowedTools", "Read Grep Bash(rm:*)", "--permission-mode", "dontAsk"],
-                        ["claude", "-p", "--allowedTools", "Read", "--permission-mode", "acceptEdits"], ["claude", "-p"]):
+                        ["claude", "-p", "--allowedTools", "Read", "--permission-mode", "acceptEdits"], ["claude", "-p"],
+                        ["claude", "-p", "--allowedTools", "Read Grep Glob Bash(git diff:*)", "--permission-mode", "dontAsk"],
+                        ["claude", "-p", "--allowedTools", "Read Bash(git log:*)", "--permission-mode", "dontAsk"]):
             self.assertIsNotNone(restriction_problem(command), command)
+
+    def test_no_configured_harness_can_run_a_shell_or_git(self):
+        config = json.loads((ROOT / ".st/review-harness.json").read_text())
+        for name, settings in config["harnesses"].items():
+            self.assertNotIn("Bash", " ".join(settings["command"]), name)
+
+    def test_the_reviewer_gets_the_diffs_as_files_in_its_checkout_instead_of_git(self):
+        self.write("crates/a/src/lib.rs", "pub fn a() {}\n")
+        self.commit("add a")
+        self.say(answer())
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        listing = (self.fake / "inputs-0.txt").read_text().split("\n")
+        self.assertIn("diff.patch", listing)
+        prompt = self.prompts()[0]
+        self.assertIn(".review-input/", prompt)
+        self.assertNotIn("git diff", prompt.split("== THE STANDARD")[0])
 
     def test_a_harness_without_the_restriction_does_not_run(self):
         config = json.loads(self.config.read_text())

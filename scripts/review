@@ -130,6 +130,25 @@ def standard(repo, base):
     return data.decode(), "sha256:" + hashlib.sha256(data).hexdigest()
 
 
+INPUT_DIR = ".review-input"
+MAX_BASE_COPY = 200_000
+
+
+def write_inputs(checkout, repo, merge_base, head, paths, remerge_text):
+    """What the reviewer reads instead of running git: the whole diff, the remerge diff, and the merge base's copy of each changed file."""
+    folder = Path(checkout) / INPUT_DIR
+    (folder / "base").mkdir(parents=True, exist_ok=True)
+    (folder / "diff.patch").write_text(git(repo, "-c", "core.quotePath=false", "diff", "--no-color", "--no-renames", merge_base, head, check=False))
+    if remerge_text:
+        (folder / "remerge.patch").write_text(remerge_text + "\n")
+    for path in paths:
+        shown = subprocess.run(["git", "show", f"{merge_base}:{path}"], cwd=repo, capture_output=True)
+        if shown.returncode == 0 and len(shown.stdout) <= MAX_BASE_COPY:
+            target = folder / "base" / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(shown.stdout)
+
+
 def harness_config(path):
     config = json.loads(Path(path).read_text())
     if config.get("version") != 1:
@@ -147,7 +166,7 @@ Base (main) {base}
 Merge base {merge_base}
 This is round {round_number} of at most {MAX_ROUNDS}.
 
-You are in a detached checkout of the head with read-only tools. Read whatever files you need to follow an input to the code that consumes it, check that a test would fail without the change, and reproduce a shell trap if there is one. Run `git diff {merge_base} {head} -- PATH` for any file listed below.
+You are in a detached checkout of the head with read-only tools and no shell: you cannot run git or anything else. What git would show is in files under {INPUT_DIR}/ (listed below). Read whatever files you need to follow an input to the code that consumes it, check by reading that a test would fail without the change, and follow a shell trap through the code if there is one. You cannot run anything: where a claim needs a run to be sure, say in your review that you could not run it. The diff of every file listed below is given in full below.
 
 == THE STANDARD (docs/review.md) ==
 {text}
@@ -159,10 +178,11 @@ Read only what changed since. These files are served from that record and need n
 Its findings were: {json.dumps(previous['findings'])}
 """)
     if remerge:
-        parts.append(f"The head contains a merge of main with a non-empty remerge diff; read it with `git show --remerge-diff {head}`. Treat every conflict-resolution hunk as new code.\n")
+        parts.append(f"The head contains a merge of main with a non-empty remerge diff; it is in {INPUT_DIR}/remerge.patch. Treat every conflict-resolution hunk as new code.\n")
     if answers_note:
         parts.append(answers_note + "\n")
-    parts.append(f"""Read in full (full diff given below, and the files they touch as needed): {json.dumps(changed)}
+    parts.append(f"""Files under {INPUT_DIR}/: diff.patch (the whole change against the merge base, structure-only files included), base/<path> (a changed file as it was at the merge base, to compare with the head's), and remerge.patch when there is one.
+Read in full (full diff given below, and the files they touch as needed): {json.dumps(changed)}
 Structure only (generated files, large fixtures; judge them by their shape, not line by line): {json.dumps(structure)}
 """)
     return "\n".join(parts)
@@ -213,7 +233,8 @@ def extract_json(text):
     return found
 
 
-READ_ONLY_CLAUDE = {"Read", "Grep", "Glob", "Bash(git log:*)", "Bash(git show:*)", "Bash(git diff:*)", "Bash(git blame:*)", "Bash(git merge-tree:*)"}
+# No Bash tool at all, not even read-only git: git log, show and diff take --output=PATH and write files, and merge-tree writes objects.
+READ_ONLY_CLAUDE = {"Read", "Grep", "Glob"}
 READ_ONLY_OMP = {"read", "grep", "find"}
 WIDENING = {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--auto-approve", "--yolo", "--full-auto",
             "--dangerously-bypass-approvals-and-sandbox"}
@@ -232,7 +253,7 @@ def restriction_problem(command):
 
     The diff under review is untrusted input, so the reviewing agent must not be able to run anything or write anything. A command
     passes when it carries one of the restrictions the supported CLIs have, with nothing that widens it: codex --sandbox read-only;
-    claude --allowedTools limited to Read, Grep, Glob and read-only git, with --permission-mode dontAsk; omp --tools limited to
+    claude --allowedTools limited to Read, Grep and Glob (no Bash), with --permission-mode dontAsk; omp --tools limited to
     read, grep and find, with --no-extensions.
     """
     widening = sorted(WIDENING & set(command))
@@ -439,6 +460,7 @@ def review(args, repo, tools):
     checkout = tempfile.mkdtemp(prefix="review-head-")
     git(repo, "worktree", "add", "--detach", "-q", checkout, head)
     try:
+        write_inputs(checkout, repo, merge_base, head, paths, remerge_text)
         started = time.time()
         reply, model, family, metrics = run_harness(config, name, args.model, prompt, checkout, config.get("timeout_seconds", 1800))
         metrics["wall_seconds"] = round(time.time() - started, 1)

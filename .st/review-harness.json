@@ -7,7 +7,7 @@
     "claude": {
       "family": "anthropic",
       "model": null,
-      "command": ["claude", "-p", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk", "--allowedTools", "Read Grep Glob Bash(git log:*) Bash(git show:*) Bash(git diff:*) Bash(git blame:*) Bash(git merge-tree:*)"],
+      "command": ["claude", "-p", "--output-format", "json", "--no-session-persistence", "--permission-mode", "dontAsk", "--allowedTools", "Read Grep Glob"],
       "model_args": ["--model", "{model}"],
       "parse": "claude-json"
     },
