@@ -456,7 +456,7 @@ fn fault_snapshot_reference_preserves_effective_readiness_after_lease_expiry() {
     let effective = store.step_run(&step.subject).unwrap().unwrap();
     assert_eq!(effective.status, "ready");
     assert!(effective.readiness_epoch > step.readiness_epoch);
-    let stored: (String, u32) = store.connection.read().query_row(
+    let stored: (String, u32) = store.readers.get().query_row(
         "SELECT status, readiness_epoch FROM step_runs WHERE subject=?1",
         [&step.subject],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -479,7 +479,7 @@ fn fault_snapshot_reference_preserves_effective_readiness_after_person_wait() {
     let effective = store.step_run(&step.subject).unwrap().unwrap();
     assert_eq!(effective.status, "ready", "no remaining person asks block the step");
     assert_eq!(effective.readiness_epoch, step.readiness_epoch + 1);
-    let stored: String = store.connection.read().query_row(
+    let stored: String = store.readers.get().query_row(
         "SELECT status FROM step_runs WHERE subject=?1", [&step.subject], |row| row.get(0),
     ).unwrap();
     assert_eq!(stored, "waiting-person");
