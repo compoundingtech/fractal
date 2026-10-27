@@ -80,6 +80,19 @@ fn same_runtime_start_request(actual: &ClaimRecord, expected: &ClaimRecord) -> b
         && actual.body == expected.body
 }
 
+/// Dispatch rejection and ordinary revocation use the same writer-fenced nonlaunch proof.
+fn cancel_undispatched_runtime_start_tx(tx: &Transaction<'_>, origin: &str, id: &str) -> Result<bool> {
+    let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+    if operation.dispatched || operation.finished || operation.revoked_by.is_none() {
+        return Ok(false);
+    }
+    let mut result = json!({"error":"start was revoked before dispatch","producer_closed":true,"closure_kind":"never-dispatched"});
+    closed_runtime_start_result(&operation, origin, &mut result)?;
+    tx.execute("UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
+        params![id, serde_json::to_string(&result)?])?;
+    Ok(true)
+}
+
 /// The recovery fence is evaluated against the admission/dispatch writer snapshot, not
 /// a planner read. It also remains available to the backend's physical spawn guard.
 fn recovery_intent_current(
@@ -787,6 +800,7 @@ impl RuntimeStartsStore for Store {
             let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
             if !recovery_intent_current(tx, self.origin(), &operation)? {
                 tx.execute("UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,'restart-intent-superseded') WHERE id=?1", [id])?;
+                cancel_undispatched_runtime_start_tx(tx, self.origin(), id)?;
                 return Ok(false);
             }
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
@@ -919,13 +933,7 @@ impl RuntimeStartsStore for Store {
 
     fn cancel_undispatched_runtime_start(&self, id: &str) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
-            let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-            if operation.dispatched || operation.finished || operation.revoked_by.is_none() { return Ok(false); }
-            let mut result = json!({"error":"start was revoked before dispatch","producer_closed":true,"closure_kind":"never-dispatched"});
-            closed_runtime_start_result(&operation, self.origin(), &mut result)?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-haddf2c06fbd7 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
-                params![id, serde_json::to_string(&result)?])?;
-            Ok(true)
+            cancel_undispatched_runtime_start_tx(tx, self.origin(), id)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
@@ -1192,6 +1200,11 @@ mod tests {
                     if boundary == "dispatch" {
                         assert!(!store.dispatch_runtime_start(&replacement.id, 2).unwrap());
                         assert!(store.runtime_start_revoked(&replacement.id).unwrap());
+                        let canceled = store.runtime_start_for(subject).unwrap().unwrap();
+                        assert!(canceled.finished && canceled.cleanup_verified);
+                        assert_eq!(canceled.result.as_ref().unwrap()["closure_kind"], "never-dispatched");
+                        store.runtime_start_applied(&replacement.id).unwrap();
+                        assert!(store.runtime_start_for(subject).unwrap().is_none());
                     }
                 }
             }

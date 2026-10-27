@@ -30,6 +30,8 @@ A failed start with unverified producer closure can be superseded only by a stil
 
 Physical preflight does not release the failed operation. With the launch lock held, one admission writer transaction checks lifecycle intent, closes that exact failed hold, and records the replacement admission. Its retained `stale_failed_start` metadata keeps the same request fence active in the dispatch writer and the backend's physical launch guard, including after queueing or daemon restart. A control committed between preflight and admission leaves the old hold unresolved; a control committed after admission prevents dispatch or fails the physical launch guard.
 
+A queued recovery rejected before dispatch is revoked and completed by the existing `never-dispatched` cancellation protocol in the same writer transaction. Reconciliation applies that nonlaunch proof and frees admission, so a later valid restart can launch without restarting the daemon.
+
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
 ```sh
