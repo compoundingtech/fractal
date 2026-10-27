@@ -42,6 +42,7 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod inventory;
 pub mod raw_terminal;
+pub mod private_notes;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -105,6 +106,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
         .route("/v1/client/devices", get(devices))
+        .route("/v1/client/private-notes/{*uri}", get(private_notes::detail))
         .route("/v1/client/resources", get(resources::list))
         .route(
             "/v1/client/agent-workspaces/{*id}",
@@ -8769,6 +8771,13 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
         .as_object_mut()
         .expect("an action is an object")
         .remove("fence");
+    if request.action_type == "private-notes.write" {
+        // The shared receipt reserves the cross-action key, not the private
+        // mutation. Content matching and recovery stay in the owner-local ledger.
+        if let Some(parameters) = content["parameters"].as_object_mut() {
+            parameters.remove("markdown");
+        }
+    }
     Ok(hex::encode(Sha256::digest(
         serde_json::to_vec(&content).map_err(ApiError::internal)?,
     )))
@@ -8924,7 +8933,7 @@ async fn action_inner(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
-    Json(request): Json<ActionRequest>,
+    Json(mut request): Json<ActionRequest>,
     reserved_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Json<Value>, ApiError> {
     // The message-send wrapper validates before reserving its gate and capacity.
@@ -8978,6 +8987,12 @@ async fn action_inner(
                 message: "the idempotency key was already used for a different action".into(),
                 details: Box::default(),
             });
+        }
+        if request.action_type == "private-notes.write" {
+            // Never replay a private fence from the graph or bypass current
+            // ownership checks and owner-local exact-request recovery.
+            validate_fence(&state, &request.fence)?;
+            return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
         }
         let mut result = receipt
             .body
@@ -9175,6 +9190,9 @@ async fn action_inner(
     } else {
         None
     };
+    if request.action_type == "private-notes.write" {
+        return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
+    }
     let affected = if let Some(attachment) = &terminal_attachment {
         vec![
             attachment["attachment_id"]
@@ -13200,22 +13218,19 @@ mission "differential" state="ready" {
     }
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
-        AppState {
-            owning_person: Some("person/operator".into()),
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.to_path_buf(),
-            pty_root: root.join("pty"),
-            pty_binary: root.join("unused-pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: crate::model::PlannerSpec::default(),
-            assistant_receipts: Default::default(),
-        }
+        AppState { owning_person: Some("person/operator".into()),
+        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     #[tokio::test]
@@ -16520,6 +16535,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({"target_id": external.id}),
         };
@@ -16672,6 +16688,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({"target_id": external.id}),
         };
@@ -18996,6 +19013,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters,
         };
@@ -22265,6 +22283,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(1),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/terminal-owner" }),
         };
@@ -22340,6 +22359,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": attachment_id }),
         };
@@ -22657,6 +22677,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(snapshot.store_index),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/concurrent-terminal-owner" }),
         };
@@ -23221,6 +23242,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(owner.store.index().unwrap()),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/fleet-terminal" }),
         };

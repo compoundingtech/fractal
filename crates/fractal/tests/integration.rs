@@ -101,6 +101,8 @@ mod operational_state_contract;
 mod otel_export;
 mod owned_sets;
 mod placement_handoff;
+mod private_notes;
+mod private_notes_restart;
 mod reconcile_pass_perf;
 mod recorder_report;
 mod revision_seats;
