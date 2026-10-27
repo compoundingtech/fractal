@@ -25,7 +25,7 @@ import type {
   ConversationSearch,
   SubagentSummary,
 } from '@fractal/client/schema'
-import type { ErrorEnvelope } from '@fractal/client'
+import type { ErrorEnvelope, SubagentDriver } from '@fractal/client'
 import type { Timestamp } from '@fractal/client/schema'
 import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
@@ -137,6 +137,8 @@ export interface Agent {
   readonly host: string
   readonly connected: boolean
   readonly harness?: 'omp' | 'claude' | 'codex'
+  /** Actual wire driver and reporting capability; unlike harness, unknown and non-observing values are retained. */
+  readonly driver?: SubagentDriver
   readonly activity: 'working' | 'waiting' | 'idle' | 'errored'
   readonly status: string
   readonly state?: string

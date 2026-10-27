@@ -1,7 +1,7 @@
 /** @vitest-environment jsdom */
 /// <reference types="vite/client" />
 import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
-import { loadWorld } from '@fractal/scenarios'
+import { foldSlice, loadWorld } from '@fractal/scenarios'
 import { useScenarioSlice } from '@fractal/scenarios/react'
 import { scenarioSections, type TranscriptSection } from './scenario-transcript.story-harness'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
@@ -459,6 +459,47 @@ test('scenario transcript preserves tool operations and failed tool lifecycle', 
   expect(toolTurns.flatMap(({ work }) => work.calls).some(call => call.kind === 'edit' && call.changedPath === 'src/session.ts')).toBe(true)
   const failedTurns = scenarioSections(world.with({ conversation: 'failed-tools' }).slices.conversation).sections.flatMap(({ turns }) => turns)
   expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
+})
+
+test('scenario transcript projects native reasoning, generic arguments and structured tool results', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  const items = turns.flatMap(turn => turn.items)
+  expect(items).toContainEqual(expect.objectContaining({
+    _tag: 'Reasoning', id: 'timeline-entry/scenario-transcript-families-builder-3',
+    text: 'I will compare the release scope and report totals before exporting.', streaming: false,
+  }))
+  const call = items.find(item => item._tag === 'ToolCall' && item.callId === 'inspect-report')
+  expect(call).toMatchObject({
+    _tag: 'ToolCall', name: 'catalog.compare_release', status: 'success',
+    input: { releases: ['atlas-7', 'atlas-8'], include: { totals: true, sections: ['runtime', 'client'] }, limit: 3 },
+    result: { mediaType: 'application/json', content: { release: 'atlas-8', totals: { passed: 18, failed: 0 }, sections: [{ name: 'runtime', ready: true }, { name: 'client', ready: true }] } },
+  })
+  expect(turns.flatMap(turn => turn.work.calls)).toContainEqual(expect.objectContaining({ kind: 'read', title: 'catalog.compare_release', outputLanguage: 'json' }))
+})
+
+test('scenario transcript retains semantic failure evidence and interrupts unresolved terminal calls', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  for (const status of ['failed', 'cancelled']) {
+    const turn = turns.find(turn => turn.items.some(item => item._tag === 'Status' && item.status === status))
+    expect(turn).toBeDefined()
+    expect(turn?.work).toMatchObject({ running: false, failed: status === 'failed', interrupted: status === 'cancelled', calls: [expect.objectContaining({ status: 'interrupted' })] })
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'ToolCall', status: 'interrupted' }))
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'Status', status, detail: expect.any(String) }))
+  }
+  const failed = turns.find(turn => turn.work.failed)
+  expect(failed?.work.failureNote).toBe('Export worker lost; report totals retained, but no export result was received.')
+  expect(failed?.items).toContainEqual(expect.objectContaining({ _tag: 'Notice', kind: 'error', text: 'The export worker disconnected before returning a result.' }))
+})
+
+test('scenario transcript replaces a streaming revision with its final native content', () => {
+  const slice = loadWorld('transcript-families').slices.conversation
+  const before = scenarioSections(slice).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const after = scenarioSections({ ...slice, state: foldSlice(slice, 2_000).state }).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const partial = before.find(item => item._tag === 'Text' && item.streaming)
+  expect(partial).toMatchObject({ _tag: 'Text', streaming: true, text: 'The report totals are retained; checking the handoff summary.' })
+  expect(after.filter(item => item.id === partial?.id)).toHaveLength(1)
+  expect(after.find(item => item.id === partial?.id)).toMatchObject({ _tag: 'Text', streaming: false, text: 'All 18 checks passed. The export failed and its retry was cancelled; hand off the report totals, not an export artifact.' })
+  expect(after).toContainEqual(expect.objectContaining({ _tag: 'Status', status: 'completed', detail: 'Handoff summary complete; no export claimed.' }))
 })
 
 test('phone whole-thread projection preserves source rows while leaving mounting to Transcript', () => {

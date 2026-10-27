@@ -1,4 +1,4 @@
-# st action coverage
+# Fractal action coverage
 
 The inventory covers every offered CLI command, every typed client action, every terminal UI daemon effect, and the palette and local controls. It distinguishes real CLI/Unix transport tests, the live terminal UI adapter, local reducer tests, and shared implementations. A test reference describes its actual layer; a shared implementation test alone is not a claim that the entire interactive UI was driven.
 
@@ -44,7 +44,7 @@ requirements. The inventory and CLI guards above, the integration action-coverag
 suite, fleet restart controls and terminal UI tests remain part of their owning
 packages' test suites.
 
-Real-process fleet tests require a process ancestry without an inherited st agent identity. Use an isolated test runner when invoking them from an st seat; do not remove the daemon's authority checks. All actors and machines in these tests are invented fixtures.
+Real-process fleet tests require a process ancestry without an inherited Fractal agent identity. Use an isolated test runner when invoking them from a Fractal seat; do not remove the daemon's authority checks. All actors and machines in these tests are invented fixtures.
 
 ## Typed client actions
 

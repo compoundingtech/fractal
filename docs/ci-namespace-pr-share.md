@@ -1,6 +1,6 @@
 # Namespace PR capacity
 
-Issue [#2918](https://github.com/compoundingtech/smalltalk/issues/2918) requests a fairer share of the shared Namespace workspace. The reported 24 running and 137 queued jobs are the reporter's snapshot, not a measurement independently verified by this change.
+Issue [#2918](https://github.com/compoundingtech/fractal/issues/2918) requests a fairer share of the shared Namespace workspace. The reported 24 running and 137 queued jobs are the reporter's snapshot, not a measurement independently verified by this change.
 
 Use a dedicated runner profile for this repository's unqueued PR jobs, with **15 concurrent runners**. This limits simultaneous runners rather than sampling a count before dispatch. [Namespace's profile limit](https://namespace.so/docs/solutions/github-actions/runner-controls/concurrent-runners) keeps excess jobs queued until profile capacity becomes available.
 

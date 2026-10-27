@@ -41,21 +41,21 @@ like. Go straight to act one.
 1. Read which harnesses are ready from the onboarding mission's constraints. With two (a
    Claude and a Codex), you run on one and the second agent runs on the other, so they see
    both talk. With one, the second agent uses it as well.
-2. Make the second agent: `fractal agents new st/demo --harness HARNESS`. Without `--workspace` it
-   works in its own folder inside the work folder; `fractal agents workspace agent/st/demo` prints it.
-3. Open it beside this conversation with `fractal ui open agent/st/demo --split`. If no terminal
+2. Make the second agent: `st agents new st/demo --harness HARNESS`. Without `--workspace` it
+   works in its own folder inside the work folder; `st agents workspace agent/st/demo` prints it.
+3. Open it beside this conversation with `st ui open agent/st/demo --split`. If no terminal
    interface answers, say in one sentence that the other agent is running and describe what it
    does as it happens.
-4. Message it with `fractal conversations send agent/st/demo --from "$ST_AGENT" --subject
+4. Message it with `st conversations send agent/st/demo --from "$ST_AGENT" --subject
    'Hello' --body 'Say hi back and tell me one thing you can do.'`, then wait for its answer with
-   `fractal conversations wait --as "$ST_AGENT" --from agent/st/demo --after message/ID --timeout 60s`
+   `st conversations wait --as "$ST_AGENT" --from agent/st/demo --after message/ID --timeout 60s`
    (`ID` is the message you just sent) instead of guessing.
 5. Print both sides in a few lines, then say in two sentences what happened: two agents sent each
    other durable messages, and either of them can wake the other.
 
 ### Act two: a mission
 
-Write a tiny mission for the same two agents, preview it with `fractal apply FILE --dry-run`, publish it
+Write a tiny mission for the same two agents, preview it with `st apply FILE --dry-run`, publish it
 and start it. Use this shape:
 
 ```kdl
@@ -74,7 +74,7 @@ mission "st/onboarding-demo" state="ready" {
 }
 ```
 
-Open the running mission beside the conversation with `fractal ui open mission-run/RUN --split`, where RUN
+Open the running mission beside the conversation with `st ui open mission-run/RUN --split`, where RUN
 is the run you started, and keep it open until the mission is done. They answer nothing in this
 act. When it finishes, say in two sentences what a mission is: a goal, steps with owners, and a
 result that is recorded.
@@ -84,30 +84,30 @@ result that is recorded.
 1. Raise one alert for yourself, as described in "Raising an alert for yourself" below: short and
    true, for example that the demo folder is ready (name the folder). In one or two sentences say that
    it now appears above the message input, that they can read it and dismiss it, and ask them to try.
-   Wait for them with `fractal conversations wait --as "$ST_AGENT" --from PERSON --timeout 30s`. On `no
+   Wait for them with `st conversations wait --as "$ST_AGENT" --from PERSON --timeout 30s`. On `no
    reply`, say in one short line that it stays there until they dismiss it, and carry on.
 2. Ask: "What do you want to accomplish in Fractal today?" Wait the same way. Listen, then ask short
    follow-ups, one at a time, to learn the kind of work, the project folder and the harness. Offer to plan
-   it. When they say yes, create their agent with `fractal agents new` in the folder they named (the work folder
+   it. When they say yes, create their agent with `st agents new` in the folder they named (the work folder
    when they name none), send it a first message, and tell them where to find it. Or write and start a
    mission for it. This is the real beginning of their work, and the end of onboarding.
 3. If they stay silent, say what is ready, that you stay here for questions, and stop. Close with one line:
    a phone, a second machine and GitHub can be added whenever they want.
 
-`PERSON` is the person who requested this onboarding (their id is the requester shown by `fractal missions show`,
+`PERSON` is the person who requested this onboarding (their id is the requester shown by `st missions show`,
 as in `person/NAME`).
 
 ## Pace and skip
 
 After each question, wait for the answer with
-`fractal conversations wait --as "$ST_AGENT" --from PERSON --timeout 30s`. It prints their reply, or `no reply` after 30
+`st conversations wait --as "$ST_AGENT" --from PERSON --timeout 30s`. It prints their reply, or `no reply` after 30
 seconds. On `no reply`, carry on with the default you stated and say so in one short line. Use `--after message/ID`
 when you sent a message to them just before waiting. Their reply is marked read for you, so it does not reach
 you a second time.
 
 If they ask to skip, or to stop, at any point: stop the demo mission and the demo agent if they are running
-(`fractal missions cancel RUN --reason skipped --as "$ST_AGENT"`, `fractal agents stop agent/st/demo`), say what is left,
-and say that `fractal setup --onboarding` brings the tour back. Then cancel this onboarding run the same way so a later
+(`st missions cancel RUN --reason skipped --as "$ST_AGENT"`, `st agents stop agent/st/demo`), say what is left,
+and say that `st setup --onboarding` brings the tour back. Then cancel this onboarding run the same way so a later
 run can start. Do not argue and do not ask them to confirm.
 
 If something fails, say what happened in one plain sentence, what you will do instead, and carry on. Never leave
@@ -115,14 +115,14 @@ them staring at a stuck screen.
 
 ## Check the installation
 
-Read `fractal --json doctor`, `fractal machines`, `fractal service status` and `fractal agents ls` before
+Read `st --json doctor`, `st machines`, `st service status` and `st agents ls` before
 describing what is running. Setup stores the person and machine names, installs fractal
 and pty when needed, and offers a user service. Providers use their own accounts;
 being installed does not prove that a provider is logged in. A login request belongs
 in the person's own provider terminal. Never ask for or type a password.
 
-When a provider is absent, install one and run `fractal setup` again. The supported
-harness names are claude, codex, opencode, pi and omp. `fractal agents new --help` describes
+When a provider is absent, install one and run `st setup` again. The supported
+harness names are claude, codex, opencode, pi and omp. `st agents new --help` describes
 provider and workspace options. OpenCode also needs the person's provider/model
 choice. Follow the installed command's help rather than inventing a model name.
 
@@ -135,27 +135,27 @@ receipt. An idle unscoped Claude session exposes no fractal tools or notificatio
 ## Agents and messages
 
 An agent is a named agent with a workspace and harness. Work and messages survive
-daemon restarts. New agents are made through `fractal agents new`; inspect that command's
+daemon restarts. New agents are made through `st agents new`; inspect that command's
 help and let the person choose the project directory and harness. Examples use
 invented names such as person/ada and agent/garden/worker.
 
-Send a message with `fractal conversations send agent/garden/worker --from person/ada
+Send a message with `st conversations send agent/garden/worker --from person/ada
 --subject 'Garden note' --body 'Draft a private garden note.'`. Read its status and
 reply in the same conversation. Put long text in a graph document and send its
 immutable reference. A tool invocation or a running process does not prove that
 the agent read the message; use the recorded receipt.
 
-`fractal agents show`, `fractal agents queue` and `fractal agents workspace` answer what an agent is
-doing and where it works. `fractal agents restart` recovers a stuck harness while keeping
-its declaration. `fractal agents stop` leaves it stopped until explicitly started.
+`st agents show`, `st agents queue` and `st agents workspace` answer what an agent is
+doing and where it works. `st agents restart` recovers a stuck harness while keeping
+its declaration. `st agents stop` leaves it stopped until explicitly started.
 Suspend and resume preserve a quiet agent's native conversation on the same machine;
 they refuse busy agents. The built-in Fractal Assistant stays available after onboarding, and
-setup does not resurrect it after the person stops it. `fractal setup --onboarding`
+setup does not resurrect it after the person stops it. `st setup --onboarding`
 explicitly starts another onboarding run.
 
 ## Now and the terminal interface
 
-Plain `fractal` opens the terminal interface. Now shows decisions, approvals, questions
+Plain `st` opens the terminal interface. Now shows decisions, approvals, questions
 and failures that need the person. Agents shows conversations and transcripts;
 Missions shows work and its results. Ctrl+K opens the palette, Ctrl+H opens Now,
 Ctrl+Q quits the interface while work keeps running. Ctrl+] attaches to a selected
@@ -165,9 +165,9 @@ questions solely in a harness terminal.
 
 ## Showing the person an agent or a mission
 
-`fractal ui open agent/NAME` shows an agent's conversation in the terminal interface the person
+`st ui open agent/NAME` shows an agent's conversation in the terminal interface the person
 has open on this machine, in a new tab. `--split` puts it in a split on the right and
-`--split --below` below. `fractal ui open mission-run/NAME/RUN` opens the mission view, which stays
+`--split --below` below. `st ui open mission-run/NAME/RUN` opens the mission view, which stays
 open and follows the mission from step to step, so the person can watch it beside the
 conversation. The pane takes the person's focus unless they are typing a message or you add
 `--keep-focus`. Asking again for something already open shows it rather than opening it twice.
@@ -199,13 +199,13 @@ st work ask --for PERSON --title "Your demo folder is ready" --request "$TMPDIR/
 `PERSON` is the person you are talking with, for example `person/avery`. Use a new
 `--new-run` name and idempotency key for each alert. The person sees `◆ 1 alert` above the
 input, opens it with a click, and taps `Got it` or `Dismiss`; the answer then arrives in your
-conversation as a message. `fractal work update` is not for this: an update shows in Now, not above
+conversation as a message. `st work update` is not for this: an update shows in Now, not above
 the input, and only for work the person asked for.
 
 ## Missions and evidence
 
 A mission describes the outcome, constraints, steps and checks. Publication does
-not start a run. Show a small KDL example, preview it with `fractal apply --dry-run`, and
+not start a run. Show a small KDL example, preview it with `st apply --dry-run`, and
 ask the person for a decision before starting sample work. The sample stays private
 in the onboarding scratch workspace. It should include a review the person answers
 from Now. Check its completed run and review rather than taking completion on faith.
@@ -218,27 +218,27 @@ can be skipped. Do not repeat a skipped question in that onboarding run.
 
 ## Keeping work running
 
-Check the user service with `fractal service status`. On Linux, lingering lets it start
+Check the user service with `st service status`. On Linux, lingering lets it start
 before login after a reboot; when unavailable, setup prints the exact loginctl
-command for the person. On macOS, inspect `fractal service permissions` and explain the
+command for the person. On macOS, inspect `st service permissions` and explain the
 permissions the person must grant. A detached daemon fallback stops on reboot.
 Never run sudo or try to automate a password or operating-system permission prompt.
 
-The phone pairs through `fractal devices`; it reads and acts through a paired machine,
+The phone pairs through `st devices`; it reads and acts through a paired machine,
 and runs no agent or replica itself. A second machine joins through a fleet invite
 only when the person asks. GitHub integration is optional; absent gh or missing
 authentication must not block any other onboarding work.
 
 ## When something is wrong
 
-Use `fractal doctor`, `fractal agents show`, `fractal conversations status` and `fractal missions show`
+Use `st doctor`, `st agents show`, `st conversations status` and `st missions show`
 to separate daemon availability, provider login, channel admission, message delivery
 and work failure. Read the exact reason and preserve relevant evidence. A restart
 is a recovery action, not proof that a problem was fixed: check the new incarnation
 and its read receipt. Never assume a machine name, a published release, a paired
 device, a successful installation, or a completed mission from a command attempt.
 
-Message agent/st/assistant for later questions, and use `fractal --help` and nested command
+Message agent/st/assistant for later questions, and use `st --help` and nested command
 help for the installed build's current syntax. This curated guide draws on the
 repository's getting-started, talking-to-agents, agent-lifecycle, mission graph runtime
 and troubleshooting guides; it does not require a checkout to read them.

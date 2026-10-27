@@ -3,7 +3,7 @@
 # Run the paid seat queue eval several times, one after another. Each run gets a
 # fresh isolated daemon started from BIN_DIR's st3 and st2. SEAT names the
 # harness of that run's seat: claude, codex or omp. Each harness gets its own
-# eval bundle, built once from evals/st3/seat-queue with the seat's harness
+# eval bundle, built once from evals/fractal/seat-queue with the seat's harness
 # block swapped in. Each run's evidence goes to OUT/run-N for its report.
 #
 # Usage: run BIN_DIR OUT SEAT...
@@ -62,7 +62,7 @@ bundle() {
   [[ -f $dir/request.json ]] && return 0
   mkdir -p "$dir"
   stage="$(mktemp -d)"
-  cp -r "$repo/evals/st3/seat-queue/." "$stage/"
+  cp -r "$repo/evals/fractal/seat-queue/." "$stage/"
   rm -rf "$stage/reports" "$stage/generated"
   harness_block "$seat" >"$stage/harness.kdl"
   python3 - "$stage/eval.kdl" "$stage/harness.kdl" <<'PY'

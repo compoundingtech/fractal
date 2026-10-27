@@ -10,7 +10,7 @@ import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { interactionVars as interaction, borderVars as border, geometryVars as g, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
 import { committedTranscriptHistory } from './story-play'
-import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
+import type { SyncStatus } from './assistant-ui/sync-presentation/sync-status'
 const now = Date.parse('2026-01-15T12:30:00Z')
 const minute = (index: number) => new Date(Date.parse('2026-01-15T12:00:00Z') + index * 60_000).toISOString()
 const prompts = ['Summarize the failing selection check.', 'Keep visible rows grouped after filtering.', 'Explain why the empty state flickers.', 'Check the count after a row is hidden.']

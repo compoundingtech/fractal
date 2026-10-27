@@ -524,6 +524,23 @@ class Hook(unittest.TestCase):
         self.install('--uninstall')
         self.assertFalse(hook.exists())
 
+    def test_the_installer_keeps_evidence_tags_out_of_fetch_tags(self):
+        # Johannes's agents hung on `git fetch --tags` pulling every refs/tags/evidence/* record: after the installer, it brings none.
+        origin = Path(self.tmp.name) / 'origin.git'
+        note = git(origin, 'commit-tree', '-p', 'main', '-m', 'note', 'main^{tree}')
+        git(origin, 'tag', 'evidence/' + 'a' * 40 + '/r1', note)
+        git(origin, 'tag', 'v1', 'main')
+        tags = lambda: set(git(self.work, 'tag', '-l').split())
+        self.install()  # twice: the refspec is set once
+        self.assertEqual(git(self.work, 'config', '--get-all', 'remote.origin.fetch').split().count('^refs/tags/evidence/*'), 1)
+        git(self.work, 'fetch', '-q', '--tags', 'origin')
+        self.assertEqual(tags(), {'v1'})
+        # A fetch that names them still gets them (st-test and the verifier fetch one tree's records by name).
+        git(self.work, 'fetch', '-q', 'origin', '+refs/tags/evidence/*:refs/tags/evidence/*')
+        self.assertIn('evidence/' + 'a' * 40 + '/r1', tags())
+        self.install('--uninstall')
+        self.assertNotIn('^refs/tags/evidence/*', git(self.work, 'config', '--get-all', 'remote.origin.fetch').split())
+
     def test_the_installer_leaves_a_configured_hooks_directory_alone(self):
         (self.work / '.git/hooks/pre-push').unlink()
         git(self.work, 'config', 'core.hooksPath', str(Path(self.tmp.name) / 'elsewhere'))

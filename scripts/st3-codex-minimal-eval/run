@@ -21,7 +21,7 @@ model="${3:-gpt-6-luna}"
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 stage="$(mktemp -d)"
-cp -r "$repo/evals/st3/codex-minimal-access/." "$stage/"
+cp -r "$repo/evals/fractal/codex-minimal-access/." "$stage/"
 rm -f "$stage/README.md"
 sed -i "s|model \"gpt-6-luna\"|model \"$model\"|" "$stage/eval.kdl"
 (

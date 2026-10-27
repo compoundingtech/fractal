@@ -25,7 +25,7 @@ successful native probe; recovery still requires a fresh recipient read.
 
 Sender state, received envelopes awaiting acknowledgement, and send idempotency
 keys are written and synced before the corresponding network mutations. The seat
-restarts through st, and the consumer reconnects a lost native channel itself.
+restarts through Fractal, and the consumer reconnects a lost native channel itself.
 Receipt replay accepts a message that already advanced only after verifying its
 graph state; a closed message without the recipient's read claim cannot pass.
 The state directory must remain stable across upgrades. A process lock prevents

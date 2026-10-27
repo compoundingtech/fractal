@@ -1,6 +1,6 @@
 # Retention
 
-How long st keeps each claim kind is one policy file:
+How long Fractal keeps each claim kind is one policy file:
 [`crates/fractal-schema/retention.toml`](../../crates/fractal-schema/retention.toml). It names every
 registered claim kind once, with its class, where its writes go and, for a transition, its window.
 It also holds the checkpoint rules, in order: which claims of a kind a checkpoint may drop.

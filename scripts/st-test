@@ -13,6 +13,9 @@ asks the verifier, from the accepted base, whether the tree is now covered, and 
 
 The tree: HEAD, the commit you are pushing. The CI gate looks up the note for the pull request head's own tree, so the tree
 you built and signed is the tree that counts even when main has moved since; the merge queue still tests the integrated tree.
+When the gate would judge the merge instead (the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or protected files moved on
+main since the branch point), a signing run first merges the base into the branch here, as a new head commit, and signs that head; with
+--push it then pushes the branch at that merge (merge_base_in, push_branch; docs/st3/gate-evidence.md).
 A check this tree already has a passing signature for (the verifier's answer, the one asked after a run) is not run again: it
 prints `already signed`, so re-running on an unchanged tree is near instant (with --push its note is pushed as it is, so
 the remote has it too); --rerun runs it anyway. It tells you how far behind the base the branch is.
@@ -317,23 +320,87 @@ def gate_commit(base):
     if key in GATE_TREE:
         return GATE_TREE[key]
     result = (head, '')
-    if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode != 0:  # the base is in the head already: the merge is the head
-        gate = load_base_gate(base_commit)
-        verdict = getattr(gate, 'branch_point_verdict', None)
-        if verdict:
-            try:
-                verdict(text(git('merge-base', base_commit, head)), head, base_commit, base_commit)
-            except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
-                merged = git('merge-tree', '--write-tree', '--no-messages', head, base_commit, check=False)
-                if merged.returncode != 0:
-                    raise Failure(f'CI will judge the merge of this branch with {base} ({reason}), and it does not merge cleanly: merge {base} into the branch first')
-                tree = merged.stdout.decode().split()[0]
-                env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
-                       'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
-                commit = text(git('commit-tree', tree, '-p', head, '-p', base_commit, '-m', f'merge of {head[:12]} with {base}', env=env))
-                result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
+    reason = fallback_reason(head, base_commit)
+    if reason:
+        merged = git('merge-tree', '--write-tree', '--no-messages', head, base_commit, check=False)
+        if merged.returncode != 0:
+            raise Failure(f'CI will judge the merge of this branch with {base} ({reason}), and it does not merge cleanly: merge {base} into the branch first')
+        tree = merged.stdout.decode().split()[0]
+        env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
+               'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+        commit = text(git('commit-tree', tree, '-p', head, '-p', base_commit, '-m', f'merge of {head[:12]} with {base}', env=env))
+        result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
     GATE_TREE[key] = result
     return result
+
+
+def fallback_reason(head, base_commit):
+    """Why the CI gate would judge the merge of `head` with the base rather than the head's own tree (the base's `branch_point_verdict`
+    Fallback: the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or protected files moved on main since the branch point), or
+    None when it keeps the head tree: also when the base is in the head already (the merge is the head) or the base has no such rule."""
+    if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode == 0:
+        return None
+    verdict = getattr(load_base_gate(base_commit), 'branch_point_verdict', None)
+    if not verdict:
+        return None
+    try:
+        verdict(text(git('merge-base', base_commit, head)), head, base_commit, base_commit)
+    except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
+        return str(reason) or type(reason).__name__
+    return None
+
+
+def merge_base_in(base):
+    """When the CI gate would judge the merge tree (fallback_reason), merge the base into the branch in this checkout first, as a new head
+    commit, and return it (None when the head is signed as it is). The tree then signed is the head's own, which stays the tree CI judges
+    for HEAD_TREE_MAX_BEHIND more commits of main; a signed merge tree is void at main's next commit, and a run that waited hours for a
+    pool tree past the bound (or after main moved a protected file) was lost to whatever landed during it. Runs after the wait, at the
+    base's tip as just fetched. Stops (Failure) on a conflict, with the branch as it was, or when the checkout gained uncommitted changes
+    to tracked files during the wait. Not for --seed, which names its tree."""
+    if TARGET:
+        return None
+    head = head_commit()
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    reason = fallback_reason(head, base_commit) if base_commit else None
+    if not reason:
+        return None
+    if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
+        raise Failure(f'{reason}, so fractal-test merges {base} into the branch before it signs, but the checkout now has uncommitted changes '
+                      'to tracked files: commit them and run again')
+    branch = text(git('symbolic-ref', '-q', '--short', 'HEAD', check=False))
+    message = (f'Merge {base} into {branch or "HEAD"}\n\nfractal-test merged {base} ({base_commit[:12]}) before signing: {reason}, so CI would '
+               'otherwise judge the merge tree, which no signature on the head covers.')
+    done = git('merge', '--no-ff', '--no-edit', '-m', message, base_commit, check=False)
+    if done.returncode != 0:
+        conflicts = text(git('diff', '--name-only', '--diff-filter=U', check=False)).split()
+        git('merge', '--abort', check=False)
+        raise Failure(f'{reason}, so fractal-test merges {base} into the branch before it signs, and it does not merge cleanly'
+                      f'{" (" + ", ".join(conflicts[:6]) + ")" if conflicts else " (" + (text(done) + " " + done.stderr.decode(errors="replace")).strip()[-300:] + ")"}'
+                      f': merge {base} into the branch yourself, then run again')
+    merged = head_commit()
+    print(f'fractal-test: {reason}: merged {base} ({base_commit[:12]}) into {branch or "the detached HEAD"} as {merged}; '
+          'the head tree is what is signed', flush=True)
+    return merged
+
+
+def push_branch(remote, base, merged):
+    """Push the merge commit merge_base_in made to the branch of the same name on `remote`, never forced, as any push (the pre-push hook
+    asks --status). A detached HEAD, or a branch named as the base's, is not pushed: the command is printed. A remote branch with commits
+    this one lacks stops the run (Failure), and nothing is pushed."""
+    branch = text(git('symbolic-ref', '-q', '--short', 'HEAD', check=False))
+    if not branch or branch in (base, base.partition('/')[2]):
+        print(f'fractal-test: the merge {merged[:12]} is not pushed ({"a detached HEAD" if not branch else f"{branch} is the base branch"}); push it yourself: '
+              f'git push {remote} {merged}:refs/heads/<branch>', flush=True)
+        return
+    if git('fetch', '-q', remote, f'refs/heads/{branch}', check=False).returncode == 0:
+        theirs = text(git('rev-parse', 'FETCH_HEAD'))
+        if git('merge-base', '--is-ancestor', theirs, merged, check=False).returncode != 0:
+            raise Failure(f'{remote}/{branch} has commits this branch lacks ({theirs[:12]}), so the merge {merged[:12]} is not pushed: '
+                          f'bring them in, then run again (never force)')
+    done = git('push', remote, f'{merged}:refs/heads/{branch}', check=False)
+    if done.returncode != 0:
+        raise Failure(f'pushing the merge {merged[:12]} to {remote}/{branch} failed: {done.stderr.decode(errors="replace").strip()[-400:]}')
+    print(f'fractal-test: pushed {branch} at the merge {merged[:12]} to {remote}', flush=True)
 
 
 REEXEC = 'ST_TEST_REEXEC'  # set to the base commit in the base's copy that run_base_copy started: it never re-executes again
@@ -1680,7 +1747,7 @@ def main(argv):
         os.chmod(scratch, 0o700)
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
         directory = Path(scratch) / 'tree'
-        pool_trees, tree_lock, tree_target, n = pool_size(), None, None, None
+        pool_trees, tree_lock, tree_target, n, merged = pool_size(), None, None, None, None
         if not needs_tree(checks):
             pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
         try:
@@ -1692,6 +1759,7 @@ def main(argv):
                 # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
                 # main that had already moved a protected file, and the push was refused).
                 base_commit = fetch_base(args.base)
+                merged = merge_base_in(args.base)
                 commit, why_merge = gate_commit(args.base)
                 if why_merge:
                     print(f'fractal-test: {why_merge}', flush=True)
@@ -1699,6 +1767,7 @@ def main(argv):
                     evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
             else:
+                merged = merge_base_in(args.base)
                 directory, commit = target_worktree(args.base, scratch)
             tools = {}
             for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
@@ -1881,6 +1950,10 @@ def main(argv):
                         'full': not args.check and not args.crate, 'checks': checks, 'pool_tree': n, 'warm': warm,
                         'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
                         'exit': code, 'stages': stages})
+            if merged and args.push and code == 0:
+                push_branch(args.push, args.base, merged)
+            elif merged:
+                print(f'fractal-test: the merge {merged[:12]} is on the branch here, not pushed' + (f' (exit {code})' if code else ''), flush=True)
             return code
         finally:
             if not pool_trees and directory.exists():

@@ -20,6 +20,8 @@ export type Attachment = {
 export type ToolCallStatus = 'running' | 'success' | 'error' | 'interrupted'
 export type ToolResult = {
   readonly content: unknown
+  readonly metadata?: Readonly<Record<string, unknown>>
+  readonly view?: Readonly<Record<string, unknown>>
   readonly mediaType?: string
   readonly isError: boolean
   readonly at: string
@@ -134,7 +136,9 @@ export type ConversationItem =
       readonly name: string
       readonly server?: string
       readonly input: unknown
+      readonly view?: Readonly<Record<string, unknown>>
       readonly status: ToolCallStatus
+      readonly skipped?: boolean
       readonly result?: ToolResult
       readonly callSeen: boolean
       readonly at: string
@@ -217,6 +221,14 @@ export type UnsupportedItem = Extract<ConversationItem, { _tag: 'Unsupported' }>
 export type SendState =
   | { readonly _tag: 'Sent' }
   | { readonly _tag: 'Pending' }
-  | { readonly _tag: 'Failed'; readonly reason: { readonly _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }; readonly detail?: string }
+  | {
+      readonly _tag: 'Failed'
+      readonly reason: { readonly _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }
+      readonly detail?: string
+      /** Full native error code, preserved for diagnosis. */
+      readonly code?: string
+      /** Source-controlled retry policy; when present it decides whether Retry appears. */
+      readonly retryable?: boolean
+    }
   /** Fractal may have taken the send and has not confirmed it yet; sending it again is safe. */
   | { readonly _tag: 'Unconfirmed'; readonly detail?: string }
