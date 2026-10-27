@@ -822,7 +822,7 @@ printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
-  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
 } as const
 
 /**
@@ -863,7 +863,8 @@ const embeddedPython = (script: string) =>
 // SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
 // full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
 // per-commit set unsharded on shard 0.
-const kitShardCount = 2
+// Four shards leave room for shard 0's non-play lanes within the unchanged 25-minute job budget.
+const kitShardCount = 4
 const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
 // What one run of the lane covers, written once: the matrix, the run step, each shard's note and the whole-check note
 // all read these, so a note can never claim more shards or a fuller test set than the run had.
@@ -920,7 +921,7 @@ export const fractalWebJobs = {
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
-    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
+    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.skip == 'true') }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
@@ -957,11 +958,11 @@ export const fractalWebJobs = {
           KIT_SHARD_COUNT: kitShardCountExpression,
           KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
           // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
-          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
+          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out), with a raw CPU ceiling;
           // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
           KIT_PLAY_SET: kitPlaySetExpression,
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
-          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
+          KIT_PLAY_WALL_GUARD_SECONDS: "${{ github.event_name == 'pull_request' && '268' || '' }}",
           // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
           // placed in the import graph); merge groups and manual runs run every test file.
           APP_TEST_SET: appTestSetExpression,
@@ -996,9 +997,8 @@ export const fractalWebJobs = {
   'fractal-web': {
     name: 'fractal-web',
     needs: ['fractal-web-changes', 'fractal-web-execution', 'evidence-gate-fractal-web'],
-    // A failed, cancelled or unexpectedly skipped execution must fail this check. Under an evidence skip the execution
-    // shards end in success with their steps skipped (fleet.yml.genie.ts), so the verdict passes and the cost steps,
-    // which have no receipts to read, do not run.
+    // Only a PR's explicit evidence decision permits job-level skipping. Queue and manual runs
+    // still require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
@@ -1011,6 +1011,8 @@ export const fractalWebJobs = {
           CHANGES_RESULT: '${{ needs.fractal-web-changes.result }}',
           RELEVANT: '${{ needs.fractal-web-changes.outputs.relevant }}',
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
+          EVIDENCE_SKIP: '${{ needs.evidence-gate-fractal-web.outputs.skip }}',
+          EVENT_NAME: '${{ github.event_name }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),
       },

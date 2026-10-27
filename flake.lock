@@ -7,17 +7,17 @@
         "tsgo": "tsgo"
       },
       "locked": {
-        "lastModified": 1792905831,
-        "narHash": "sha256-NsnuoFuA3KKu0iQK/PVOpOFFRwftY93Sx5Il6QTWrcQ=",
+        "lastModified": 1793064840,
+        "narHash": "sha256-SQjH91BSMoTBhdjNWMFnbMEY7eaiuf6SRc2Bjn3kCn8=",
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "fd39f4ff0c7db982aabd138e12489c05fd990541",
+        "rev": "ac338ff0249e191ce4af54f050f1ef55a408505d",
         "type": "github"
       },
       "original": {
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "fd39f4ff0c7db982aabd138e12489c05fd990541",
+        "rev": "ac338ff0249e191ce4af54f050f1ef55a408505d",
         "type": "github"
       }
     },
@@ -262,17 +262,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1792607136,
-        "narHash": "sha256-/WBNEa34/nJBDrGlU8bGDy9Z5ZRGqZsAg8soV4Th15k=",
+        "lastModified": 1792793749,
+        "narHash": "sha256-SvBLC5XDieiklYrFq4WlCQCYB+UHA2QGg2n5kzXPNvU=",
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "6336c376fe3d1657d825f4278465b6192b770b40",
+        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
         "type": "github"
       },
       "original": {
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "6336c376fe3d1657d825f4278465b6192b770b40",
+        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
         "type": "github"
       }
     },

@@ -125,6 +125,14 @@ pub struct ProjectionProgress {
     pub total: Option<u64>,
 }
 
+fn projection_diagnostic_prefix() -> &'static str {
+    // Exec gates capture stderr as JSON; keep their established diagnostic spelling.
+    static PREFIX: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        if std::env::var_os("ST_GATE_REPORT").is_some() { "st" } else { "fractal" }
+    });
+    *PREFIX
+}
+
 /// Keep diagnostics on one bounded line even when an error code or caller phase is untrusted.
 fn full_replay_log_line(phase: &str, reason: &str, frontier: u64, target: u64) -> String {
     fn bounded(value: &str) -> String {
@@ -135,7 +143,8 @@ fn full_replay_log_line(phase: &str, reason: &str, frontier: u64, target: u64) -
             .collect()
     }
     format!(
-        "st: projection full replay phase={} reason={} frontier={frontier} target={target}",
+        "{}: projection full replay phase={} reason={} frontier={frontier} target={target}",
+        projection_diagnostic_prefix(),
         bounded(phase),
         bounded(reason)
     )
@@ -253,12 +262,33 @@ fn projection_failure_log_line(
             || ["projection_stage", "projection_claim_id", "projection_subject", "projection_operation_id", "projection_claim_kind"].iter()
                 .any(|name| details.get(*name).and_then(Value::as_str).is_some_and(|value| value.chars().take(257).count()>256)),
     });
-    format!("st: projection failure detail {diagnostic}")
+    format!("{}: projection failure detail {diagnostic}", projection_diagnostic_prefix())
 }
 
 #[cfg(test)]
 mod projection_failure_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn projection_diagnostic_prefix_preserves_gate_stderr() {
+        const CHILD: &str = "FRACTAL_TEST_PROJECTION_PREFIX_CHILD";
+        if let Some(expected) = std::env::var_os(CHILD) {
+            let line = full_replay_log_line("replay", "test", 0, 1);
+            assert!(line.starts_with(&format!("{}: projection ", expected.to_string_lossy())), "{line}");
+            return;
+        }
+        for (gate, expected) in [(false, "fractal"), (true, "st")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "store::projection_failure_diagnostic_tests::projection_diagnostic_prefix_preserves_gate_stderr", "--nocapture"])
+                .env(CHILD, expected)
+                .env_remove("ST_GATE_REPORT");
+            if gate {
+                command.env("ST_GATE_REPORT", "/unused/gate-report");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
 
     #[test]
     fn diagnostic_rate_keeps_first_error_and_reports_reset_counts_by_stage_and_code() {
@@ -392,7 +422,7 @@ mod projection_failure_diagnostic_tests {
         assert_eq!(lines.len(), 2);
         for (line, suppressed) in lines.iter().zip([0, 1]) {
             let value: Value =
-                serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+                serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                     .unwrap();
             assert_eq!(value["error"], error.message);
             assert_eq!(value["suppressed_errors"], suppressed);
@@ -419,7 +449,7 @@ mod projection_failure_diagnostic_tests {
         );
         assert_eq!(line.lines().count(), 1);
         let value: Value =
-            serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+            serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                 .unwrap();
         assert_eq!(value["error"].as_str().unwrap().chars().count(), 4096);
         assert_eq!(value["error_truncated"], true);
@@ -441,7 +471,7 @@ mod projection_failure_diagnostic_tests {
         );
         let value: Value = serde_json::from_str(
             short
-                .strip_prefix("st: projection failure detail ")
+                .strip_prefix("fractal: projection failure detail ")
                 .unwrap(),
         )
         .unwrap();
@@ -852,6 +882,9 @@ pub struct Store {
     pub trim_pause_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
+    /// The last seal-identity digest, and the capture epoch it holds for; see
+    /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
+    pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1194,6 +1227,7 @@ impl Store {
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
+            sealed_identity_memo: Mutex::new(None),
             runtime,
         })
     }
@@ -5694,12 +5728,29 @@ impl Store {
 
     #[track_caller]
     pub fn read_snapshot<T>(&self, read: impl FnOnce(u64) -> Result<T>) -> Result<T> {
+        self.read_snapshot_starting(current_index, read)
+    }
+
+    /// `read_snapshot` for a read that needs no claim index. The snapshot starts at the first
+    /// statement `read` runs, so every statement in it still reads one snapshot, without a
+    /// `current_index` read nobody uses.
+    #[track_caller]
+    pub fn read_snapshot_unindexed<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.read_snapshot_starting(|_| Ok(()), |()| read())
+    }
+
+    #[track_caller]
+    fn read_snapshot_starting<I, T>(
+        &self,
+        start: impl FnOnce(&Connection) -> Result<I>,
+        read: impl FnOnce(I) -> Result<T>,
+    ) -> Result<T> {
         let key = self.readers.key();
         // Reentry joins this thread's existing snapshot of this store, even when another
         // store's pin is newer: that connection is already inside its read transaction, so
         // BEGINning it again is both wrong and refused by SQLite.
         if let Some(connection) = crate::sqlite::pinned_reader_for(key) {
-            let index = current_index(&connection)?;
+            let index = start(&connection)?;
             return read(index);
         }
         // The snapshot's own entry: the guard below is lent out and dropped at once.
@@ -5724,7 +5775,7 @@ impl Store {
         let timing = crate::sqlite::ReaderTiming::start();
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5f4a6691287 owner=smallclaims::store TODO=trace-statement-and-value-representation */ "BEGIN")?;
         // The first read starts the snapshot; every later read in `read` sees the same one.
-        let index = current_index(&connection)?;
+        let index = start(&connection)?;
         drop(timing);
         live.snapshot_started(&connection);
         crate::sqlite::push_pinned_reader(key, connection);
@@ -8774,8 +8825,11 @@ impl Store {
             .load(std::sync::atomic::Ordering::Relaxed);
         // Projection caches include committed local batches before their envelopes are sealed.
         // Equal sealed inventories cannot diagnose those pending writes as peer divergence.
+        // Only batches past the sealing cursor can be unsealed. `+origin` keeps SQLite on that
+        // rowid range: on the origin index it walked every local batch ever written to find none
+        // (0.9 s per status read on a 50 GB store).
         let unsealed_local: bool = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM batches WHERE rowid>?1 AND origin=?2)",
+            "SELECT EXISTS(SELECT 1 FROM batches WHERE rowid>?1 AND +origin=?2)",
             params![self.seeded_batch_rowid.load(Ordering::Acquire), self.origin],
             |row| row.get(0),
         )?;

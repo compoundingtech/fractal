@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Distinguish fractalite from Fractal TUI in the scenario kit specification",
+  "replay": { "status": "none", "detail": "No deployed replay or runtime data change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "Documentation-only clarification of distinct terminal clients, Fractal Product Lead ownership of Fractal TUI, and no planned scenario adoption for fractalite. Runtime APIs and emitted files are unchanged." },
+  "downtime": { "status": "none", "detail": "No service interruption introduced." },
+  "manual": { "status": "none", "detail": "No deployed installation action required." },
+  "recovery": { "status": "none", "detail": "No database or runtime recovery change." }
+}

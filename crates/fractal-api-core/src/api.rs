@@ -61,10 +61,34 @@ pub use crate::store::agent_queue_values::{
     AGENT_QUEUE_FIELDS, agent_queue_fields, agent_queue_metadata,
 };
 use crate::model::ClientReplicated;
-use crate::model::{ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView, AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput, ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer, ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest, DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord, GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest, LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption, LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest, LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt, MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest, MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest, MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView, OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec, PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest, PlanningProposalRequest, PlanningRevisionRequest, PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse, ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse, ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse, ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest, RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView, RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest, SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView, WorkRequest, WorkRetryRequest, WorkWakeRequest};
+use crate::model::{
+    ApplyRequest, ApplyResponse, AttachRequest, Attachment, AttentionItemView,
+    AttentionRequestView, AttentionResolveRequest, AttentionWithdrawRequest, ClaimInput,
+    ClaimRecord, ClaimsPage, ClientPageInfo, ClientResourcePage, ClientSyncNotice, ClientSyncPeer,
+    ContextClearRequest, DoctorCheck, DoctorReport, DocumentListResponse, DocumentPutRequest,
+    DocumentVersion, EvalStartRequest, EvalStartResponse, EvalStatus, EventRecord,
+    GateResultRequest, HumanReviewView, LaunchApproveAndStartRequest,
+    LaunchApproveAndStartView, LaunchDecisionAnswerRequest, LaunchDecisionOption,
+    LaunchDecisionRequest, LaunchDecisionResponse, LaunchDecisionType, LaunchStartRequest,
+    LocalTerminal, MAX_EVAL_TIMEOUT_MS, MessageLifecycleRequest, MessagePage, MessageSendReceipt,
+    MessageSendRequest, MessageView, MissionOutputView, MissionProductionRequest, MissionRequest,
+    MissionResponse, MissionRetireRequest, MissionRevisionRequest, MissionRunOutcomeRequest,
+    MissionRunReportRequest, MissionRunReportView, MissionRunRequest, MissionRunView,
+    OperationalRepairApplyRequest, OperationalRepairPlan, OperationalRepairResult, PlannerSpec,
+    PlanningApprovalRequest, PlanningCancelRequest, PlanningCandidateSubmitRequest,
+    PlanningProposalRequest, PlanningRevisionRequest,
+    PlanningSessionStartRequest, PlanningSessionView, QuickAgentRequest, QuickAgentResponse,
+    ReplicaRecordView, ReplicationExportRequest, ReplicationExportResponse,
+    ReplicationPeerFailureRequest, ReplicationReceiveRequest, ReplicationReceiveResponse,
+    ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
+    RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
+    RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    WorkRequest, WorkRetryRequest, WorkWakeRequest,
+};
+use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
-use crate::model::{PersonAskRequest, PersonStepResponse};
 use crate::store::Store;
 
 pub mod wire_names;
@@ -119,6 +143,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
 pub mod tile_endpoint;
@@ -214,6 +239,9 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Caller-bound assistant read receipts committed off the request path. Shut it down before
+    /// the store closes; the last state reference to drop commits what remains.
+    pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
@@ -417,10 +445,12 @@ impl ApiError {
             | "stale-launch-preview"
             | "fleet-leaving"
             | "glass-deleted"
+            | "person-rename-conflict"
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
             | "lane-approval-denied"
+            | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
@@ -622,6 +652,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/sets/apply", post(owned_sets::apply))
         .route("/v1/intent/apply", post(launches::apply_with_bound))
         .route("/v1/agents/rename", post(agents::rename_agent))
+        .route("/v1/persons/rename", post(agents::rename_person))
         .route("/v1/agents/rename-id", post(agents::rename_agent_id))
         .route("/v1/missions/rename-id", post(agents::rename_mission_id))
         .route("/v1/agents/restart", post(agents::restart_agent))
@@ -813,6 +844,10 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             "/v1/mission-runs/{run}/report-to",
             post(runs::set_mission_run_report),
         )
+        .route(
+            "/v1/mission-runs/{run}/waiting-on",
+            get(waiting_on::get_run_waiting_on),
+        )
         .route("/v1/mission-runs/{run}", get(runs::get_mission_run))
         .route("/v1/run-generations/{generation}", get(runs::get_run_generation))
         .route(
@@ -944,11 +979,19 @@ async fn response_envelope_unbounded(
         && request.uri().path() == "/v1/client/capabilities"
         && !request.headers().contains_key(axum::http::header::AUTHORIZATION)
     {
-        return Json(json!({
-            "api_version": CLIENT_API_VERSION,
-            "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-        }))
-        .into_response();
+        // The second capability goes only to a client that says it understands it
+        // (`?accepts=fabric-gateway-grant`): an older client validating this answer as exactly
+        // one `device-key-proofs` entry keeps getting exactly that.
+        let mut capabilities = vec![json!({"id":"device-key-proofs", "version":1, "state":"granted"})];
+        if request
+            .uri()
+            .query()
+            .is_some_and(|query| query.split('&').any(|pair| pair == "accepts=fabric-gateway-grant"))
+        {
+            capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
+        }
+        return Json(json!({"api_version": CLIENT_API_VERSION, "capabilities": capabilities}))
+            .into_response();
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
@@ -1427,6 +1470,68 @@ pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
 
+/// Note what keeps this minute of the member's CPU from being idle.
+fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
+    request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
+}
+
+/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
+/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// the `workers` replication workers this member runs has sent, note a replication catch-up, and
+/// check the seats of the minute closed one boundary earlier, once every harness observation
+/// stamped inside it has committed. The first boundary is this daemon's start.
+pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
+    use smallclaims::windows::cpu_minutes::Busy;
+    // This member's seats as of `seats_until`, which each minute's check carries into the next.
+    let mut seats = None;
+    let mut seats_until = 0;
+    let mut unsettled = None;
+    loop {
+        let minute = client_now_ms() as u64 / 60_000;
+        let (at, daemon_ns) = (Instant::now(), smallclaims::windows::process_cpu_ns());
+        let catching_up = store.replication_catching_up();
+        let closed = {
+            let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let cpu = meter.cpu_minutes();
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            let closed = cpu.boundary(minute, at, daemon_ns, workers);
+            if catching_up {
+                cpu.note(Busy::CatchUp);
+            }
+            closed
+        };
+        if let Some(closed) = closed
+            && let Some(check) = unsettled.replace(closed)
+        {
+            let (from, until) = (check * 60_000, (check + 1) * 60_000);
+            let carried = seats.take().filter(|_| seats_until == from);
+            let reading = store.clone();
+            let checked = tokio::task::spawn_blocking(move || {
+                smallclaims::task_cpu::blocking("slo.cpu_minutes", || {
+                    reading.local_seats_busy(from, until, carried)
+                })
+            })
+            .await;
+            let busy = match checked {
+                Ok(Ok((busy, newest))) => {
+                    (seats, seats_until) = (Some(newest), until);
+                    Some(busy)
+                }
+                _ => None,
+            };
+            request_latency()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cpu_minutes()
+                .settle(check, busy);
+        }
+        let now = client_now_ms() as u64;
+        tokio::time::sleep(Duration::from_millis((now / 60_000 + 1) * 60_000 - now + 5)).await;
+    }
+}
+
 pub use crate::peer::track_remote_reads;
 
 /// A query that asks the daemon to wait for a change makes the request a long poll.
@@ -1801,12 +1906,15 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "wrong-message-recipient"
         | "lane-approval-denied"
         | "glass-owner-forbidden"
+        | "person-rename-forbidden"
         | "foreign-agent-actor" => "forbidden".into(),
         "lane-not-found" => "not-found".into(),
         "invalid-person-ask"
         | "invalid-person-response"
         | "invalid-person-request"
         | "invalid-person-answer"
+        | "invalid-person-rename"
+        | "unknown-person"
         | "answer-required"
         | "unsupported-person-request"
         | "missing-ask-owner"
@@ -1820,6 +1928,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-review-decision"
         | "feedback-gate-needs-step" => "validation-failed".into(),
         "wrong-reviewer" => "forbidden".into(),
+        "person-rename-conflict" => "conflict".into(),
         "stale-work-ask"
         | "stale-subject"
         | "missing-subject-token"
@@ -6683,6 +6792,7 @@ pub async fn guard_bound_request(
         "/v1/sets/",
         "/v1/agent-queue-moves",
         "/v1/agents/rename",
+        "/v1/persons/rename",
         "/v1/agents/restart",
         "/v1/agents/rollout",
         "/v1/agents/start",
@@ -8207,12 +8317,24 @@ fn replication_receive_has_new_data(received: usize) -> bool {
 }
 
 /// Pure local memory update. Older daemons answer 404 rather than interpreting worker
-/// progress as a failed exchange during a worker/daemon rolling restart.
+/// progress as a failed exchange during a worker/daemon rolling restart. A report of the
+/// worker's process CPU, which carries no peer, feeds the member's CPU minutes instead.
 async fn replication_worker_status(
     State(state): State<AppState>,
     Json(request): Json<smallclaims::replication::ReplicationWorkerStatusRequest>,
 ) -> Json<Value> {
-    state.store.record_replication_worker(&request.peer, request.worker);
+    if let Some(worker) = request.worker {
+        state.store.record_replication_worker(&request.peer, worker);
+    }
+    if let Some(process) = request.process {
+        let catching_up = state.store.replication_catching_up();
+        let mut meter = request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let cpu = meter.cpu_minutes();
+        cpu.note_worker((process.pid, process.started_at_unix_ms), process.cpu_ns, Instant::now());
+        if catching_up {
+            cpu.note(smallclaims::windows::cpu_minutes::Busy::CatchUp);
+        }
+    }
     Json(json!({ "recorded": true, "changed": false }))
 }
 
@@ -10131,6 +10253,20 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+}
+
+/// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
+/// hierarchy, queue, timing, summaries and wake a reader would fold for it after COMMIT.
+async fn work_action_response_viewing(
+    state: AppState,
+    action: String,
+    subject: String,
+    request: WorkRequest,
+    extend_ms: Option<u64>,
+    handoff: Option<crate::model::WorkHandoffRequest>,
+    lease_view: bool,
+) -> Result<Json<StepRunView>, ApiError> {
     let actor = request
         .actor
         .as_deref()
@@ -10158,7 +10294,7 @@ async fn work_action_response(
         if let Some(input) = handoff.as_ref() {
             state.store.handoff_retry(&subject, input).map_err(ApiError::bad)?;
         }
-        if action == "renew" {
+        if action == "renew" && !lease_view {
             // A renewal caches its view without the fields the writer no longer folds.
             let store = state.store.clone();
             response = blocking_action(move || {
@@ -10193,10 +10329,11 @@ async fn work_action_response(
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_extending(&subject, &action, &request, extend_ms)?
+            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
         };
-
-        work_response::enrich_under(&store, &mut response)?;
+        if !lease_view {
+            work_response::enrich_under(&store, &mut response)?;
+        }
         Ok(response)
     })
     .await?;

@@ -1965,17 +1965,17 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         assert_eq!(
             lines
                 .iter()
-                .filter(|line| line.starts_with("st: projection full replay "))
+                .filter(|line| line.starts_with("fractal: projection full replay "))
                 .cloned()
                 .collect::<Vec<_>>(),
             [format!(
-                "st: projection full replay phase=startup/project-replication-backlog reason={reason} frontier={expected_frontier} target={target}"
+                "fractal: projection full replay phase=startup/project-replication-backlog reason={reason} frontier={expected_frontier} target={target}"
             )],
             "{reason}"
         );
         let details = lines
             .iter()
-            .filter_map(|line| line.strip_prefix("st: projection failure detail "))
+            .filter_map(|line| line.strip_prefix("fractal: projection failure detail "))
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         if matches!(reason, "incremental-error:internal" | "operation-conflict"
@@ -2007,9 +2007,9 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                 };
                 assert_eq!(details[0]["claim_kind"], expected_kind);
                 let detail_position = lines.iter().position(|line|
-                    line.starts_with("st: projection failure detail ")).unwrap();
+                    line.starts_with("fractal: projection failure detail ")).unwrap();
                 let replay_position = lines.iter().position(|line|
-                    line.starts_with("st: projection full replay ")).unwrap();
+                    line.starts_with("fractal: projection full replay ")).unwrap();
                 assert!(detail_position < replay_position);
             }
         } else {
@@ -2974,6 +2974,26 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
         before,
         "an unrelated write must not refold this subject's history"
     );
+
+    // A harness report on the subject is not folded, so it does not refold the history either.
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "harness.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([("state".into(), Value::String("idle".into()))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+    assert_eq!(
+        store.latest_actual_value(subject).unwrap().unwrap()["status"],
+        "stopped"
+    );
+    assert_eq!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get), 0);
+    assert_eq!(cached(&store).unwrap(), before);
 
     let running = observe(subject, "running");
     assert_eq!(
@@ -8023,9 +8043,87 @@ fn harness_usage_replicates_on_a_schedule_while_working_and_at_once_when_it_stop
     assert!(
         local_observation_position(&usage("context_occupancy", 36, 1, start + 11 * minute).0)
             .is_none(),
-        "an idle harness replicates its usage at once"
+        "the interval has passed since the stop replicated the last reading"
     );
-    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 12);
+    assert!(
+        local_observation_position(&usage("context_occupancy", 37, 1, start + 12 * minute).0)
+            .is_some(),
+        "subagents answering while the harness rests wait for the interval"
+    );
+    let state = |state: &str, at: u128| {
+        store
+            .append_latest_observation(&harness_state(subject, state, at as u64), at)
+            .unwrap()
+    };
+    state("working", start + 13 * minute);
+    state("idle", start + 14 * minute);
+    assert_eq!(
+        usage_claims(&store).last(),
+        Some(&occupancy(37)),
+        "the turn's end replicates what was pending"
+    );
+    state("working", start + 15 * minute);
+    state("idle", start + 16 * minute);
+    assert!(
+        local_observation_position(&usage("context_occupancy", 38, 1, start + 16 * minute + 500).0)
+            .is_none(),
+        "a turn's last response can arrive after its idle report and replicates at once"
+    );
+    assert!(
+        local_observation_position(&usage("context_occupancy", 39, 1, start + 17 * minute).0)
+            .is_some(),
+        "later responses of the same rest wait for the interval"
+    );
+    state("idle", start + 19 * minute);
+    assert_eq!(usage_claims(&store).last(), Some(&occupancy(38)));
+    state("idle", start + 22 * minute);
+    assert_eq!(
+        usage_claims(&store).last(),
+        Some(&occupancy(39)),
+        "a resting harness's re-stamp replicates the reading that waited out its interval"
+    );
+    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 21);
+}
+
+/// Measured on the fleet (2026-10-26): a seat whose main loop waited while its subagent worked
+/// replicated a usage claim for every response, one every four seconds, because its harness
+/// reported idle. Ten minutes of that, then a working turn of the same pace, then its end.
+#[test]
+fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let second = 1_000_u128;
+    let state = |state: &str, at: u128| {
+        store
+            .append_latest_observation(&harness_state(subject, state, at as u64), at)
+            .unwrap();
+    };
+    let mut responses = 0;
+    let mut respond = |at: u128| {
+        responses += 1;
+        store
+            .append_latest_observation(&harness_usage(subject, "context_occupancy", responses, 0), at)
+            .unwrap();
+    };
+    state("idle", start);
+    for tick in 0..=150 {
+        respond(start + second + tick * 4 * second);
+    }
+    let resting = store.claims_for(subject, Some("harness.usage")).unwrap().len();
+    // The first reading, then one per five-minute interval of the ten minutes.
+    assert_eq!(resting, 3, "{resting} usage claims for 151 responses at rest");
+    let turn = start + 11 * 60 * second;
+    state("working", turn);
+    for tick in 0..75 {
+        respond(turn + second + tick * 4 * second);
+    }
+    state("idle", turn + 301 * second);
+    let total = store.claims_for(subject, Some("harness.usage")).unwrap().len();
+    // The interval during the turn, and its end.
+    assert_eq!(total, resting + 2, "{total} usage claims for {responses} responses");
+    let newest = store.latest_claim(subject, Some("harness.usage")).unwrap().unwrap();
+    assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
 }
 
 #[test]
@@ -11070,4 +11168,91 @@ fn a_claude_trust_prompt_fences_its_incarnation_as_not_ready_with_the_reason() {
     append("runtime.observed", None, running("second"));
     append("harness.observed", Some(subject), ready("second"));
     assert!(store.current_harness(subject).unwrap().unwrap().is_ready());
+}
+
+#[test]
+fn local_seats_busy_reads_each_seats_newest_state_and_every_one_in_the_minute() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    let observe = |subject: &str, state: &str, at: u64, jobs: Option<u64>| {
+        let mut input = harness_state(subject, state, at);
+        if let Some(jobs) = jobs {
+            input.fields.insert("background_jobs".into(), json!(jobs));
+        }
+        store.append_latest_observation(&input, u128::from(at)).unwrap();
+    };
+    // Minutes after now, so the runtime claims appended now are before every span checked.
+    let base = (now_ms() as u64 / MINUTE + 10) * MINUTE;
+    observe("agent/node.a", "working", base - 5_000, None);
+    observe("agent/node.a", "idle", base - 1_000, None);
+    observe("agent/node.b", "ended", base - 30 * MINUTE, None);
+    // Each seat's newest observation before the minute says it is quiet.
+    let (busy, seats) = store.local_seats_busy(base, base + MINUTE, None).unwrap();
+    assert!(!busy);
+    assert_eq!(seats.harness.len(), 2);
+    // A seat that worked inside the minute keeps it from being idle, though idle by its end.
+    observe("agent/node.c", "working", base + MINUTE + 10, None);
+    observe("agent/node.c", "idle", base + MINUTE + 20, None);
+    let (busy, seats) = store.local_seats_busy(base + MINUTE, base + 2 * MINUTE, Some(seats)).unwrap();
+    assert!(busy);
+    let (busy, seats) = store.local_seats_busy(base + 2 * MINUTE, base + 3 * MINUTE, Some(seats)).unwrap();
+    assert!(!busy, "{seats:?}");
+    // Background jobs, and a state that does not say the seat is quiet, are busy, and stay busy
+    // into later minutes until the seat says otherwise.
+    observe("agent/node.a", "idle", base + 3 * MINUTE + 1, Some(2));
+    let (busy, seats) = store.local_seats_busy(base + 3 * MINUTE, base + 4 * MINUTE, Some(seats)).unwrap();
+    assert!(busy);
+    assert!(store.local_seats_busy(base + 4 * MINUTE, base + 5 * MINUTE, Some(seats)).unwrap().0);
+    assert!(store.local_seats_busy(base + 9 * MINUTE, base + 10 * MINUTE, None).unwrap().0, "read afresh");
+    observe("agent/node.a", "idle", base + 10 * MINUTE + 1, None);
+    observe("agent/node.d", "starting", base + 10 * MINUTE + 2, None);
+    assert!(store.local_seats_busy(base + 10 * MINUTE, base + 11 * MINUTE, None).unwrap().0);
+}
+
+#[test]
+fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
+    const MINUTE: u64 = 60_000;
+    let store = Store::open_memory("node").unwrap();
+    let runtime = |status: &str, incarnation: Option<&str>| {
+        let mut fields = BTreeMap::from([("status".to_owned(), json!(status))]);
+        if let Some(incarnation) = incarnation {
+            fields.insert("incarnation_id".into(), json!(incarnation));
+        }
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/node.e".into(),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields,
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    };
+    let check = |minute: u64| {
+        let from = (now_ms() as u64 / MINUTE + minute) * MINUTE;
+        store.local_seats_busy(from, from + MINUTE, None).unwrap().0
+    };
+    // No harness observation reaches the store for a seat this member runs: not quiet.
+    runtime("running", Some("inc-1"));
+    assert!(check(2));
+    // One of another incarnation proves nothing about this one.
+    let at = now_ms() as u64;
+    let mut other = harness_state("agent/node.e", "idle", at);
+    other.fields.insert("incarnation_id".into(), json!("inc-0"));
+    store.append_latest_observation(&other, u128::from(at)).unwrap();
+    assert!(check(2));
+    store.append_latest_observation(&harness_state("agent/node.e", "idle", at + 1), u128::from(at + 1)).unwrap();
+    assert!(!check(2));
+    // A seat that starts inside the minute is busy in it.
+    assert!(check(0));
+    // A later runtime observation that omits the incarnation keeps it.
+    runtime("running", None);
+    assert!(!check(2));
+    // Once this member ended the seat, its last harness state no longer counts.
+    store.append_latest_observation(&harness_state("agent/node.e", "working", at + 2), u128::from(at + 2)).unwrap();
+    assert!(check(2));
+    runtime("exited", None);
+    assert!(!check(2));
 }

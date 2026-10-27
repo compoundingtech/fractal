@@ -44,6 +44,7 @@ fn state(root: &Path, name: &str) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     }
 }
 
@@ -454,7 +455,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         device_name: "Raw terminal device".into(),
         person_id: "person/avery".into(),
         full_control: Some(true),
-        scopes: None,
+        scopes: None, fabric_gateway: None,
     }).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -466,6 +467,7 @@ async fn raw_terminal_bytes_capability_replay_and_close_over_paired_gateways() {
         code: challenge.value.code,
         device_public_key: "raw-terminal-public-key-000000000000000000000".into(),
         key_storage: None,
+        fabric_node_id: None,
     },).await.unwrap();
     let gateway_socket = state.state_dir.join("raw-client-gateway.sock");
     let server_socket = gateway_socket.clone();
@@ -1193,7 +1195,7 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
                 device_name: "Unattributed device".into(),
                 person_id: "person/ada".into(),
                 full_control: None,
-                scopes: None,
+                scopes: None, fabric_gateway: None,
             })
             .await
             .is_err(),
@@ -1567,7 +1569,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     device_name: "Conformance phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap();
 
@@ -1582,6 +1584,7 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
         code: challenge.value.code,
         device_public_key: "conformance-public-key-000000000000000000000000".into(),
         key_storage: None,
+        fabric_node_id: None,
     },)
         .await
         .unwrap();
@@ -1607,7 +1610,13 @@ async fn generated_client_conforms_over_paired_loopback_and_rejects_bad_credenti
     assert_eq!(advertisement, serde_json::json!({
         "api_version": fractal_client::API_VERSION,
         "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-    }));
+    }), "a client that did not ask sees exactly the one capability older clients validate");
+    let asked = unix_response(&gateway_socket, "/v1/client/capabilities?accepts=fabric-gateway-grant", None).await;
+    let asked: Value = serde_json::from_slice(&asked.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(asked["capabilities"], serde_json::json!([
+        {"id":"device-key-proofs", "version":1, "state":"granted"},
+        {"id":"fabric-gateway-grant", "version":1, "state":"granted"},
+    ]));
     assert_eq!(
         unix_status(&gateway_socket, "/v1/client/agents", None).await,
         StatusCode::FORBIDDEN,

@@ -103,7 +103,8 @@ mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
 mod work_cli;
-use agents_cli::run_agents;
+mod waiting_on_cli;
+use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
 use conversations_cli::{run_message, upload_attachments};
 use driver_cli::{run_driver, run_driver_hook};
@@ -116,7 +117,7 @@ use work_cli::{run_wait, run_work};
 
 use presentation::{
     OutputStyle, follow_snapshot, glance, mission_run_signature, relative_time,
-    render_attention_show, render_generation, render_generations, render_host_facts,
+    render_attention_show, render_claim_lease, render_generation, render_generations, render_host_facts,
     render_human_value, render_mission_run_page, render_revision_proposal, render_step_run,
     shell_argument,
 };
@@ -261,7 +262,7 @@ enum Command {
     /// Configure this machine and start fractal, with flags for unattended setup.
     Setup(crate::setup::SetupArgs),
     /// Open the terminal interface: spaces, conversations, Home and agent terminals.
-    #[command(version = fractal_drivers::version::display_version())]
+    #[command(alias = "tui", version = fractal_drivers::version::display_version())]
     Ui(fractal_tui::Args),
     /// Open the daemon's local web session in a browser.
     ///
@@ -351,6 +352,11 @@ enum Command {
     Agents {
         #[command(subcommand)]
         command: AgentsCommand,
+    },
+    /// Repair current work after a person identity changes.
+    Persons {
+        #[command(subcommand)]
+        command: PersonsCommand,
     },
     /// Read, follow, and send normalized conversations.
     Conversations {
@@ -780,7 +786,7 @@ struct UninstallArgs {
     /// Leave the fleet without reaching any member first.
     #[arg(long)]
     offline: bool,
-    /// Keep the installed st3, st, stui, fractal-migrate, and pty executables.
+    /// Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty).
     #[arg(long)]
     keep_binaries: bool,
     /// Also required when this machine's graph exists nowhere else.
@@ -1202,6 +1208,19 @@ enum MissionViewCommand {
     },
     /// Explain one mission run, its goals, state, work, and usage.
     Show(MissionShowArgs),
+    /// What one run waits on: each open step, whom it waits on and since when, open asks, the
+    /// steps not ready and finished, and whether the run has stalled and why.
+    ///
+    /// Reads the daemon's published work and missions lists, never claim history, so it
+    /// answers in milliseconds. A held step with no progress, or a ready step nobody claims,
+    /// for longer than --quiet counts as stuck.
+    WaitingOn {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
+        run: String,
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        #[arg(long)]
+        quiet: Option<String>,
+    },
     /// Change a mission's canonical ID without replacing its runs or revision history.
     RenameId(IdentityRenameArgs),
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
@@ -2019,6 +2038,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// Let this pairing grant the device this member's client gateway over Fabric (after
+        /// `devices fabric enable`); without it pairing grants nothing over Fabric.
+        #[arg(long, conflicts_with = "assistant")]
+        fabric_gateway: bool,
         /// Begin a revocable external-assistant grant instead of a person device.
         #[arg(long, value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
@@ -2066,6 +2089,27 @@ enum DevicesCommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Reach this member's client gateway over Fabric: pairing grants a device it, revoking removes it.
+    Fabric {
+        #[command(subcommand)]
+        command: DevicesFabricCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevicesFabricCommand {
+    /// Expose the paired-only client gateway as one Fabric service. From then on, pairing a
+    /// device that sends its Fabric NodeID grants it that service, inbound-only, and revoking
+    /// the pairing removes the grant. Needs fabric 0.2.41 or later.
+    Enable {
+        /// The Fabric service name devices dial.
+        #[arg(long, default_value = fractal_daemon::fabric_gateway::DEFAULT_SERVICE)]
+        service: String,
+    },
+    /// Stop exposing the client gateway over Fabric and remove every grant Fractal made for a device.
+    Disable,
+    /// Show the Fabric service and the devices Fractal has granted it.
+    Status,
 }
 
 /// Grant terms sealed when the configured owning person begins or changes an assistant grant.
@@ -2749,6 +2793,24 @@ struct AgentHoldArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as")]
     actor: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum PersonsCommand {
+    /// Reassign open work and pending reviews; report declarations needing republishing.
+    Rename(PersonRenameArgs),
+}
+
+#[derive(Args)]
+struct PersonRenameArgs {
+    #[arg(value_parser = parse_person_subject)]
+    old_person: String,
+    #[arg(value_parser = parse_person_subject)]
+    new_person: String,
+    #[arg(long = "as", value_parser = parse_actor_subject)]
+    actor: Option<String>,
+    #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    idempotency_key: Option<String>,
 }
 
 #[derive(Args)]
@@ -3530,7 +3592,7 @@ enum AttentionCommand {
         actor: Option<String>,
     },
     /// Chat about an alert: send a message to the agent whose conversation it belongs to, titled
-    /// after it, with a reference to what it is about. This is what "Chat about this" does in stui.
+    /// after it, with a reference to what it is about. This is what "Chat about this" does in the Fractal terminal UI.
     Discuss(AttentionDiscussArgs),
     /// Legacy mutation: returns attention-migrated. Use work ask or remedy the source.
     Request(AttentionRequestArgs),
@@ -3699,9 +3761,9 @@ enum WorkCommand {
     Renew(WorkActionArgs),
     /// Record a material progress update without changing ownership.
     ///
-    /// Records progress in the graph without messaging another agent; people read it in stui.
+    /// Records progress in the graph without messaging another agent; people read it in the Fractal terminal UI.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
-    Progress(WorkActionArgs),
+    Progress(WorkProgressArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
     /// Stop the execution clock while claimed work waits for something outside this agent.
@@ -3951,6 +4013,19 @@ struct WorkWaitArgs {
     /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
+}
+
+#[derive(Args)]
+struct WorkProgressArgs {
+    #[command(flatten)]
+    action: WorkActionArgs,
+    /// Estimated finish: a positive duration from now or a future RFC3339 timestamp.
+    ///
+    /// Adds a self-reported ETA to this progress note, not an execution deadline.
+    /// The next nonempty summary replaces it. Use --summary without --eta to withdraw it.
+    /// Handoff clears it; revisions do not carry it. Work show prints its age and author.
+    #[arg(long)]
+    eta: Option<String>,
 }
 
 #[derive(Args)]
@@ -4594,11 +4669,12 @@ fn main() -> ExitCode {
 }
 
 fn cli_main() -> ExitCode {
+    let _ = *STDERR_MESSAGE;
     // A recorder link starts st3 as `git` or `gh`. It must not build the async runtime.
     if let Some(program) = fractal_daemon::recorder::invoked_program() {
         fractal_daemon::recorder::run(program);
     }
-    let mut arguments = std::env::args_os().collect::<Vec<_>>();
+    let arguments = std::env::args_os().collect::<Vec<_>>();
     // Parse the local launcher before any raw scanner can mistake its state path
     // for an unrelated option. Inspect clap's value sources, never raw tokens.
     if arguments.get(1).is_some_and(|argument| argument == "web") {
@@ -4626,19 +4702,18 @@ fn cli_main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some(false) => {
-            eprintln!("st: --checkpoint-space-gate-capabilities must be used alone");
+            stderr_message("st", format_args!("--checkpoint-space-gate-capabilities must be used alone"));
             return ExitCode::from(2);
         }
         None => {}
     }
-    fractal::dispatch(arguments.as_mut_slice());
     match read_contract_inventory_request(&arguments) {
         Some(true) => {
             println!("{}", read_contract_inventory_json());
             return ExitCode::SUCCESS;
         }
         Some(false) => {
-            eprintln!("st: --read-contract-inventory-json must be used alone");
+            stderr_message("st", format_args!("--read-contract-inventory-json must be used alone"));
             return ExitCode::from(2);
         }
         None => {}
@@ -4648,7 +4723,7 @@ fn cli_main() -> ExitCode {
     if let Some(name) = instance_name {
         // SAFETY: no other thread exists yet; the async runtime starts after this returns.
         if let Err(error) = unsafe { fractal_daemon::instance::activate(&name) } {
-            eprintln!("st: --instance {name}: {error:#}");
+            stderr_message("st", format_args!("--instance {name}: {error:#}"));
             return ExitCode::from(2);
         }
     }
@@ -4692,7 +4767,7 @@ fn cli_main() -> ExitCode {
         let subject = match crate::setup::prepare_plain_ui() {
             Ok(subject) => subject,
             Err(error) => {
-                eprintln!("st: {}", plain_error(&error));
+                stderr_message("st", format_args!("{}", plain_error(&error)));
                 return ExitCode::FAILURE;
             }
         };
@@ -4731,7 +4806,7 @@ fn cli_main() -> ExitCode {
         return match actor_contract::print(*effective) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("st actor-contract: {error:#}");
+                eprintln!("{} actor-contract: {error:#}", ClientMessage::for_output(false).diagnostic_prefix("st"));
                 ExitCode::FAILURE
             }
         };
@@ -4742,7 +4817,7 @@ fn cli_main() -> ExitCode {
         return match fractal_daemon::tiles::cli::run(args) {
             Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
             Err(error) => {
-                eprintln!("st tiles: {error:#}");
+                eprintln!("{} tiles: {error:#}", ClientMessage::for_output(false).diagnostic_prefix("st"));
                 ExitCode::FAILURE
             }
         };
@@ -4774,7 +4849,7 @@ fn cli_main() -> ExitCode {
         }
         Ok(None) => {}
         Err(error) => {
-            eprintln!("st: {error:#}");
+            stderr_message("st", format_args!("{error:#}"));
             return ExitCode::FAILURE;
         }
     }
@@ -4805,7 +4880,7 @@ fn run_terminal_ui(mut options: fractal_tui::Args, endpoint: Option<&str>) -> Ex
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("st: {}", plain_error(&error));
+            stderr_message("st", format_args!("{}", plain_error(&error)));
             ExitCode::FAILURE
         }
     }
@@ -4859,7 +4934,7 @@ fn run_demo(command: DemoCommand) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("st: {}", plain_error(&error));
+            stderr_message("st", format_args!("{}", plain_error(&error)));
             ExitCode::FAILURE
         }
     }
@@ -5020,7 +5095,7 @@ async fn run_cli(cli: Cli, command_name: &str) -> ExitCode {
                 return ExitCode::from(exit.0);
             }
             let message = cli_error_message(&error, native_driver);
-            eprintln!("st: {message}");
+            stderr_message("st", format_args!("{message}"));
             if refused_command(&error) {
                 fractal_daemon::gate_report::note_refusal(&plain_error(&error));
             }
@@ -5049,12 +5124,53 @@ enum ClientMessage {
     Human,
 }
 
+static STDERR_MESSAGE: std::sync::LazyLock<ClientMessage> = std::sync::LazyLock::new(|| {
+    ClientMessage::for_output(native_driver_requested(std::env::args_os().skip(1)))
+});
+
+fn native_driver_requested(arguments: impl Iterator<Item = std::ffi::OsString>) -> bool {
+    let mut skip_value = false;
+    for argument in arguments {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if matches!(argument.to_str(), Some("--endpoint" | "--instance" | "--catalog" | "--daemon-wait")) {
+            skip_value = true;
+        } else if argument.as_encoded_bytes().starts_with(b"-") {
+            continue;
+        } else {
+            return argument == "driver" || argument == fractal_daemon::driver_hook::SUBCOMMAND;
+        }
+    }
+    false
+}
+
+fn stderr_message(legacy_prefix: &'static str, message: std::fmt::Arguments<'_>) {
+    let mode = *STDERR_MESSAGE;
+    eprintln!("{}: {message}", mode.diagnostic_prefix(legacy_prefix));
+}
+
 impl ClientMessage {
     fn for_output(native_driver: bool) -> Self {
         static IN_GATE: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
             std::env::var_os(fractal_daemon::gate_report::ENV).is_some()
         });
         if native_driver || *IN_GATE { Self::Stable } else { Self::Human }
+    }
+
+    fn diagnostic_prefix(self, legacy_prefix: &'static str) -> &'static str {
+        match self {
+            Self::Stable => legacy_prefix,
+            Self::Human => "fractal",
+        }
+    }
+
+    fn product_name(self) -> &'static str {
+        match self {
+            Self::Stable => "st",
+            Self::Human => "Fractal",
+        }
     }
 
     fn error(self, error: &fractal_client::ClientError) -> String {
@@ -5362,6 +5478,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Agents { command } => {
             run_agents(&endpoint, config.person.as_deref(), command, cli.json).await
         }
+        Command::Persons { command } => {
+            run_persons(&endpoint, config.person.as_deref(), command, cli.json).await
+        }
         Command::Conversations { command } => {
             run_message(
                 &client,
@@ -5373,6 +5492,10 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Activity(args) => run_activity(&endpoint, args, cli.json).await,
+        Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Fabric { command }),
+            ..
+        }) => run_devices_fabric(&config, command, cli.json).await,
         Command::Schedules { command } => schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await,
         Command::Devices(args) => {
             run_devices(endpoint.clone(), config.person.as_deref(), args, cli.json).await
@@ -5637,14 +5760,20 @@ fn guard_mutating_cli_actor(
             },
             _ => None,
         },
+        Command::Persons { command } => match command {
+            PersonsCommand::Rename(args) => Some(args.actor.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("a harness person rename needs explicit --as {own}")
+            })?),
+        },
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
             WorkCommand::Done(args) | WorkCommand::CancelAsk(args) => Some(args.actor.as_str()),
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
-            WorkCommand::Claim(args) | WorkCommand::Renew(args) | WorkCommand::Progress(args)
+            WorkCommand::Claim(args) | WorkCommand::Renew(args)
             | WorkCommand::Complete(args) | WorkCommand::Fail(args) | WorkCommand::Release(args) => args.actor.as_deref(),
+            WorkCommand::Progress(args) => args.action.actor.as_deref(),
             WorkCommand::Wake(args) => args.actor.as_deref(),
             WorkCommand::PublishMission(args) => args.actor.as_deref(),
             WorkCommand::Revise(args) => args.actor.as_deref(),
@@ -5720,6 +5849,7 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     let state = match text("state") {
         "ended" => format!("ended ({})", text("ended")),
         "degraded" => format!("degraded: {}", text("reason")),
+        "active" if !text("reason").is_empty() => format!("active ({})", text("reason")),
         state => state.to_owned(),
     };
     let until = view
@@ -5960,11 +6090,8 @@ fn raise_open_file_limit() {
     };
     // SAFETY: setrlimit only reads the rlimit it is given.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } != 0 {
-        eprintln!(
-            "st3: could not raise the open file limit from {}: {}",
-            limit.rlim_cur,
-            std::io::Error::last_os_error()
-        );
+        stderr_message("st3", format_args!("could not raise the open file limit from {}: {}", limit.rlim_cur,
+        std::io::Error::last_os_error()));
     }
 }
 
@@ -6249,7 +6376,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     for run in startup_telemetry.task("startup.settle_runs", || {
         fractal_daemon::task_cpu::blocking("startup.settle_runs", || store.settle_runs_for_canonical_replay())
     })? {
-        eprintln!("st: mission run `{run}` stays over as this node's graph showed it");
+        stderr_message("st", format_args!("mission run `{run}` stays over as this node's graph showed it"));
     }
     startup.phase("project-replication-backlog");
     startup_telemetry.phase("project-replication-backlog");
@@ -6265,15 +6392,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         })
     }).context("startup projection failed; stopping before daemon.started and runtime initialization")?;
     if !projected {
-        eprintln!(
-            "st: the replicated projection remains deferred; the daemon will use its last good graph"
-        );
+        stderr_message("st", format_args!("the replicated projection remains deferred; the daemon will use its last good graph"));
     }
     if admission.unknown != 0 {
-        eprintln!("st: {} claims waiting for a newer build", admission.unknown);
+        stderr_message("st", format_args!("{} claims waiting for a newer build", admission.unknown));
     }
     if admission.invalid != 0 {
-        eprintln!("st: replication has {} invalid records", admission.invalid);
+        stderr_message("st", format_args!("replication has {} invalid records", admission.invalid));
     }
     startup_phases.settlement_projection_ms = phase_elapsed_ms();
     startup.phase("initialize-runtime");
@@ -6359,6 +6484,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        assistant_receipts: Default::default(),
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));
@@ -6420,6 +6546,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
             },
         )));
     }
+    // The member's CPU by closed minute, for the CPU targets. A member in a fleet runs one
+    // replication worker, whose CPU counts with the daemon's; `run_worker` needs a fleet.
+    tokio::spawn(fractal_daemon::task_cpu::account("slo.cpu_minutes", fractal_daemon::api::run_cpu_minutes(
+        store.clone(),
+        usize::from(config.fleet_id.is_some()),
+    )));
     tokio::spawn(fractal_daemon::task_cpu::account("recorder.receipts", fractal_daemon::recorder_receipts::run(
         store.clone(),
         fractal_daemon::recorder::receipt_path(&config.state_dir),
@@ -6428,10 +6560,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )));
     if let Some(otlp) = &config.observations.otlp {
         let exporter = fractal_daemon::otlp::OtlpExporter::new(otlp, &config.node)?;
-        eprintln!(
-            "st3: exporting local observations to OpenTelemetry at {}",
-            otlp.endpoint
-        );
+        stderr_message("st3", format_args!("exporting local observations to OpenTelemetry at {}", otlp.endpoint));
         tokio::spawn(fractal_daemon::task_cpu::account("observations.export", fractal_daemon::otlp::run(store.clone(), exporter)));
         // The live SLO windows go out as gauges, once a minute, on a timer of their own.
         tokio::spawn(fractal_daemon::task_cpu::account("slo.export", fractal_daemon::otlp::run_slo(
@@ -6460,11 +6589,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
             let drift = match audit.await {
                 Ok(Ok(drift)) => drift,
                 Ok(Err(error)) => {
-                    eprintln!("st3: operation projection check failed: {error:#}");
+                    stderr_message("st3", format_args!("operation projection check failed: {error:#}"));
                     return;
                 }
                 Err(error) => {
-                    eprintln!("st3: operation projection check stopped: {error}");
+                    stderr_message("st3", format_args!("operation projection check stopped: {error}"));
                     return;
                 }
             };
@@ -6473,10 +6602,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
             }))
             .await
             {
-                Ok(Ok(true)) => eprintln!("st3: rebuilt an operation projection that drifted"),
+                Ok(Ok(true)) => stderr_message("st3", format_args!("rebuilt an operation projection that drifted")),
                 Ok(Ok(false)) => {}
-                Ok(Err(error)) => eprintln!("st3: operation projection check failed: {error:#}"),
-                Err(error) => eprintln!("st3: operation projection check stopped: {error}"),
+                Ok(Err(error)) => stderr_message("st3", format_args!("operation projection check failed: {error:#}")),
+                Err(error) => stderr_message("st3", format_args!("operation projection check stopped: {error}")),
             }
         }));
     }
@@ -6502,17 +6631,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         .and_then(|pty_root| fractal_daemon::terminal_fabric::TerminalSocket::start(&terminal_socket, pty_root))
     {
         Ok(service) => {
-            eprintln!(
-                "st: Fabric terminal socket listening at {}",
-                terminal_socket.display()
-            );
+            stderr_message("st", format_args!("Fabric terminal socket listening at {}", terminal_socket.display()));
             Some(service)
         }
         Err(error) => {
-            eprintln!(
-                "st: Fabric terminal socket {} is unavailable, so attaches from other hosts use the client gateway: {error:#}",
-                terminal_socket.display()
-            );
+            stderr_message("st", format_args!("Fabric terminal socket {} is unavailable, so attaches from other hosts use the client gateway: {error:#}", terminal_socket.display()));
             None
         }
     };
@@ -6541,11 +6664,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
                 {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
-                        eprintln!("st: replication history activation failed: {error:#}");
+                        stderr_message("st", format_args!("replication history activation failed: {error:#}"));
                         return;
                     }
                     Err(error) => {
-                        eprintln!("st: replication history activation stopped: {error}");
+                        stderr_message("st", format_args!("replication history activation stopped: {error}"));
                         return;
                     }
                 }
@@ -6569,11 +6692,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
             tokio::spawn(fractal_daemon::maintenance::run_completion_health(
                 Arc::downgrade(&store),
             ));
-            eprintln!("st: local API listening at {}", config.socket.display());
-            eprintln!(
-                "st: paired client gateway listening at {}",
-                config.client_gateway_socket.display()
-            );
+            stderr_message("st", format_args!("local API listening at {}", config.socket.display()));
+            stderr_message("st", format_args!("paired client gateway listening at {}", config.client_gateway_socket.display()));
         }
     };
     let web_dist = args.web_dist.unwrap_or(std::env::current_exe()?
@@ -6583,20 +6703,55 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ).await?;
     let web_status = axum::Extension(web.status.clone());
     let web_state = state.clone();
-    tokio::try_join!(
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            local_reserved,
-            router(state.clone()).layer(web_status.clone()),
-            Some(state.store.clone()),
-            ready
-        ),
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            gateway_reserved, fabric_router(state).layer(web_status), None, ready,
-        ),
-        web.serve(web_state),
-    )?;
+    let receipts = state.assistant_receipts.clone();
+    // A stop signal first commits the assistant read receipts of reads that already returned,
+    // then ends the process by that signal as it did before the daemon handled it.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let serving = async {
+        tokio::try_join!(
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                local_reserved,
+                router(state.clone()).layer(web_status.clone()),
+                Some(state.store.clone()),
+                ready
+            ),
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+            ),
+            web.serve(web_state),
+        )
+    };
+    let stopped = tokio::select! {
+        served = serving => Err(served),
+        _ = terminate.recv() => Ok(libc::SIGTERM),
+        _ = interrupt.recv() => Ok(libc::SIGINT),
+    };
+    // Shutdown refuses receipts from connections still being served, then waits for the writer
+    // to commit every admitted one however long it takes. Only a second stop signal, an
+    // explicit forced stop, ends the daemon before they commit.
+    tokio::select! {
+        flushed = receipts.shutdown() => if let Err(error) = flushed {
+            stderr_message("st3", format_args!("assistant read receipts failed to commit at shutdown: {}", error.message));
+        },
+        _ = terminate.recv() => stderr_message("st3", format_args!("forced stop before assistant read receipts committed")),
+        _ = interrupt.recv() => stderr_message("st3", format_args!("forced stop before assistant read receipts committed")),
+    }
     telemetry.shutdown();
-    Ok(())
+    match stopped {
+        Ok(signal) => end_by_signal(signal),
+        Err(served) => served.map(|_| ()),
+    }
+}
+
+/// Ends this process by `signal` with its default disposition, as if no handler had caught it.
+fn end_by_signal(signal: libc::c_int) -> Result<()> {
+    // SAFETY: both calls take a valid signal number and no pointers.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+    anyhow::bail!("signal {signal} did not end the daemon")
 }
 
 /// Links `git` and `gh` to this executable for the daemon and its members. The daemon still
@@ -6622,19 +6777,16 @@ fn install_recorder(
         });
     match installed {
         Ok(installation) if installation.programs.is_empty() => {
-            eprintln!("st: neither git nor gh is on PATH, so no calls are recorded");
+            stderr_message("st", format_args!("neither git nor gh is on PATH, so no calls are recorded"));
             Some(installation)
         }
         Ok(installation) => {
-            eprintln!(
-                "st: recording {} calls in {}",
-                installation.programs.join(" and "),
-                installation.log.display()
-            );
+            stderr_message("st", format_args!("recording {} calls in {}", installation.programs.join(" and "),
+            installation.log.display()));
             Some(installation)
         }
         Err(error) => {
-            eprintln!("st: not recording git and gh calls: {error:#}");
+            stderr_message("st", format_args!("not recording git and gh calls: {error:#}"));
             None
         }
     }
@@ -6647,7 +6799,7 @@ unsafe extern "C" {
 
 fn notice_ignored_read_actor(actor: Option<&str>) {
     if actor.is_some() {
-        eprintln!("st: --as is ignored for this read; no actor is required");
+        stderr_message("st", format_args!("--as is ignored for this read; no actor is required"));
     }
 }
 
@@ -6744,7 +6896,7 @@ async fn check_before_publish(
             !required,
             "this st daemon cannot check exec gates; update it"
         );
-        eprintln!("st: this st daemon cannot check exec gates; publishing without the check");
+        stderr_message("st", format_args!("this {} daemon cannot check exec gates; publishing without the check", ClientMessage::for_output(false).product_name()));
         return Ok(());
     };
     let broken = view
@@ -7292,7 +7444,7 @@ fn publication_document(node: KdlNode) -> String {
 fn warn_ignored_authority(preview: &MissionResponse) {
     for warning in &preview.warnings {
         if let Some(warning) = warning.strip_prefix("free-mode: ") {
-            eprintln!("st: {warning}");
+            stderr_message("st", format_args!("{warning}"));
         }
     }
 }
@@ -7912,7 +8064,7 @@ fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<Generat
                 return Err(outage.into());
             }
         } else {
-            eprintln!("st: {}", startup.summary());
+            stderr_message("st", format_args!("{}", startup.summary()));
         }
     }
     Ok(person
@@ -8075,6 +8227,102 @@ async fn run_activity(endpoint: &Endpoint, args: ActivityArgs, json_output: bool
     }
 }
 
+async fn run_devices_fabric(
+    config: &Config,
+    command: DevicesFabricCommand,
+    json_output: bool,
+) -> Result<()> {
+    use fractal_daemon::fabric_gateway::{GatewayExposure, granted_peers};
+    use fractal_daemon::fleet::transport::{Fabric, resolve_tool};
+    let state_dir = &config.state_dir;
+    let exposure = GatewayExposure::load(state_dir)?;
+    match command {
+        DevicesFabricCommand::Enable { service } => {
+            anyhow::ensure!(
+                !service.trim().is_empty(),
+                "the Fabric service name must not be empty"
+            );
+            let override_path = fractal_daemon::config::FleetFile::load(state_dir)?.and_then(|file| file.fabric);
+            let program = resolve_tool(override_path.as_deref(), "fabric")
+                .context("this machine cannot use Fabric: fabric is not installed")?;
+            let program = std::fs::canonicalize(&program).unwrap_or(program);
+            let fabric = Fabric::new(program.clone());
+            if let Some(previous) = exposure.as_ref().filter(|previous| previous.service != service) {
+                anyhow::bail!(
+                    "the client gateway is already exposed as {}; run st devices fabric disable first",
+                    previous.service
+                );
+            }
+            fabric
+                .expose_socket(&service, &config.client_gateway_socket)
+                .await
+                .context("Fabric could not expose the client gateway; nothing changed")?;
+            GatewayExposure {
+                service: service.clone(),
+                fabric: program,
+            }
+            .save(state_dir)?;
+            if json_output {
+                println!("{}", json!({"service": service, "enabled": true}));
+            } else {
+                println!(
+                    "The client gateway is exposed over Fabric as {service}. Pairing a device now grants it that service, inbound-only; st devices revoke removes the grant."
+                );
+            }
+        }
+        DevicesFabricCommand::Disable => {
+            let Some(exposure) = exposure else {
+                println!("The client gateway is not exposed over Fabric.");
+                return Ok(());
+            };
+            let fabric = Fabric::new(exposure.fabric.clone());
+            let mut removed = Vec::new();
+            for peer in granted_peers(&fabric).await? {
+                fabric.remove(&peer).await?;
+                removed.push(peer);
+            }
+            fabric
+                .unexpose(&exposure.service)
+                .await
+                .with_context(|| format!("removed {} device grant(s); run fabric unexpose {}", removed.len(), exposure.service))?;
+            GatewayExposure::remove(state_dir)?;
+            if json_output {
+                println!("{}", json!({"service": exposure.service, "enabled": false, "removed": removed}));
+            } else {
+                println!(
+                    "The client gateway is no longer exposed over Fabric; removed {} device grant(s).",
+                    removed.len()
+                );
+            }
+        }
+        DevicesFabricCommand::Status => {
+            let peers = match &exposure {
+                Some(exposure) => granted_peers(&Fabric::new(exposure.fabric.clone())).await?,
+                None => Vec::new(),
+            };
+            if json_output {
+                println!(
+                    "{}",
+                    json!({"service": exposure.as_ref().map(|exposure| &exposure.service), "enabled": exposure.is_some(), "granted": peers})
+                );
+            } else if let Some(exposure) = exposure {
+                println!("The client gateway is exposed over Fabric as {}.", exposure.service);
+                if peers.is_empty() {
+                    println!("No paired device has a grant yet.");
+                }
+                for peer in peers {
+                    println!("{peer}");
+                }
+            } else {
+                println!(
+                    "The client gateway is not exposed over Fabric. Run st devices fabric enable."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_devices(
     endpoint: Endpoint,
     configured_person: Option<&str>,
@@ -8092,6 +8340,7 @@ async fn run_devices(
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
         DevicesCommand::Complete { .. } => unreachable!("handled before loading local config"),
+        DevicesCommand::Fabric { .. } => unreachable!("handled without a client"),
         DevicesCommand::Ls => {
             anyhow::ensure!(
                 limit > 0 && limit <= 200,
@@ -8151,6 +8400,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            fabric_gateway,
             assistant: None,
             grant,
         } => {
@@ -8171,6 +8421,7 @@ async fn run_devices(
                             .map(|scope| (*scope).to_owned())
                             .collect()
                     }),
+                    fabric_gateway: fabric_gateway.then_some(true),
                 })
                 .await?;
             print_client_value(&response, json_output)?;
@@ -11365,10 +11616,7 @@ async fn resolve_member_subject(
                 .map(|candidate| format!("  {}  {}", candidate.subject, candidate.description))
                 .collect::<Vec<_>>()
                 .join("\n");
-            eprintln!(
-                "st: `{subject}` matches {} subjects; name one exactly:\n{listing}",
-                matches.len()
-            );
+            stderr_message("st", format_args!("`{subject}` matches {} subjects; name one exactly:\n{listing}", matches.len()));
             Err(CommandExit(2).into())
         }
     }
@@ -12097,7 +12345,12 @@ fn agent_start_document(
             ));
         }
         let harness = body.get_mut("harness").expect("harness was inserted");
-        if let Some(driver) = &args.harness {
+        if let Some(driver) = &args.harness
+            && harness.entries()[0].value().as_string() != Some(driver.as_str())
+        {
+            // Models, effort and native arguments belong to their provider. A harness
+            // replacement starts with its own body, then takes the explicit options below.
+            harness.set_children(KdlDocument::new());
             harness.entries_mut()[0] = KdlEntry::new(driver.as_str());
         }
         let harness_body = harness.ensure_children();
@@ -13373,7 +13626,7 @@ feedback and a custom choice need text. The resumed step's `person_answers` carr
 as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
 act on `id` and `outcome`, not on the words."##;
 
-fn render_client_work_detail(work: &fractal_client::Work) -> String {
+fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {
     use std::fmt::Write as _;
 
     let mut output = String::new();
@@ -13394,6 +13647,12 @@ fn render_client_work_detail(work: &fractal_client::Work) -> String {
     }
     if let Some(incarnation) = &work.submitted_incarnation {
         let _ = writeln!(output, "Submitted incarnation: {incarnation}");
+    }
+    if let Some(expires) = work.claim_expires_at_unix_ms {
+        let _ = writeln!(output, "Lease: {}", render_claim_lease(
+            &work.header.id, work.claimant.as_deref(), work.claim_incarnation.as_deref(),
+            u128::from(expires), driver_held,
+        ));
     }
     if let Some(nudged) = work
         .nudged_at_unix_ms
@@ -13418,6 +13677,12 @@ fn render_client_work_detail(work: &fractal_client::Work) -> String {
     }
     for blocker in &work.blockers {
         let _ = writeln!(output, "Blocker: {blocker}");
+    }
+    if let Some(progress) = &work.last_progress {
+        let age = work.progress_at.as_deref()
+            .map(|at| ago(at, now_ms()))
+            .unwrap_or_else(|| "age unknown".to_owned());
+        let _ = writeln!(output, "Progress ({age}): {progress}");
     }
     for goal in &work.goals {
         let _ = writeln!(output, "Goal: {goal}");
@@ -13766,10 +14031,7 @@ async fn send_message(
                     Err(error) if fractal_daemon::client::http_status(&error) == Some(404) => {}
                     // A busy daemon still takes the send: only a send whose answer was lost in
                     // the hour's last moments could repeat, and refusing every send is worse.
-                    Err(error) => eprintln!(
-                        "st: could not check the previous hour for this message ({}); sending it with idempotency key {key}",
-                        plain_error(&error)
-                    ),
+                    Err(error) => stderr_message("st", format_args!("could not check the previous hour for this message ({}); sending it with idempotency key {key}", plain_error(&error))),
                 }
             }
             key
@@ -13792,9 +14054,7 @@ fn warn_unconfirmed_silent(request: &MessageSendRequest, receipt: &MessageSendRe
             .any(|tag| tag == fractal_daemon::silent::SILENT_TAG)
         && receipt.kind.as_deref() != Some("silent")
     {
-        eprintln!(
-            "st: daemon did not confirm silent holding; this message may wake its recipient. Upgrade the sender and recipient owner daemons."
-        );
+        stderr_message("st", format_args!("daemon did not confirm silent holding; this message may wake its recipient. Upgrade the sender and recipient owner daemons."));
     }
 }
 
@@ -13886,16 +14146,13 @@ fn print_message_receipt(receipt: &MessageSendReceipt, json_output: bool) -> Res
         return print_value(receipt, true);
     }
     if receipt.already_sent {
-        eprintln!(
-            "st: {} was already sent{} (idempotency key {}); nothing new was sent",
-            receipt.message.subject,
-            receipt
-                .sent_at
-                .as_deref()
-                .map(|sent_at| format!(" at {sent_at}"))
-                .unwrap_or_default(),
-            receipt.idempotency_key
-        );
+        stderr_message("st", format_args!("{} was already sent{} (idempotency key {}); nothing new was sent", receipt.message.subject,
+        receipt
+            .sent_at
+            .as_deref()
+            .map(|sent_at| format!(" at {sent_at}"))
+            .unwrap_or_default(),
+        receipt.idempotency_key));
     }
     println!("{}", receipt.message.subject);
     Ok(())
@@ -16651,9 +16908,10 @@ async fn renew_claimed_work(
         .into_iter()
         .filter(|step| work_claim_has_active_harness(step, subject, harness))
     {
+        // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
-                &format!("/v1/work/renew/{}", urlencoding::encode(&step.subject)),
+                &format!("/v1/work/renew/{}?view=lease", urlencoding::encode(&step.subject)),
                 &WorkRequest {
                     wait_ms: None,
                     actor: Some(subject.into()),
@@ -16711,16 +16969,41 @@ fn renewal_lost_its_claim(error: &anyhow::Error) -> bool {
     )
 }
 
+/// Lease guidance is optional enrichment: Fabric cannot expose the legacy status route.
+/// A failed lookup must neither hide successful work output nor assert unmanaged ownership.
+async fn claim_has_driver(
+    client: &Client,
+    claimant: Option<&str>,
+    incarnation: Option<&str>,
+) -> Option<bool> {
+    let Some(subject) = claimant.filter(|subject| subject.starts_with("agent/")) else {
+        return Some(false);
+    };
+    let Some(incarnation) = incarnation else {
+        return Some(false);
+    };
+    let status: StatusResponse = client.get(&format!(
+        "/v1/status?subject={}&harness_only=true", urlencoding::encode(subject),
+    )).await.ok()?;
+    let harness = status.subjects.iter()
+        .find(|candidate| candidate.subject == subject)
+        .and_then(|candidate| candidate.harness.as_ref());
+    Some(claim_has_active_harness(Some(incarnation), harness))
+}
+
 fn work_claim_has_active_harness(
     step: &StepRunView,
     subject: &str,
     harness: Option<&CurrentHarnessView>,
 ) -> bool {
     step.work_claim_is_held_by(subject)
-        && harness.is_some_and(|harness| {
-            harness.state != "ended"
-                && step.claim_incarnation.as_deref() == Some(harness.incarnation_id.as_str())
-        })
+        && claim_has_active_harness(step.claim_incarnation.as_deref(), harness)
+}
+
+fn claim_has_active_harness(incarnation: Option<&str>, harness: Option<&CurrentHarnessView>) -> bool {
+    harness.is_some_and(|harness| {
+        harness.state != "ended" && incarnation == Some(harness.incarnation_id.as_str())
+    })
 }
 
 /// Seconds into each minute at which this seat renews its work leases, 0 to 49, fixed per seat.
@@ -18391,7 +18674,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
             Some(Err(error)) => {
                 let error = format!("{error:#}");
                 if last_error.as_ref() != Some(&error) {
-                    eprintln!("st3: daemon policies keep their last config: {error}");
+                    stderr_message("st3", format_args!("daemon policies keep their last config: {error}"));
                     last_error = Some(error);
                 }
             }
@@ -18414,17 +18697,17 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
         {
             Ok(Ok((outcome, check))) => {
                 if check.status == "warn" {
-                    eprintln!("st3: limits policy: {}", check.message);
+                    stderr_message("st3", format_args!("limits policy: {}", check.message));
                 }
                 for seat in outcome.stopped {
-                    eprintln!("st3: limits policy stopped {seat}");
+                    stderr_message("st3", format_args!("limits policy stopped {seat}"));
                 }
                 for (seat, account) in outcome.switched {
-                    eprintln!("st3: limits policy restarted {seat} on account {account}");
+                    stderr_message("st3", format_args!("limits policy restarted {seat} on account {account}"));
                 }
             }
-            Ok(Err(error)) => eprintln!("st3: limits policy failed: {error}"),
-            Err(error) => eprintln!("st3: limits policy stopped: {error}"),
+            Ok(Err(error)) => stderr_message("st3", format_args!("limits policy failed: {error}")),
+            Err(error) => stderr_message("st3", format_args!("limits policy stopped: {error}")),
         }
         tokio::time::sleep(LIMITS_INTERVAL).await;
     }
@@ -18547,16 +18830,13 @@ fn retry_projection_contention_observed(
                 Err(_) => (false, false, generation, "worker-failed"),
             };
             schedule.finish(tokio::time::Instant::now(), generation, retry);
-            eprintln!(
-                "st3: projection contention retry {}",
-                json!({
-                    "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
-                    "projection_deferred_after_attempt": still_deferred,
-                    "stop_reason": if schedule.due.is_some() { None } else if recovered {
-                        Some("recovered")
-                    } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
-                })
-            );
+            stderr_message("st3", format_args!("projection contention retry {}", json!({
+                "attempt":attempt, "limit":3, "outcome":outcome, "rescheduled":schedule.due.is_some(),
+                "projection_deferred_after_attempt": still_deferred,
+                "stop_reason": if schedule.due.is_some() { None } else if recovered {
+                    Some("recovered")
+                } else if retry { Some("budget-exhausted") } else { Some("non-retryable") },
+            })));
             if recovered {
                 fractal_daemon::performance::record_wake("projection-contention-retry", None);
                 notify.notify_one();
@@ -18751,27 +19031,27 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                             "read_lifetimes": store.readers.live_read_report(),
                         })
                     });
-                    eprintln!("st3: WAL checkpoint {}", json!({
+                    stderr_message("st3", format_args!("WAL checkpoint {}", json!({
                         "bucket": if abnormal { "abnormal" } else { "ordinary" },
                         "observed_at_unix_ms": std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH).ok().map(|age| age.as_millis()),
                         "report": outcome, "duration_ms": duration_ms, "retained": retained,
                         "pinned": pinned,
-                    }));
+                    })));
                 }
                 if let Err(error) = result {
                     let now = Instant::now();
                     if last_error_log.is_none_or(|last| {
                         now.duration_since(last) >= WAL_CHECKPOINT_ERROR_LOG_INTERVAL
                     }) {
-                        eprintln!("st3: {error:#}; checkpoint duration_ms={}", started.elapsed().as_millis());
+                        stderr_message("st3", format_args!("{error:#}; checkpoint duration_ms={}", started.elapsed().as_millis()));
                         last_error_log = Some(now);
                     }
                 }
             }
         });
     if let Err(error) = worker {
-        eprintln!("st3: start WAL checkpoint worker: {error}");
+        stderr_message("st3", format_args!("start WAL checkpoint worker: {error}"));
     }
 }
 
@@ -18807,7 +19087,7 @@ async fn build_transport_observation_index(store: Arc<Store>) {
             }
             Ok(Err(error)) if maintenance_contention(&error) => {}
             error => {
-                eprintln!("st: transport observation index build stopped: {error:?}");
+                stderr_message("st", format_args!("transport observation index build stopped: {error:?}"));
                 return;
             }
         }
@@ -18826,12 +19106,12 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
     let result = tokio::task::spawn_blocking(move || -> Result<()> {
         let initial = worker.signature_migration()?;
         let mut phase = initial.phase.clone();
-        if !initial.done() { eprintln!("st3: signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description()); }
+        if !initial.done() { stderr_message("st3", format_args!("signature bootstrap starting (legacy selected={}, available={}): {}", initial.serving_legacy, initial.serving_legacy && initial.legacy_fault.is_none(), initial.progress_description())); }
         loop {
             let page_started = std::time::Instant::now();
             let report = worker.advance_signature_migration()?;
             if report.phase != phase {
-                eprintln!("st3: signature bootstrap phase {}: {}",report.phase,report.progress_description());
+                stderr_message("st3", format_args!("signature bootstrap phase {}: {}", report.phase,report.progress_description()));
                 phase = report.phase.clone();
             }
             if let Some(reason) = report.unavailable_reason() && report.fault.is_some() {
@@ -18846,7 +19126,7 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
             std::thread::sleep(page_elapsed * SIGNATURE_BOOTSTRAP_QUIET_PER_WORK);
             if worker.signature_migration()?.done() {
                 let complete = worker.signature_migration()?;
-                if !initial.done() { eprintln!("st3: signature candidate authority activated: {}",complete.progress_description()); }
+                if !initial.done() { stderr_message("st3", format_args!("signature candidate authority activated: {}", complete.progress_description())); }
                 loop {
                     let retired_started = std::time::Instant::now();
                     if !worker.retire_legacy_signature_page()? { break; }
@@ -18858,9 +19138,9 @@ async fn migrate_signature_candidates(store: Arc<Store>) {
     }).await;
     if !matches!(result, Ok(Ok(()))) {
         if let Err(error) = store.fail_signature_migration(&format!("bootstrap job stopped: {result:?}")) {
-            eprintln!("st3: signature migration fault could not be persisted: {error:#}");
+            stderr_message("st3", format_args!("signature migration fault could not be persisted: {error:#}"));
         }
-        eprintln!("st3: signature candidate migration stopped: {result:?}");
+        stderr_message("st3", format_args!("signature candidate migration stopped: {result:?}"));
     }
 }
 
@@ -18878,7 +19158,7 @@ async fn import_retired_identities(store: Arc<Store>) {
         match result {
             Ok(Ok(())) => return,
             error => {
-                eprintln!("st3: retired identity import failed: {error:?}");
+                stderr_message("st3", format_args!("retired identity import failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -18900,7 +19180,7 @@ async fn fold_claim_ranges(store: Arc<Store>, mut events: watch::Receiver<u64>) 
                 }
             }
             error => {
-                eprintln!("st3: claim range fold failed: {error:?}");
+                stderr_message("st3", format_args!("claim range fold failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -18917,7 +19197,7 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
             Ok(Ok(report)) if report.done => return,
             Ok(Ok(_)) => tokio::time::sleep(Duration::from_millis(50)).await,
             error => {
-                eprintln!("st3: binary envelope conversion failed: {error:?}");
+                stderr_message("st3", format_args!("binary envelope conversion failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -18938,7 +19218,7 @@ async fn catch_up_coordination_counts(store: Arc<Store>) {
             Ok(Ok(true)) => return,
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
-                eprintln!("st3: coordination count bootstrap failed: {error:?}");
+                stderr_message("st3", format_args!("coordination count bootstrap failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -18960,7 +19240,7 @@ async fn backfill_agent_message_days(store: Arc<Store>) {
             Ok(Ok(true)) => return,
             Ok(Ok(false)) => tokio::time::sleep(Duration::from_millis(100)).await,
             error => {
-                eprintln!("st3: agent message usage backfill failed: {error:?}");
+                stderr_message("st3", format_args!("agent message usage backfill failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -18983,7 +19263,7 @@ async fn copy_stop_deferral_history(store: Arc<Store>) {
         match result {
             Ok(Ok(_)) => return,
             error => {
-                eprintln!("st3: stop-deferral history copy failed: {error:?}");
+                stderr_message("st3", format_args!("stop-deferral history copy failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
@@ -19021,13 +19301,13 @@ fn spawn_publication_evidence(store: Arc<Store>) {
                     {
                         Ok(Ok(_)) => tokio::task::yield_now().await,
                         error => {
-                            eprintln!("st3: publication evidence bootstrap stopped: {error:?}");
+                            stderr_message("st3", format_args!("publication evidence bootstrap stopped: {error:?}"));
                             return;
                         }
                     }
                 }
                 error => {
-                    eprintln!("st3: publication evidence status failed: {error:?}");
+                    stderr_message("st3", format_args!("publication evidence status failed: {error:?}"));
                     return;
                 }
             }
@@ -19038,13 +19318,10 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 async fn migrate_event_payloads(store: Arc<Store>) {
     match fractal_daemon::maintenance::migrate_event_payloads(store).await {
         Ok(report) if report.pending_at_start => {
-            eprintln!(
-                "st3: event payload migration completed: {} rows in {} chunks, {:.0} ms elapsed, {:.1} ms maximum chunk call",
-                report.moved_rows, report.chunks, report.elapsed_ms, report.max_chunk_call_ms
-            );
+            stderr_message("st3", format_args!("event payload migration completed: {} rows in {} chunks, {:.0} ms elapsed, {:.1} ms maximum chunk call", report.moved_rows, report.chunks, report.elapsed_ms, report.max_chunk_call_ms));
         }
         Ok(_) => {}
-        Err(error) => eprintln!("st3: event payload migration stopped: {error:#}"),
+        Err(error) => stderr_message("st3", format_args!("event payload migration stopped: {error:#}")),
     }
 }
 
@@ -19087,15 +19364,13 @@ async fn expire_completed_responses(
             match tokio::task::spawn_blocking(move || fractal_daemon::task_cpu::blocking("maintenance.response_expiry_deadline", || read_store.next_idempotency_expiry())).await {
                 Ok(Ok(deadline)) => deadline,
                 Ok(Err(error)) if maintenance_contention(&error) => {
-                    eprintln!(
-                        "st3: response expiry read contention; retrying in {retry:?}: {error:#}"
-                    );
+                    stderr_message("st3", format_args!("response expiry read contention; retrying in {retry:?}: {error:#}"));
                     tokio::time::sleep(retry).await;
                     retry = (retry * 2).min(Duration::from_secs(5));
                     continue;
                 }
                 error => {
-                    eprintln!("st3: response expiry scheduler stopped: {error:?}");
+                    stderr_message("st3", format_args!("response expiry scheduler stopped: {error:?}"));
                     return;
                 }
             };
@@ -19128,23 +19403,19 @@ async fn expire_completed_responses(
         {
             Ok(Ok(limit)) => limit,
             Ok(Err(error)) if maintenance_contention(&error) => {
-                eprintln!(
-                    "st3: response expiry clock contention; retrying in {retry:?}: {error:#}"
-                );
+                stderr_message("st3", format_args!("response expiry clock contention; retrying in {retry:?}: {error:#}"));
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
                 continue;
             }
             error => {
-                eprintln!("st3: response expiry clock read stopped: {error:?}");
+                stderr_message("st3", format_args!("response expiry clock read stopped: {error:?}"));
                 return;
             }
         };
         if clock_limit.is_none_or(|limit| deadline.unwrap() > limit) {
             if !clock_deferred {
-                eprintln!(
-                    "st3: response expiry deferred until committed claim time validates the deadline"
-                );
+                stderr_message("st3", format_args!("response expiry deferred until committed claim time validates the deadline"));
                 clock_deferred = true;
             }
             if changed.changed().await.is_err() {
@@ -19166,14 +19437,12 @@ async fn expire_completed_responses(
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
             Ok(Err(error)) if maintenance_contention(&error) => {
-                eprintln!(
-                    "st3: response expiry write contention; retrying in {retry:?}: {error:#}"
-                );
+                stderr_message("st3", format_args!("response expiry write contention; retrying in {retry:?}: {error:#}"));
                 tokio::time::sleep(retry).await;
                 retry = (retry * 2).min(Duration::from_secs(5));
             }
             error => {
-                eprintln!("st3: response expiry cleanup stopped: {error:?}");
+                stderr_message("st3", format_args!("response expiry cleanup stopped: {error:?}"));
                 return;
             }
         }
@@ -19249,13 +19518,13 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
         }))
         .await
         {
-            eprintln!("st3: usage response trim failed: {error:#}");
+            stderr_message("st3", format_args!("usage response trim failed: {error:#}"));
         }
         match trimmed {
             Ok(Ok(0)) => {}
-            Ok(Ok(count)) => eprintln!("st3: trimmed {count} local observations"),
-            Ok(Err(error)) => eprintln!("st3: local observation trim failed: {error:#}"),
-            Err(error) => eprintln!("st3: local observation trim stopped: {error}"),
+            Ok(Ok(count)) => stderr_message("st3", format_args!("trimmed {count} local observations")),
+            Ok(Err(error)) => stderr_message("st3", format_args!("local observation trim failed: {error:#}")),
+            Err(error) => stderr_message("st3", format_args!("local observation trim stopped: {error}")),
         }
         // What these trims, checkpoints and response expiry freed goes back to the filesystem,
         // one short write at a time so other writes run between them.
@@ -19266,25 +19535,25 @@ async fn trim_local_observations(store: Arc<Store>, observations: fractal_daemon
                 Ok(Ok(0)) => break,
                 Ok(Ok(pages)) => released += pages,
                 Ok(Err(error)) => {
-                    eprintln!("st3: giving free pages back failed: {error:#}");
+                    stderr_message("st3", format_args!("giving free pages back failed: {error:#}"));
                     break;
                 }
                 Err(error) => {
-                    eprintln!("st3: giving free pages back stopped: {error}");
+                    stderr_message("st3", format_args!("giving free pages back stopped: {error}"));
                     break;
                 }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         if released > 0 {
-            eprintln!("st3: gave {released} free pages back to the filesystem");
+            stderr_message("st3", format_args!("gave {released} free pages back to the filesystem"));
         }
         // The database target's sample: after the trims, so it counts what they freed.
         let size_store = store.clone();
         match size_store.connection.write_workers().spawn_blocking(move || fractal_daemon::task_cpu::blocking("observations.database_size", || size_store.record_database_size(now_ms()))).await {
             Ok(Ok(size)) => fractal_daemon::slo::note_database_size(&size),
-            Ok(Err(error)) => eprintln!("st3: database size sample failed: {error:#}"),
-            Err(error) => eprintln!("st3: database size sample stopped: {error}"),
+            Ok(Err(error)) => stderr_message("st3", format_args!("database size sample failed: {error:#}")),
+            Err(error) => stderr_message("st3", format_args!("database size sample stopped: {error}")),
         }
         tokio::time::sleep(LOCAL_OBSERVATION_TRIM_INTERVAL).await;
     }
@@ -19300,8 +19569,8 @@ async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::Chec
     let sweep_dir = context.scratch.clone();
     match tokio::task::spawn_blocking(move || sweep_store.sweep_checkpoint_proof_scratch(&sweep_dir)).await {
         Ok(Ok(())) => {}
-        Ok(Err(error)) => eprintln!("st3: checkpoint proof startup cleanup failed: {error:#}"),
-        Err(error) => eprintln!("st3: checkpoint proof startup cleanup stopped: {error}"),
+        Ok(Err(error)) => stderr_message("st3", format_args!("checkpoint proof startup cleanup failed: {error:#}")),
+        Err(error) => stderr_message("st3", format_args!("checkpoint proof startup cleanup stopped: {error}")),
     }
     loop {
         let store = store.clone();
@@ -19316,14 +19585,11 @@ async fn run_checkpoints(store: Arc<Store>, context: fractal_daemon::store::Chec
         {
             Ok(Ok(actions)) => {
                 for action in actions {
-                    eprintln!(
-                        "st3: checkpoint {}",
-                        serde_json::to_string(&action).unwrap_or_default()
-                    );
+                    stderr_message("st3", format_args!("checkpoint {}", serde_json::to_string(&action).unwrap_or_default()));
                 }
             }
-            Ok(Err(error)) => eprintln!("st3: checkpoint work failed: {error:#}"),
-            Err(error) => eprintln!("st3: checkpoint work stopped: {error}"),
+            Ok(Err(error)) => stderr_message("st3", format_args!("checkpoint work failed: {error:#}")),
+            Err(error) => stderr_message("st3", format_args!("checkpoint work stopped: {error}")),
         }
         tokio::time::sleep(CHECKPOINT_INTERVAL).await;
     }

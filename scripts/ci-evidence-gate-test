@@ -762,6 +762,35 @@ class EndToEnd(unittest.TestCase):
         fields = self.assertRuns(s['base'], 'main moved a protected file', **self.pr_env(s))
         self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
 
+    def test_main_changing_only_a_list_read_at_the_base_keeps_the_head_tree(self):
+        # The keys, the author list and the log key are read at the accepted base when a note is judged, never from the head tree: main
+        # changing one after the branch point does not void a head signature (2026-10-26: a key rotation on main made finished runs stale).
+        rotated = lambda: self.f.keys.read_text() + f'fleet/rotated namespaces="git" {self.f.key("rotated").with_suffix(".pub").read_text()}'
+        log_key = lambda: f'log/evidence namespaces="git" {self.f.key("log-key").with_suffix(".pub").read_text()}'
+        for path, content in (('.st/evidence-keys', rotated), ('.st/evidence-authors.json', lambda: json.dumps({**self.AUTHORS, 'logins': ['alice', 'bob', 'carol']})),
+                              ('.st/evidence-log-key', log_key)):
+            with self.subTest(path):
+                self.tmp_reset()
+                s = self.pull_request(main_files={path: content()})
+                self.assertIn(path, self.f.git('diff', '--name-only', s['base'], s['tip']).split())
+                record = self.note(s['head'], s['head_tree'], seconds=1)
+                fields, outputs = self.run_gate(s['tip'], **self.pr_env(s))
+                self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], outputs['record']), ('skip', 'head', 'used', record))
+
+    def test_main_changing_the_required_lanes_after_the_branch_point_still_falls_back(self):
+        s = self.pull_request(main_files={'.st/required-lanes.json': '{}\n'})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'main moved the required lanes', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
+
+    def test_a_key_rotation_on_main_that_drops_the_signer_still_refuses_the_head_note(self):
+        kept = ''.join(line for line in self.f.allowed if not line.startswith('fleet/ci '))
+        s = self.pull_request(main_files={'.st/evidence-keys': kept})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['tip'], 'the base no longer trusts the signer', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('head', 'used'))
+        self.assertNotEqual(fields['outcome'], 'satisfied')
+
     def test_a_base_without_the_signing_script_falls_back(self):
         s = self.pull_request(signing=False)
         self.note(s['head'], s['head_tree'], seconds=1)
@@ -2033,8 +2062,8 @@ class WorkflowStructure(unittest.TestCase):
         self.assertIn('KIT_SHARD_COUNT: ' + env['KIT_SHARD_COUNT'].strip(), execution)
         self.assertIn('KIT_PLAY_SET: ' + env['KIT_PLAY_SET'].strip(), execution)
         self.assertIn('APP_TEST_SET: ' + env['APP_TEST_SET'].strip(), execution)
-        self.assertIn('matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == \'true\' && github.event_name != \'pull_request\' && \'{"shard":[0,1]}\'', execution)
-        self.assertIn("&& '2' || '1' }}", env['KIT_SHARD_COUNT'])
+        self.assertIn('matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == \'true\' && github.event_name != \'pull_request\' && \'{"shard":[0,1,2,3]}\'', execution)
+        self.assertIn("&& '4' || '1' }}", env['KIT_SHARD_COUNT'])
         self.assertEqual(env['KIT_INPUTS'].strip(), '${{ needs.fractal-web-changes.outputs.kit-inputs }}')
         self.assertIn('python3 "$helper" once fractal-web', sign)
         self.assertIn('python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"', sign)
@@ -2051,30 +2080,21 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(json.loads(shard_env['STEP_COMMAND'].strip().strip("'")), FRACTAL_WEB_SHARD_ARGV)
         self.assertNotEqual(FRACTAL_WEB_SHARD_ARGV, rule['command'])
 
-    def test_the_fractal_web_lane_skips_its_shards_steps_only_when_its_own_gate_says_so(self):
-        """Wired like typescript-client: each execution shard keeps running and skips its steps (never the checkout) on its own
-        gate's skip, so an enforce flip is the only change a skip needs; the verdict job still runs and the kit coverage check
-        in the merge queue never reads the gate."""
+    def test_the_fractal_web_lane_skips_its_jobs_only_for_trusted_pull_request_evidence(self):
+        """The semantic check remains emitted; only PR execution avoids runner allocation.
+        Queue and manual execution retain their complete proof and shard coverage."""
         blocks = self.blocks()
         execution, verdict = blocks['fractal-web-execution'], blocks['fractal-web']
         self.assertIn('evidence-gate-fractal-web', self.needs_of(execution))
         self.assertIn('evidence-gate-fractal-web', self.needs_of(verdict))
-        self.assertNotIn('evidence-gate', self.job_condition(execution))
+        condition = self.job_condition(execution)
+        self.assertIn("github.event_name == 'pull_request'", condition)
+        self.assertIn("needs.evidence-gate-fractal-web.outputs.skip == 'true'", condition)
+        self.assertIn("!(", condition)
         self.assertNotIn('evidence-gate', self.job_condition(verdict))
-        covered = "needs.evidence-gate-fractal-web.outputs.skip != 'true'"
-        steps = self.steps_of('fractal-web-execution')
-        names = [n for n, _ in steps]
-        self.assertIn('evidence covered by a trusted note', names)
-        for name, condition in steps:
-            if str(name).startswith('actions/checkout'):
-                self.assertIsNone(condition, 'the checkout is never skipped')
-            elif name == 'evidence covered by a trusted note':
-                self.assertEqual(condition, "needs.evidence-gate-fractal-web.outputs.skip == 'true'")
-            elif name == 'Report job cache coverage':
-                self.assertEqual(condition, 'always()')
-            else:
-                self.assertIsNotNone(condition, f'{name} would run on a skip')
-                self.assertIn(covered, condition, name)
+        self.assertNotIn('evidence covered by a trusted note', execution)
+        self.assertIn("EVIDENCE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip }}", verdict)
+        self.assertIn("EVENT_NAME: ${{ github.event_name }}", verdict)
         for name, condition in self.steps_of('fractal-web'):
             if name == 'Require every kit shard and exact full-index coverage':
                 self.assertNotIn('evidence-gate', condition)
