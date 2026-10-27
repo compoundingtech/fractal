@@ -18,6 +18,7 @@ export type ActionCommon = {
   type: 
   "arrangement.edit"
   | "custom.reply"
+  | "private-notes.write"
   | "prompt.respond"
   | "attention.resolve"
   | "review.approve"
@@ -81,6 +82,7 @@ export type ActionResult = {
   arrangement_revision?: Revision;
   kind: "action-result";
   operation_id: Id;
+  private_notes?: PrivateNotesFence;
   snapshot_id: Id;
   status: "accepted" | "completed" | "rejected";
   terminal_attachment?: (TerminalAttachment | null);
@@ -1492,7 +1494,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -1561,6 +1563,9 @@ export type ErrorCode = (
   | "content-not-text"
   | "invalid-document-reference"
   | "document-not-synced"
+  | "private-notes-unreachable"
+  | "private-notes-carrier-conflict"
+  | "private-notes-indeterminate"
   | "internal"
  | string);
 
@@ -1598,6 +1603,7 @@ export type Fence = {
   attempt?: number;
   mission_generation?: RunGenerationId;
   preview_token?: string;
+  private_notes?: PrivateNotesFence;
   readiness_epoch?: number;
   runtime_desired_revision?: string;
   runtime_incarnation?: string;
@@ -2414,6 +2420,38 @@ export type PresentationActor = {
   kind: "person" | "agent" | "st" | "nobody";
   label?: string;
   person?: Id;
+};
+
+export type PrivateNotesAction = {
+  fence: Fence & Required<Pick<Fence, 'private_notes'>>;
+  id: "private-notes.write";
+};
+
+export type PrivateNotesData = {
+  fence: PrivateNotesFence;
+  markdown: string;
+  uri: PrivateNotesUri;
+};
+
+export type PrivateNotesFence = {
+  carrier_generation: Revision;
+  revision: Revision;
+};
+
+export type PrivateNotesSubject = {
+  actions: Array<PrivateNotesAction>;
+  data: PrivateNotesData;
+  family: "private-notes";
+  live: null;
+  ref: PrivateNotesUri;
+  schema: "fractal.private-notes@1";
+};
+
+export type PrivateNotesUri = string;
+
+export type PrivateNotesWriteParameters = {
+  markdown: string;
+  uri: PrivateNotesUri;
 };
 
 export type ProjectionEvent = Omit<{
@@ -3840,6 +3878,7 @@ export type ActionRequest =
   workspace: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |

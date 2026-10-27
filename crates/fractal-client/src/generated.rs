@@ -120,6 +120,9 @@ pub enum ErrorCode {
     BlobQuotaExceeded,
     BlobNotFound,
     BlobExpired,
+    PrivateNotesCarrierConflict,
+    PrivateNotesUnreachable,
+    PrivateNotesIndeterminate,
     MessageTooLarge,
     MessageStoreFull,
     LongMessageSignatureUnsupported,
@@ -2786,6 +2789,42 @@ pub enum EventType {
     Unknown,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrivateNotesFence {
+    pub carrier_generation: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrivateNotesData {
+    pub uri: String,
+    pub markdown: String,
+    pub fence: PrivateNotesFence,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PrivateNotesAction {
+    pub id: String,
+    pub fence: Fence,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PrivateNotesSubject {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub family: String,
+    pub schema: String,
+    pub data: PrivateNotesData,
+    pub actions: Vec<PrivateNotesAction>,
+    pub live: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrivateNotesWriteParameters {
+    pub uri: String,
+    pub markdown: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Fence {
     pub snapshot_id: String,
@@ -2807,12 +2846,16 @@ pub struct Fence {
     pub terminal_sequence: Option<u64>,
     #[serde(default)]
     pub preview_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_notes: Option<PrivateNotesFence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ActionType {
     #[serde(rename = "custom.reply")]
     CustomReply,
+    #[serde(rename = "private-notes.write")]
+    PrivateNotesWrite,
     #[serde(rename = "prompt.respond")]
     PromptRespond,
     #[serde(rename = "arrangement.edit")]
@@ -3358,6 +3401,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::PairingRevoke,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn private_notes_write(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PrivateNotesWriteParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::PrivateNotesWrite,
             idempotency_key,
             fence,
             &parameters,
@@ -4150,6 +4207,8 @@ pub struct ActionResult {
     pub snapshot_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_attachment: Option<TerminalAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_notes: Option<PrivateNotesFence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangement_revision: Option<String>,
 }

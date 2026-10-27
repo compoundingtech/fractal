@@ -1187,7 +1187,6 @@ fn ts_type(value: &Value) -> Result<String> {
             return Ok(members);
         }
     }
-    }
     // A required-only allOf branch refines optional fields on its referenced
     // object. Dropping that branch makes returned action fences unusable by
     // the corresponding typed write method.
@@ -1206,6 +1205,7 @@ fn ts_type(value: &Value) -> Result<String> {
             return Ok(base);
         }
         return Ok(format!("{base} & Required<Pick<{base}, {}>>", keys.join(" | ")));
+    }
     if let Some(types) = value.get("type").and_then(Value::as_array) {
         return Ok(types
             .iter()
