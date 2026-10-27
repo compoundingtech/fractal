@@ -37,6 +37,20 @@ test('wall ceiling is independent of CPU cost and remains only a hang guard', ()
   assert.equal(result(456, { elapsedSeconds: 20 }).overBudget, true)
 })
 
+test('compatible maxSeconds remains the wall guard and overBudget combines both checks', () => {
+  for (const cpuSeconds of [100, 456]) {
+    for (const elapsedSeconds of [100, 269]) {
+      const receipt = result(cpuSeconds, { elapsedSeconds })
+      assert.equal(receipt.maxSeconds, receipt.wallGuardSeconds)
+      assert.equal(receipt.maxSeconds, 268)
+      assert.equal(receipt.overBudget, receipt.overCpuBudget || receipt.overWallGuard)
+    }
+  }
+  const unset = assessKitPlayCost(kitPlayBudget({}), { elapsedSeconds: 100, busyCoreMinutes: 1, costRequired: false })
+  assert.equal(unset.maxSeconds, null)
+  assert.equal(unset.overBudget, false)
+})
+
 test('non-commit runs retain CPU telemetry without enforcing the commit CPU policy', () => {
   const full = result(1000, { costRequired: false })
   assert.equal(full.cpuSeconds, 1000)

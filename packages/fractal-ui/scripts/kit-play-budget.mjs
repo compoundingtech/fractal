@@ -18,7 +18,7 @@ export function assessKitPlayCost({ wallGuardSeconds }, { elapsedSeconds, busyCo
   const overCpuBudget = maxCpuSeconds !== null && cpuSeconds > maxCpuSeconds
   const overWallGuard = wallGuardSeconds !== null && elapsedSeconds > wallGuardSeconds
   return {
-    cpuSeconds, cpuAnchorSeconds, maxCpuSeconds, wallGuardSeconds,
+    cpuSeconds, cpuAnchorSeconds, maxCpuSeconds, wallGuardSeconds, maxSeconds: wallGuardSeconds,
     overCpuBudget, overWallGuard, overBudget: overCpuBudget || overWallGuard,
   }
 }

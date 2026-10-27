@@ -128,6 +128,8 @@ test('full set with a11y requires one passed a11y report per case', { timeout: 6
   assert.equal(code, 0)
   assert.equal(receipt.pass, true)
   assert.deepEqual([receipt.set, receipt.a11y, receipt.wallGuardSeconds, receipt.stories, receipt.cases], ['all', 'on', null, 8, 21])
+  assert.equal(receipt.maxSeconds, receipt.wallGuardSeconds)
+  assert.equal(receipt.overBudget, false)
   assert.ok(receipt.cpu.count > 0 && receipt.cpu.busyCoreMinutes >= 0 && receipt.cpu.loadavgEnd.length === 3)
   for (const row of receipt.rows) {
     assert.equal(row.storyFile, './Kit.stories.tsx', 'receipt paths join entry.id, not the index key')

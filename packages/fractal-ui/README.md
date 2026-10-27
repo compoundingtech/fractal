@@ -116,6 +116,7 @@ node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook
 Options (environment): `KIT_PLAY_SET=commit` is the per-commit set, a narrowing of the critical stories to one case each (both widths for the layout stories) without two heavy ones; `scripts/kit-play-commit-set.mjs` lists exactly what it omits and the merge gate runs everything. `KIT_PLAY_SET=critical` runs only stories tagged `critical` (add `tags: ['critical']` to a story or its meta; the UI owners decide which flows are critical), and `KIT_PLAY_A11Y=off` skips the axe check (the separate full run keeps it).
 
 Commit plays gate raw CPU seconds against the single frozen `KIT_CPU_ANCHOR_SECONDS = 413.9` constant plus exactly 10% headroom (455.29 seconds). The receipt retains raw CPU seconds/core-minutes, wall seconds and Linux `/proc/stat` tick deltas, including steal ticks and fraction; no jiffy frequency is assumed. `KIT_PLAY_WALL_GUARD_SECONDS=268` is a separate hang ceiling, about three times the historical 89.37-second quiet run, not the regression signal. Full and critical sets retain CPU telemetry without enforcing the commit-set CPU limit. After #3982 lands, lower the anchor once to the new measured cost; never raise it later.
+Receipts retain the compatible `maxSeconds` field as the wall guard value (or `null` when unset), beside `wallGuardSeconds` and the new CPU fields. `overBudget` remains true when either the CPU ceiling or wall guard fails.
 
 ## Stories
 
