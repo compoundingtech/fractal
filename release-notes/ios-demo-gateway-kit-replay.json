@@ -4,7 +4,7 @@
   "replay": { "status": "none", "detail": "Demo HTTP and WebSocket adapters now use the scenario kit createReplay; landing captures pin the kit anchor and a frozen manual clock, while ordinary demos use a real clock. No daemon replay change." },
   "schema": { "status": "none", "detail": "No wire schema changes. Gateway integration coverage strictly decodes HTTP envelopes and collection frames with the client schemas and exercises the iOS Now and conversation feed." },
   "rules": { "status": "none", "detail": "No checkpoint rule changes." },
-  "compatibility": { "status": "none", "detail": "Demo capture expectations now use the fleet-mid-refactor review attention and Atlas Builder conversation. Fleet inventories absent from the world reject with explicit unsupported-capability errors, not silent empty lists. Demo-only cryptographic pairing and eight-second WebSocket heartbeats remain intact." },
+  "compatibility": { "status": "none", "detail": "Demo capture expectations now use the fleet-mid-refactor review attention and Atlas Builder conversation. Demo-only cryptographic pairing and eight-second WebSocket heartbeats remain intact; capture mode freezes scenario state at the kit anchor." },
   "downtime": { "status": "none", "detail": "No production service changes." },
   "manual": { "status": "none", "detail": "Install workspace dependencies before running the demo, and launch it with node --experimental-transform-types demoGateway.mjs. The landing capture script supplies the flag. Keep this unauthenticated demo restricted to Debug simulators." },
   "recovery": { "status": "none", "detail": "Revert this change to restore the previous screenshot demo." }

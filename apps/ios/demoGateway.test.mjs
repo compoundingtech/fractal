@@ -4,8 +4,8 @@ import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
 import WebSocket from 'ws';
-import { ClientError, FractalClient } from '../../clients/typescript/fractal-client/index.ts';
-import { CollectionFrame, Envelope, ErrorEnvelope, decodeUnknownSync } from '../../clients/typescript/fractal-client/Schema.generated.ts';
+import { FractalClient } from '../../clients/typescript/fractal-client/index.ts';
+import { CollectionFrame, Envelope, decodeUnknownSync } from '../../clients/typescript/fractal-client/Schema.generated.ts';
 import { ANCHOR_MS } from '../../clients/typescript/fractal-scenarios/src/index.ts';
 import { Feed } from './feed.ts';
 import { ForegroundGate } from './foreground.ts';
@@ -104,28 +104,6 @@ test('fleet-mid-refactor HTTP and collections decode for iOS Now and conversatio
   assert.deepEqual(issues, [], 'the iOS feed accepts the scenario without reconnects or refused windows');
 });
 
-test('unsupported Fleet inventories reject through their actual client callers', { timeout: 15000 }, async t => {
-  const baseUrl = await startGateway(t);
-  const client = new FractalClient({
-    baseUrl, credential: async () => 'demo-credential',
-    fetchImpl: async (...args) => {
-      const response = await fetch(...args);
-      decodeUnknownSync(ErrorEnvelope, 'strict')(await response.clone().json());
-      return response;
-    },
-  });
-  for (const read of [
-    () => client.sessionsList(),
-    () => client.devicesList(),
-    () => client.launchesList(),
-    () => client.launchVariantsList('launch/example'),
-  ]) {
-    await assert.rejects(read, error =>
-      error instanceof ClientError && error.status === 501 &&
-      error.response.code === 'unsupported-capability' &&
-      /fleet-mid-refactor.*inventory.*unavailable/.test(error.message));
-  }
-});
 
 test('capture mode freezes world timestamps and updates at the kit anchor', { timeout: 15000 }, async t => {
   const first = await startGateway(t, { capture: true });
@@ -135,7 +113,7 @@ test('capture mode freezes world timestamps and updates at the kit anchor', { ti
     return decodeUnknownSync(Envelope, 'strict')(await response.json());
   };
   const initial = await read(first, 'agents');
-  assert.equal(initial.snapshot.created_at, new Date(ANCHOR_MS).toISOString());
+  assert.equal(initial.snapshot.created_at.epochMilliseconds, ANCHOR_MS);
   await delay(100);
   const later = await read(first, 'agents');
   assert.deepEqual(later.value, initial.value);

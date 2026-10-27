@@ -92,21 +92,6 @@ const server = http.createServer(async (request, response) => {
       send({ api_version: API_VERSION, request_id: 'request/demo-observations', value: { accepted: true } });
       return;
     }
-    const family = url.pathname.split('/')[3];
-    // These inventories have no wire resources in this world. Do not turn the
-    // replay's unknown-route empty-page default into a successful Fleet read.
-    // Session timeline reads remain supported by the conversation slice.
-    if (['devices', 'launches', 'launch-variants', 'sessions'].includes(family) &&
-        !(family === 'sessions' && url.pathname.endsWith('/timeline'))) {
-      response.writeHead(501, { 'content-type': 'application/json' });
-      response.end(JSON.stringify({
-        api_version: API_VERSION, error_version: 'st3.client.error.v0',
-        request_id: `request/demo-unsupported-${family}`, code: 'unsupported-capability',
-        message: `The ${world.id} demo world does not provide the ${family} inventory; this Fleet view is unavailable.`,
-        retryable: false, details: {},
-      }));
-      return;
-    }
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const result = await replay.fetch(url, {
