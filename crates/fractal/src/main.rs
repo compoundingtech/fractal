@@ -12037,46 +12037,6 @@ fn parse_agent_start_identity(identity: &str) -> Result<String, String> {
     Ok(identity.strip_prefix("agent/").unwrap_or(identity).into())
 }
 
-fn declaration_node(value: &Value) -> Result<KdlNode> {
-    let mut node = KdlNode::new(value["name"].as_str().context("declaration has no name")?);
-    if let Some(arguments) = value["arguments"].as_array() {
-        for argument in arguments {
-            node.entries_mut()
-                .push(KdlEntry::new(declaration_value(argument)?));
-        }
-    }
-    if let Some(properties) = value["properties"].as_object() {
-        for (name, value) in properties {
-            node.entries_mut()
-                .push(KdlEntry::new_prop(name.as_str(), declaration_value(value)?));
-        }
-    }
-    if let Some(children) = value["children"].as_array() {
-        let mut body = KdlDocument::new();
-        for child in children {
-            body.nodes_mut().push(declaration_node(child)?);
-        }
-        node.set_children(body);
-    }
-    Ok(node)
-}
-
-fn declaration_value(value: &Value) -> Result<kdl::KdlValue> {
-    Ok(match value {
-        Value::String(value) => kdl::KdlValue::String(value.clone()),
-        Value::Bool(value) => kdl::KdlValue::Bool(*value),
-        Value::Null => kdl::KdlValue::Null,
-        Value::Number(value) => {
-            if let Some(integer) = value.as_i64() {
-                kdl::KdlValue::Integer(integer.into())
-            } else {
-                kdl::KdlValue::Float(value.as_f64().context("invalid declaration number")?)
-            }
-        }
-        _ => anyhow::bail!("invalid declaration value: {value}"),
-    })
-}
-
 fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
     if let Some(current) = body
         .nodes_mut()
@@ -12092,9 +12052,10 @@ fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
 fn agent_start_document(
     args: &AgentStartArgs,
     existing: Option<&fractal_daemon::model::DesiredSubject>,
+    uris: &BTreeMap<String, String>,
 ) -> Result<String> {
     let mut agent = match existing {
-        Some(existing) => declaration_node(&existing.desired)?,
+        Some(existing) => fractal_daemon::graph::render_agent_node(&existing.desired, uris)?,
         None => kdl_node("agent", [args.identity.as_str()]),
     };
     let mut body = agent.children_mut().take().unwrap_or_default();

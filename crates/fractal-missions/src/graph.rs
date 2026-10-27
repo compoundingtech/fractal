@@ -184,31 +184,7 @@ pub fn render_agent_node(
             "expected an agent root",
         ));
     }
-    let mut node = render_desired_node(desired)?;
-    let references = declared_resources(desired);
-    if references.is_empty() {
-        return Ok(node);
-    }
-    let mut body = node.children().cloned().unwrap_or_default();
-    for reference in references {
-        let uri = (reference.kind == crate::model::ResourceReferenceKind::Uri)
-            .then(|| uris.get(&reference.subject))
-            .flatten();
-        let mut child = KdlNode::new("resource");
-        child.entries_mut().push(kdl::KdlEntry::new(reference.name));
-        child.entries_mut().push(match uri {
-            Some(uri) => kdl::KdlEntry::new_prop("uri", uri.as_str()),
-            None => kdl::KdlEntry::new_prop("subject", reference.subject),
-        });
-        if let Some(reason) = reference.reason {
-            child
-                .entries_mut()
-                .push(kdl::KdlEntry::new_prop("reason", reason));
-        }
-        body.nodes_mut().push(child);
-    }
-    node.set_children(body);
-    Ok(node)
+    render_desired_tree(desired, uris)
 }
 
 /// Preserve environment names while hiding values in a declaration read.
@@ -235,7 +211,16 @@ pub fn redact_agent_env_values(tree: &mut Value) {
     }
 }
 
+/// Render a desired tree, preserving agent resource edges as explicit subject references.
+/// Use [`render_agent_node`] when resource URI bindings are available.
 pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
+    render_desired_tree(tree, &BTreeMap::new())
+}
+
+fn render_desired_tree(
+    tree: &Value,
+    uris: &BTreeMap<String, String>,
+) -> Result<KdlNode, St3Error> {
     let invalid = || St3Error::new("invalid-declaration", "malformed desired KDL node tree");
     let object = tree.as_object().ok_or_else(invalid)?;
     let name = object
@@ -260,7 +245,7 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
     if let Some(children) = object.get("children") {
         let mut document = KdlDocument::new();
         for child in children.as_array().ok_or_else(invalid)? {
-            document.nodes_mut().push(render_desired_node(child)?);
+            document.nodes_mut().push(render_desired_tree(child, uris)?);
         }
         if !document.nodes().is_empty() || name == "harness" {
             node.set_children(document);
@@ -269,6 +254,29 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
         // Older normalized trees omitted empty children. A validated harness
         // always has a body, so recover that required syntax when rendering it.
         node.set_children(KdlDocument::new());
+    }
+    if name == "agent" {
+        let references = declared_resources(tree);
+        if !references.is_empty() {
+            let body = node.ensure_children();
+            for reference in references {
+                let uri = (reference.kind == crate::model::ResourceReferenceKind::Uri)
+                    .then(|| uris.get(&reference.subject))
+                    .flatten();
+                let mut child = KdlNode::new("resource");
+                child.entries_mut().push(kdl::KdlEntry::new(reference.name));
+                child.entries_mut().push(match uri {
+                    Some(uri) => kdl::KdlEntry::new_prop("uri", uri.as_str()),
+                    None => kdl::KdlEntry::new_prop("subject", reference.subject),
+                });
+                if let Some(reason) = reference.reason {
+                    child
+                        .entries_mut()
+                        .push(kdl::KdlEntry::new_prop("reason", reason));
+                }
+                body.nodes_mut().push(child);
+            }
+        }
     }
     Ok(node)
 }
