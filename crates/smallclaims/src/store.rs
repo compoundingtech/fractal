@@ -55,6 +55,8 @@ mod prepared_envelope_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
+mod sealed_view_cache_tests;
+#[cfg(test)]
 mod repair_operation_tests;
 #[cfg(test)]
 mod schema_install_tests;
@@ -1100,10 +1102,8 @@ impl Store {
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h22782312d531 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired_facts::schema()).map_err(Into::into)
         })?;
-        install_schema_batch(connection, fresh, |connection| {
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
-            idempotency::initialize(connection)
-        })?;
+        initialize_fleet_generation(connection)?;
+        install_schema_batch(connection, fresh, idempotency::initialize)?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             inventory_generation::initialize(connection)
@@ -2763,15 +2763,84 @@ pub fn max_envelope_rowid(connection: &Connection) -> Result<i64> {
         .map_err(Into::into)
 }
 
+const FLEET_GENERATION_TRIGGER_VERSION: i64 = 1;
+
+fn initialize_fleet_generation(connection: &Connection) -> Result<()> {
+    // Acquire the write reservation before reading the version. Concurrent opens then
+    // observe the completed installation rather than both trying to replace its triggers.
+    let transaction = Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='fleet_generation')",
+        [], |row| row.get(0),
+    )?;
+    if !exists {
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h9dd0c105a101 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE fleet_generation (
+                 id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL,
+                 trigger_version INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO fleet_generation(id,value,trigger_version) VALUES(1,0,0);",
+        )?;
+    } else {
+        let version_column: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fleet_generation') WHERE name='trigger_version')",
+            [], |row| row.get(0),
+        )?;
+        if !version_column {
+            transaction.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-hee8dc149755b owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE fleet_generation ADD COLUMN trigger_version INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+    }
+    let version: i64 = transaction.query_row(
+        "SELECT trigger_version FROM fleet_generation WHERE id=1", [], |row| row.get(0),
+    )?;
+    anyhow::ensure!(version <= FLEET_GENERATION_TRIGGER_VERSION,
+        "unsupported fleet generation trigger version {version}");
+    if version != FLEET_GENERATION_TRIGGER_VERSION {
+        // Replacement and the generation fence commit together. A live Store's cache
+        // cannot survive a mutation missed by the old definitions or a gap in installation.
+        // Install the covering probe index with the trigger upgrade, not on every open.
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hbe53791f5691 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_batch_kind ON claims(batch_id, kind);"
+        )?;
+        for table in ["claim", "batch", "envelope", "signature", "anchor"] {
+            for event in ["insert", "update", "delete"] {
+                transaction.execute_batch(&format!(
+                    /* sqlite-large-value: allow-for-now lv-hd5547c558e17 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS fleet_generation_{table}_{event};",
+                ))?;
+            }
+        }
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h12c1178eeb5f owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "DROP TRIGGER IF EXISTS fleet_generation_envelope_detach;")?;
+        for name in [
+            "signature_insert_by_batch",
+            "signature_delete_by_batch",
+            "signature_update_by_batch",
+            "envelope_identity_update",
+            "claim_identity_update",
+        ] {
+            transaction.execute_batch(&format!(
+                /* sqlite-large-value: allow-for-now lv-h71bcfcfc61a4 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS fleet_generation_{name};"
+            ))?;
+        }
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h6140c9d34075 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_generation SET value=value+1,trigger_version=?1 WHERE id=1",
+            [FLEET_GENERATION_TRIGGER_VERSION],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Fold the admitted `fleet.*` claims from the pinned anchor. A store without an anchor has an
 /// empty membership, in which every writer is legacy.
 /// A counter that moves whenever fleet membership could: a fleet claim, the envelope that carries
 /// it, a signature on that envelope, or the anchor. `fleet_membership` re-folds only when it moved.
 fn fleet_generation_schema() -> String {
     let bump = /* sqlite-large-value: allow-for-now lv-h84b389587ccc owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_generation SET value=value+1 WHERE id=1;";
-    let carries_fleet_claims = |envelope: &str| {
+    let carries_fleet_claims = |row: &str, column: &str| {
         format!(
-            "EXISTS (SELECT 1 FROM claims WHERE batch_id={envelope}.batch_id \
+            "EXISTS (SELECT 1 FROM claims WHERE batch_id={row}.{column} \
              AND kind IN ({FLEET_CLAIM_KINDS}))"
         )
     };
@@ -2786,62 +2855,51 @@ fn fleet_generation_schema() -> String {
         )
     };
     format!(
-        /* sqlite-large-value: allow-for-now lv-h38fa81434d61 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS fleet_generation (
-             id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
-         INSERT OR IGNORE INTO fleet_generation(id, value) VALUES (1, 0);
-         DROP TRIGGER IF EXISTS fleet_generation_signature_insert;
-         DROP TRIGGER IF EXISTS fleet_generation_signature_delete;
-         DROP TRIGGER IF EXISTS fleet_generation_signature_update;
+        /* sqlite-large-value: allow-for-now lv-h509931eac50e owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS fleet_generation (
+             id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL,
+             trigger_version INTEGER NOT NULL DEFAULT 0);
+         INSERT OR IGNORE INTO fleet_generation(id,value,trigger_version) VALUES(1,0,0);
          CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_delete AFTER DELETE ON claims
          WHEN OLD.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_update
-         AFTER UPDATE OF kind, batch_id, body ON claims
+         CREATE TRIGGER fleet_generation_claim_update
+         AFTER UPDATE OF id, kind, subject, body, batch_id ON claims
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) OR OLD.kind IN ({FLEET_CLAIM_KINDS})
          BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_insert AFTER INSERT ON replica_envelopes
-         WHEN NEW.batch_id IS NOT NULL AND {insert_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_update
-         AFTER UPDATE OF batch_id ON replica_envelopes
-         WHEN NEW.batch_id IS NOT NULL AND {update_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_insert_by_batch
-         AFTER INSERT ON replica_envelope_signatures
-         WHEN {insert_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_delete_by_batch
-         AFTER DELETE ON replica_envelope_signatures
-         WHEN {delete_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_delete AFTER DELETE ON replica_envelopes
-         WHEN {old_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_identity_update
-         AFTER UPDATE OF writer, sequence, envelope_hash, batch_id ON replica_envelopes
-         WHEN {old_envelope} OR {update_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_update_by_batch
-         AFTER UPDATE ON replica_envelope_signatures
-         WHEN {insert_signature} OR {delete_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_identity_update
-         AFTER UPDATE OF id, subject ON claims
-         WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) OR OLD.kind IN ({FLEET_CLAIM_KINDS})
-         BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_insert AFTER INSERT ON batches
+         WHEN {insert_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_delete AFTER DELETE ON batches
+         WHEN {delete_batch} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_update
          AFTER UPDATE OF id, origin, replica_sequence ON batches
-         WHEN EXISTS (SELECT 1 FROM claims WHERE batch_id IN (OLD.id, NEW.id)
-                      AND kind IN ({FLEET_CLAIM_KINDS})) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_delete AFTER DELETE ON batches
-         WHEN EXISTS (SELECT 1 FROM claims WHERE batch_id=OLD.id
-                      AND kind IN ({FLEET_CLAIM_KINDS})) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_insert AFTER INSERT ON batches
-         WHEN EXISTS (SELECT 1 FROM claims WHERE batch_id=NEW.id
-                      AND kind IN ({FLEET_CLAIM_KINDS})) BEGIN {bump} END;
+         WHEN {insert_batch} OR {delete_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_insert AFTER INSERT ON replica_envelopes
+         WHEN NEW.batch_id IS NOT NULL AND {insert_envelope} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_envelope_update
+         AFTER UPDATE OF writer, sequence, batch_id, envelope_hash ON replica_envelopes
+         WHEN {insert_envelope} OR {delete_envelope} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_delete AFTER DELETE ON replica_envelopes
+         WHEN {delete_envelope} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_signature_insert
+         AFTER INSERT ON replica_envelope_signatures
+         WHEN {insert_signature} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_signature_delete
+         AFTER DELETE ON replica_envelope_signatures
+         WHEN {delete_signature} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_signature_update
+         AFTER UPDATE ON replica_envelope_signatures
+         WHEN {insert_signature} OR {delete_signature} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_insert AFTER INSERT ON meta
          WHEN NEW.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_update AFTER UPDATE ON meta
          WHEN NEW.key='fleet_anchor_key' OR OLD.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_delete AFTER DELETE ON meta
          WHEN OLD.key='fleet_anchor_key' BEGIN {bump} END;",
-        insert_envelope = carries_fleet_claims("NEW"),
-        update_envelope = carries_fleet_claims("NEW"),
-        old_envelope = carries_fleet_claims("OLD"),
+        insert_batch = carries_fleet_claims("NEW", "id"),
+        delete_batch = carries_fleet_claims("OLD", "id"),
+        insert_envelope = carries_fleet_claims("NEW", "batch_id"),
+        delete_envelope = carries_fleet_claims("OLD", "batch_id"),
         insert_signature = signs_fleet_claims("NEW"),
         delete_signature = signs_fleet_claims("OLD"),
     )
