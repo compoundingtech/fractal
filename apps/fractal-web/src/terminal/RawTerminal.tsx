@@ -18,7 +18,8 @@ import { Button } from 'react-aria-components'
 import { Modal, ModalDialog, ModalHeader, ModalTitle } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 
-import { DomTerminal, TERMINAL_FONT_SIZE, TERMINAL_LINE_HEIGHT } from './DomTerminal.tsx'
+import { DomTerminal } from './DomTerminal.tsx'
+import { terminalMetrics } from './terminalMetrics.stylex.ts'
 import { makeGhosttyKeyboardOn, type TerminalKeyEncoder } from './ghosttyKeyboard.ts'
 import { loadGhosttyNative, makeGhosttyTerminal, type GhosttyTerminal } from './ghosttyVt.ts'
 import type { TerminalPalette } from './palette.ts'
@@ -470,7 +471,7 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
                   width: entry.contentRect.width,
                   height: entry.contentRect.height,
                   cellWidth,
-                  cellHeight: TERMINAL_LINE_HEIGHT,
+                  cellHeight: terminalMetrics.lineHeight,
                 })
                 if (size !== undefined) debouncer.observe(size)
               })
@@ -560,7 +561,7 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
       }}
       onWheel={(event) => {
         if (scroll === undefined) return
-        wheel.current += event.deltaMode === 1 ? event.deltaY : event.deltaY / TERMINAL_LINE_HEIGHT
+        wheel.current += event.deltaMode === 1 ? event.deltaY : event.deltaY / terminalMetrics.lineHeight
         const lines = Math.trunc(wheel.current)
         if (lines === 0) return
         wheel.current -= lines
@@ -571,7 +572,7 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
         ref={probe}
         aria-hidden
         {...stylex.props(styles.probe)}
-        style={{ fontFamily: TERMINAL_FONT_FAMILY, fontSize: `${TERMINAL_FONT_SIZE}px` }}
+        style={{ fontFamily: TERMINAL_FONT_FAMILY, fontSize: `${terminalMetrics.fontSize}px` }}
       />
       <DomTerminal
         screen={screen}
@@ -591,7 +592,7 @@ const LoadedSurface = ({ screen, palette, typing, live, onTypingChange, resize, 
               spellCheck={false}
               {...stylex.props(styles.field, composing && styles.composing)}
               style={{
-                top: cursor.row * TERMINAL_LINE_HEIGHT,
+                top: cursor.row * terminalMetrics.lineHeight,
                 left: `${cursor.column}ch`,
                 width: composing ? `${Math.max(1, screen.columns - cursor.column)}ch` : '1ch',
                 fontFamily: TERMINAL_FONT_FAMILY,
@@ -666,15 +667,15 @@ const styles = stylex.create({
   field: {
     position: 'absolute',
     zIndex: 1,
-    height: `${TERMINAL_LINE_HEIGHT}px`,
+    height: `${terminalMetrics.lineHeight}px`,
     margin: 0,
     padding: 0,
     borderWidth: 0,
     resize: 'none',
     overflow: 'hidden',
     whiteSpace: 'pre',
-    fontSize: `${TERMINAL_FONT_SIZE}px`,
-    lineHeight: `${TERMINAL_LINE_HEIGHT}px`,
+    fontSize: `${terminalMetrics.fontSize}px`,
+    lineHeight: `${terminalMetrics.lineHeight}px`,
     caretColor: 'transparent',
     opacity: 0,
     outline: 'none',
