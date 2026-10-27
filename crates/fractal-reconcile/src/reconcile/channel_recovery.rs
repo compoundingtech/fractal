@@ -405,6 +405,11 @@ fn claude_channel_policy_blocked(screen: &str) -> bool {
     let mut lines = screen.lines();
     while let Some(line) = lines.next() {
         let line = line.trim();
+        // The provider banner is in the startup chrome, before the first conversation
+        // turn. A matching diagnostic quoted later in a prompt/reply has no authority.
+        if line.starts_with(['❯', '>', '●', '⏺']) {
+            return false;
+        }
         if line.starts_with("```") {
             quoted = !quoted;
             continue;

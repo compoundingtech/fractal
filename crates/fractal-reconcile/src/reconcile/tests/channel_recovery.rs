@@ -132,7 +132,7 @@ fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_res
     desired.member.as_mut().unwrap().restart = RestartType::Always;
     let since = attachment(&store, "orchid-one", false);
     policy_launch(&store, "orchid-one");
-    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    *runtime.screen.lock().unwrap() = format!("Claude Code v2.1.306\n{POLICY_BANNER}\n❯ ");
     let error = recover(&reconciler, &desired, "orchid-one", since).unwrap_err();
     assert!(error.to_string().contains("channelsEnabled: true"), "{error}");
     reconciler.record_member_reconcile_result(SEAT, Err(error)).unwrap();
@@ -179,6 +179,9 @@ fn quoted_channel_policy_banner_is_not_a_provider_refusal() {
         format!("❯ Please explain this error:\n> {}", POLICY_BANNER.replace('\n', "\n> ")),
         format!("❯ Please explain this error:\n```\n{POLICY_BANNER}\n```"),
         format!("❯ {POLICY_BANNER}"),
+        format!("❯ Please explain this error:\n{POLICY_BANNER}"),
+        format!("● This is the error you quoted:\n{POLICY_BANNER}"),
+        format!("```\n{POLICY_BANNER}\n```"),
     ] {
         let (store, runtime, reconciler, desired) = setup();
         let since = attachment(&store, "orchid-one", false);
