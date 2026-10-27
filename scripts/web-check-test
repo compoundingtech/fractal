@@ -1,0 +1,81 @@
+#!/usr/bin/env python3
+"""Focused offline tests; no Nix, package install or real check execution."""
+import importlib.machinery
+import importlib.util
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+import subprocess
+
+loader = importlib.machinery.SourceFileLoader("web_check", str(Path(__file__).with_name("web-check")))
+spec = importlib.util.spec_from_loader(loader.name, loader)
+web = importlib.util.module_from_spec(spec)
+loader.exec_module(web)
+
+
+class WebCheckTest(unittest.TestCase):
+    def test_shell_payload_cannot_build_or_substitute(self):
+        command = web.shell_command(Path("/cache/key"), ["true"])
+        self.assertEqual(command[2], "/cache/key/profile")
+        self.assertIn("--offline", command)
+        self.assertEqual(command[command.index("substitute") + 1], "false")
+        self.assertEqual(command[command.index("max-jobs") + 1], "0")
+        self.assertNotIn(".#web", command)
+
+    def test_digest_is_path_sensitive_and_worktree_independent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            values = []
+            for tree in ("a", "b"):
+                directory = root / tree
+                directory.mkdir()
+                (directory / "flake.lock").write_text("locked")
+                with patch.object(web, "ROOT", directory):
+                    values.append(web.digest([directory / "flake.lock"]))
+            self.assertEqual(*values)
+            (root / "b/flake.lock").write_text("changed")
+            with patch.object(web, "ROOT", root / "b"):
+                self.assertNotEqual(values[0], web.digest([root / "b/flake.lock"]))
+
+    def test_prepare_seeds_same_relative_location(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "shared-shell"
+            directory.mkdir()
+            (directory / "profile").write_text("rooted")
+            (root / "repos/effect-utils").mkdir(parents=True)
+            (root / "repos/effect-utils/package.json").write_text("{}")
+            seeds = root / "seeds"
+            seeds.mkdir()
+            for index in range(2):
+                (seeds / f"{index}.tsbuildinfo").write_text(f"seed {index}")
+            local = root / ".devenv/web-check"
+            with patch.object(web, "ROOT", root), patch.object(web, "LOCAL", local), patch.object(web, "shell_dir", return_value=directory), patch.object(web, "seed_dir", return_value=seeds), patch.object(web, "call") as call:
+                web.prepare()
+                self.assertEqual(call.call_count, 1)
+                self.assertIn("--frozen-lockfile", call.call_args.args[0])
+                self.assertEqual((local / "0.tsbuildinfo").read_text(), "seed 0")
+                (local / "0.tsbuildinfo").write_text("local newer")
+                web.prepare()
+                self.assertEqual((local / "0.tsbuildinfo").read_text(), "local newer")
+                self.assertEqual((root / ".devenv/gc/devshell").resolve(), (directory / "profile").resolve())
+
+    def test_failed_batch_does_not_publish_seed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "profile").touch()
+            (root / "node_modules").mkdir()
+            with patch.object(web, "ROOT", root), patch.object(web, "LOCAL", root / "local"), patch.object(web, "shell_dir", return_value=root), patch.object(web, "seed_dir") as seeds, patch.object(web.subprocess, "run", return_value=subprocess.CompletedProcess([], 2)) as run:
+                self.assertEqual(web.run(["src/test.test.ts"]), 2)
+                seeds.assert_not_called()
+                payload = run.call_args.args[0][-1]
+                self.assertIn("--incremental", payload)
+                self.assertIn("vitest", payload)
+                self.assertIn("typecheck", payload)
+                self.assertIn("apps/fractal-web", payload)
+                self.assertIn("packages/fractal-ui", payload)
+
+
+if __name__ == "__main__":
+    unittest.main()
