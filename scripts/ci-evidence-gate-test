@@ -762,6 +762,35 @@ class EndToEnd(unittest.TestCase):
         fields = self.assertRuns(s['base'], 'main moved a protected file', **self.pr_env(s))
         self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
 
+    def test_main_changing_only_a_list_read_at_the_base_keeps_the_head_tree(self):
+        # The keys, the author list and the log key are read at the accepted base when a note is judged, never from the head tree: main
+        # changing one after the branch point does not void a head signature (2026-10-26: a key rotation on main made finished runs stale).
+        rotated = lambda: self.f.keys.read_text() + f'fleet/rotated namespaces="git" {self.f.key("rotated").with_suffix(".pub").read_text()}'
+        log_key = lambda: f'log/evidence namespaces="git" {self.f.key("log-key").with_suffix(".pub").read_text()}'
+        for path, content in (('.st/evidence-keys', rotated), ('.st/evidence-authors.json', lambda: json.dumps({**self.AUTHORS, 'logins': ['alice', 'bob', 'carol']})),
+                              ('.st/evidence-log-key', log_key)):
+            with self.subTest(path):
+                self.tmp_reset()
+                s = self.pull_request(main_files={path: content()})
+                self.assertIn(path, self.f.git('diff', '--name-only', s['base'], s['tip']).split())
+                record = self.note(s['head'], s['head_tree'], seconds=1)
+                fields, outputs = self.run_gate(s['tip'], **self.pr_env(s))
+                self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], outputs['record']), ('skip', 'head', 'used', record))
+
+    def test_main_changing_the_required_lanes_after_the_branch_point_still_falls_back(self):
+        s = self.pull_request(main_files={'.st/required-lanes.json': '{}\n'})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'main moved the required lanes', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
+
+    def test_a_key_rotation_on_main_that_drops_the_signer_still_refuses_the_head_note(self):
+        kept = ''.join(line for line in self.f.allowed if not line.startswith('fleet/ci '))
+        s = self.pull_request(main_files={'.st/evidence-keys': kept})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['tip'], 'the base no longer trusts the signer', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('head', 'used'))
+        self.assertNotEqual(fields['outcome'], 'satisfied')
+
     def test_a_base_without_the_signing_script_falls_back(self):
         s = self.pull_request(signing=False)
         self.note(s['head'], s['head_tree'], seconds=1)
