@@ -19,7 +19,7 @@ sys.dont_write_bytecode = True
 from release_notes import FIELDS, ImpactError, check_pull_request, collect, render, validate, version
 
 ROOT = Path(__file__).resolve().parent.parent
-loader = importlib.machinery.SourceFileLoader('release_daily', str(ROOT / 'scripts/release-smalltalk-daily'))
+loader = importlib.machinery.SourceFileLoader('release_daily', str(ROOT / 'scripts/release-fractal-daily'))
 spec = importlib.util.spec_from_loader(loader.name, loader)
 daily = importlib.util.module_from_spec(spec)
 loader.exec_module(daily)
@@ -460,6 +460,8 @@ class ReleaseNotes(unittest.TestCase):
             commands.append(args)
             if args[0] == 'git':
                 return self.git(*args[1:])
+            if args[:2] == ('gh', 'api'):
+                return json.dumps([{'artifacts': [{'name': 'fractal-release', 'expired': False}]}])
             if args[:3] == ('gh', 'run', 'download'):
                 (downloads / 'example.tar.gz').write_bytes(b'archive fixture')
                 (downloads / 'example.tar.gz.sha256').write_text('checksum fixture')
@@ -470,8 +472,8 @@ class ReleaseNotes(unittest.TestCase):
                 return 'Existing artifact proof fixture'
             raise AssertionError(f'Unexpected publication command in dry run: {args}')
         output = io.StringIO()
-        with patch.object(sys, 'argv', ['release-smalltalk-daily', '--dry-run']), \
-             patch.object(daily, '__file__', str(self.repo / 'scripts/release-smalltalk-daily')), \
+        with patch.object(sys, 'argv', ['release-fractal-daily', '--dry-run']), \
+             patch.object(daily, '__file__', str(self.repo / 'scripts/release-fractal-daily')), \
              patch.object(daily, 'newest_verified_main_run', return_value=(1, source)), \
              patch.object(daily, 'latest_release_tag', return_value='v0.3.0'), \
              patch.object(daily, 'next_tag', return_value='v0.3.1'), \
@@ -483,7 +485,7 @@ class ReleaseNotes(unittest.TestCase):
         self.assertEqual((downloads / 'RELEASE-NOTES.md').read_text(), expected)
         self.assertEqual(json.loads((downloads / 'UPGRADE-IMPACT.json').read_text()), report)
         self.assertFalse(any(args[:2] == ('gh', 'release') for args in commands))
-        workflow = (ROOT / '.github/workflows/release-smalltalk.yml.genie.ts').read_text()
+        workflow = (ROOT / '.github/workflows/release-fractal.yml.genie.ts').read_text()
         self.assertIn('python3 scripts/release_notes.py --source', workflow)
         self.assertLess(workflow.index('python3 scripts/release_notes.py --source'), workflow.index('gh release create'))
 
@@ -500,7 +502,7 @@ class ReleaseNotes(unittest.TestCase):
             if args[0] == 'python3' and args[2:] == ('check', '--source', source, '--require-latest'):
                 return ''
             raise AssertionError(f'Unexpected command before classification: {args}')
-        with patch.object(sys, 'argv', ['release-smalltalk-daily']), \
+        with patch.object(sys, 'argv', ['release-fractal-daily']), \
              patch.object(daily, 'newest_verified_main_run', return_value=(1, source)), \
              patch.object(daily, 'latest_release_tag', return_value='v0.3.0'), \
              patch.object(daily, 'next_tag', return_value='v0.3.1'), \

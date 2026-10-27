@@ -20,7 +20,7 @@ st agents queue agent/garden/worker
 | What you see | Next check |
 | --- | --- |
 | Daemon unavailable | `service status` and [startup replay](#startup-replay-and-an-unavailable-api); an active process may still be recovering. |
-| Missing `fractal` or `pty` | [PATH and PTY](#path-pty-and-harness-login); check the daemon user's login-shell PATH too. |
+| Missing `st` or `pty` | [PATH and PTY](#path-pty-and-harness-login); check the daemon user's login-shell PATH too. |
 | macOS launch or permission denied | [Signing and permissions](#macos-signing-and-permissions). |
 | Agent starting or waiting | Attach to its terminal and finish login, trust, or permission prompts. |
 | Agent stopped, failed, or missing from the list | Show its exact ID and history; read its stop reason before starting it. |
@@ -97,7 +97,7 @@ st terminals attach agent/garden/worker
 
 After fixing its dependency, restart a stale running agent; explicitly start an intentionally stopped one. Resume a suspended one instead. [Agent lifecycle](seat-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
 
-For a Claude agent with stale delivery, check `fractal claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that an agent's channel connected.
+For a Claude agent with stale delivery, check `st claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that an agent's channel connected.
 
 If doctor reports an operational contradiction, inspect the bounded repair plan:
 
@@ -117,7 +117,7 @@ See [CLI tour](https://github.com/compoundingtech/fractal/blob/main/docs/site/re
 
 ## Startup replay and an unavailable API
 
-During daemon startup, `fractal doctor` reads a local readiness file without waiting for SQLite or
+During daemon startup, `st doctor` reads a local readiness file without waiting for SQLite or
 an API listener. It reports `starting`, the current recovery phase, and committed frontier/target
 when projection has begun. Full replay also reports its stage and, during base claims, processed
 claims/total; those counts describe uncommitted work, not a newer committed frontier. Updates
@@ -125,8 +125,8 @@ occur at stage boundaries and every 1,000 base claims. The record changes to `se
 both local API and paired gateway sockets have bound. Serving means the APIs accept requests;
 projection health remains a separate doctor check.
 
-`fractal service status` adds this readiness to the daemon service line, so a service manager's
-`active` or `running` state is not mistaken for API readiness. `fractal doctor --json` includes the
+`st service status` adds this readiness to the daemon service line, so a service manager's
+`active` or `running` state is not mistaken for API readiness. `st doctor --json` includes the
 local record as `startup`; if the API is unreachable during recovery it reports a failed
 startup check and exits nonzero. Once the API answers, `starting` is informational and the
 API's health checks determine the result, even before the gateway has bound.
@@ -168,15 +168,15 @@ st doctor
 
 Use the bin directory from your chosen archive or Nix route in the daemon user's login-shell
 PATH. Open a new terminal after updating your shell profile. Avoid mixing an old archive's
-`fractal` with a new Nix profile or another PTY install. `doctor` checks the daemon's environment;
+`st` with a new Nix profile or another PTY install. `doctor` checks the daemon's environment;
 working commands in your current shell alone do not prove the service sees them. Refresh
-service definitions with `fractal service install` after a changed executable path when they are
+service definitions with `st service install` after a changed executable path when they are
 manually managed. If Home Manager owns the daemon, update its pinned input and activate that
 configuration instead; follow the [Home Manager upgrade](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/upgrading.md).
 
 Log in to the harness as that same OS user, attach to the affected agent and finish login/trust
 prompts. Check its declared workspace and [account](st3/accounts.md) rather than copying another
-user's credentials. A missing Claude channel needs `fractal claude-channel status` and the connection
+user's credentials. A missing Claude channel needs `st claude-channel status` and the connection
 check above. A failed omp/OpenCode admission has exact boundary diagnostics; use
 [admission guidance](st3/seat-deploys.md#harness-admission-at-the-next-launch). Attach and inspect
 before restarting repeatedly or overriding admission.
@@ -185,7 +185,7 @@ before restarting repeatedly or overriding admission.
 
 Verify Python 3 is installed, the configured app path is stable, and the selected signing
 identity exists. Release executables are ad-hoc signed, not notarized. Follow macOS's explicit
-approval flow for the verified download and run `fractal service permissions` for the service's
+approval flow for the verified download and run `st service permissions` for the service's
 Full Disk Access/Developer Tools guidance. Permissions can need renewed approval after ad-hoc
 updates. Do not globally disable Gatekeeper or remove quarantine from unrelated files.
 A configured missing or wrong-team signing identity fails instead of falling back; see

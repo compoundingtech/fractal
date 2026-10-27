@@ -13,6 +13,17 @@
     "public_listener": false,
     "remote_mode": "online-thin-client"
   },
+  "agents_publication_contract": {
+    "description": "Transport-neutral complete current view definition only. No endpoint, transport opt-in or capability availability is added.",
+    "metadata": "AgentsPublicationMetadata",
+    "watermark": "AgentsStatusWatermark",
+    "view": "AgentsPublication",
+    "owner": "background-roster-refresher",
+    "replacement": "atomic-latest-value",
+    "history": "not-included",
+    "replay": "not-provided",
+    "legacy_http_and_websocket_grammar": "unchanged"
+  },
   "streams": [
     { "id": "collections.stream", "method": "GET", "path": "/v1/client/collections/stream", "websocket_protocol": "fractal.client.collections.v0", "command": "CollectionCommand", "frame": "CollectionFrame", "max_subscriptions": 8 }
   ],
@@ -20,6 +31,7 @@
     {"id": "notes.list", "method": "GET", "path": "/v1/client/notes", "response": "DirectiveNotes", "scope": "read.projections", "query": {"actor": "optional exact authenticated person or agent; cannot select another actor"}},
     {"id": "custom-subjects.list", "method": "GET", "path": "/v1/client/custom-subjects", "response": "Page", "scope": "read.projections"},
     {"id": "custom-subjects.get", "method": "GET", "path": "/v1/client/custom-subjects/{id}", "response": "Resource", "scope": "read.projections"},
+    { "id": "private-notes.get", "method": "GET", "path": "/v1/client/private-notes/{uri}", "response": "PrivateNotesSubject", "scope": "read.projections" },
     { "id": "host.repositories", "method": "GET", "path": "/v1/client/hosts/{id}/repositories", "response": "HostRepositories", "scope": "read.projections" },
     { "id": "sets.list", "method": "GET", "path": "/v1/client/sets", "response": "Page" },
     { "id": "sets.get", "method": "GET", "path": "/v1/client/sets/{id}", "response": "Resource" },
@@ -117,6 +129,7 @@
   "actions": {
     "arrangement.edit": { "capability": "control.arrangements", "parameters": "ArrangementEditParameters", "max_response_bytes": 1048576 },
     "custom.reply": {"capability": "control.attention", "parameters": "CustomReplyParameters"},
+    "private-notes.write": { "capability": "control.work", "parameters": "PrivateNotesWriteParameters" },
     "prompt.respond": {"capability": "control.attention", "parameters": "PromptRespondParameters"},
     "review.approve": { "capability": "control.attention", "parameters": "TargetParameters" },
     "review.reject": { "capability": "control.attention", "parameters": "TargetParameters" },

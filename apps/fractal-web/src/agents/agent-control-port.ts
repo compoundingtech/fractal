@@ -1,6 +1,6 @@
 import { ClientError, plainError, type FractalClient } from '@fractal/client'
 
-/** A change to a seat, as stui's agent actions name them. */
+/** A change to a seat, as the Fractal terminal UI's agent actions name them. */
 export type AgentControl = 'restart' | 'suspend' | 'retire' | 'start' | 'resume'
 
 export type AgentControlResult =
@@ -10,7 +10,7 @@ export type AgentControlResult =
 export interface AgentControlPort {
   /** Restart, suspend, retire, start or resume a seat, fenced on its current declaration. */
   readonly control: (agent: string, control: AgentControl) => Promise<AgentControlResult>
-  /** Stop the agent's current turn: Esc in its own terminal, as stui sends it. */
+  /** Stop the agent's current turn: Esc in its own terminal, as the Fractal terminal UI sends it. */
   readonly interrupt: (agent: string) => Promise<AgentControlResult>
 }
 
@@ -18,7 +18,7 @@ const REASON = "from the web app's agent actions"
 
 const refused = (detail: string): AgentControlResult => ({ _tag: 'Refused', detail })
 
-/** The seat's live runtime, as st holds it now: its incarnation and terminal, or why there is none. */
+/** The seat's live runtime, as Fractal holds it now: its incarnation and terminal, or why there is none. */
 const liveRuntime = async (client: FractalClient, agent: string): Promise<{ readonly incarnation?: string; readonly terminal?: string } | string> => {
   const row = (await client.agentsGet(agent)).value as { kind?: unknown; runtime_ids?: readonly string[] }
   const runtimeId = row.kind === 'agent' ? row.runtime_ids?.[0] : undefined
@@ -31,8 +31,8 @@ const explained = (error: unknown): AgentControlResult =>
   refused(error instanceof ClientError ? `${plainError(error)}.` : 'Fractal did not confirm it; check the agent before trying again. It was not sent again.')
 
 /**
- * One action per step, each fenced to the seat's declaration as st selects it at that moment. A
- * restart is a stop and then a start, as stui does it; nothing is retried.
+ * One action per step, each fenced to the seat's declaration as Fractal selects it at that moment. A
+ * restart is a stop and then a start, as the Fractal terminal UI does it; nothing is retried.
  */
 export const gatewayAgentControls = (client: FractalClient): AgentControlPort => ({
   control: async (agent, control) => {
