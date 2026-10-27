@@ -26,11 +26,10 @@ import { TranscriptSearch } from './TranscriptSearch'
 import { useClockLabel } from '../../time/clock'
 import { NarrowLayoutContext } from './NarrowLayout'
 
-export const transcriptInitialTailCount = 2
-/** Story-declared window tied to the same constants as the real initial mount. */
-export const transcriptMountedWindow: Extract<ScenarioMountedWindow, { readonly _tag: 'tail' }> = {
-  _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
-}
+/** Source rows (a prompt counts as one) the first commit mounts; the latest prompt and a reasoning run crossing the bound mount whole besides. */
+export const transcriptInitialSourceRowCount = 6
+/** Story-declared window tied to the same constant as the real initial mount. */
+export const transcriptMountedWindow: Extract<ScenarioMountedWindow, { readonly _tag: 'sourceRows' }> = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount }
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -256,10 +255,11 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
+/** The work log lists tools separately, so all nonblank thoughts of one turn share a disclosure. */
+const workLogReasoning = (items: readonly ConversationItem[]) => items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
 const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
-  // The work log lists tool calls separately, so every thought of the turn is visually adjacent: one disclosure.
-  const reasoning = turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
+  const reasoning = workLogReasoning(turn.items)
   const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning')
   // A shown block continues a prose run when it and the block before it are the same sender's adopted prose.
   const continues = shown.map((item, index) => [item, shown[index - 1]].every(entry => entry?._tag === 'Text' && entry.role === 'assistant' && stranded?.has(entry.id) !== true) && turn.senderCaptions?.[item.id] === turn.senderCaptions?.[shown[index - 1]!.id])
@@ -269,7 +269,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
     const end = continues.indexOf(false, index + 1)
     return shown.slice(index, end === -1 ? undefined : end).map(entry => entry._tag === 'Text' ? entry.text : '').join('\n\n')
   })
-  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
+  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} {...stylex.props(styles.turn)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
     {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
     {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
@@ -294,18 +294,61 @@ function RunElapsed({ startedAt, now }: { readonly startedAt?: string; readonly 
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
+/** One conversation item in source order; a turn's prompt is its own row. */
+interface SourceRow { readonly item: ConversationItem; readonly turnId: string; readonly prompt: boolean }
 /**
- * The window of rendered turns, kept outside the scroll body so its warning and recovery stay visible at the tail.
- * Browser Find only sees rendered turns, so the one-line summary leads with that limit (truncation only ever cuts the
- * count) while a polite status carries the full range. Both actions stay mounted and focusable while turns are
- * materializing (repeat presses are ignored). Once every turn is rendered the actions leave but the line keeps its
+ * The mounted source rows for a viewport start: the suffix from `startIndex`, plus the earlier reasoning IDs of a
+ * crossing work-log disclosure and the latest prompt when omitted. Interleaved tools and prose outside the suffix
+ * stay deferred; completing a disclosure must not mount an unbounded work log.
+ */
+function sourceWindow(rows: readonly SourceRow[], startIndex: number): { readonly start: number; readonly shown: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[] } {
+  const start = Math.min(startIndex, rows.length)
+  let pinnedReasoning: readonly string[] = []
+  if (start > 0 && start < rows.length) {
+    const turnId = rows[start]!.turnId
+    let turnStart = start
+    let turnEnd = start + 1
+    while (turnStart > 0 && rows[turnStart - 1]!.turnId === turnId) turnStart--
+    while (turnEnd < rows.length && rows[turnEnd]!.turnId === turnId) turnEnd++
+    const earlier = workLogReasoning(rows.slice(turnStart, start).map(row => row.item))
+    const later = workLogReasoning(rows.slice(start, turnEnd).map(row => row.item))
+    if (later.length > 0) pinnedReasoning = earlier.map(item => item.id)
+  }
+  let latestPrompt = rows.length - 1
+  while (latestPrompt >= 0 && !rows[latestPrompt]!.prompt) latestPrompt--
+  const pinnedPrompt = latestPrompt >= 0 && latestPrompt < start ? rows[latestPrompt]!.item.id : undefined
+  return { start, shown: rows.length - start + pinnedReasoning.length + (pinnedPrompt === undefined ? 0 : 1), pinnedPrompt, pinnedReasoning }
+}
+/** Turns trimmed to the mounted source rows, with work-log calls trimmed alike so hidden tool rows never mount. Whole turns keep their identity, and every turn keeps its key, so revealing history only adds rows. */
+function MountedTurns({ turns, rowIds, start, pinnedPrompt, pinnedReasoning, stranded, now, tailRef, onOpenTool, onRetryRun, landmarkContext }: { readonly turns: readonly TranscriptTurn[]; readonly rowIds: readonly string[]; readonly start: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[]; readonly stranded: ReadonlySet<string>; readonly now?: number; readonly tailRef?: React.Ref<HTMLElement>; readonly onOpenTool: TranscriptProps['onOpenTool']; readonly onRetryRun?: () => void; readonly landmarkContext?: string }) {
+  const mounted = React.useMemo(() => {
+    const ids = new Set(rowIds.slice(start))
+    if (pinnedPrompt !== undefined) ids.add(pinnedPrompt)
+    for (const id of pinnedReasoning) ids.add(id)
+    return turns.flatMap(turn => {
+      const prompt = turn.prompt !== undefined && ids.has(turn.prompt.id) ? turn.prompt : undefined
+      const items = turn.items.filter(item => ids.has(item.id))
+      if (prompt === turn.prompt && items.length === turn.items.length) return [turn]
+      if (prompt === undefined && items.length === 0) return []
+      const itemIds = new Set(items.map(item => item.id))
+      return [{ ...turn, prompt, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
+    })
+  }, [turns, rowIds, start, pinnedPrompt, pinnedReasoning])
+  const last = turns[turns.length - 1]
+  return mounted.map(turn => <PreparedTurn key={turn.id} turn={turn} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
+}
+/**
+ * The window of rendered source rows, kept outside the scroll body so its warning and recovery stay visible at the tail.
+ * Browser Find only sees rendered rows, so the one-line summary leads with that limit (truncation only ever cuts the
+ * count) while a polite status carries the full range. Both actions stay mounted and focusable while rows are
+ * materializing (repeat presses are ignored). Once every row is rendered the actions leave but the line keeps its
  * height, so the viewport never resizes mid-prepend; focus that was on an action moves to the conversation history.
  */
-function HistoryRange({ total, startIndex, materializing, earlierId, firstId, revealRow, scrollId }: { readonly total: number; readonly startIndex: number; readonly materializing: boolean; readonly earlierId: string; readonly firstId: string; readonly revealRow: (id: string, preservePosition?: boolean) => void; readonly scrollId: string }) {
+function HistoryRange({ total, start, shown, materializing, earlierId, firstId, revealRow, scrollId }: { readonly total: number; readonly start: number; readonly shown: number; readonly materializing: boolean; readonly earlierId: string; readonly firstId: string; readonly revealRow: (id: string, preservePosition?: boolean) => void; readonly scrollId: string }) {
   const [request, setRequest] = React.useState<'earlier' | 'all'>()
   const focusWithin = React.useRef(false)
   const statusId = React.useId()
-  const complete = startIndex === 0 && !materializing
+  const complete = start === 0 && !materializing
   const showingAll = materializing && request !== 'earlier'
   if (!materializing && request !== undefined) setRequest(undefined)
   React.useLayoutEffect(() => {
@@ -313,12 +356,12 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
     focusWithin.current = false
     document.getElementById(scrollId)?.focus({ preventScroll: true })
   }, [complete, scrollId])
-  const shown = total - startIndex
+  const hidden = total - shown
   const status = complete
-    ? `All ${total} turns shown. Browser Find searches all loaded messages.`
+    ? `All ${total} entries shown. Browser Find searches all loaded messages.`
     : showingAll
-      ? `Showing all ${total} turns… Browser Find may miss earlier turns until this finishes.`
-      : `Latest ${shown} of ${total} turns shown. Browser Find misses ${startIndex} earlier ${startIndex === 1 ? 'turn' : 'turns'} until you choose Show all messages.`
+      ? `Showing all ${total} entries… Browser Find may miss earlier entries until this finishes.`
+      : `Latest ${shown} of ${total} entries shown. Browser Find misses ${hidden} earlier ${hidden === 1 ? 'entry' : 'entries'} until you choose Show all messages.`
   const reveal = (next: 'earlier' | 'all') => {
     if (materializing) return
     setRequest(next)
@@ -326,7 +369,7 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
   }
   return <div role="group" aria-label="Conversation history range" aria-describedby={statusId} aria-busy={materializing} data-testid="transcript-history-controls" data-state={complete ? 'complete' : showingAll ? 'materializing' : 'deferred'} onFocus={() => { focusWithin.current = true }} onBlur={event => { focusWithin.current = event.currentTarget.contains(event.relatedTarget) }} {...stylex.props(styles.historyBar)}>
     <span id={statusId} role="status" aria-live="polite" data-testid="transcript-history-range" {...stylex.props(styles.visuallyHidden)}>{status}</span>
-    <span aria-hidden="true" title={status} data-testid="transcript-history-summary" {...stylex.props(styles.historyNote, styles.historySummary)}><span {...stylex.props(styles.historyLead)}>{complete ? 'Find: all loaded' : showingAll ? 'Find: preparing' : 'Find: shown only'}</span><span {...stylex.props(styles.historyCount)}> · {complete ? `All ${total} turns shown` : `${shown}/${total} turns`}</span></span>
+    <span aria-hidden="true" title={status} data-testid="transcript-history-summary" {...stylex.props(styles.historyNote, styles.historySummary)}><span {...stylex.props(styles.historyLead)}>{complete ? 'Find: all loaded' : showingAll ? 'Find: preparing' : 'Find: shown only'}</span><span {...stylex.props(styles.historyCount)}> · {complete ? `All ${total} entries shown` : `${shown}/${total} entries`}</span></span>
     {!complete && <><Button aria-label="Show earlier messages" data-testid="transcript-history-earlier" onPress={() => reveal('earlier')} {...stylex.props(styles.historyLoad)}>Earlier</Button>
       <Button aria-label="Show all messages" data-testid="transcript-history-all" onPress={() => reveal('all')} {...stylex.props(styles.historyLoad)}>Show all</Button></>}
   </div>
@@ -386,7 +429,10 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   }, [strandedIds])
   const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage, renderInlineReference }), [resolveImage, onLoadImage, renderInlineReference])
   // New rows or changed content are news; send state, tool status and timing are metadata.
-  const rows = React.useMemo(() => committed.map(turn => ({ id: turn.id, version: (turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]).map(contentVersion).join(' ') })), [committed])
+  const sourceRows = React.useMemo(() => committed.flatMap(turn => [...(turn.prompt === undefined ? [] : [{ item: turn.prompt, turnId: turn.id, prompt: true }]), ...turn.items.map(item => ({ item, turnId: turn.id, prompt: false }))]), [committed])
+  // One viewport row per source row, so the initial bound and history reveal count conversation items rather than turns.
+  const rows = React.useMemo(() => sourceRows.map(row => ({ id: row.item.id, version: contentVersion(row.item) })), [sourceRows])
+  const rowIds = React.useMemo(() => rows.map(row => row.id), [rows])
   const running = [...committed].reverse().find(turn => turn.work.running)
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   // Error copy is time-independent; time-bearing sync copy subscribes inside SyncLine.
@@ -407,13 +453,21 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   return <TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={transcriptInitialTailCount} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
-      renderHeader={(startIndex, revealRow, materializing) => committed.length > transcriptInitialTailCount && <HistoryRange total={committed.length} startIndex={startIndex} materializing={materializing} earlierId={committed[Math.max(0, startIndex - historyBatchSize)]!.id} firstId={committed[0]!.id} revealRow={revealRow} scrollId={scrollId} />}>
-      {(startIndex, revealRow) => <>
-      {history._tag === 'HasOlder' && startIndex === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
-      {committed.length === 0 ? empty : <TranscriptSearch turns={committed} startIndex={startIndex} revealRow={revealRow} {...stylex.props(styles.timeline)}>
-        {committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} tailRef={turn === committed[committed.length - 1] ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}
-      </TranscriptSearch>}</>}
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+      renderHeader={(startIndex, revealRow, materializing) => {
+        if (rows.length <= transcriptInitialSourceRowCount) return null
+        const bound = sourceWindow(sourceRows, startIndex)
+        return <HistoryRange total={rows.length} start={bound.start} shown={bound.shown} materializing={materializing} earlierId={rowIds[Math.max(0, bound.start - historyBatchSize)]!} firstId={rowIds[0]!} revealRow={revealRow} scrollId={scrollId} />
+      }}>
+      {(startIndex, revealRow) => {
+        const bound = sourceWindow(sourceRows, startIndex)
+        return <>
+          {history._tag === 'HasOlder' && bound.start === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
+          {committed.length === 0 ? empty : <TranscriptSearch turns={committed} rowIds={rowIds} startIndex={bound.start} revealRow={revealRow} {...stylex.props(styles.timeline)}>
+            <MountedTurns turns={committed} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
+          </TranscriptSearch>}
+        </>
+      }}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider>
 }

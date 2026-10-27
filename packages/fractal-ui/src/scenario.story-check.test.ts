@@ -3,7 +3,7 @@
 import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
 import { loadWorld } from '@fractal/scenarios'
 import { useScenarioSlice } from '@fractal/scenarios/react'
-import { scenarioSections } from './scenario-transcript.story-harness'
+import { scenarioSections, type TranscriptSection } from './scenario-transcript.story-harness'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -20,8 +20,7 @@ import './scenario-fixture-graph.unit.test.ts'
 import { storyGlobs } from '../.storybook/stories.ts'
 import storybookConfig from '../.storybook/main.ts'
 
-import { transcriptInitialTailCount, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
-import { historyBatchSize } from './assistant-ui/EmbraceScrollViewport'
+import { transcriptInitialSourceRowCount, transcriptMountedWindow, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 
 // jsdom has no layout engine. This test observes domain reads, not resize geometry;
 // the real browser plays remain the proof for observer-driven layout behavior.
@@ -76,10 +75,8 @@ test('an error boundary cannot hide an exempt story domain read', () => {
   }, {})).toThrow(/exempt|forbidden/)
 })
 
-test('the story mounted window uses the real Transcript and viewport mount constants', () => {
-  expect(transcriptMountedWindow).toEqual({
-    _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
-  })
+test('the story mounted window uses the real Transcript initial source-row bound', () => {
+  expect(transcriptMountedWindow).toEqual({ _tag: 'sourceRows', rows: transcriptInitialSourceRowCount })
 })
 test('Markdown AllStates consumes the declared conversation slice', () => {
   const result = scenarioStoryCheck(AllStates, meta)
@@ -464,13 +461,17 @@ test('scenario transcript preserves tool operations and failed tool lifecycle', 
   expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
 })
 
-test('phone whole-thread projection preserves turns while leaving mounting to Transcript', () => {
+test('phone whole-thread projection preserves source rows while leaving mounting to Transcript', () => {
   const slice = loadWorld('huge').slices.conversation
+  const sourceIds = (sections: readonly TranscriptSection[]) => sections.flatMap(section => section.turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]))
+  const sourceRowCount = (turns: readonly TranscriptTurn[]) => turns.reduce((rows, turn) => rows + turn.items.length + (turn.prompt === undefined ? 0 : 1), 0)
   const bounded = scenarioSections(slice).sections
   const whole = scenarioSections(slice, 'whole-thread').sections
   expect(whole).toHaveLength(slice.state.threads.length)
-  expect(whole.flatMap(section => section.turns.map(turn => turn.id))).toEqual(bounded.flatMap(section => section.turns.map(turn => turn.id)))
-  expect(whole.some(section => section.turns.length > transcriptInitialTailCount + historyBatchSize)).toBe(true)
+  expect(sourceIds(whole)).toEqual(sourceIds(bounded))
+  // Bounded sections mount whole; whole threads exceed the initial bound, so Transcript defers their history.
+  expect(bounded.every(section => sourceRowCount(section.turns) <= transcriptInitialSourceRowCount)).toBe(true)
+  expect(whole.some(section => sourceRowCount(section.turns) > transcriptInitialSourceRowCount)).toBe(true)
 })
 
 test('connection geometry header and bounded history belong to the same thread', () => {

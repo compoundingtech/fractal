@@ -1187,30 +1187,31 @@ Stories whose consumer initially mounts only part of a conversation may declare
 `parameters.scenario.window`, typed by `ScenarioStoryParameter` from `/storybook/check`:
 
 ```ts
-// Transcript uses initialTailCount={2}; EmbraceScrollViewport historyBatchSize=4.
-window: { _tag: 'tail', turns: 2, historyBatch: 4 }
+// Transcript mounts transcriptInitialSourceRowCount=6 source rows, plus the latest prompt.
+window: { _tag: 'sourceRows', rows: 6 }
 ```
 
 The tagged union also accepts `{ _tag: 'all' }`, equivalent to omitting the window,
-including for empty or loading baselines; vacuity validation applies only to tail windows.
-The check derives each thread's turns from folded wire entries: user text content opens a
-turn; an assistant-content/tool-call prefix is one turn. It selects the final N turns per
-thread, not the final N entries; threads with at most N + historyBatch turns mount whole,
-matching EmbraceScrollViewport's short-conversation rule. The check requires their markers and counts.
+including for empty or loading baselines; vacuity validation applies only to source-row windows.
+The check derives each thread's source rows from folded wire entries: user or assistant text
+content and tool calls, one row each. It selects the final N source rows per thread plus the
+thread's latest user prompt, without the rows between them; threads with at most N source rows
+mount whole. Scenario wire entries carry no reasoning, so Transcript's rule of mounting a
+reasoning run that crosses the bound whole never widens the window here. The check requires their markers and counts.
 Other slices retain their full marker contract. World-switch contrast selection uses the
 same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
 The story must state the consumer's real mount rule, with a comment naming that rule; this
 is not permission to choose arbitrary convenient data or split the transcript.
 Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
-Transcript's initial tail count and EmbraceScrollViewport's history batch size. Stories
-can use this shared value instead of copying the counts; a consumer-side test guards it.
+Transcript's initial source-row count. Stories can use this shared value instead of copying
+the count; a consumer-side test guards it.
 
-`MountedWindow` failures reject invalid tail counts/history batches, a baseline tail window
+`MountedWindow` failures reject invalid row counts, a baseline source-row window
 selecting zero entries, or one excluding every marker from a marker-bearing conversation.
 Genuinely empty/loading contrast sides still participate as contentless contrasts.
 Without a window, the all-source marker contract is unchanged. The mounted check does not
 prove history reveal or a reply deliberately held back by an interaction harness: browser
-plays must separately prove both, and a tail window cannot express an arbitrary held-back
+plays must separately prove both, and a source-row window cannot express an arbitrary held-back
 reply within a mounted turn.
 
 The kit's own tests include a negative case: a story that declares slices but renders fixed text

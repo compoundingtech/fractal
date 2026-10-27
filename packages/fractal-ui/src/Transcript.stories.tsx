@@ -146,6 +146,22 @@ const adjacentReasoning = Array.from({ length: 11 }, (_, index): ConversationIte
 function reasoningData(id: string, items: readonly ConversationItem[], running = false): TranscriptStoryData {
   return { sync: { _tag: 'Live', since: now }, turns: [{ id, items, work: workLogTurnFromItems(items, { kindFor: () => 'read', running, failed: false, interrupted: false, completeHistory: true }) }] }
 }
+// One turn longer than the initial source bound: the newest six rows cut a reasoning run, and the tall answers keep
+// the lane filled so no viewport backfill runs before the play's explicit reveal.
+const boundaryRun = Array.from({ length: 4 }, (_, index): ConversationItem => ({ _tag: 'Reasoning', id: `boundary/run/${index}`, text: `Boundary thought ${index + 1}.`, streaming: false, at }))
+const boundaryAnswer = (id: string, label: string): ConversationItem => ({ _tag: 'Text', id, role: 'assistant', text: Array.from({ length: 6 }, (_, paragraph) => `${label}, paragraph ${paragraph + 1}: the projection keeps visible rows grouped and preserves the reader's selection while older entries stay deferred.`).join('\n\n'), attachments: [], streaming: false, at })
+const boundaryEarlier = Array.from({ length: 30 }, (_, index) => boundaryAnswer(`boundary/earlier/${index}`, `Earlier answer ${index + 1}`))
+const boundaryLatest = Array.from({ length: 3 }, (_, index) => boundaryAnswer(`boundary/latest/${index}`, `Latest answer ${index + 1}`))
+const boundaryPrompt: TextItem & { role: 'user' } = { _tag: 'Text', id: 'boundary/prompt', role: 'user', text: 'Walk through every retained row.', attachments: [], streaming: false, at }
+const boundaryItems = [...boundaryEarlier, ...boundaryRun, ...boundaryLatest]
+const boundaryData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'boundary-turn', prompt: boundaryPrompt, items: boundaryItems, work: workLogTurnFromItems(boundaryItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) }] }
+const mountedSourceIds = (turn: HTMLElement) => turn.dataset.sourceIds?.split(' ').filter(id => id !== '')
+/** Explicitly reveal every deferred row; a short lane may already have backfilled them all. */
+async function revealAll(region: HTMLElement) {
+  const all = within(region).queryByRole('button', { name: 'Show all messages' })
+  if (all !== null) await userEvent.click(all)
+  await waitFor(() => expect(within(region).getByTestId('transcript-history-controls')).toHaveAttribute('data-state', 'complete'))
+}
 function ReasoningExamples({ scheme = 'dark' }: { scheme?: Scheme }) {
   const [grown, setGrown] = React.useState(false)
   const tool = cases.settled.turns[0]!.items[0]!
@@ -158,6 +174,7 @@ function ReasoningExamples({ scheme = 'dark' }: { scheme?: Scheme }) {
       ['Empty reasoning', reasoningData('empty-reasoning', [{ _tag: 'Reasoning', id: 'empty/thinking', text: '  ', streaming: false, at }])],
       ['Separate turns control', separate],
       ['Streaming reasoning', reasoningData('growing', streaming, true)],
+      ['Long turn boundary', boundaryData],
   ]
   return <section {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     {examples.map(([label, data]) => <section key={label} aria-label={label} {...stylex.props(styles.frame)}><RuntimeTranscript data={data} onRetry={() => {}} /></section>)}
@@ -171,13 +188,35 @@ export const AdjacentReasoning: Story = {
     const canvas = within(canvasElement)
     // RuntimeTranscript has no onOpenTool: the work summary is static, not a "Worked" button.
     for (const label of ['Adjacent reasoning', 'Tools between reasoning']) {
-      const region = within(canvas.getByRole('region', { name: label }))
+      const element = canvas.getByRole('region', { name: label })
+      const region = within(element)
+      // A tool call ends a reasoning run: the thoughts before it start outside the initial source bound.
+      if (label === 'Tools between reasoning') await revealAll(element)
       const thinking = await region.findByRole('button', { name: 'Thinking' })
       await expect(region.getAllByRole('button', { name: 'Thinking' })).toHaveLength(1)
       await expect(thinking).toHaveAttribute('aria-expanded', 'false')
       await userEvent.click(thinking)
       for (let index = 0; index < 11; index++) await expect(region.getByText(`Check ${index + 1}: keep the observed reasoning in order.`)).toBeVisible()
     }
+    // The initial bound keeps the newest prompt and the whole cut reasoning run; Show all restores every row in place.
+    const boundaryElement = canvas.getByRole('region', { name: 'Long turn boundary' })
+    const boundary = within(boundaryElement)
+    const turn = await boundary.findByTestId('transcript-turn')
+    const prompt = boundary.getByTestId('user-message')
+    await expect(prompt).toHaveAttribute('data-item-id', boundaryPrompt.id)
+    await expect(mountedSourceIds(turn)).toEqual([boundaryPrompt.id, ...boundaryRun.map(item => item.id), ...boundaryLatest.map(item => item.id)])
+    await expect(boundaryElement.querySelector('[data-item-id="boundary/earlier/29"]')).toBeNull()
+    const boundaryThinking = boundary.getByRole('button', { name: 'Thinking' })
+    await userEvent.click(boundaryThinking)
+    for (let index = 0; index < boundaryRun.length; index++) await expect(boundary.getByText(`Boundary thought ${index + 1}.`)).toBeVisible()
+    await userEvent.click(boundary.getByRole('button', { name: 'Show all messages' }))
+    await waitFor(() => expect(boundary.getByTestId('transcript-history-controls')).toHaveAttribute('data-state', 'complete'))
+    await expect(mountedSourceIds(turn)).toEqual([boundaryPrompt.id, ...boundaryItems.map(item => item.id)])
+    await expect(boundary.getByTestId('transcript-turn')).toBe(turn)
+    await expect(boundary.getByTestId('user-message')).toBe(prompt)
+    await expect(boundary.getByRole('button', { name: 'Thinking' })).toBe(boundaryThinking)
+    await expect(boundaryThinking).toHaveAttribute('aria-expanded', 'true')
+    await expect(boundaryElement.querySelector('[data-item-id="boundary/earlier/0"]')).toHaveTextContent('Earlier answer 1, paragraph 1')
     await expect(within(canvas.getByRole('region', { name: 'Empty reasoning' })).queryByRole('button', { name: 'Thinking' })).toBeNull()
     // Negative control: grouping is per work log, never across distinct turns.
     const separate = within(canvas.getByRole('region', { name: 'Separate turns control' }))

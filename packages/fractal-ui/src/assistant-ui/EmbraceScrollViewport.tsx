@@ -355,6 +355,8 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly scrollToBottomKey?: string
   /** Mount the tail first, then fill one extra viewport and prepend on upward navigation. */
   readonly initialTailCount?: number
+  /** Deferred rows below which a conversation mounts whole; defaults to one history batch. A strict bound passes 0. */
+  readonly wholeMountSlack?: number
   /** Retained hidden panes pause progressive materialization until they become active again. */
   readonly active?: boolean
   /** Persistent controls share the materialization state without becoming part of the scroll content. */
@@ -364,13 +366,13 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
 
 export const historyBatchSize = 4
 
-export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
+export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, wholeMountSlack = historyBatchSize, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
   const store = React.useContext(ViewportStoreContext)
   const saved = stateKey === undefined ? undefined : store?.get(stateKey)
   const rememberedFirstId = saved?.following === false ? saved.firstRenderedId : undefined
   const [controller] = React.useState(() => new ViewportController(stateKey === undefined ? undefined : store?.get(stateKey)))
-  // Do not defer a short conversation that fits within the tail plus one history batch.
-  const initialStart = initialTailCount === undefined || items.length <= initialTailCount + historyBatchSize ? 0 : items.length - initialTailCount
+  // Do not defer a short conversation that fits within the tail plus the whole-mount slack.
+  const initialStart = initialTailCount === undefined || items.length <= initialTailCount + wholeMountSlack ? 0 : items.length - initialTailCount
   const [window, setWindow] = React.useState(() => ({ key: stateKey, firstId: rememberedFirstId ?? items[initialStart]?.id }))
   const [revealTarget, setRevealTarget] = React.useState<{ readonly key: string | undefined; readonly id: string }>()
   const savedFirstId = window.key === stateKey ? window.firstId : rememberedFirstId
