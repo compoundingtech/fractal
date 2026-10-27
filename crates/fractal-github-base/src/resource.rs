@@ -1267,7 +1267,7 @@ mod tests {
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
             for response in [
-                "HTTP/1.1 301 Moved Permanently\r\nLocation: /repos/redirect-fixture/repo/pulls\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                "HTTP/1.1 301 Moved Permanently\r\nLocation: /repositories/123\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}".to_owned(),
             ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
@@ -1301,7 +1301,7 @@ mod tests {
             String::from_utf8_lossy(&child.stdout), String::from_utf8_lossy(&child.stderr));
         let requests = server.await.unwrap();
         assert!(requests[0].starts_with("GET /repos/redirect-fixture/repo "));
-        assert!(requests[1].starts_with("GET /repos/redirect-fixture/repo/pulls "));
+        assert!(requests[1].starts_with("GET /repositories/123 "));
         assert!(requests.iter().all(|request| request.to_ascii_lowercase()
             .contains("authorization: bearer fixture-installation\r\n")));
         let rows: Value = serde_json::from_slice(
@@ -1328,6 +1328,53 @@ mod tests {
             &auth, Duration::ZERO,
         )).await.unwrap();
         assert_eq!(payload.value["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn redirected_app_fallback_never_caches_pat_under_original_principal() {
+        use crate::github_http::app_read::tests::install;
+        let root = tempfile::tempdir().unwrap();
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(60);
+        install(root.path(), "redirect-a", "gh-ci", "fixture-a", expires);
+        install(root.path(), "redirect-b", "gh-ci", "fixture-b", expires);
+        let auth = crate::github_http::app_read::select(
+            Some(root.path()), "redirect-a", "gh-ci", &GithubAuth::test("fixture-pat"),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/repos/redirect-a/repo", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in [
+                "HTTP/1.1 200 OK\r\nETag: \"app-a\"\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                "HTTP/1.1 302 Found\r\nLocation: /repos/redirect-b/repo\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nETag: \"pat-b\"\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    request.extend_from_slice(&chunk[..size]);
+                    if size == 0 || request.windows(4).any(|bytes| bytes == b"\r\n\r\n") { break; }
+                }
+                requests.push(String::from_utf8(request).unwrap().to_ascii_lowercase());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let client = github_client();
+        github_json(&client, url.clone(), &auth, Duration::ZERO).await.unwrap();
+        github_json(&client, url.clone(), &auth, Duration::ZERO).await.unwrap();
+        let requests = server.await.unwrap();
+        assert!(requests[1].contains("if-none-match: \"app-a\""));
+        assert!(requests[2..].iter().all(|request| !request.contains("if-none-match:")));
+        assert!(requests[2..4].iter().all(|request| request.contains("authorization: bearer fixture-b")));
+        assert!(requests[4].contains("authorization: bearer fixture-pat"));
+        assert!(auth.used_fallback());
+        let entry = github_cache().lock().await.get(&format!("{} {url}", auth.cache_principal())).unwrap().clone();
+        assert!(entry.lock().await.is_none(), "PAT response must not populate A's installation cache");
     }
 
     #[tokio::test]

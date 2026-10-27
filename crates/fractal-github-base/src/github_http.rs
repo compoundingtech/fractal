@@ -431,10 +431,26 @@ impl GithubAuth {
 
 pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
     let Ok(url) = reqwest::Url::parse(url) else { return auth.pat().clone(); };
-    let Some((owner, app, statuses)) = app_read::route(&url) else { return auth.pat().clone(); };
+    let Some((owner, app, statuses)) = app_read::route(&url) else {
+        // GitHub repository rename redirects can replace the owner/name path with
+        // its numeric repository identity. That does not change read authority.
+        let mut segments = url.path_segments().into_iter().flatten();
+        if segments.next() == Some("repositories")
+            && segments.next().is_some_and(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit())) {
+            return auth.clone();
+        }
+        if let GithubAuth::Read { source, .. } = auth {
+            app_read::fallback(&source.owner, &source.app, "unroutable");
+            source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        return auth.pat().clone();
+    };
     if statuses {
         if matches!(auth, GithubAuth::Read { .. }) || SOURCE.get().is_some_and(|config| config.github.app_token_root.is_some()) {
             app_read::fallback(owner, app, "statuses");
+        }
+        if let GithubAuth::Read { source, .. } = auth {
+            source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         return auth.pat().clone();
     }
@@ -451,10 +467,10 @@ pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> R
         request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD) {
         return send(request, auth).await;
     }
-    send_selected_read(request, auth).await
+    send_selected_read(request, &mut auth.clone()).await
 }
 
-async fn send_selected_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+async fn send_selected_read(request: reqwest::RequestBuilder, auth: &mut GithubAuth) -> Result<reqwest::Response> {
     let read = request.try_clone().and_then(|request| request.build().ok()).is_some_and(|request| {
         request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD ||
             (request.method() == reqwest::Method::POST && request.url().path().ends_with("/graphql") &&
@@ -465,7 +481,14 @@ async fn send_selected_read(request: reqwest::RequestBuilder, auth: &GithubAuth)
     });
     if !read { return send_once(request, auth.pat()).await; }
     match auth {
-        GithubAuth::Read { source, pat } => app_read::send(request, source, pat).await,
+        GithubAuth::Read { source, pat } => {
+            let (response, effective) = app_read::send(request, source, pat).await?;
+            match effective {
+                Some(effective) => *source = effective,
+                None => *auth = pat.as_ref().clone(),
+            }
+            Ok(response)
+        }
         _ => send_once(request, auth).await,
     }
 }
@@ -483,10 +506,29 @@ pub async fn send(
     }
     let mut template = request;
     let mut redirects = 0;
+    let mut effective = auth.clone();
+    let mut cache_ineligible = auth.used_fallback();
     loop {
-        let selected = read_auth_for_url(template.url().as_str(), auth);
+        let mut selected = read_auth_for_url(template.url().as_str(), &effective);
+        if selected.cache_principal() != effective.cache_principal() {
+            template.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+            cache_ineligible = true;
+        }
+        let fallback = match &selected {
+            GithubAuth::Read { source, .. } => Some(source.used_fallback.clone()),
+            _ => None,
+        };
         let request = template.try_clone().context("GitHub read body cannot be replayed for a redirect")?;
-        let response = send_selected_read(reqwest::RequestBuilder::from_parts(client.clone(), request), &selected).await?;
+        let response = send_selected_read(reqwest::RequestBuilder::from_parts(client.clone(), request), &mut selected).await?;
+        cache_ineligible |= fallback.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+            || selected.cache_principal() != effective.cache_principal();
+        effective = selected;
+        if cache_ineligible {
+            template.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
+            if let GithubAuth::Read { source, .. } = auth {
+                source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
         }

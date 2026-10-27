@@ -96,12 +96,12 @@ pub fn route(url: &reqwest::Url) -> Option<(&str, &'static str, bool)> {
     Some((owner, app, statuses))
 }
 
-pub async fn send(request: reqwest::RequestBuilder, source: &ReadSource, pat: &GithubAuth) -> Result<reqwest::Response> {
+pub async fn send(request: reqwest::RequestBuilder, source: &ReadSource, pat: &GithubAuth) -> Result<(reqwest::Response, Option<ReadSource>)> {
     let retry = request.try_clone();
     let auth = GithubAuth::Local { token: source.token.clone(), cache: None };
     let response = crate::github_http::send_once(request, &auth).await?;
-    if response.status() != reqwest::StatusCode::UNAUTHORIZED { return Ok(response); }
-    let Some(retry) = retry else { return Ok(response); };
+    if response.status() != reqwest::StatusCode::UNAUTHORIZED { return Ok((response, Some(source.clone()))); }
+    let Some(retry) = retry else { return Ok((response, Some(source.clone()))); };
     // Reload once for atomic minter rotation. Never replay any mutation.
     let fallback_request = retry.try_clone();
     if let Ok(reloaded) = load(&source.root, &source.owner, &source.app) {
@@ -112,11 +112,11 @@ pub async fn send(request: reqwest::RequestBuilder, source: &ReadSource, pat: &G
             request.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
             reqwest::RequestBuilder::from_parts(client, request)
         } else { retry };
-        let auth = GithubAuth::Local { token: reloaded.token, cache: None };
+        let auth = GithubAuth::Local { token: reloaded.token.clone(), cache: None };
         let response = crate::github_http::send_once(retry, &auth).await?;
-        if response.status() != reqwest::StatusCode::UNAUTHORIZED { return Ok(response); }
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED { return Ok((response, Some(reloaded))); }
     }
-    let Some(request) = fallback_request else { return Ok(response); };
+    let Some(request) = fallback_request else { return Ok((response, Some(source.clone()))); };
     fallback(&source.owner, &source.app, "401");
     source.used_fallback.store(true, Ordering::Relaxed);
     // The app's ETag must not validate a potentially different PAT representation.
@@ -124,7 +124,7 @@ pub async fn send(request: reqwest::RequestBuilder, source: &ReadSource, pat: &G
     let mut request = request?;
     request.headers_mut().remove(reqwest::header::IF_NONE_MATCH);
     let builder = reqwest::RequestBuilder::from_parts(client, request);
-    crate::github_http::send_once(builder, pat).await
+    Ok((crate::github_http::send_once(builder, pat).await?, None))
 }
 
 #[cfg(test)]

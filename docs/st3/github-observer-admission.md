@@ -273,7 +273,8 @@ OTel COUNTER `st.github.auth.fallback`, labeled `github.owner`, `github.app` and
 `github.auth.fallback.reason`, and emits a warning. Reasons are `missing`
 (unconfigured/absent root or one missing file), `no-installation` (both owner
 files absent under an existing supplied root), `expired`, `unreadable`
-(including invalid sidecars/token format/permissions), and `401`. Operators must
+(including invalid sidecars/token format/permissions), `401`, and `unroutable`
+(an unrecognized redirected read endpoint that cannot retain app authority). Operators must
 use this explicit absence convention when publishing an owner's installation.
 These count source-selection fallback events, not GitHub charges; conditional
 cache hits can still encounter a missing source. Remove transition fallback only
@@ -294,6 +295,10 @@ REST cache keys include the stable installation principal, permissions and
 repository-selection scope, not token bytes; rotation preserves cache identity.
 PAT and app bodies/ETags are separate. A401 PAT fallback drops the app's ETag
 and does not populate the app cache with a PAT representation.
+Same-origin numeric `/repositories/ID` redirect hops retain the selected
+installation. Other hops carry their effective source forward, strip validators
+on principal changes, and aggregate fallback/cache-ineligibility across the
+whole chain; a final PAT body is never cached under an earlier installation.
 
 Local fixture tests cover supplied-root reads, endpoint selection, no-root PAT,
 rotation, expiry, invalid/unreadable/missing sources and reason counts,401 reload
