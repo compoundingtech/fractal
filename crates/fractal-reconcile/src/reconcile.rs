@@ -24979,6 +24979,11 @@ agent "import/omp/fixture" {{
             notify.clone(),
         );
         reconciler.ensure_file_observation(&subject).unwrap();
+        // Publishing the initial file.observed claim signals a graph change. Consume
+        // that known wake before asserting that subsequent reads stay quiet.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the initial observation must publish its graph-change wake");
         for _ in 0..3 {
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "ready");
             reconciler.ensure_file_observation(&subject).unwrap();
@@ -25012,7 +25017,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
-        reconciler.ensure_file_observation(&subject).unwrap();
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
         for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
             std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
             assert!(
@@ -25114,7 +25119,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
-        reconciler.ensure_file_observation(&subject).unwrap();
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
         std::fs::write(actual.join("unrelated"), "ignore").unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
             .await.is_err());
@@ -25155,7 +25160,7 @@ agent "import/omp/fixture" {{
             "node".into(),
             notify.clone(),
         );
-        reconciler.ensure_file_observation(&subject).unwrap();
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
         std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
         assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
