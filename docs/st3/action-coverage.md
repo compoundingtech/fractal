@@ -35,7 +35,7 @@ Run the per-PR checks through the repository's normal test and signing runner,
 from the committed head you intend to push:
 
 ```sh
-scripts/st-test --all --push origin
+scripts/fractal-test --all --push origin
 ```
 
 This runs the checks in a clean worktree with isolated test state and publishes
