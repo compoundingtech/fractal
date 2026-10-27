@@ -200,7 +200,7 @@ fn attach_redraw_cost() {
     let mut ui = Ui::new(demo::world());
     ui.glasses = glass::Glasses::open(None, None);
     ui.open_in_glass(Pane::Terminal(AGENT.into()), glass::Open::Tab);
-    let (stui, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (tui, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
     ui.terminal = Some(TerminalView {
         agent: AGENT.into(),
         name: "Probe".into(),
@@ -209,7 +209,7 @@ fn attach_redraw_cost() {
         cursor: None,
         stale: None,
         ended: None,
-        native: Some(pty::NativeTerminal::spawn(stui, "bench", "one".into(), 38, 120)),
+        native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120)),
     });
     if std::env::var_os("STUI_BENCH_ALERT").is_some() {
         ui.world.attention = Load::Ready(vec![ask(AGENT)]);

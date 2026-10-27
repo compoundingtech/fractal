@@ -673,7 +673,7 @@
       "command": "st alerts discuss",
       "description": "Chat about an item: send a message to the agent involved, titled after the item, with a reference to what it is about. This is what \"Chat about this\" does in Fractal TUI",
       "tests": [
-        "crates/fractal/tests/client_v0_cli.rs::attention_discuss_sends_the_message_stui_chat_about_this_sends"
+        "crates/fractal/tests/client_v0_cli.rs::attention_discuss_sends_the_message_tui_chat_about_this_sends"
       ],
       "verification": "real CLI over private Unix socket; the agent reads the message with the item named"
     },
@@ -2353,7 +2353,7 @@
       "tests": [
         "crates/fractal/src/terminal_ui_tests.rs::terminal_ui_arguments_and_help_match_the_documented_surface",
         "crates/fractal/tests/typed_keys.rs::shifted_keys_are_typed_as_a_keyboard_protocol_terminal_sends_them",
-        "crates/fractal/tests/client_only.rs::daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member"
+        "crates/fractal/tests/client_only.rs::daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member"
       ],
       "verification": "CLI parser and real st ui under a PTY, raw kitty keys and isolated paired-only members"
     },

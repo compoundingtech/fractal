@@ -118,7 +118,7 @@ pub fn card(
 }
 
 /// Whether this actor is st's own machinery, which a person reads as "st".
-fn is_st(id: &str) -> bool {
+fn is_fractal(id: &str) -> bool {
     id.starts_with("daemon/") || id == "agent/st3/reconciler"
 }
 
@@ -160,7 +160,7 @@ pub fn present(row: &Facts, fleet: &impl Fleet) -> Presentation {
     // The requester st names, else the agent behind it; a gate or fault nobody filed by hand
     // comes from its mission.
     let raised_by = match row.requester_id.as_deref().or(agent_id.as_deref()) {
-        Some(id) if is_st(id) => Some(Who {
+        Some(id) if is_fractal(id) => Some(Who {
             id: id.to_owned(),
             label: "st".into(),
         }),

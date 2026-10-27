@@ -944,7 +944,7 @@ fn assistant_read_contract_decodes_fixtures_and_rejects_malformed_shapes() {
 }
 
 #[test]
-fn queued_mission_deadlines_decode_for_stui() {
+fn queued_mission_deadlines_decode_for_tui() {
     let mut wire: serde_json::Value =
         serde_json::from_slice(&fixture("person-ask-mission.json")).unwrap();
     wire["run_details"][0]["after"] = serde_json::json!("mission-run/predecessor");

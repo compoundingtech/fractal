@@ -186,7 +186,7 @@ pub fn parse_intent_with_owner(
     let mut document: KdlDocument = source
         .parse::<KdlDocument>()
         .map_err(|error| St3Error::new("invalid-kdl", error.to_string()))?;
-    fractal_drivers::kdl_version::ensure_st3_version(&document)
+    fractal_drivers::kdl_version::ensure_kdl_schema_version(&document)
         .map_err(|error| St3Error::new("unsupported-kdl-version", error.to_string()))?;
     let mut deprecated_syntax = BTreeSet::new();
     canonicalize_terminal_declarations(&mut document, &mut deprecated_syntax);
@@ -1902,7 +1902,7 @@ fn driver_member(
         // native channel. `dev-channels #true` is retained only so declarations written before
         // the channel became intrinsic continue to parse; opting out would create an agent that
         // cannot receive graph messages, so false is rejected below.
-        provider.extend(["--channels".into(), fractal_drivers::claude_channel::ST3_CHANNEL.into()]);
+        provider.extend(["--channels".into(), fractal_drivers::claude_channel::FRACTAL_CHANNEL.into()]);
         // The channel wakes the real TUI, while Claude's own lifecycle hooks externalize the
         // resulting turn. Supplying the canonical registration as an additional native settings
         // source keeps arbitrary user workspaces untouched and gives every typed st seat the
@@ -5034,7 +5034,7 @@ version 2
         assert!(argv.iter().any(|arg| arg == "claude"));
         assert!(
             argv.windows(2)
-                .any(|pair| pair == ["--channels", fractal_drivers::claude_channel::ST3_CHANNEL])
+                .any(|pair| pair == ["--channels", fractal_drivers::claude_channel::FRACTAL_CHANNEL])
         );
         let settings = argv
             .windows(2)

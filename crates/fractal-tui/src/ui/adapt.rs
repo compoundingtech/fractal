@@ -1664,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_skill_model_folds_the_expansion_and_stui_draws_real_lines() {
+    fn claude_skill_model_folds_the_expansion_and_tui_draws_real_lines() {
         let fixture = include_str!("../../../../fixtures/clients/transcripts/claude-skill.json");
         let timeline: Vec<TimelineEntry> = serde_json::from_str(fixture).unwrap();
         let entries = conversation(&timeline, &BTreeMap::new());

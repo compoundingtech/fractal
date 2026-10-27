@@ -392,7 +392,7 @@ async fn prepare_harness(
             say!("Claude channel installation failed: {error}");
             return Ok(fallback_harness(&found));
         }
-        if fractal_drivers::claude_channel::st3_policy_available() {
+        if fractal_drivers::claude_channel::fractal_policy_available() {
             say!(
                 "Claude channel policy is present; seats use --channels plugin:st-channel@st."
             );

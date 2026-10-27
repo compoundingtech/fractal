@@ -11,9 +11,9 @@ async fn delivery(
     axum::extract::Path(subject): axum::extract::Path<String>,
 ) -> axum::Json<serde_json::Value> {
     let message = state.store.message(&subject).unwrap().unwrap();
-    let rendered = fractal_drivers::ding::st3_notification_with_metadata(
+    let rendered = fractal_drivers::ding::fractal_notification_with_metadata(
         &message.subject, &message.from, &message.to, message.title.as_deref(),
-        &message.content, &fractal_drivers::ding::st3_body_sha256(&message.content),
+        &message.content, &fractal_drivers::ding::fractal_body_sha256(&message.content),
         fractal_drivers::ding::NotificationMetadata {
             attachments: &[],
             assistant: message.assistant_metadata().as_ref(),

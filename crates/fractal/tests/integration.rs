@@ -107,7 +107,7 @@ mod revision_seats;
 mod seat_queue_perf;
 mod setup;
 mod startup_readiness;
-mod stui_slo_history;
+mod tui_slo_history;
 mod subagent_publisher;
 mod subagents_seat;
 mod terminal_attach;

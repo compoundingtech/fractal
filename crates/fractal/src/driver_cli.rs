@@ -93,7 +93,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             )
             .await;
         }
-        return fractal_drivers::claude_mcp::run_st3(&paths.driver_root, &paths.identity);
+        return fractal_drivers::claude_mcp::run_fractal(&paths.driver_root, &paths.identity);
     }
     if matches!(args.driver.as_str(), "pi-channel" | "omp-channel") {
         let identity = args

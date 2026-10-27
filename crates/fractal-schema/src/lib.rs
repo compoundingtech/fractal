@@ -465,19 +465,25 @@ impl Registry {
 
     pub fn markdown(&self) -> String {
         let mut output = format!(
-            "# st3 schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
+            "# Fractal schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
             self.name,
             STORAGE_VERSION,
             storage_digest()
         );
         output.push_str("## Subject families\n\n| Family | Pattern | Client writable | Description |\n|---|---|---:|---|\n");
         for spec in self.subjects.values() {
+            // Registry descriptions are hashed compatibility data; branding belongs in this view.
+            let description = match spec.description.as_str() {
+                "An st3 daemon." => "A Fractal daemon.",
+                "A Small Talk message." => "A Fractal message.",
+                description => description,
+            };
             output.push_str(&format!(
                 "| `{}` | `{}` | {} | {} |\n",
                 spec.family,
                 spec.pattern,
                 if spec.client_writable { "yes" } else { "no" },
-                markdown_cell(&spec.description)
+                markdown_cell(description)
             ));
         }
         output.push_str("\nCustom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE.NAME`.\n\n");
@@ -5021,6 +5027,19 @@ mod tests {
             include_str!("../../../docs/st3/schema.md"),
             registry().markdown()
         );
+    }
+
+    #[test]
+    fn markdown_brands_subjects_without_changing_registry_descriptions() {
+        let registry = registry();
+        assert_eq!(registry.subjects["daemon"].description, "An st3 daemon.");
+        assert_eq!(registry.subjects["message"].description, "A Small Talk message.");
+        let markdown = registry.markdown();
+        assert!(markdown.starts_with("# Fractal schema registry\n"));
+        assert!(markdown.contains("A Fractal daemon."));
+        assert!(markdown.contains("A Fractal message."));
+        assert!(!markdown.contains("An st3 daemon."));
+        assert!(!markdown.contains("A Small Talk message."));
     }
 
     #[test]

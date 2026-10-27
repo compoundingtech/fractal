@@ -199,7 +199,7 @@ fn sorted_keys(value: Value) -> Value {
 }
 
 #[test]
-fn the_shared_client_contract_matches_stui() {
+fn the_shared_client_contract_matches_tui() {
     let update = std::env::var_os("STUI_UPDATE_CONTRACT").is_some();
     for (name, value) in files() {
         let path = root().join(name);
