@@ -1605,7 +1605,8 @@ pub struct Agent {
     pub under: Vec<AgentRelationship>,
     #[serde(default)]
     pub delivery: Option<AgentDelivery>,
-    /// The subagents this seat's harness runs now, oldest first. An older daemon omits them.
+    /// The subagents this seat's harness runs now, oldest first. Omitted when the driver does not
+    /// report subagents, or by an older daemon.
     #[serde(default)]
     pub subagents: Vec<AgentSubagent>,
     /// The seat's latest suspend or resume and its phase. An older daemon omits it.

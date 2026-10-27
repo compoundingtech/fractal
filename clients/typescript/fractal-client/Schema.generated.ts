@@ -992,8 +992,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When this observed state began in this runtime incarnation. Same-state observations never reset it. */
   "since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When this observed state began in this runtime incarnation. Same-state observations never reset it." }),
   "state": AgentState,
-  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field. */
-  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field." }),
+  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Absence means not reported; an empty list means no running subagents. */
+  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Absence means not reported; an empty list means no running subagents." }),
   /** The seat's latest suspend or resume and its phase. An older daemon omits the field. */
   "suspension": Schema.OptionFromOptionalNullOr(AgentSuspension, NULL_NONE).annotate({ description: "The seat's latest suspend or resume and its phase. An older daemon omits the field." }),
   /** Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible. */

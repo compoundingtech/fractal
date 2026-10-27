@@ -3263,8 +3263,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     })
 }
 
-/// Each seat's running subagents: open, with a lease that runs past this read. A lease runs out
-/// without a claim, so this is read per request rather than cached with the agents.
+/// Each observing seat's running subagents: open, with a lease that runs past this read. A lease
+/// runs out without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -3297,6 +3297,12 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
             }));
     }
     for item in items {
+        if !item["driver"]
+            .as_str()
+            .is_some_and(fractal_drivers::subagents::driver_observes_subagents)
+        {
+            continue;
+        }
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
         let subagents = running.remove(id).unwrap_or_default();
         item["subagents"] = Value::Array(subagents);
