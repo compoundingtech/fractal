@@ -221,6 +221,8 @@ with tempfile.TemporaryDirectory() as directory:
     repo = tmp / 'repo'
     subprocess.run(['git', 'init', '-q', str(repo)], check=True, env=GENV)
     (repo / 'flake.lock').write_text('{}\n')
+    (repo / '.st').mkdir()
+    (repo / '.st/evidence-keys').write_text(f'fleet/ci namespaces="git" {pub[0]} {pub[1]}\n')
     git(repo, 'add', '.')
     git(repo, 'commit', '-q', '-m', 'one')
     # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — the wrapper must resolve a real accepted revision.
