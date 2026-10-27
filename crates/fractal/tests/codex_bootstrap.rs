@@ -283,7 +283,7 @@ async fn delivery_recovery_control(
     until(|| socket.exists(), "the isolated API did not start").await;
     let provider = root.join("provider");
     let stub = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/st3-boot-canaries/stub-codex.py");
+        .join("../../scripts/fractal-boot-canaries/stub-codex.py");
     std::fs::write(
         &provider,
         format!(

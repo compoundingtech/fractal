@@ -14,7 +14,7 @@
   "scripts/ci-nextest-targets",
   "scripts/ci-rustc-wrapper",
   "scripts/rust-test-keys",
-  "scripts/st3_test_process.py"
+  "scripts/fractal_test_process.py"
  ],
  "crates": {
   "agent-spec": {
@@ -165,7 +165,7 @@
     "plugins/claude/st-channel/.claude-plugin/plugin.json",
     "plugins/claude/st-channel/.mcp.json",
     "scripts/ci-test-paths.rs",
-    "scripts/st3-boot-canaries/codex-schemas"
+    "scripts/fractal-boot-canaries/codex-schemas"
    ]
   },
   "fractal-e2e": {

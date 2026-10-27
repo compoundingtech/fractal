@@ -2519,9 +2519,9 @@ fn supervise_leave_with_diagnostics() -> bool {
         let scripts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts");
         let root = tempfile::tempdir().unwrap();
         let output = Command::new("python3")
-            .arg(scripts.join("st3_test_process.py"))
+            .arg(scripts.join("fractal_test_process.py"))
             .args(["--owner", &std::process::id().to_string(), "--", "python3"])
-            .arg(scripts.join("st3_fleet_leave_diagnostics.py"))
+            .arg(scripts.join("fractal_fleet_leave_diagnostics.py"))
             .args(["--seconds", "600", "--root"])
             .arg(root.path())
             .arg("--")
@@ -5112,7 +5112,7 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
             format!(
                 "#!/bin/sh\nexec env STUB_HARNESS=omp '{}' '{}' \"$@\"\n",
                 node_program.display(),
-                repo.join("scripts/st3-boot-canaries/stub-pi-family.mjs")
+                repo.join("scripts/fractal-boot-canaries/stub-pi-family.mjs")
                     .display()
             ),
         )
