@@ -174,47 +174,26 @@
         {
           "at": "",
           "body": {
-            "kind": "mail",
-            "value": {
-              "body": "Can you check why the worker typecheck fails after the rename?",
-              "delivered": false,
-              "dictated": false,
-              "from": "Fractal",
-              "subject": "",
-              "to": ""
-            }
+            "kind": "user",
+            "value": "Can you check why the worker typecheck fails after the rename?"
           },
-          "id": "message/scenario-fleet-mid-refactor/captured-36"
+          "id": "timeline-entry/scenario-fleet-mid-refactor/captured-15#0"
         },
         {
           "at": "",
           "body": {
-            "kind": "mail",
-            "value": {
-              "body": "The worker passes only the user id. loadUser now needs the session too, so syncAvatars has to thread it through.",
-              "delivered": false,
-              "dictated": false,
-              "from": "Fractal",
-              "subject": "",
-              "to": ""
-            }
+            "kind": "assistant",
+            "value": "The worker passes only the user id. loadUser now needs the session too, so syncAvatars has to thread it through."
           },
-          "id": "message/scenario-fleet-mid-refactor/captured-37"
+          "id": "timeline-entry/scenario-fleet-mid-refactor/captured-39"
         },
         {
           "at": "",
           "body": {
-            "kind": "mail",
-            "value": {
-              "body": "Can you check why the worker typecheck fails after the rename?",
-              "delivered": false,
-              "dictated": false,
-              "from": "Fractal",
-              "subject": "",
-              "to": ""
-            }
+            "kind": "user",
+            "value": "Can you check why the worker typecheck fails after the rename?"
           },
-          "id": "message/scenario-fleet-mid-refactor/captured-40"
+          "id": "timeline-entry/scenario-fleet-mid-refactor/captured-42#0"
         },
         {
           "at": "",
@@ -236,47 +215,26 @@
         {
           "at": "",
           "body": {
-            "kind": "mail",
-            "value": {
-              "body": "Observed shell result for Can you check why the worker typecheck fails after the rename?.",
-              "delivered": false,
-              "dictated": false,
-              "from": "Fractal",
-              "subject": "",
-              "to": ""
-            }
+            "kind": "assistant",
+            "value": "Observed shell result for Can you check why the worker typecheck fails after the rename?."
           },
-          "id": "message/scenario-fleet-mid-refactor/captured-49"
+          "id": "timeline-entry/scenario-fleet-mid-refactor/captured-51"
         },
         {
           "at": "",
           "body": {
-            "kind": "mail",
-            "value": {
-              "body": "Can you check why the worker typecheck fails after the rename?",
-              "delivered": false,
-              "dictated": false,
-              "from": "Fractal",
-              "subject": "",
-              "to": ""
-            }
+            "kind": "user",
+            "value": "Can you check why the worker typecheck fails after the rename?"
           },
-          "id": "message/scenario-fleet-mid-refactor/captured-52"
+          "id": "timeline-entry/scenario-fleet-mid-refactor/captured-54#0"
         },
         {
           "at": "",
           "body": {
-            "kind": "mail",
-            "value": {
-              "body": "The typecheck still fails in packages/worker: syncAvatars calls loadUser with one argument. I asked Robin whether to thread the session through.",
-              "delivered": false,
-              "dictated": false,
-              "from": "Fractal",
-              "subject": "",
-              "to": ""
-            }
+            "kind": "assistant",
+            "value": "The typecheck still fails in packages/worker: syncAvatars calls loadUser with one argument. I asked Robin whether to thread the session through."
           },
-          "id": "message/scenario-fleet-mid-refactor/captured-55"
+          "id": "timeline-entry/scenario-fleet-mid-refactor/captured-57"
         },
         {
           "at": "",
@@ -313,17 +271,10 @@
         {
           "at": "",
           "body": {
-            "kind": "mail",
-            "value": {
-              "body": "Can you check why the worker typecheck fails after the rename?",
-              "delivered": false,
-              "dictated": false,
-              "from": "Fractal",
-              "subject": "",
-              "to": ""
-            }
+            "kind": "user",
+            "value": "Can you check why the worker typecheck fails after the rename?"
           },
-          "id": "message/scenario-fleet-mid-refactor/captured-31"
+          "id": "timeline-entry/scenario-fleet-mid-refactor/captured-33#0"
         },
         {
           "at": "",
@@ -446,7 +397,11 @@
     "value": [
       {
         "age": "1m",
-        "agents": [],
+        "agents": [
+          "agent/example/atlas/builder",
+          "agent/example/atlas/reviewer",
+          "agent/example/atlas/migrator"
+        ],
         "decision": null,
         "goals": [],
         "host": "",
@@ -455,18 +410,140 @@
         "outcome": null,
         "parent": null,
         "state": "running",
-        "step_metadata": {},
-        "steps": [],
+        "step_metadata": {
+          "step-run/example/atlas/load-user-rename/1/step-1": {
+            "blocked_reason": null,
+            "last_progress": null
+          },
+          "step-run/example/atlas/load-user-rename/1/step-2": {
+            "blocked_reason": null,
+            "last_progress": null
+          },
+          "step-run/example/atlas/load-user-rename/1/step-3": {
+            "blocked_reason": "syncAvatars calls loadUser without the session",
+            "last_progress": null
+          },
+          "step-run/example/atlas/load-user-rename/1/step-4": {
+            "blocked_reason": null,
+            "last_progress": null
+          },
+          "step-run/example/atlas/load-user-rename/1/step-5": {
+            "blocked_reason": null,
+            "last_progress": null
+          }
+        },
+        "steps": [
+          {
+            "after": [],
+            "age": "30m",
+            "attempt": 1,
+            "blockers": [],
+            "constraints": [
+              "Keep the public API stable until the docs land"
+            ],
+            "gates": [],
+            "goals": [
+              "Rename the export and its tests"
+            ],
+            "id": "step-run/example/atlas/load-user-rename/1/step-1",
+            "name": "step-1",
+            "note": null,
+            "owner": "Atlas Builder",
+            "owner_id": "agent/example/atlas/builder",
+            "seat": "agent/example/atlas/builder",
+            "state": "done"
+          },
+          {
+            "after": [],
+            "age": "21m",
+            "attempt": 1,
+            "blockers": [],
+            "constraints": [
+              "Keep the public API stable until the docs land"
+            ],
+            "gates": [],
+            "goals": [
+              "Every web call site uses loadUser"
+            ],
+            "id": "step-run/example/atlas/load-user-rename/1/step-2",
+            "name": "step-2",
+            "note": null,
+            "owner": "Atlas Migrator",
+            "owner_id": "agent/example/atlas/migrator",
+            "seat": "agent/example/atlas/migrator",
+            "state": "working"
+          },
+          {
+            "after": [],
+            "age": "12m",
+            "attempt": 1,
+            "blockers": [],
+            "constraints": [
+              "Keep the public API stable until the docs land"
+            ],
+            "gates": [],
+            "goals": [
+              "docs/api/users.md describes loadUser"
+            ],
+            "id": "step-run/example/atlas/load-user-rename/1/step-5",
+            "name": "step-5",
+            "note": "queued for Atlas Migrator, which is busy with example/atlas/load-user-rename › step-2",
+            "owner": "Atlas Migrator",
+            "owner_id": "agent/example/atlas/migrator",
+            "seat": null,
+            "state": "ready"
+          },
+          {
+            "after": [],
+            "age": "1m",
+            "attempt": 1,
+            "blockers": [],
+            "constraints": [
+              "Keep the public API stable until the docs land"
+            ],
+            "gates": [],
+            "goals": [
+              "pnpm -r typecheck passes"
+            ],
+            "id": "step-run/example/atlas/load-user-rename/1/step-3",
+            "name": "step-3",
+            "note": "syncAvatars calls loadUser without the session",
+            "owner": "Atlas Builder",
+            "owner_id": "agent/example/atlas/builder",
+            "seat": "agent/example/atlas/builder",
+            "state": "waiting"
+          },
+          {
+            "after": [],
+            "age": "12m",
+            "attempt": 1,
+            "blockers": [],
+            "constraints": [
+              "Keep the public API stable until the docs land"
+            ],
+            "gates": [],
+            "goals": [
+              "A person approves the rename"
+            ],
+            "id": "step-run/example/atlas/load-user-rename/1/step-4",
+            "name": "step-4",
+            "note": null,
+            "owner": "Atlas Reviewer",
+            "owner_id": "agent/example/atlas/reviewer",
+            "seat": "agent/example/atlas/reviewer",
+            "state": "pending"
+          }
+        ],
         "system": false,
         "title": "example/atlas · Rename fetchUser to loadUser",
         "updated_at": "2030-01-01T11:58:25.000Z",
-        "word": "unknown",
+        "word": "stalled",
         "worktree": null
       }
     ]
   },
   "person": "person/robin",
-  "quiet_missions": 0,
+  "quiet_missions": 1,
   "worktrees": {
     "state": "ready",
     "value": []
