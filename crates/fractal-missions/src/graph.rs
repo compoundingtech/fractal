@@ -225,9 +225,12 @@ pub fn render_desired_node(tree: &Value) -> Result<KdlNode, St3Error> {
         for child in children.as_array().ok_or_else(invalid)? {
             document.nodes_mut().push(render_desired_node(child)?);
         }
-        if !document.nodes().is_empty() {
+        if !document.nodes().is_empty() || name == "harness" {
             node.set_children(document);
         }
+    } else if name == "harness" {
+        // Export explicit bodies so older releases can still consume normalized declarations.
+        node.set_children(KdlDocument::new());
     }
     Ok(node)
 }
@@ -376,6 +379,14 @@ mission "example/train" state="ready" {{
                     body.as_object_mut().unwrap().insert("children".into(), json!([]));
                 }
                 let node = render_desired_node(&tree).unwrap();
+                let harness_node = render_desired_node(
+                    tree["children"].as_array().unwrap().iter()
+                        .find(|child| child["name"] == "harness").unwrap()
+                ).unwrap().to_string();
+                assert!(
+                    harness_node.contains('{') && harness_node.contains('}'),
+                    "empty harness must export explicit braces for older releases: {harness_node}"
+                );
                 let restored = parse_test_intent(&format!("version 2\n{node}\n"), "node").unwrap();
                 assert_eq!(restored.subjects["agent/node.worker"].desired, *desired);
             }
