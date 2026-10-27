@@ -13,6 +13,12 @@ older pushes must not keep consuming runners after their source is superseded. M
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The five required queue checks and complete test partitions are retained.
 
+When a trusted note covers a pull request's web check, `fractal-web-execution` skips at job
+level and allocates no runner. The always-emitted `fractal-web` collector accepts that skip
+only for a pull request with an explicit evidence decision and successful change detection;
+failure and cancellation still fail. Merge-group and manual execution never take this shortcut,
+and the queue retains complete shard receipts.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
