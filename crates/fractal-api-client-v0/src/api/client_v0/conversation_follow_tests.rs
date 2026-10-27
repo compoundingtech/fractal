@@ -501,13 +501,9 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
             Some(ApiError::internal(
                 "synthetic native-read failure selects stored fallback",
             )),
-<<<<<<< HEAD:crates/st3-api/src/api/client_v0/conversation_follow_tests.rs
-            None,
-=======
             super::super::managed_session_owner_at(
                 &fixture.state.store, fixture.state.store.index().unwrap(), &fixture.session_id,
             ).unwrap().as_ref(),
->>>>>>> origin/main:crates/fractal-api-client-v0/src/api/client_v0/conversation_follow_tests.rs
         )
         .unwrap()
         .0
