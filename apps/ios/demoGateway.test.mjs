@@ -94,7 +94,7 @@ test('fleet-mid-refactor HTTP and collections decode for iOS Now and conversatio
   assert.ok(windows.missions.some(item => item.title === 'Rename fetchUser to loadUser'));
   assert.ok(windows.agents.some(item => item.id === builder.id));
   assert.equal(thread.sessionId, builder.current_session_id);
-  assert.ok(thread.items.some(item => item.kind === 'content'), 'real iOS Feed receives conversation content');
+  assert.ok(thread.items.some(item => item.type === 'content'), 'real iOS Feed receives conversation content');
   assert.ok(decodedFrames.some(frame => frame.kind === 'conversation'));
   assert.deepEqual(decodeErrors, [], 'every received frame passes the strict client schema decoder');
   assert.deepEqual(issues, [], 'the iOS feed accepts the scenario without reconnects or refused windows');
