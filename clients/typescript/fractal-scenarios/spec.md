@@ -311,6 +311,10 @@ member; it never invents a foreign identity or dereferences a missing first reco
 `roster.all-states` cycles the supported lifecycle/harness combinations over the declared cast;
 it does not add agents merely to display every state. `conversation.long` contains 80 exchanges
 per cast agent, and `attention.many` contains 50 cards distributed over cast-owned work.
+`conversation.tool-heavy` keeps its turn `running` while the final shell call has no result;
+`conversation.failed-tools` keeps its turn `waiting`. After the latest terminal (`completed`,
+`failed`, or `cancelled`) status, tool calls without results require a non-terminal status
+update. A terminal status after an unanswered call legitimately interrupts that earlier work.
 `conversation.remote-only-mail` uses another cast agent, preferring a different host; a singleton
 cast uses agent-to-agent loopback mail, which the protocol permits, never person-origin content.
 `conversation.huge` gives the first cast agent a logical 10,000-turn history, four entries per

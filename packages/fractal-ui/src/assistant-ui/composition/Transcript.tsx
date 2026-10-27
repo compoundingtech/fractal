@@ -5,7 +5,7 @@ import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiSt
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
 import type { ScenarioMountedWindow } from '@fractal/scenarios/storybook/check'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
-import { EmbraceScrollViewport, historyBatchSize } from '../EmbraceScrollViewport'
+import { EmbraceScrollViewport, historyBatchSize, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
@@ -271,7 +271,18 @@ const contentVersion = (item: ConversationItem): string => {
 }
 /** The work log lists tools separately, so all nonblank thoughts of one turn share a disclosure. */
 const workLogReasoning = (items: readonly ConversationItem[]) => items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
-const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
+/** Persistable anchor id of a turn's work summary; source history and the rendered summary must agree on it. */
+const workSummaryId = (turnId: string) => JSON.stringify(['work-summary', turnId])
+const workMemberIds = new WeakMap<TranscriptTurn, readonly string[]>()
+/** Source tool calls and thoughts a turn's summary owns, computed once per source turn so memoized turns keep their props. */
+const workMembers = (turn: TranscriptTurn): readonly string[] => {
+  const cached = workMemberIds.get(turn)
+  if (cached !== undefined) return cached
+  const ids = turn.items.filter(item => item._tag === 'ToolCall' || item._tag === 'Reasoning').map(item => item.id)
+  workMemberIds.set(turn, ids)
+  return ids
+}
+const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
   const renderFooter = React.useContext(TurnFooterRenderer)
 
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
@@ -285,9 +296,9 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
     const end = continues.indexOf(false, index + 1)
     return shown.slice(index, end === -1 ? undefined : end).map(entry => entry._tag === 'Text' ? entry.text : '').join('\n\n')
   })
-  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} {...stylex.props(styles.turn)}>
+  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
     {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
     {!turn.work.running && renderFooter?.(turn)}
@@ -337,7 +348,7 @@ function sourceWindow(rows: readonly SourceRow[], startIndex: number): { readonl
   return { start, shown: rows.length - start + pinnedReasoning.length + (pinnedPrompt === undefined ? 0 : 1), pinnedPrompt, pinnedReasoning }
 }
 /** Turns trimmed to the mounted source rows, with work-log calls trimmed alike so hidden tool rows never mount. Whole turns keep their identity, and every turn keeps its key, so revealing history only adds rows. */
-function MountedTurns({ turns, rowIds, start, pinnedPrompt, pinnedReasoning, stranded, now, tailRef, onOpenTool, onRetryRun, landmarkContext }: { readonly turns: readonly TranscriptTurn[]; readonly rowIds: readonly string[]; readonly start: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[]; readonly stranded: ReadonlySet<string>; readonly now?: number; readonly tailRef?: React.Ref<HTMLElement>; readonly onOpenTool: TranscriptProps['onOpenTool']; readonly onRetryRun?: () => void; readonly landmarkContext?: string }) {
+function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedReasoning, stranded, now, tailRef, onOpenTool, onRetryRun, landmarkContext }: { readonly turns: readonly TranscriptTurn[]; readonly sourceTurns: ReadonlyMap<string, TranscriptTurn>; readonly rowIds: readonly string[]; readonly start: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[]; readonly stranded: ReadonlySet<string>; readonly now?: number; readonly tailRef?: React.Ref<HTMLElement>; readonly onOpenTool: TranscriptProps['onOpenTool']; readonly onRetryRun?: () => void; readonly landmarkContext?: string }) {
   const mounted = React.useMemo(() => {
     const ids = new Set(rowIds.slice(start))
     if (pinnedPrompt !== undefined) ids.add(pinnedPrompt)
@@ -352,7 +363,7 @@ function MountedTurns({ turns, rowIds, start, pinnedPrompt, pinnedReasoning, str
     })
   }, [turns, rowIds, start, pinnedPrompt, pinnedReasoning])
   const last = turns[turns.length - 1]
-  return mounted.map(turn => <PreparedTurn key={turn.id} turn={turn} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
+  return mounted.map(turn => <PreparedTurn key={turn.id} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
 }
 /**
  * The window of rendered source rows, kept outside the scroll body so its warning and recovery stay visible at the tail.
@@ -445,6 +456,21 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
     if (strandedIds !== '' && process.env.NODE_ENV !== 'production') console.warn(`Transcript: the runtime never adopted ${strandedIds}; showing a fallback row.`)
   }, [strandedIds])
   const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage, renderInlineReference }), [resolveImage, onLoadImage, renderInlineReference])
+  // Source membership stays authoritative while adoption, folding or the tail window leaves rows unmounted. Only an
+  // observed, complete, non-empty history can retire a saved anchor; waiting or partial history keeps it pending.
+  // The id set is built only when a pending restore asks, never per streaming update.
+  const anchorHistory = React.useMemo<ViewportAnchorHistory>(() => {
+    if (history._tag !== 'Complete' || turns.length === 0) return { _tag: 'Partial' }
+    let ids: ReadonlySet<string> | undefined
+    return { _tag: 'Complete', includes: id => (ids ??= new Set(turns.flatMap(turn => [
+      turn.id,
+      ...(turn.prompt === undefined ? [] : [turn.prompt.id]),
+      ...turn.items.map(item => item.id),
+      ...(workMembers(turn).length > 0 ? [workSummaryId(turn.id)] : []),
+    ]))).has(id) }
+  }, [turns, history._tag])
+  // A summary owns its turn's full source work, never only the adopted prefix it currently renders.
+  const sourceTurns = React.useMemo(() => new Map(turns.map(turn => [turn.id, turn])), [turns])
   // New rows or changed content are news; send state, tool status and timing are metadata.
   const sourceRows = React.useMemo(() => committed.flatMap(turn => [...(turn.prompt === undefined ? [] : [{ item: turn.prompt, turnId: turn.id, prompt: true }]), ...turn.items.map(item => ({ item, turnId: turn.id, prompt: false }))]), [committed])
   // One viewport row per source row, so the initial bound and history reveal count conversation items rather than turns.
@@ -470,7 +496,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   return <TurnFooterRenderer.Provider value={renderTurnFooter}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
       renderHeader={(startIndex, revealRow, materializing) => {
         if (rows.length <= transcriptInitialSourceRowCount) return null
         const bound = sourceWindow(sourceRows, startIndex)
@@ -481,7 +507,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
         return <>
           {history._tag === 'HasOlder' && bound.start === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
           {committed.length === 0 ? empty : <TranscriptSearch turns={committed} rowIds={rowIds} startIndex={bound.start} revealRow={revealRow} {...stylex.props(styles.timeline)}>
-            <MountedTurns turns={committed} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
+            <MountedTurns turns={committed} sourceTurns={sourceTurns} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
           </TranscriptSearch>}
         </>
       }}

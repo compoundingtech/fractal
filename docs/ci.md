@@ -664,6 +664,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   the final commit). `--no-renames` counts both sides of a rename. Missing or malformed
   SHAs, failed fetches and failed diffs conservatively select every web lane, including
   kit plays, with a warning; `workflow_dispatch` also forces all lanes.
+  Kit inputs explicitly include the raw PTY terminal surface and its bundled runtime
+  dependencies; terminal unit tests alone do not select kit plays.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
   `clients/typescript/fractal-views/**`, `clients/typescript/fractal-scenarios/**` and `fixtures/**`.
   Within `clients/typescript/fractal-client`, only the consumed export graph (`index.ts`,
@@ -1500,7 +1502,7 @@ repo-settings changes have merged.
 | --- | --- |
 | `fleet.yml` | The old fork-only fleet compatibility job is absorbed into `linux-gate`, which now covers every PR and main. This preserves fork coverage and adds same-repository coverage on Namespace. |
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
-| `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
+| `release-fractal.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
 | `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
@@ -1750,7 +1752,7 @@ it does not establish the cause of earlier digest mismatches or a measured speed
 ## Tests the sandboxed st3 check does not run
 
 `checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
-`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+`nix/fractal-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
 Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
 sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
 test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`

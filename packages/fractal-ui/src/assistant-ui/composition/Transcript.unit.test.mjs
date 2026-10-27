@@ -181,7 +181,7 @@ test('the optional host footer renders once per finished turn as its last child,
 test('a converted error notice names retryability only when it is reported true', () => {
   const notice = { _tag: 'Notice', id: 'notice/error', kind: 'error', text: 'Model call failed.', detail: 'Provider unavailable.', at: new Date(now).toISOString() }
   const text = item => convertConversationItem(item).content.map(part => part.text).join('')
-  assert.equal(text({ ...notice, retryable: true }), 'Model call failed.\nProvider unavailable.\nRetryable')
+  assert.equal(text({ ...notice, retryable: true }), 'Model call failed.\nProvider unavailable.\nCan be retried')
   assert.equal(text({ ...notice, retryable: false }), 'Model call failed.\nProvider unavailable.')
   assert.equal(text(notice), 'Model call failed.\nProvider unavailable.')
 })

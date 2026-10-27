@@ -224,6 +224,28 @@ describe('tail-first transcript mounting', () => {
     expect(lane().scrollTop).toBe(top)
   })
 
+  it('restores a saved source window and leaf anchor outside the newest six rows', async () => {
+    await render(transcript())
+    expect(mountedSourceIds()).toEqual(turns.slice(-6).map(turn => turn.prompt!.id))
+    await act(async () => root.render(null))
+    const store = new ViewportStore()
+    store.save('tail-test', {
+      following: false, unread: false, top: 225, firstRenderedId: 'prompt-18',
+      anchor: { id: 'prompt-20', offset: -25 },
+    })
+    const restored = <ViewportStoreContext value={store}>{transcript()}</ViewportStoreContext>
+    await render(restored)
+    expect(mountedSourceIds()).toEqual(turns.slice(18).map(turn => turn.prompt!.id))
+    expect(container.querySelector('[data-item-id="prompt-17"]')).toBeNull()
+    const anchor = lane().querySelector<HTMLElement>('[data-testid="user-message"][data-item-id="prompt-20"]')!
+    expect(anchor).not.toBeNull()
+    expect(anchor.getBoundingClientRect().top).toBe(-25)
+    expect(lane().scrollTop).toBe(225)
+    await flushFrames()
+    expect(anchor.getBoundingClientRect().top).toBe(-25)
+    expect(lane().scrollTop).toBe(225)
+  })
+
   it('offers accessible full-history actions instead of incomplete hidden browser-find proxies', async () => {
     await render(transcript())
     expect(container.querySelectorAll('[data-testid="transcript-turn"]').length).toBeLessThan(turns.length)
