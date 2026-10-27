@@ -684,12 +684,12 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       const titleElement = row.querySelector<HTMLElement>('[data-row-column="title"]')!
       const where = `${host.dataset.countHost} · "${title}"`
       // The 240px sidebar's rows go bare: the count alone, its word visually hidden but still in the text for assistive
-      // tech. 320px rows, desktop and phone, have room for the word and paint it.
+      // tech. Desktop 320px rows have room for the word; phone rows reserve space for the touch action column.
       const word = chip!.querySelector<HTMLElement>('[data-count-word]')!
       const compact = getComputedStyle(word).position === 'absolute'
       const nameWidth = row.querySelector('[data-row-column="name"]')!.getBoundingClientRect().width
-      await expect(compact, `${where}: count word ${compact ? 'compacted' : 'painted'} on a ${nameWidth}px name column`).toBe(host.dataset.width === '240')
-      await expect(compact, `${where}: compact mode disagrees with the 180px name threshold (name ${nameWidth}px)`).toBe(nameWidth < 180)
+      await expect(compact, `${where}: count word ${compact ? 'compacted' : 'painted'} on a ${nameWidth}px name column`).toBe(host.dataset.countHost !== 'desktop-320')
+      await expect(compact, `${where}: compact mode disagrees with the 192px name threshold (name ${nameWidth}px)`).toBe(nameWidth < 192)
       if (compact) {
         await expect(word.getBoundingClientRect().width, `${where}: compact word still painted`).toBeLessThanOrEqual(1)
         await expect(tag.getBoundingClientRect().width, `${where}: bare count wider than its digits`).toBeLessThanOrEqual(28)
@@ -710,7 +710,7 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       await expect(getComputedStyle(tag).whiteSpace).toBe('nowrap')
       await expect(getComputedStyle(tag).color).toBe(soft)
       // The title truncates first: whole while title, gap and count fit the name column, otherwise an ellipsis that keeps
-      // a readable stretch: the bare count at 240px and the word only from a 180px name column leave flat titles ~100px.
+      // a readable stretch: the full count starts only above a 192px name column, reserving at least 96px for the title.
       // At 320px every short title is whole.
       const fits = titleElement.scrollWidth + 6 + tagBox.width <= name.width + 1
       if (longCountTitles.includes(title)) await expect(fits, `${where}: fixture title should be long enough to truncate`).toBe(false)
@@ -758,10 +758,10 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
     modes.add(compact ? 'compact' : 'full')
     if (compact) {
       // Bare count: the word is visually hidden but still in the text.
-      await expect(name.width, `${at}: bare count on a name column of 180px or more`).toBeLessThan(180 + 0.5)
+      await expect(name.width, `${at}: bare count on a name column of 192px or more`).toBeLessThan(192 + 0.5)
       await expect(name.width, `${at}: bare count on a name column under 48px`).toBeGreaterThanOrEqual(48 - 0.5)
       await expect(word.getBoundingClientRect().width, `${at}: compact word still painted`).toBeLessThanOrEqual(1)
-    } else await expect(name.width, `${at}: full count on a name column under 180px`).toBeGreaterThanOrEqual(180 - 0.5)
+    } else await expect(name.width, `${at}: full count on a name column under 192px`).toBeGreaterThanOrEqual(192 - 0.5)
     const tagBox = tag.getBoundingClientRect()
     const tagAt = `${at} tag ${tagBox.left}–${tagBox.right}px, ${compact ? 'compact' : 'full'}`
     await expect(tagBox.left, `${tagAt}: count starts before the name column`).toBeGreaterThanOrEqual(name.left - 0.5)
@@ -798,7 +798,9 @@ const expectExplained = async (trigger: HTMLElement, root: HTMLElement, text: st
   await userEvent.unhover(trigger)
   await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
   // Keyboard modality, then focus: the same explanation opens without a pointer.
-  await userEvent.keyboard('{Shift}')
+  const active = document.activeElement as HTMLElement | null
+  active?.blur()
+  await userEvent.keyboard('{Escape}')
   trigger.focus()
   await expect(trigger).toHaveFocus()
   await expect(await within(document.body).findByRole('tooltip'), `${where}: focus tooltip`).toHaveTextContent(text)
@@ -808,7 +810,7 @@ const expectExplained = async (trigger: HTMLElement, root: HTMLElement, text: st
 
 export const SubagentCount: StoryObj<{ scheme: Scheme }> = {
   name: 'Subagent count · after the title · 240/320 desktop and phone',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify the count copy, placement, title truncation and one-line fit at 240px and 320px desktop and phone widths: 240px rows show the bare count and 320px rows keep its word, with the full label kept for assistive tech. The unreported "?" carries its reason as accessible description and kit tooltip on hover and keyboard focus at both widths. A 240px tree includes depth 8 and continues to depth 12 to verify bare and hidden count modes without covering the trailing metadata slot.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify count copy, placement, title truncation and one-line fit at 240px and 320px desktop and phone widths. Tight name columns use a bare count, while desktop 320px retains the word; the full label remains available to assistive tech. The unreported count carries an accessible description and kit tooltip on hover and keyboard focus. A 240px tree includes depth 8 and continues to depth 12 to verify bare and hidden count modes without covering trailing metadata.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <SubagentCountMatrix scheme={scheme} />,
   play: subagentCountPlay,

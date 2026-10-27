@@ -167,10 +167,9 @@ function SubagentCount({ count, onPress, onExplain }: { readonly count: number |
   </span>
 }
 
-// Name-column widths: below `compactName` the full "14 subagents" would leave the title under ~100px (every row of the
-// 240px sidebar that has trailing metadata; 320px rows keep the word), so the count goes bare; below `hiddenCount` even
-// the bare count would leave the title under ~24px, so it leaves line 1.
-const compactName = '@container agent-name (width < 180px)'
+// Keep ~96px for the title, 6px for the gap and ~90px for a full two-digit count. Tighter name columns, including touch
+// rows at 320px, use the bare count. Below `hiddenCount` even that would leave too little title, so it leaves line 1.
+const compactName = '@container agent-name (width < 192px)'
 const hiddenCount = '@container agent-name (width < 48px)'
 
 const styles = stylex.create({
