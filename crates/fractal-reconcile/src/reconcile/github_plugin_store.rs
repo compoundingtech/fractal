@@ -90,13 +90,24 @@ impl GithubPluginStore {
         Ok(())
     }
 
-    /// Refuse every later write, as a full disk or a read-only file does.
+    /// Refuse every later write, as a full disk or a read-only file does, or accept them again.
     #[cfg(test)]
-    pub(crate) fn refuse_writes(&self) {
+    pub(crate) fn refuse_writes(&self, refuse: bool) {
         self.connection
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .pragma_update(None, "query_only", true)
+            .pragma_update(None, "query_only", refuse)
+            .unwrap();
+    }
+
+    /// Fail every later read, as a damaged file does, or read again.
+    #[cfg(test)]
+    pub(crate) fn fail_reads(&self, fail: bool) {
+        let (from, to) = if fail { ("observer_cursors", "unreadable") } else { ("unreadable", "observer_cursors") };
+        self.connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .execute_batch(&format!("ALTER TABLE {from} RENAME TO {to}"))
             .unwrap();
     }
 }

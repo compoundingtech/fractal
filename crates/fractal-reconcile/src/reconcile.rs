@@ -16412,25 +16412,38 @@ impl<R: RuntimeControl> Reconciler<R> {
             .and_then(|actual| actual.get("facts").cloned());
         // What the plugin database holds for this observer, which a poll replaces when its
         // cursor moves. This process's own cursor is what it last kept there.
-        let (cursor, mut kept_cursor) = match self
-            .observer_cursors
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&deadline_key)
-            .cloned()
-        {
-            Some(cursor) => (cursor.clone(), Some(cursor)),
-            None => self.observer_cursor(&observer.subject)?,
-        };
         // A repository observer that never recorded anything continues from the observer that
         // last recorded into its resource, such as the intake observer a standing observer
         // replaces, so nothing changed between their polls is missed.
-        let mut cursor = match cursor {
-            None if spec.provider == "github.repository" => {
-                self.inherited_observer_cursor(&spec.resource, &observer.subject)?
+        let resolved = (|| -> Result<_> {
+            let (cursor, kept_cursor) = match self
+                .observer_cursors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&deadline_key)
+                .cloned()
+            {
+                Some(cursor) => (cursor.clone(), Some(cursor)),
+                None => self.observer_cursor(&observer.subject)?,
+            };
+            let cursor = match cursor {
+                None if spec.provider == "github.repository" => {
+                    self.inherited_observer_cursor(&spec.resource, &observer.subject)?
+                }
+                cursor => cursor,
+            };
+            Ok((cursor, kept_cursor))
+        })();
+        // A database that cannot be read leaves no arm behind, so a later pass polls again.
+        let (mut cursor, mut kept_cursor) = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
+                return Err(error);
             }
-            cursor => cursor,
         };
+        // A cursor a poll recorded facts for but could not keep in the plugin database.
+        let mut unkept: Option<Option<String>> = None;
         let github_plugin = self.github_plugin.clone();
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
@@ -16465,6 +16478,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return;
                 }
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
+                // Until the plugin database keeps the cursor the last poll recorded facts for,
+                // the provider is not asked again and the observer stays degraded.
+                if let Some(pending) = unkept.clone() {
+                    if github_plugin.set_cursor(&observer_subject, &spec.resource, pending.as_deref()).is_err() {
+                        next_check = now_ms().saturating_add(60_000);
+                        continue;
+                    }
+                    cursors.lock().unwrap_or_else(PoisonError::into_inner)
+                        .insert(deadline_key.clone(), pending.clone());
+                    kept_cursor = Some(pending.clone());
+                    cursor = pending;
+                    unkept = None;
+                }
                 let request = ObservationRequest {
                     provider: spec.provider.clone(),
                     locator: spec.locator.clone(),
@@ -16560,9 +16586,9 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 previous_facts = Some(observation.facts);
                                 // The cursor survives a restart only in the plugin database. A poll
                                 // that cannot keep it there is the observer's failure, which its
-                                // state shows; the next poll reads again from the cursor last kept,
-                                // and facts it already recorded deliver nothing twice.
-                                let unkept = if kept_cursor.as_ref() == Some(&observation.cursor)
+                                // state shows until the database takes it. A provider that never
+                                // gives this observer a cursor needs no row: nothing is adopted.
+                                let failed = if kept_cursor.as_ref() == Some(&observation.cursor)
                                     || (kept_cursor.is_none() && cursor.is_none() && observation.cursor.is_none())
                                 {
                                     None
@@ -16571,18 +16597,24 @@ impl<R: RuntimeControl> Reconciler<R> {
                                         .set_cursor(&observer_subject, &spec.resource, observation.cursor.as_deref())
                                         .err()
                                 };
-                                match unkept {
+                                match failed {
                                     None => {
-                                        kept_cursor = Some(observation.cursor.clone());
+                                        if kept_cursor.is_some() || observation.cursor.is_some() || cursor.is_some() {
+                                            kept_cursor = Some(observation.cursor.clone());
+                                        }
                                         completed_deadline = Some(observation.next_check_unix_ms);
                                         completed_cursor = Some(observation.cursor);
                                     }
                                     Some(error) => {
                                         completed_deadline = Some(now_ms().saturating_add(60_000));
                                         error_backoff = true;
+                                        unkept = Some(observation.cursor);
                                         let reason = format!("the GitHub plugin database did not keep the cursor: {error:#}");
+                                        // The healthy receipt this poll recorded names the episode,
+                                        // so a failure after a recovery records its own receipt.
+                                        let episode = store.latest_claim_id(&observer_subject).ok().flatten().unwrap_or_default();
                                         let failure_hash = hex::encode(sha2::Sha256::digest(
-                                            format!("{revision}:{reason}").as_bytes(),
+                                            format!("{revision}:{reason}:{episode}").as_bytes(),
                                         ));
                                         durable_changed |= write_state(ClaimInput {
                                             subject: observer_subject.clone(),
@@ -39518,28 +39550,95 @@ subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example
         assert_eq!(*asked.lock().unwrap(), [Some("old-build".into()), Some("c1".into()), None]);
         assert!(newest_observed().get("cursor").is_none());
 
-        // A database that cannot keep the cursor is the observer's failure, which its state shows.
-        let refusing = Arc::new(github_plugin_store::GithubPluginStore::memory());
-        refusing.refuse_writes();
+    }
+
+    /// A plugin database that fails is the observer's failure, never hidden. A read that fails
+    /// leaves no arm behind, so the observer polls once the database reads again. A cursor the
+    /// database does not keep holds the observer degraded, and GitHub is not asked again, until
+    /// the database takes it; a later failure records its own receipt.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_plugin_database_degrades_the_observer_until_it_recovers() {
+        struct Polls {
+            asked: Arc<Mutex<Vec<Option<String>>>>,
+            cursor: Arc<Mutex<&'static str>>,
+        }
+        impl ResourceProvider for Polls {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                self.asked.lock().unwrap().push(request.cursor);
+                let cursor = *self.cursor.lock().unwrap();
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: serde_json::json!({"repository_id": 7, "issues": []}),
+                    cursor: Some(cursor.into()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"
+}"#,
+            "cursor-failure",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let cursor = Arc::new(Mutex::new("c1"));
         let reconciler = Reconciler::new(
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         )
-        .with_github_plugin(refusing)
-        .with_resource_provider(Arc::new(OnePoll { asked: asked.clone(), facts: listing(&[1, 3, 4]), cursor: "c4" }));
-        reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
-        reconciler.reconcile_resource_observers(&store.desired_subjects().unwrap(), &[]).unwrap();
-        let degraded = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if let Some(claim) = store.latest_claim("observer/repo", Some("observer.state")).unwrap()
-                    && claim.body["fields"]["state"] == "degraded"
-                {
-                    break claim.body["fields"].clone();
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        }).await.expect("an unkept cursor degrades the observer");
-        assert_eq!(degraded["error_code"], "github-plugin-database", "{degraded}");
-        assert_eq!(delivered(), 2);
+        .with_github_plugin(plugin.clone())
+        .with_resource_provider(Arc::new(Polls { asked: asked.clone(), cursor: cursor.clone() }));
+        let pass = || {
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            reconciler.reconcile_resource_observers(&store.desired_subjects().unwrap(), &[]).unwrap();
+        };
+        let state = || store.latest_claim("observer/repo", Some("observer.state")).unwrap()
+            .map(|claim| (claim.id, claim.body["fields"]["state"].as_str().unwrap_or_default().to_owned()));
+        async fn until(what: &str, mut done: impl FnMut() -> bool) {
+            tokio::time::timeout(Duration::from_secs(3_600), async {
+                while !done() { tokio::time::sleep(Duration::from_millis(50)).await; }
+            }).await.unwrap_or_else(|_| panic!("{what}"));
+        }
+
+        plugin.fail_reads(true);
+        pass();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(asked.lock().unwrap().is_empty(), "no poll without the cursor it would start from");
+        plugin.fail_reads(false);
+        pass();
+        until("the observer polls once the database reads again", || asked.lock().unwrap().len() == 1).await;
+        until("the cursor is kept", || plugin.cursor("observer/repo").unwrap() == Some(Some("c1".into()))).await;
+
+        plugin.refuse_writes(true);
+        *cursor.lock().unwrap() = "c2";
+        pass();
+        until("an unkept cursor degrades the observer", || state().is_some_and(|(_, state)| state == "degraded")).await;
+        let (first, _) = state().unwrap();
+        let fields = store.latest_claim("observer/repo", Some("observer.state")).unwrap().unwrap().body["fields"].clone();
+        assert_eq!(fields["error_code"], "github-plugin-database", "{fields}");
+        let polls = asked.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(asked.lock().unwrap().len(), polls, "GitHub is not asked again until the cursor is kept");
+        assert_eq!(state().unwrap(), (first.clone(), "degraded".into()));
+
+        plugin.refuse_writes(false);
+        until("the database takes the cursor", || plugin.cursor("observer/repo").unwrap() == Some(Some("c2".into()))).await;
+        pass();
+        until("the next poll continues from it", || asked.lock().unwrap().last() == Some(&Some("c2".into()))).await;
+        until("the observer is healthy again", || state().is_some_and(|(_, state)| state == "healthy")).await;
+
+        plugin.refuse_writes(true);
+        *cursor.lock().unwrap() = "c3";
+        pass();
+        until("a later failure degrades the observer again", || state().is_some_and(|(_, state)| state == "degraded")).await;
+        assert_ne!(state().unwrap().0, first, "a later failure records its own receipt");
     }
 
     /// An intake run revised onto its repository's standing observer keeps its subscriptions,

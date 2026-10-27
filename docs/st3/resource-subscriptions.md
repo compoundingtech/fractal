@@ -319,9 +319,10 @@ open item once. Each item is compared with the facts the graph already recorded 
 poll delivers only what changed since: an item opened meanwhile, or a pull request at a new ready
 head. It costs one full read of the repository within the hourly GitHub budget. A repository with
 no recorded facts is a baseline, which delivers nothing. The daemon refuses to start when the
-database cannot be opened, and an observer whose poll cannot keep its cursor there is `degraded`
-with error code `github-plugin-database` until a poll keeps it; meanwhile each poll reads again
-from the cursor last kept.
+database cannot be opened. A read that fails is the observer's fault, and a later pass polls it
+again. An observer whose poll cannot keep its cursor there is `degraded` with error code
+`github-plugin-database`: it retries the write each minute and does not ask GitHub again until the
+database takes the cursor.
 
 The provider applies bounded retries and backoff. It records authentication, rate-limit, and transport failures on the observer subject.
 
