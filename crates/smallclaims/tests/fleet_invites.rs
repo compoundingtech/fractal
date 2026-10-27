@@ -50,6 +50,7 @@ fn code(invite: &CreatedFleetInvite, migrate: bool) -> JoinCode {
         name: None,
         migrate,
         endpoints: Vec::new(),
+        pairing: None,
     }
 }
 

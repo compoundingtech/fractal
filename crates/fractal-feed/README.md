@@ -51,7 +51,7 @@ async fn main() {
 | Glasses via the `glasses` argument, if granted at version 1 or newer | `GlassesVersion` precedes the glasses `Window`, so the application can select the matching storage shape. The window holds at most 100 glasses. |
 | `Converse { targets }` | Up to `MAX_CONVERSATIONS` (three) agent or session conversations. `Conversation` identifies its target and resolved session; `replace` resets the newest page, otherwise merge entries by ID. Preserve `has_more` for older-page navigation. `ConversationFailed` retries unless history is permanently incomplete. |
 | `Resubscribe { target }` | Resolve a followed agent's current session again after a restart; subsequent conversation updates replace the previous page. |
-| `Follow { runtime_ids }` | One runtime's terminal: `Attached` supplies its viewer and incarnation, followed by `Screen`. Transient failures send `Reconnecting`; `Ended` reports a refusal, process exit or changed incarnation. `Unfollow` ends following. |
+| `Follow { runtime_ids, generation }` | One runtime's terminal: `Terminal { generation, update }` identifies the owning attempt. `Attached` supplies its viewer and incarnation, followed by `Screen`. Transient failures send `Reconnecting`; `Ended` reports a refusal, process exit or changed incarnation. Subscription IDs are generation-specific; failure, replacement and `Unfollow` clean up that ID before its state is forgotten. |
 
 `Connected` supplies the selected member's client for subsequent actions; wait for live window
 data before enabling them. `Offline` retains the last display while the feed retries. The waits

@@ -55,7 +55,7 @@ def rewrite(text):
             continue
         text = re.sub(r'(?P<flag>--bin[ =]+)' + re.escape(new) + r'(?![\w-])',
                       lambda match: match['flag'] + old, text)
-        text = re.sub(r'(?P<flake>(?:\.|github:compoundingtech/smalltalk/[^\s`]*)#)' +
+        text = re.sub(r'(?P<flake>(?:\.|github:compoundingtech/fractal/[^\s`]*)#)' +
                       re.escape(new) + r'(?![\w-])',
                       lambda match: match['flake'] + old, text)
     # Repair earlier output at reviewed runtime contexts, not Cargo selectors.

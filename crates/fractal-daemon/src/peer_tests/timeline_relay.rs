@@ -1,4 +1,4 @@
-//! Timeline relay tests that run the API; they live in st3-daemon because the API does.
+//! Timeline relay tests that run the API; they live in fractal-daemon because the API does.
 
 #![allow(unused_imports)]
 
@@ -203,7 +203,7 @@ for (operation, expected, schema) in [
     *request.headers_mut() = auth
         .request_headers_for(CLIENT_READ_PATH, "gateway", &body)
         .unwrap();
-    let response = peer_router(peer.clone(), smalltalk_routes(crate::api::raw_terminal_owner_splice))
+    let response = peer_router(peer.clone(), fractal_routes(crate::api::raw_terminal_owner_splice))
         .oneshot(request)
         .await
         .unwrap();
@@ -233,7 +233,7 @@ for (operation, expected, schema) in [
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 let address = listener.local_addr().unwrap();
 let peer_server = tokio::spawn(async move {
-    axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice)))
+    axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice)))
         .await
         .unwrap();
 });
@@ -260,31 +260,29 @@ gateway_store
 let secret = root.path().join("fleet-secret");
 fs::write(&secret, [4_u8; 32]).unwrap();
 fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
-let state = crate::api::AppState {
-    owning_person: None,
-    store: gateway_store,
-    notify: Arc::new(tokio::sync::Notify::new()),
-    event_notify: watch::channel(0_u64).0,
+let state = crate::api::AppState { owning_person: None,
+store: gateway_store,
+notify: Arc::new(tokio::sync::Notify::new()),
+event_notify: watch::channel(0_u64).0,
+node: "gateway".into(),
+state_dir: root.path().into(),
+pty_root: root.path().join("pty"),
+pty_binary: "unused-pty".into(),
+fleet_id: None,
+configured_peers: vec!["owner".into()],
+native_session_home: None,
+client_relay: ClientRelay::from_config(&Config {
     node: "gateway".into(),
-    state_dir: root.path().into(),
-    pty_root: root.path().join("pty"),
-    pty_binary: "unused-pty".into(),
-    fleet_id: None,
-    configured_peers: vec!["owner".into()],
-    native_session_home: None,
-    client_relay: ClientRelay::from_config(&Config {
-        node: "gateway".into(),
-        fleet_id: Some("fleet-test".into()),
-        shared_secret_file: Some(secret),
-        peers: vec![PeerConfig {
-            name: "owner".into(),
-            url: format!("http://{address}"),
-        }],
-        ..Default::default()
-    })
-    .unwrap(),
-    planner_default: crate::model::PlannerSpec::default(),
-};
+    fleet_id: Some("fleet-test".into()),
+    shared_secret_file: Some(secret),
+    peers: vec![PeerConfig {
+        name: "owner".into(),
+        url: format!("http://{address}"),
+    }],
+    ..Default::default()
+})
+.unwrap(),
+planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
 let gateway_socket = root.path().join("gateway.sock");
 let served = gateway_socket.clone();
 let gateway_server = tokio::spawn(async move {

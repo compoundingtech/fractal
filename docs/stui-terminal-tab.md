@@ -19,6 +19,29 @@ The top bar's bottom border occupies one row in both layouts. Terminal panes beg
 below it and have one fewer content row at the same window size; the current
 fixtures record that geometry.
 
+### Ordered shared geometry
+
+The pane's **requested** dimensions are distinct from the daemon's **effective**
+shared dimensions. Cell-metric updates resend the requested dimensions; another
+attached writer may constrain the effective grid without changing that request.
+The native viewer applies `GEOMETRY` in wire order, including the geometry before
+the initial `SCREEN`. Read-ahead geometry after that snapshot must not affect how
+the snapshot is parsed. A resize request alone never resizes either local model:
+queued output still belongs to the preceding effective grid.
+
+This requires the pinned PTY geometry protocol, not a daemon that silently
+resizes without `GEOMETRY`. At fleet pin `063ff7f9d6ef099f76c31752b2eb52c5bba94c17`,
+[`negotiate_size` lines 38–40](https://github.com/compoundingtech/pty/blob/063ff7f9d6ef099f76c31752b2eb52c5bba94c17/crates/pty/src/daemon/geometry.rs#L38-L40)
+broadcasts geometry before resizing the kernel PTY, and
+[`handle_attach` lines 288–295](https://github.com/compoundingtech/pty/blob/063ff7f9d6ef099f76c31752b2eb52c5bba94c17/crates/pty/src/daemon/clients.rs#L288-L295)
+also sends geometry when attachment does not change the shared size. Consequently
+the pinned daemon cannot silently change the effective grid through this path.
+Pre-protocol legacy daemons are unsupported for native resize; replace them
+before attaching. There is deliberately no timeout-based speculative fallback:
+delay cannot distinguish an old daemon from a constrained or slow current one,
+and guessing reintroduces stale rows.
+
+
 ## Wheel and mouse
 
 The original wheel failure occurred before the encoder: `draw_terminal` did not
@@ -116,7 +139,7 @@ second answer with different geometry or defaults.
 
 ### DECRQM 5522 availability regression
 
-This is a **pty behavior change** in the f8388fe7 pin, not a new stui clipboard
+This is a **pty behavior change** in the f8388fe7 pin, not a new Fractal TUI clipboard
 implementation. pty#148 added mode 5522 tracking and its availability-dependent
 DECRQM reply; pty#152 made an attached writable client past its initial SCREEN
 an answering client. `CSI ? 5522 h` really sets this mode in the pinned producer.
@@ -124,22 +147,22 @@ The probe records actual child-input bytes for these three states:
 
 | Fixture case | Setup | Expected received bytes (hex) |
 | --- | --- | --- |
-| `queries/DECRQM-5522/no-answer-client` | Connect a session socket without ATTACH, before stui starts; enable 5522 in child output | `1b5b3f353532323b302479` (`ESC[?5522;0$y`) |
-| `queries/DECRQM-5522/enabled-False` | stui's normal writable attachment, reset 5522 | `1b5b3f353532323b322479` (`ESC[?5522;2$y`) |
+| `queries/DECRQM-5522/no-answer-client` | Connect a session socket without ATTACH, before Fractal TUI starts; enable 5522 in child output | `1b5b3f353532323b302479` (`ESC[?5522;0$y`) |
+| `queries/DECRQM-5522/enabled-False` | Fractal TUI's normal writable attachment, reset 5522 | `1b5b3f353532323b322479` (`ESC[?5522;2$y`) |
 | `queries/DECRQM-5522/enabled-True` | Same attachment, enable 5522 | `1b5b3f353532323b312479` (`ESC[?5522;1$y`) |
 
 All send `1b5b3f353532322470` (`ESC[?5522$p`). The first case has a real
 connected but unattached, hence non-answering, client; it does not fake a reply
-or rewrite stui's transport. Even an enabled mode reports 0 without availability.
+or rewrite Fractal TUI's transport. Even an enabled mode reports 0 without availability.
 Its output request is published through the existing child fixture files, and
 the child log supplies the complete reply before the writable attachment starts.
 The matrix resets modes before every subsequent case. The historic baseline is
-unchanged. The OSC 52 read/write probes and stui's own OSC 5522 clipboard read
+unchanged. The OSC 52 read/write probes and Fractal TUI's own OSC 5522 clipboard read
 in `src/ui/attach.rs` remain unchanged; a DECRQM capability reply is not proof of
 outer-terminal clipboard access.
 
 For hosted positive/negative controls, keep the same resolved pty f8388fe7
-derivation on PATH and the same stui unit-test worker executable for both runs:
+derivation on PATH and the same Fractal TUI unit-test worker executable for both runs:
 
 ```sh
 python3 crates/fractal-tui/tests/terminal_tab_probe.py --worker "$STUI_TEST_WORKER" --check

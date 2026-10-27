@@ -13,10 +13,18 @@ older pushes must not keep consuming runners after their source is superseded. M
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The five required queue checks and complete test partitions are retained.
 
+When a trusted note covers a pull request's web check, `fractal-web-execution` skips at job
+level and allocates no runner. The always-emitted `fractal-web` collector accepts that skip
+only for a pull request with an explicit evidence decision and successful change detection;
+failure and cancellation still fail. Merge-group and manual execution never take this shortcut,
+and the queue retains complete shard receipts.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
-on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web`,
+on `main` are `linux-gate`, `genie-freshness`, `typescript-client` and `fractal-web` (`ci-script-tests`, the CI scripts' own tests on their
+declared inputs, runs beside `genie-freshness` and is not a required context of its own: the `linux-gate` job, which every head reports,
+needs it and fails when it failed or was cancelled; a head from before it existed has no run of it and is not blocked),
 and `main` lands through GitHub's merge queue (see [Merge queue](#merge-queue)). The VM tests
 (`isolation-vm`) and the mail redelivery canaries run once a day in `daily-long.yml`, not on pull
 requests or in the queue (2026-10-23); a red daily run comments on its one open issue.
@@ -486,7 +494,7 @@ The gate covers st3 and the code st3 uses. The `ci` profile's `default-filter` i
 `.config/nextest.toml` selects it on every event, with no path filter or scheduled full run:
 
 - every test of the other workspace crates: st3, fractal-client, fractal-client-codegen, fractal-schema,
-  fractal-migrate, stui (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
+  fractal-migrate, Fractal TUI (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
   harness state and sessions st3 and st2 share) and the shared and resource-provider crates;
 - st2's integration test files, apart from those below.
 
@@ -528,7 +536,7 @@ existing scope.
 
 Every required Linux stage runs `scripts/check-st-boundary-test` and
 `scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
-in st3/stui, plus direct, renamed or indirect workspace dependencies on st2 (including
+in st3/Fractal TUI, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 
 The Claude no-st2 seat eval and all five harness boot canaries inspect fresh seat processes
@@ -549,23 +557,43 @@ both generations continue to coordinate with Claude's own config lock.
 `tests/transport_isolation.rs` proves that a task st2 starts in its own systemd user scope
 survives a SIGKILL of its supervisor's cgroup, for both exec and pty tasks. The managed-agent
 color contract also checks environment propagation through a real user scope, including a
-PTY restart. These three tests need a real systemd user manager, which Namespace's runner
-image does not boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily
-`daily-isolation-vm` job (`daily-long.yml`):
+PTY restart. The current runtime adds three ignored tests in the `fractal-runtime` package's
+`scope_cascade` binary:
+
+| Test | Guarantee |
+| --- | --- |
+| `exec_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | An exec scope survives its parent service's cgroup SIGKILL, keeps its incarnation and cgroup, then stops cleanly. |
+| `pty_survives_parent_service_sigkill_with_the_same_incarnation_and_stops` | A PTY scope survives the same cascade with its incarnation and cgroup intact, then stops cleanly. |
+| `literal_environment_is_preserved_across_a_work_scope` | Literal environment values cross a real user scope unchanged. |
+
+The landed `fractal-runtime` library test
+`isolate::retirement::native_tests::a_bound_scope_retires_escaped_descendants_and_preserves_a_neighbor`
+adds the fourth current-runtime control. It checks that a changed original request cannot
+signal either workload, then retires an escaped descendant while its neighboring scope
+survives. The test remains ignored in ordinary CI; the VM explicitly selects it by package,
+`fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
+activation of the retirement primitive.
+
+All seven controls need a real systemd user manager, which Namespace's runner image does not
+boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
+job (`daily-long.yml`):
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
 2. The producer prebuilds the preserved workspace selection into one archive, including the
-   existing st2 integration test binary and its executable for these three VM tests.
+   existing st2 integration binary and executable plus the fractal-runtime `scope_cascade` and
+   library binaries.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
    NixOS with a lingering user, copies in the archive, extracts it at the checkout's path (the
-   test binary has st2's path compiled in) and runs both cascade tests and
-   `nomad_survival::managed_agent_color_contract_crosses_systemd_scope` with nextest as a
-   transient service of that user's systemd manager. The VM compiles nothing.
+   st2 test binary has its executable's path compiled in) and runs the seven controls with
+   nextest as a transient service of that user's systemd manager. The VM compiles nothing.
 
-The VM requires all three tests to run and pass, with no isolation opt-out. The job summary
-records the KVM probe and each phase's elapsed time.
+The archive inventory must match the seven exact package, binary, kind and test identities.
+Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
+The JUnit report must contain exactly those seven distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All seven tests must run and pass, with no isolation
+opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
 
@@ -576,15 +604,48 @@ inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack s
 The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
 are disabled by the workspace configuration.
 The store cache key is
-`typescript-client-<os>-node24.18.0-pnpm12.7.0-<sha256 of pnpm-lock.yaml>`.
+`typescript-client-<os>-node24.18.0-pnpm12.15.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
+
+The effect-utils GVS shared-store default and `pnpm:store:retire` task do not
+relocate this workspace's stores: Fractal uses the hoisted linker, a plain
+`nix develop .#web` shell (not the upstream pnpm devenv tasks), explicit
+`${{ runner.temp }}/pnpm-store` in CI, and a sandbox-local `$TMPDIR/store`
+for the fixed-output installation. Store cache keys track pnpm 12.15.0;
+no legacy-store retirement is needed for this cutover.
 
 After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
 `tsc --noEmit -p .` in `apps/ios`, and the iOS tests. The client packages pin TypeScript
 6.0.3 and Effect 4.0.0 stable. The iOS project allows explicit TypeScript import extensions
 for generated-client consumers. The main ruleset requires `typescript-client`.
+
+### Storybook deployment
+
+The separate [Storybook deployment workflow](../.github/workflows/storybook-deploy.yml),
+authored with `githubWorkflow` in `storybook-deploy.yml.genie.ts`, is not a required
+check and does not change Workspace CI or its gates. It builds
+`packages/fractal-ui/storybook-static` and deploys the Alchemy v2 stack
+`@fractal/storybook-deploy` with Cloudflare remote state in stage `main` for the
+canonical [Storybook](https://storybook.compounding.tech). Every push to `main`
+deploys; there is no change-detection job, pull-request trigger, per-PR stage or
+close-cleanup job. The checkout is the push's immutable `github.sha`.
+Deployment credentials are exposed only to code merged into `main`, never to
+PR-head infrastructure code. This is outside the PR admission path, so it needs
+no draft-policy exception and is not a draft-transition cancellation target.
+Infrastructure updates to the canonical site are serialized without cancellation.
+
+The deployment URL is written to the GitHub Actions job summary; the workflow
+does not need repository write permissions or post PR comments. An administrator
+must configure `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` before deployment.
+If either secret is absent, a credential preflight writes a skip summary and all
+checkout, setup, build and deploy steps are skipped successfully.
+The `STORYBOOK_DOMAIN` repository variable overrides the canonical custom domain;
+unset uses `storybook.compounding.tech`, while an explicitly empty value disables
+the custom domain in favor of `workers.dev`. The workflow preserves this
+unset-versus-empty distinction. See [Storybook deployment setup](development.md#storybook-deployment)
+for account permissions, state bootstrap and manual deployment commands.
 
 ### Fractal web
 
@@ -603,6 +664,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   the final commit). `--no-renames` counts both sides of a rename. Missing or malformed
   SHAs, failed fetches and failed diffs conservatively select every web lane, including
   kit plays, with a warning; `workflow_dispatch` also forces all lanes.
+  Kit inputs explicitly include the raw PTY terminal surface and its bundled runtime
+  dependencies; terminal unit tests alone do not select kit plays.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
   `clients/typescript/fractal-views/**`, `clients/typescript/fractal-scenarios/**` and `fixtures/**`.
   Within `clients/typescript/fractal-client`, only the consumed export graph (`index.ts`,
@@ -629,7 +692,7 @@ their sandbox flags and declared-input boundary remain unchanged.
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
-  `fractal-web-pnpm-<os>-pnpm12.7.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  `fractal-web-pnpm-<os>-pnpm12.15.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
@@ -738,7 +801,7 @@ the check (`enforce: true`); under a shadow entry the line reads `decision=run r
 and names the record. `fractal-web` has such a shadow entry; `fractal-web-kit` has none, so
 its decision is `run` with `reason=no-record`. `claims PATH…` and
 `inputs CHECK` print the plugin's path ownership and declared inputs.
-`scripts/web-skip-proof-test` (in `genie-freshness`) covers key stability, the app/kit
+`scripts/web-skip-proof-test` (in `ci-script-tests`) covers key stability, the app/kit
 split, base-pinned rules and the policy path.
 
 The strict kit play lane runs every indexed story at both 440/1440 widths and
@@ -754,6 +817,18 @@ user agent), as Storybook's own runner does: after each play the preview pauses
 animations at their end state for the a11y check instead of a fixed 100 ms sleep
 before waiting for them. A play that leaves UI opening after it returns (a hover
 card under the pointer) waits for that state itself rather than relying on the sleep.
+Each case must have exactly one completed strict story record for its requested story.
+The guard follows the iframe document's identity, not its current URL: `pushState` and
+`replaceState` keep collecting lifecycle and axe evidence at the final in-app URL.
+A replacement document fails closed: Node observes main-frame document navigation
+requests before the initial `goto`, rejecting a second request even for a same-URL
+reload before DOMContentLoaded. History API changes do not request another document.
+Receipts record both the initial Storybook URL and the final evidence URL; empty
+records or missing/duplicate completions cannot pass. This detects accidental
+navigation, not an application deliberately forging evidence.
+Play-driven component transitions use local React state: Storybook's `updateArgs`
+starts another story render, which emits another completion and accessibility report.
+SyncLine's transition demo keeps its full play assertions without updating story args.
 
 The gate takes three options. Pull requests run the per-commit set (`KIT_PLAY_SET=commit`)
 with a11y off and a 100-second budget; merge groups (observed and signed by Evidence
@@ -787,7 +862,7 @@ post-DOM readiness, assertion and close timings. The strict lifecycle assertions
 story-identity checks, matrix size and job timeout are unchanged.
 
 Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
-out into two non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
+out into four non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
 and the gate refuses shard options for any set but `all`. Each shard validates the
 **full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
 cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
@@ -801,6 +876,25 @@ Storybook build and their strict plays. Browser controls and Storybook wait for 
 stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
 stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
+
+The job timeout stays **25 minutes**. On 2026-10-26, the two-shard full matrix
+exhausted shard 0's budget: [run 40357292970](https://github.com/compoundingtech/fractal/actions/runs/40357292970)
+spent about four minutes preparing the runner, six minutes installing and running
+the non-play streams, and two minutes on browser controls/builds before strict plays.
+Shard 0 was cancelled after 26m24s with only 998 of its 1,132 cases completed;
+shard 1 finished its 1,265 cases in 13m02s of plays. This is not a larger shard-0
+story partition: shard 0 also owns the other lanes. Play speed varies too:
+[run 40359051491](https://github.com/compoundingtech/fractal/actions/runs/40359051491)
+took 20m39s for shard 1's same 1,265 cases, leaving little room even without
+the non-play lanes. These jobs use GitHub-hosted runners. Observed shard-0 runs
+took 1,444–1,530 seconds on EPYC 7763 runners versus 822–1,065 seconds on
+EPYC 9V45/9V74 runners; the overruns correlate with runner CPU type, not
+contention on a local build host. Four shards halve each old parity partition while preserving
+the stable hash rule, all cases, axe and receipt coverage. A third shard would
+reduce plays by only about a third, leaving less headroom for shard 0's fixed work
+and the observed runner variation. Extra shards duplicate setup and the small
+Storybook build; they do not duplicate app tests or browser controls. These are
+historical timings, not a measured runtime guarantee for the four-shard workflow.
 
 Every shard publishes `receipt.json` in an artifact named
 `kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and
@@ -842,10 +936,10 @@ Calling-thread CPU excludes host descheduling and unrelated Node worker-thread C
 Each report includes all samples and host load averages; load never skips the lane or
 changes its thresholds.
 
-The web shell supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+The web shell supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
-mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `smalltalk`. Remote caching
+mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching
 and uploads are disabled, with no remote endpoints. The shell links `rules` and
 `capabilities` cells into ignored `.buck2/`; CI fails if checked-in root files drift
 from the Nix rendering. `buck2/dependencies/BUCK` and its SHA-256 sidecar project the
@@ -1179,7 +1273,8 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in:
+The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in. It is
+the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
 stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.
@@ -1407,7 +1502,7 @@ repo-settings changes have merged.
 | --- | --- |
 | `fleet.yml` | The old fork-only fleet compatibility job is absorbed into `linux-gate`, which now covers every PR and main. This preserves fork coverage and adds same-repository coverage on Namespace. |
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
-| `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
+| `release-fractal.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
 | `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
@@ -1657,7 +1752,7 @@ it does not establish the cause of earlier digest mismatches or a measured speed
 ## Tests the sandboxed st3 check does not run
 
 `checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
-`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+`nix/fractal-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
 Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
 sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
 test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`

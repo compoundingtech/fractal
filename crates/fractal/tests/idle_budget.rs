@@ -399,21 +399,19 @@ async fn a_quiescent_daemon_cpu_control_accepts_idle_and_rejects_busy() {
         .unwrap()
         .set_modified(std::time::SystemTime::now() - Duration::from_secs(3_601))
         .unwrap();
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: event_notify.clone(),
-        node: NODE.into(),
-        state_dir,
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: notify.clone(),
+    event_notify: event_notify.clone(),
+    node: NODE.into(),
+    state_dir,
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let ingesting = tokio::spawn(fractal_daemon::recorder_receipts::run(
         store.clone(),
         receipts.clone(),
@@ -566,25 +564,36 @@ async fn an_idle_daemon_stays_under_its_cpu_and_request_budget() {
     std::fs::create_dir_all(&workspace).unwrap();
     // A file-backed store, as a member runs: its reads and writes cost what they cost there.
     let store = Arc::new(Store::open(&root.join("claims.sqlite3"), NODE).unwrap());
+    // Seeding is about 1,450 single-claim commits, and with synchronous=FULL each waited on
+    // an fsync: 21 s before the daemon started. The window below measures the daemon at the
+    // member's own setting, so only the seeding skips the fsync.
+    let synchronous = |mode: i64| {
+        let connection = store.connection.write();
+        let before: i64 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        connection.pragma_update(None, "synchronous", mode).unwrap();
+        before
+    };
+    let member = synchronous(0);
     seed(&store, &workspace);
+    synchronous(member);
 
     let notify = Arc::new(Notify::new());
     let event_notify = watch::channel(0_u64).0;
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: event_notify.clone(),
-        node: NODE.into(),
-        state_dir: root.join("daemon"),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: notify.clone(),
+    event_notify: event_notify.clone(),
+    node: NODE.into(),
+    state_dir: root.join("daemon"),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     std::fs::create_dir_all(root.join("daemon")).unwrap();
     // The receipt consumer is part of the daemon's idle cost. Its own scans must
     // not keep waking its filesystem watcher.

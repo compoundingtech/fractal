@@ -338,7 +338,7 @@ impl Store {
     /// A fresh evaluator/store incarnation must warm a full new window. This is
     /// a local producer fence, never historical closure evidence on a replica.
     pub fn slo_source_epoch(&self) -> (String,u64) {
-        let source = self.smalltalk.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
+        let source = self.fractal.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
         (source.epoch.clone(),source.started_ms)
     }
 
@@ -384,7 +384,7 @@ impl Store {
             self.slo_authority_at(tx, &fleet, &key, generation)?;
             let current = head(tx,&fleet,&self.origin,objective)?;
             let decision = observation.decision();
-            let mut local = self.smalltalk.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut local = self.fractal.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
             anyhow::ensure!(observation.epoch == local.epoch && observation.epoch_started_ms == local.started_ms
                 && observation.start_ms >= local.started_ms && u128::from(observation.observed_at_ms) <= now_ms(),
                 "SLO observation belongs to a stale, future or unknown source epoch");
@@ -553,7 +553,7 @@ impl Store {
             anyhow::ensure!(record.member==self.origin,"only the observing member recovers its episode");
             anyhow::ensure!(head(tx,&record.fleet,&record.member,&record.objective)?==Some((episode.into(),record.ordinal,false)),
                 "stale health cannot recover an obsolete episode");
-            let local = self.smalltalk.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
+            let local = self.fractal.slo_source.lock().unwrap_or_else(PoisonError::into_inner);
             anyhow::ensure!(healthy.epoch == local.epoch && healthy.epoch_started_ms == local.started_ms
                 && healthy.start_ms >= local.started_ms && u128::from(healthy.observed_at_ms) <= now_ms(),
                 "SLO recovery needs a complete fresh window after source restart/warmup");

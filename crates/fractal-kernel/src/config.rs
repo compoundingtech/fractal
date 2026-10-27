@@ -37,6 +37,8 @@ pub struct Config {
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
     pub pty_root: Option<PathBuf>,
+    /// Owner-local catalog roots supplying declared private-notes carrier provenance.
+    pub private_notes_catalogs: Vec<PathBuf>,
     pub socket: PathBuf,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
@@ -268,12 +270,17 @@ impl LimitsConfig {
     }
 }
 
-/// `[reconcile]`: maximum background pass starts per minute, default30, and when a seat that
-/// holds claimed work and has nothing set to wake it is nudged.
+/// The reconcile pass cap when `[reconcile] max_passes_per_minute` is not set.
+pub const DEFAULT_MAX_PASSES_PER_MINUTE: u32 = 30;
+
+/// `[reconcile]`: maximum background pass starts per minute, and when a seat that holds claimed
+/// work and has nothing set to wake it is nudged.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ReconcileConfig {
-    pub max_passes_per_minute: u32,
+    /// Unset: the running binary's default, [`DEFAULT_MAX_PASSES_PER_MINUTE`] for st.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_passes_per_minute: Option<u32>,
     /// How long a seat idles holding a claimed step, with nothing set to wake it, before st nudges
     /// it: a duration such as `30m`, or `off`.
     pub idle_nudge_after: String,
@@ -285,7 +292,7 @@ pub struct ReconcileConfig {
 impl Default for ReconcileConfig {
     fn default() -> Self {
         Self {
-            max_passes_per_minute: 30,
+            max_passes_per_minute: None,
             idle_nudge_after: "30m".into(),
             idle_nudge_quiet_watch: "2h".into(),
         }
@@ -294,8 +301,13 @@ impl Default for ReconcileConfig {
 
 impl ReconcileConfig {
     pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    /// The configured cap, or `default` when the config sets none.
+    pub fn max_passes_per_minute_or(&self, default: u32) -> u32 {
+        self.max_passes_per_minute.unwrap_or(default)
+    }
     pub fn validate(&self) -> Result<()> {
-        anyhow::ensure!((1..=600).contains(&self.max_passes_per_minute),
+        anyhow::ensure!(self.max_passes_per_minute.is_none_or(|cap| (1..=600).contains(&cap)),
             "reconcile.max_passes_per_minute must be between 1 and 600");
         self.idle_nudge()?;
         Ok(())
@@ -496,6 +508,7 @@ impl Default for Config {
             shared_secret_file: None,
             state_dir,
             pty_root: None,
+            private_notes_catalogs: Vec::new(),
             socket,
             client_gateway_socket,
             peer_listen: None,
@@ -701,6 +714,11 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.reconcile.validate()?;
         self.github.validate()?;
+        anyhow::ensure!(
+            self.private_notes_catalogs.iter().all(|path| path.is_absolute()
+                && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))),
+            "private_notes_catalogs must contain absolute paths without parent components"
+        );
         if self.work_root.is_some() {
             self.work_root()?;
         }
@@ -1036,7 +1054,7 @@ mod tests {
             let error = config(&format!("{home}/{guarded}/projects")).validate().unwrap_err();
             assert!(error.to_string().contains(guarded), "{error}");
         }
-        assert!(config(&format!("{home}/Smalltalk")).validate().is_ok());
+        assert!(config(&format!("{home}/Fractal")).validate().is_ok());
     }
 
     #[test]
@@ -1055,7 +1073,7 @@ mod tests {
         assert!(super::check_work_root_in(&new_through, home.path()).is_err());
         let new_direct = elsewhere.path().join("newwork/deeper");
         assert!(super::check_work_root_in(&new_direct, home.path()).is_err());
-        assert!(super::check_work_root_in(&home.path().join("Smalltalk"), home.path()).is_ok());
+        assert!(super::check_work_root_in(&home.path().join("Fractal"), home.path()).is_ok());
         assert!(super::check_work_root_in(home.path(), home.path()).is_err());
     }
 
@@ -1134,20 +1152,25 @@ mod tests {
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
         let (_, mut effective) = read_daemon_policies(Some(&path)).unwrap();
-        assert_eq!(effective.max_passes_per_minute, 30);
+        assert_eq!(effective.max_passes_per_minute, None);
+        assert_eq!(effective.max_passes_per_minute_or(DEFAULT_MAX_PASSES_PER_MINUTE), 30);
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();
         effective = read_daemon_policies(Some(&path)).unwrap().1;
         for bad in ["0", "-1", "601", "4294967296", "\"bad\""] {
             std::fs::write(&path, format!("[reconcile]\nmax_passes_per_minute={bad}\n")).unwrap();
             assert!(read_daemon_policies(Some(&path)).is_err());
-            assert_eq!(effective.max_passes_per_minute, 60);
+            assert_eq!(effective.max_passes_per_minute, Some(60));
         }
         std::fs::remove_file(&path).unwrap();
         assert!(read_daemon_policies(Some(&path)).is_err());
-        assert_eq!(effective.max_passes_per_minute, 60);
+        assert_eq!(effective.max_passes_per_minute, Some(60));
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=15\n").unwrap();
         effective = read_daemon_policies(Some(&path)).unwrap().1;
-        assert_eq!(effective.max_passes_per_minute, 15);
+        assert_eq!(effective.max_passes_per_minute, Some(15));
+        // A cap the config names is kept, even the default value.
+        std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=30\n").unwrap();
+        effective = read_daemon_policies(Some(&path)).unwrap().1;
+        assert_eq!(effective.max_passes_per_minute_or(600), 30);
     }
     use super::*;
     use tempfile::tempdir;

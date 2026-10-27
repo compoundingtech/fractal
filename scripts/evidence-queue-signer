@@ -3,6 +3,7 @@
 
   evidence-queue-signer observe --repo DIR [--repository OWNER/NAME]
   evidence-queue-signer sign --repo DIR [--repository OWNER/NAME] [--dry-run]
+  evidence-queue-signer seed --repo DIR [--repository OWNER/NAME]
   evidence-queue-signer report [--hours 24]
 
 Shadow by construction: a note signed at the host level never covers a merge_group run (.st/evidence-skip-policy.json), so nothing
@@ -32,10 +33,19 @@ minutes: the queue does not wait for a calm host, and a measurement that never s
 A tree is never run twice, whatever the outcome: one stopped for load is not retried (for measurement, that is a result too).
 When the run ended, each note's time is read back from the notes pushed for the tree (their observed_at); when none can be read it
 is estimated from the run's start and st-test's per-check seconds, and the line says which (signed_at_source).
-~/.config/evidence-queue-signer/off stops both before they do anything.
+seed (every minute, one run at a time): once main has moved, runs `st-test --seed COMMIT` on main's new tip, from origin/main like
+sign: it signs the per-crate rust-tests notes of that tree for the crates whose key has none yet and pushes them, so pull requests
+branched from main reuse them (most merges move a handful of crates; one that moves the lane, all of them). Main's code is merged
+code, the code every run on this host already builds under a pull request, so no author rule applies. Its nextest takes the host's
+build slots through the admission shim as every st-test build does; this adds no slot. It starts on the same terms as sign, and not
+while another st-test --seed runs on the host (a seat's, or one by hand): that tick is skipped and the next one tries again. A tip
+is seeded once, whatever the outcome, with one exception: a seed that load stopped before its tests started (waiting for a build
+slot, or building) tries the same tip again on the next tick, up to SEED_TRIES tries, until a newer merge replaces it; each try is a
+line of its own. The next merge's seed covers what one left missing. Each line records the pool cap its st-test ran with.
+~/.config/evidence-queue-signer/off stops all three before they do anything.
 
 State: ~/.local/state/evidence-queue-signer/ (entries.json, the open records; entries.jsonl, one line per finished entry;
-attempts.jsonl, one line per run; logs/). `report` sums the lines of the window.
+attempts.jsonl, one line per run; seeds.jsonl, one line per seed; logs/). `report` sums the lines of the window.
 """
 import argparse
 import calendar
@@ -46,6 +56,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import sys
@@ -58,6 +69,10 @@ STATE = Path(os.environ.get('EVIDENCE_QUEUE_STATE') or Path.home() / '.local/sta
 BASE = 'main'
 START = {'start_io60': 12.0, 'min_free_gib': 165.0, 'start_mem_gib': 20.0}  # operations' start terms (stops: the worker's)
 SETTLE = 3 * 3600  # an entry that left the queue is written out once its checks finished, or after this long
+# st-test's summary rows, as --seed prints them: rust-tests (covered, passed or not) and a row for each crate that did not sign.
+SEED_TRIES = 6  # tries per tip when load stops a seed before its tests start (Factory, 2026-10-25)
+TESTS_STARTED = re.compile(r'^\s*Starting \d+ tests? across ', re.M)  # nextest's first line of the run
+SEED_ROW = re.compile(r'^  (\S+)\s+(covered|passed|timed out|not signed|NOT SIGNED|NOT RUN|FAILED(?: \([^)]*\))?)\s+(\d+)s\s+(.*)$')
 QUERY = '''query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: "main") {
   entries(first: 50) { nodes { position state enqueuedAt pullRequest { number headRefOid author { login } }
     headCommit { oid } baseCommit { oid } } } } } }'''
@@ -356,13 +371,7 @@ def sign(args):
     lock = run_lock('sign')
     if lock is None:
         return 0
-    rules = dict(W.limits(), **START)
-    start = CONFIG / 'start.json'  # an override agreed with operations
-    if start.exists():
-        given = json.loads(start.read_text())
-        if set(given) - set(START):
-            raise Failure(f'{start}: unknown start terms {", ".join(sorted(set(given) - set(START)))}')
-        rules.update({key: float(value) for key, value in given.items()})
+    rules = start_rules()
     repo = Path(args.repo).resolve()
     W.clone(repo, args.repository)
     attempted = {a.get('tree') for a in read_lines(STATE / 'attempts.jsonl')}
@@ -380,12 +389,9 @@ def sign(args):
         say(message)
         append(STATE / 'skips.jsonl', {'time': stamp(), 'pr': pick['pr'], 'tree': pick['tree'], 'kind': pick['kind'], 'reason': reason})
         return 0
-    if W.free_gib(repo) < rules['min_free_gib']:
-        return not_starting('disk', f'{W.free_gib(repo):.0f} GiB free, under {rules["min_free_gib"]:.0f}: not starting')
-    if W.io60() >= rules['start_io60']:
-        return not_starting('busy', f'IO pressure {W.io60():.1f}% is over {rules["start_io60"]}%: not starting this tick')
-    if W.mem_gib() < rules['start_mem_gib']:
-        return not_starting('memory', f'{W.mem_gib():.1f} GiB available, under {rules["start_mem_gib"]:.0f}: not starting this tick')
+    held = held_back(repo, rules)
+    if held:
+        return not_starting(*held)
     commit = build_commit(repo, pick, pick['pr'])
     if commit is None:
         return not_starting('unavailable', f'#{pick["pr"]}: the commit for tree {pick["tree"][:12]} cannot be built here')
@@ -420,6 +426,110 @@ def sign(args):
     append(STATE / 'attempts.jsonl', line)
     say(f'#{pick["pr"]} {pick["kind"]} tree {pick["tree"][:12]}: {line["outcome"]} in {seconds}s')
     return 0
+
+
+def start_rules():
+    """The worker's stop limits with operations' start terms, and any override agreed with operations (start.json)."""
+    rules = dict(W.limits(), **START)
+    start = CONFIG / 'start.json'
+    if start.exists():
+        given = json.loads(start.read_text())
+        if set(given) - set(START):
+            raise Failure(f'{start}: unknown start terms {", ".join(sorted(set(given) - set(START)))}')
+        rules.update({key: float(value) for key, value in given.items()})
+    return rules
+
+
+def held_back(repo, rules):
+    """(reason, message) when the host is too full, busy or short of memory to start a run; None when it may start."""
+    if W.free_gib(repo) < rules['min_free_gib']:
+        return 'disk', f'{W.free_gib(repo):.0f} GiB free, under {rules["min_free_gib"]:.0f}: not starting'
+    if W.io60() >= rules['start_io60']:
+        return 'busy', f'IO pressure {W.io60():.1f}% is over {rules["start_io60"]}%: not starting this tick'
+    if W.mem_gib() < rules['start_mem_gib']:
+        return 'memory', f'{W.mem_gib():.1f} GiB available, under {rules["start_mem_gib"]:.0f}: not starting this tick'
+    return None
+
+
+def seeding_elsewhere():
+    """True when an st-test --seed runs on this host (another seat's, or one started by hand): two would run and sign the same crates."""
+    for cmdline in Path(os.environ.get('EVIDENCE_QUEUE_PROC') or '/proc').glob('[0-9]*/cmdline'):
+        try:
+            argv = cmdline.read_bytes().split(b'\0')
+        except OSError:
+            continue
+        if b'--seed' in argv and any(Path(arg.decode(errors='replace')).name == 'st-test' for arg in argv):
+            return True
+    return False
+
+
+def seed(args):
+    if (CONFIG / 'off').exists():
+        say(f'{CONFIG / "off"} exists: not running')
+        return 0
+    lock = run_lock('seed')
+    if lock is None:
+        return 0
+    rules = start_rules()
+    repo = Path(args.repo).resolve()
+    W.clone(repo, args.repository)
+    commit = git(repo, 'rev-parse', f'origin/{BASE}').stdout.strip()
+    tries = [line for line in read_lines(STATE / 'seeds.jsonl') if line.get('commit') == commit]
+    if tries and not (all(line.get('retry') for line in tries) and len(tries) < SEED_TRIES):
+        return 0
+    tree = tree_of(repo, commit)
+    merged_at = stamp(int(git(repo, 'show', '-s', '--format=%ct', commit).stdout))  # main's tip is the queue's commit: its time is the merge's
+
+    def not_starting(reason, message):
+        say(message)
+        append(STATE / 'skips.jsonl', {'time': stamp(), 'kind': 'seed', 'commit': commit, 'tree': tree, 'reason': reason})
+        return 0
+    if seeding_elsewhere():
+        return not_starting('seeding', 'another st-test --seed runs on this host: not starting this tick')
+    held = held_back(repo, rules)
+    if held:
+        return not_starting(*held)
+    git(repo, 'checkout', '-q', '--detach', '--force', commit)
+    with tempfile.TemporaryDirectory(prefix='evidence-queue-') as scratch:
+        st_test = W.base_tools(repo, scratch)
+        log = STATE / 'logs' / f'{time.strftime("%Y%m%dT%H%M%S")}-seed-{commit[:12]}.log'
+        log.parent.mkdir(parents=True, exist_ok=True)
+        started = time.time()
+        # The commit, not origin/main: st-test fetches the base again, and main may have moved since; this tip is the one recorded.
+        _, reason, seconds, peak = W.run(st_test, repo, [], 'seed', rules, log, extra=('--seed', commit))
+    rows = seed_rows(log)
+    result, detail = rows.pop('rust-tests', ('no result', ''))
+    tests_started = bool(TESTS_STARTED.search(log.read_text(errors='replace')))
+    line = {'time': stamp(), 'commit': commit, 'tree': tree, 'merged_at': merged_at, 'started_at': stamp(started),
+            'wait_s': round(started - seconds_of(merged_at)), 'seconds': seconds, 'rust_tests': result, 'detail': detail,
+            'not_signed': {name: row[0] for name, row in rows.items()}, 'io60_peak': round(peak, 2), 'log': str(log),
+            'try': len(tries) + 1, 'tests_started': tests_started,
+            # None: st-test's own default cap (POOL_MAX_GB)
+            'pool_max_gb': os.environ.get('ST_TEST_POOL_MAX_GB')}
+    if reason:
+        # Stopped before its tests started: the next tick tries this tip again, while tries are left.
+        line.update(outcome='deferred', stopped=reason, retry=not tests_started and len(tries) + 1 < SEED_TRIES)
+    elif result == 'covered':
+        line['outcome'] = 'covered'
+    else:
+        line['outcome'] = 'seeded' if result == 'passed' and not rows else 'failed'
+    append(STATE / 'seeds.jsonl', line)
+    say(f'seed {commit[:12]} tree {tree[:12]} try {line["try"]} of {SEED_TRIES}: {line["outcome"]} in {seconds}s ({detail or result})'
+        + ('; the next tick tries it again' if line.get('retry') else ''))
+    return 0
+
+
+def seed_rows(log):
+    """{name: (result, detail)} from st-test's summary after its last `st-test: tree` line."""
+    lines = Path(log).read_text(errors='replace').splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith('st-test: tree ')]
+    rows = {}
+    for line in lines[starts[-1] + 1:] if starts else []:
+        match = SEED_ROW.match(line)
+        if not match:
+            break
+        rows[match[1]] = (match[2], match[4])
+    return rows
 
 
 def note_times(repo, tree, since):
@@ -457,6 +567,7 @@ def report(args):
     since = time.time() - args.hours * 3600
     entries = [e for e in read_lines(STATE / 'entries.jsonl') if seconds_of(e['left_at']) >= since]
     attempts = [a for a in read_lines(STATE / 'attempts.jsonl') if seconds_of(a['time']) >= since]
+    seeds = [s for s in read_lines(STATE / 'seeds.jsonl') if seconds_of(s['time']) >= since]
     signed = [e for e in entries if e.get('signer')]
     leads = [row['minutes'] for e in signed for row in e['compare'].values() if 'minutes' in row]
     print(json.dumps({
@@ -474,6 +585,10 @@ def report(args):
         'runs': len(attempts), 'outcomes': {o: sum(1 for a in attempts if a['outcome'] == o) for o in sorted({a['outcome'] for a in attempts})},
         'median_run_s': statistics.median([a['seconds'] for a in attempts]) if attempts else None,
         'median_wait_s': statistics.median([a['wait_s'] for a in attempts]) if attempts else None,
+        'seeds': len(seeds), 'seed_outcomes': {o: sum(1 for s in seeds if s['outcome'] == o) for o in sorted({s['outcome'] for s in seeds})},
+        'seed_retries': sum(1 for s in seeds if s.get('try', 1) > 1),
+        'median_seed_s': statistics.median([s['seconds'] for s in seeds]) if seeds else None,
+        'median_seed_wait_s': statistics.median([s['wait_s'] for s in seeds]) if seeds else None,
     }, indent=1, sort_keys=True))
     return 0
 
@@ -481,7 +596,8 @@ def report(args):
 def main(argv):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     commands = parser.add_subparsers(dest='command', required=True)
-    for name, text in (('observe', 'record the queue, the prediction and the queue\'s results'), ('sign', 'sign at most one tree')):
+    for name, text in (('observe', 'record the queue, the prediction and the queue\'s results'), ('sign', 'sign at most one tree'),
+                       ('seed', 'sign the per-crate rust-tests notes of main\'s new tip')):
         one = commands.add_parser(name, help=text)
         one.add_argument('--repo', required=True, help='the clone this command owns (created on first use)')
         one.add_argument('--repository', default='compoundingtech/fractal')
@@ -496,7 +612,7 @@ def main(argv):
     import signal
     signal.signal(signal.SIGTERM, interrupted)
     try:
-        return {'observe': observe, 'sign': sign, 'report': report}[args.command](args)
+        return {'observe': observe, 'sign': sign, 'seed': seed, 'report': report}[args.command](args)
     except KeyboardInterrupt:
         if W.CHILD is not None:
             W.stop(W.CHILD)

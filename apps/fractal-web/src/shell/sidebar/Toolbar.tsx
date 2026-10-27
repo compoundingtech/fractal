@@ -14,12 +14,14 @@ import {
   MenuTrigger,
 } from '../../ui-compat/components.tsx'
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
+import { spaceVars as space } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import { parseSidebarQuery, sortModes, type SortMode } from './filter.ts'
 import { SidebarShowMenu } from './ShowMenu.tsx'
 import type { ShowRow } from './show.ts'
 import { defaultFilters, type SidebarFilters } from './state.ts'
 import { statuses, type AgentStatus } from './StatusIcon.tsx'
+import { Icon } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 
 const readLightScheme = () => document.documentElement.dataset.scheme !== 'dark'
 const subscribeScheme = (notify: () => void) => {
@@ -155,7 +157,7 @@ export const SidebarToolbar = ({
                     id={value}
                     textValue={label}
                     stylexStyle={narrow && styles.touchRow}
-                    suffix={filters.sort === value ? <span aria-hidden="true">✓</span> : undefined}
+                    suffix={filters.sort === value ? <Icon name="check" /> : undefined}
                   >
                     {label}
                   </MenuItem>
@@ -177,7 +179,7 @@ export const SidebarToolbar = ({
             if (event.key === 'Escape') update({ ...filters, query: '' })
             if (event.key === 'ArrowDown' && onEnterResults !== undefined) { event.preventDefault(); onEnterResults() }
           }}
-          stylexStyle={[searchStyle, narrow && styles.touchSearch]}
+          stylexStyle={[styles.search, searchStyle, narrow && styles.touchSearch]}
         />
       </div>
     </div>
@@ -188,9 +190,14 @@ const styles = stylex.create({
   toolbar: {
     display: 'flex',
     flexDirection: 'column',
-    gap: scale.space2,
-    paddingInline: scale.space2,
-    paddingBottom: scale.space2,
+    gap: space.md,
+    paddingInline: space.md,
+    paddingBottom: space.md,
+  },
+  search: {
+    boxSizing: 'border-box',
+    borderRadius: 6,
+    ':focus-visible': { outline: `2px solid ${tokens['--ds-focus-color']}`, outlineOffset: 2 },
   },
   controls: {
     display: 'flex',

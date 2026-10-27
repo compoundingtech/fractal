@@ -142,6 +142,10 @@ export const geometryVars = stylex.defineVars({
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
   modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
+  /** Fit-within box for a sent image in the transcript; it opens full size on press. */
+  imageMaxWidth: '320px', imageMaxHeight: '240px',
+  /** Widest a staged attachment chip grows to fit its name: narrower on phones, where the tray scrolls. */
+  attachmentMax: { default: '180px', '@media (min-width: 600px)': '240px' },
   detailsValueMin: '120px',
   statusWord: '80px',
   switchWidth: '32px', switchHeight: '18px', iconSm: '12px', statusDot: '6px',
@@ -184,6 +188,9 @@ export const motionVars = stylex.defineVars({
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
   ease: 'ease', linear: 'linear', surfaceTransform: 'scale(0.98)',
 })
+
+/** Numeric twin of `motionVars.standard` for imperative motion such as the eased return to the transcript end. */
+export const motionNumbers = { standard: 200 } as const
 
 export const elevationVars = stylex.defineVars({
   popover: '0 18px 44px -18px rgb(0 0 0 / 80%)',

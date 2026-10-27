@@ -27,7 +27,7 @@ struct CachedModel {
     model: Model,
 }
 
-/// The existing stui cache location, hashed by endpoint and actor. Requires an absolute cache home.
+/// The existing Fractal TUI cache location, hashed by endpoint and actor. Requires an absolute cache home.
 pub fn path(endpoint: &Path, actor: &str) -> Option<PathBuf> {
     if actor.is_empty() {
         return None;

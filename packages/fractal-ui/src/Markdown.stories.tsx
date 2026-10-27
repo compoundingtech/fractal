@@ -13,12 +13,40 @@ import { MarkdownCanvas, languages, streamChunks, inlineStreamStages, styles } f
 
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Markdown', component: MarkdownCanvas,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'CommonMark + GFM prose with semantic emphasis, nested lists, aligned scrollable tables, titled links, and preserved resource references. Code fences retain local wrap/copy state across streamed updates, copy unformatted source through the Clipboard API, and lazily load explicit refractor grammars whose tokens use the existing semantic theme. Unknown languages remain plain text. Streaming mode completes unfinished inline prose without changing settled literal punctuation or fenced source.' } } },
   args: { scenario: 'rich-text', scheme: 'dark' },
   argTypes: { scenario: { options: ['rich-text', 'languages', 'streaming', 'inline-streaming', 'all'], control: 'radio' }, scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof MarkdownCanvas>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStatesLight:contract-fixture',
+  'CopyFailure:contract-fixture',
+  'InputForegroundDark1440:contract-fixture',
+  'InputForegroundDark440:contract-fixture',
+  'InputForegroundLight1440:contract-fixture',
+  'InputForegroundLight440:contract-fixture',
+  'Languages:contract-fixture',
+  'LanguagesLight:contract-fixture',
+  'Light:contract-fixture',
+  'RichText:contract-fixture',
+  'StreamingCodeBlock:contract-fixture',
+  'StreamingCodeBlockLight:contract-fixture',
+  'StreamingControlsPersistence:contract-fixture',
+  'StreamingControlsPersistenceLight:contract-fixture',
+  'StreamingHeading:contract-fixture',
+  'StreamingHeadingLight:contract-fixture',
+  'StreamingInlineMarkup:contract-fixture',
+  'StreamingParagraph:contract-fixture',
+  'StreamingParagraphLight:contract-fixture',
+  'StreamingTable:contract-fixture',
+  'StreamingTableLight:contract-fixture',
+  'StreamingTightList:contract-fixture',
+  'StreamingTightListLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local markdown syntax and token streaming stages exercise parser and renderer contracts.' } } } satisfies Story
 

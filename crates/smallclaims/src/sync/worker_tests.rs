@@ -266,13 +266,15 @@ async fn overload_poll_exhaustion_retains_authenticated_response_details() {
     let _ = server.await;
     let _ = awake.await;
     assert!(error.is::<PeerOverloaded>());
+    let inner_elapsed = error.downcast_ref::<ReplicationExchangeFailure>().unwrap().elapsed_ms;
     let failure = ReplicationExchangeFailure::from_error(
         &error, ReplicationFailurePhase::Verify, Duration::from_secs(300), None,
     );
     assert_eq!(failure.code, "replication-overloaded");
     assert_eq!(failure.phase, ReplicationFailurePhase::ResponseBody);
     assert_eq!(failure.http_status, Some(503));
-    assert_eq!(failure.elapsed_ms, 300_000);
+    assert_eq!(failure.elapsed_ms, inner_elapsed);
+    assert!(failure.preparation_ms.is_some());
     assert!(!failure.cause.contains("private"));
 }
 
@@ -633,6 +635,7 @@ async fn an_authenticated_failure_has_a_request_bound_signature() {
     let body = Bytes::from_static(b"not json");
     let request_digest = FleetAuth::body_digest(&body);
     let response = receive_exchange(
+        None,
         State(PeerState {
             backend: Local(Arc::new(plain_memory("target").unwrap())),
             node: "target".into(),
@@ -1038,6 +1041,7 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
     };
 
     let first = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("source", &body).unwrap(),
         body.clone(),
@@ -1048,6 +1052,7 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
     let _ = outbound_wake.borrow_and_update();
 
     let duplicate = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("source", &body).unwrap(),
         body,
@@ -1060,15 +1065,77 @@ async fn a_duplicate_inbound_exchange_does_not_wake_outbound_replication() {
     );
 }
 
+#[tokio::test]
+async fn fresh_retry_after_accepted_but_unanswered_exchange_applies_envelope_once() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let fleet_id = "1f91ca65-7793-48cc-866e-ac15690130e1";
+    let auth = FleetAuth::test(fleet_id, &[7; 32]);
+    let source = plain_memory("source").unwrap();
+    let target = Arc::new(plain_memory("target").unwrap());
+    source.bind_fleet(fleet_id).unwrap();
+    target.bind_fleet(fleet_id).unwrap();
+    source.append_claim(&ClaimInput {
+        subject: "note/copper".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::from([("status".into(), Value::String("up".into()))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("source-up".into()),
+    }).unwrap();
+    let request = source.export_replication_exchange(fleet_id, &ReplicationInventory::default()).unwrap();
+    let state = PeerState::new(
+        Local(Arc::clone(&target)), "target".into(), auth.clone(),
+        FleetContext::legacy(BTreeSet::from(["source".into()])),
+    );
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&attempts);
+    let release = Arc::new(tokio::sync::Notify::new());
+    let unblock = Arc::clone(&release);
+    let router = peer_router(state, Router::new()).layer(axum::middleware::from_fn(
+        move |request: Request<Body>, next: axum::middleware::Next| {
+            let seen = Arc::clone(&seen);
+            let unblock = Arc::clone(&unblock);
+            async move {
+                let first = seen.fetch_add(1, Ordering::Relaxed) == 0;
+                // Apply and authenticate before losing the first response.
+                let response = next.run(request).await;
+                if first {
+                    unblock.notified().await;
+                }
+                response
+            }
+        },
+    ));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let peer = PeerConfig { name: "target".into(), url: format!("http://{}", listener.local_addr().unwrap()) };
+    let server = tokio::spawn(axum::serve(listener, router).into_future());
+    let http = reqwest::Client::builder().timeout(Duration::from_millis(250)).build().unwrap();
+    let result = post_signed_to::<_, ReplicationExchange>(
+        &http, &peer, "source", &auth,
+        &FleetContext::legacy(BTreeSet::from(["target".into()])),
+        EXCHANGE_PATH, &request, false,
+    ).await;
+    release.notify_one();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(attempts.load(Ordering::Relaxed), 2);
+    assert_eq!(target.claims_for("note/copper", Some("example.note")).unwrap().len(), 1);
+    server.abort();
+    let _ = server.await;
+}
+
 #[test]
 fn the_dial_set_comes_from_membership_and_skips_dial_out_members() {
     let member =
         |name: &str, state: &str, mode: &str, endpoints: Vec<Value>| crate::fleet::MemberView {
             name: name.into(),
             member_key: format!("{name}-key"),
+            node_id: None,
             state: state.into(),
             mode: mode.into(),
             endpoints,
+            endpoints_published: true,
             start: 1,
             end: None,
             ended: None,
@@ -1133,6 +1200,8 @@ fn transport_order_view() -> FleetView {
         member_key: format!("{name}-key"),
         state: "current".into(),
         mode: "listening".into(),
+        node_id: None,
+        endpoints_published: true,
         endpoints,
         start: 1,
         end: None,
@@ -1397,6 +1466,76 @@ fn a_refusal_waits_for_the_settings_lock_without_blocking_the_runtime() {
             .removed
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn pairing_admission_binds_signed_membership_before_sealing_the_answer() {
+    use crate::fleet::code::{JoinCode, fingerprint};
+    use crate::fleet::handshake::{JoinResponse, Joiner};
+    let fleet = "3b241101-e2bb-4255-8caf-4136c566a962";
+    let anchor = Arc::new(MemberKey::generate().unwrap().0);
+    let member = MemberKey::generate().unwrap().0;
+    let store = Arc::new(plain_memory("a").unwrap());
+    store.bind_fleet(fleet).unwrap();
+    store.pin_fleet_anchor(anchor.public()).unwrap();
+    store.set_member_key(Some(anchor.clone())).unwrap();
+    fleet_claim(&store, "fleet.member-admitted", "host/a", serde_json::json!({
+        "fleet_id": fleet, "member_key": anchor.public(), "via": "anchor", "mode": "listening"
+    }));
+    let invitation = store.create_fleet_invite(
+        Some("b"), Duration::from_secs(600), &["fabric".into()], "person/test", false,
+    ).unwrap();
+    let code = JoinCode {
+        fleet_id: uuid::Uuid::parse_str(fleet).unwrap(),
+        invite: hex::decode(invitation.invite).unwrap().try_into().unwrap(),
+        token: invitation.token,
+        fingerprint: fingerprint(anchor.public()),
+        expires_at: invitation.expires_at_unix_ms / 1000,
+        name: Some("b".into()),
+        migrate: false,
+        endpoints: Vec::new(),
+        pairing: None,
+    };
+    let node_id = "a".repeat(64);
+    let session = Joiner::start_bound(&code, &member, "b", "dial-out", None, "test", Some(node_id.clone())).unwrap();
+    let state = PeerState {
+        backend: Local(store.clone()),
+        node: "a".into(),
+        auth: FleetAuth::test(fleet, &[9; 32]).with_member_key(Some(anchor.clone())),
+        fleet: member_context(&store, &anchor, &[], &[], false),
+        outbound_notify: watch::channel(0_u64).0,
+    };
+    let body = serde_json::json!({
+        "request": session.request(), "node_id": node_id,
+        "expected_fleet_id": fleet, "expected_sponsor_key": anchor.public()
+    });
+    let response = receive_pairing_admission(State(state.clone()), Bytes::from(serde_json::to_vec(&body).unwrap())).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), MAX_JOIN_BYTES).await.unwrap();
+    let answer: JoinResponse = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(session.open(&answer).unwrap().fleet_id, fleet);
+    store.verify_fleet_pairing_admission("b", member.public(), &node_id).unwrap();
+    let view = store.fleet_view().unwrap();
+    let admitted = view.current("b");
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].member_key, member.public());
+    assert_eq!(admitted[0].node_id.as_deref(), Some(node_id.as_str()));
+    assert!(admitted[0].endpoints.is_empty(), "admission must not wait for joiner endpoint publication");
+    assert!(!admitted[0].endpoints_published);
+    let encoded = serde_json::to_value(&view).unwrap();
+    assert_eq!(serde_json::from_value::<FleetView>(encoded).unwrap(), view);
+    assert!(store.verify_fleet_pairing_admission("b", member.public(), &"b".repeat(64)).is_err());
+    assert!(store.verify_fleet_pairing_admission("b", anchor.public(), &node_id).is_err());
+    let mut wrong_fleet = body.clone();
+    wrong_fleet["expected_fleet_id"] = serde_json::json!("3b241101-e2bb-4255-8caf-4136c566a963");
+    let refused = receive_pairing_admission(
+        State(state.clone()), Bytes::from(serde_json::to_vec(&wrong_fleet).unwrap()),
+    ).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    let mut wrong_node = body;
+    wrong_node["node_id"] = serde_json::json!("b".repeat(64));
+    let refused = receive_pairing_admission(State(state), Bytes::from(serde_json::to_vec(&wrong_node).unwrap())).await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -3045,7 +3184,10 @@ mod retry_tests {
             })
             .await;
         }
-        assert_eq!(attempts.lock().iter().filter(|&&route| route).count(), 1);
+        assert_eq!(
+            attempts.lock().iter().filter(|&&route| route).count(), 2,
+            "one failed send plus one fresh retry; cooldown must add no preferred attempts"
+        );
         notify.send_modify(|generation| *generation += 1);
         tokio::time::advance(Duration::from_secs(31)).await;
         settled(&local, |worker| {
@@ -3939,9 +4081,12 @@ mod retry_tests {
             }
             tokio::time::resume();
             let retries = attempts.load(Ordering::Relaxed) - before;
+            // Each unanswered logical attempt can use one fresh-connection retry;
+            // keep the same backoff budget while counting both wire connections.
+            let allowed_logical_attempts = if away == 120 { 20 } else { 40 };
             assert!(
-                retries <= if away == 120 { 20 } else { 40 },
-                "{retries} connection attempts in {away}s"
+                retries <= 2 * allowed_logical_attempts,
+                "{retries} wire connections in {away}s, budget {allowed_logical_attempts} logical attempts"
             );
             for server in &stores[..2] {
                 server.age_replication_peer_for_test("traveller");
@@ -4118,6 +4263,8 @@ mod retry_tests {
             state: "current".into(),
             mode: "listening".into(),
             member_key: "member-key".into(),
+            node_id: None,
+            endpoints_published: true,
             start: 0,
             end: None,
             ended: None,
@@ -4302,6 +4449,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     let digest = FleetAuth::body_digest(&bytes);
     let headers = auth.request_headers("birch", &bytes).unwrap();
     let interrupted = tokio::spawn(receive_exchange(
+        None,
         State(state.clone()),
         headers.clone(),
         bytes.clone(),
@@ -4322,7 +4470,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
     );
 
     let started = tokio::time::Instant::now();
-    let overload = receive_exchange(State(state.clone()), headers.clone(), bytes.clone()).await;
+    let overload = receive_exchange(None, State(state.clone()), headers.clone(), bytes.clone()).await;
     assert_eq!(overload.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(started.elapsed() < REPLICATION_EXCHANGE_TIMEOUT);
     let overload_headers = overload.headers().clone();
@@ -4363,6 +4511,7 @@ async fn slow_export_returns_signed_overload_and_preserves_interrupted_receipt()
         serde_json::to_vec(&left.export_replication_summary(fleet_id).unwrap()).unwrap(),
     );
     let busy = receive_exchange(
+        None,
         State(state.clone()),
         auth.request_headers("birch", &changed).unwrap(),
         changed,
@@ -4756,6 +4905,7 @@ async fn failed_export_job_is_removed_and_identical_retry_preserves_receipt() {
     );
     for expected_status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK] {
         let response = receive_exchange(
+            None,
             State(state.clone()),
             auth.request_headers("birch", &bytes).unwrap(),
             bytes.clone(),
@@ -4947,6 +5097,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
         };
         let state = PeerState::new(backend, "cedar".into(), auth.clone(), fleet.clone());
         requests.push(tokio::spawn(receive_exchange(
+            None,
             State(state),
             auth.request_headers(name, &bytes).unwrap(),
             bytes,
@@ -4978,6 +5129,7 @@ async fn concurrent_slow_exports_refuse_more_work_with_authenticated_overload() 
     let state = PeerState::new(Local(store), "cedar".into(), auth.clone(), fleet.clone());
     let started = tokio::time::Instant::now();
     let response = receive_exchange(
+        None,
         State(state),
         auth.request_headers("elm", &query).unwrap(),
         query.clone(),
@@ -5278,10 +5430,11 @@ mod early_recovery {
         link.set(HEAD_ONLY);
         let rearmed = worker.wait(third.as_deref(), 10).await;
         assert!(rearmed.is_some_and(|waited| waited <= PEER_PROBE_INTERVAL.as_secs() + 1));
-        // Three attempts, each an export and a signature, over a link that never carried an
-        // exchange; two were released early, one per observed outage and recovery.
+        // Three logical attempts, each an export and a signature; two were released
+        // early, one per observed outage/recovery. Each unanswered attempt has one
+        // additional wire send through a fresh connection, not another recovery credit.
         assert_eq!(worker.attempts, 3);
-        assert_eq!(link.exchanges.load(Ordering::SeqCst), 3);
+        assert_eq!(link.exchanges.load(Ordering::SeqCst), 2 * worker.attempts);
         awake.abort();
         link.server.abort();
     }
@@ -5499,17 +5652,18 @@ mod early_recovery {
             );
             step(&local).await;
         }
-        // Not a spin: while the link was down the worker tried no more often than the shortest
-        // jitter of its backoff schedule allows.
+        // Not a spin: the logical attempt budget remains the shortest-jitter
+        // backoff schedule, with at most two wire sends per logical attempt.
         let (mut schedule, mut allowed) = (Duration::ZERO, 0);
         while schedule < outage {
             schedule += PeerBackoff::delay(allowed, 0);
             allowed += 1;
         }
         let refused = link.refused.load(Ordering::SeqCst);
+        let allowed_sends = 2 * allowed as usize;
         assert!(
-            (1..=allowed as usize).contains(&refused),
-            "{refused} exchanges in a {outage:?} outage; the backoff allows {allowed}"
+            (1..=allowed_sends).contains(&refused),
+            "{refused} wire sends in a {outage:?} outage; backoff allows {allowed} logical attempts ({allowed_sends} sends)"
         );
         dialer.abort();
         peer.abort();

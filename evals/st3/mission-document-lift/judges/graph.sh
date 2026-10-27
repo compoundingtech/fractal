@@ -66,4 +66,4 @@ jq -e '
 st subject show "resource/$root/mission-result" --json \
   | jq -e '.status.subjects[0].actual | (.fields // .) | .kind == "custom.st3.document-result" and .state == "published"' >/dev/null
 
-echo "PASS: Small Talk used the exact attempt-bound mission output after publication"
+echo "PASS: Fractal used the exact attempt-bound mission output after publication"

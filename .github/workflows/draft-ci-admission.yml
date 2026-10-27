@@ -11,7 +11,7 @@ on:
       - Public repository check
       - Nix
       - macOS CI
-      - Smalltalk tag release
+      - Fractal tag release
       - fractal-web
     types: [requested]
 
@@ -47,7 +47,7 @@ jobs:
           from urllib.request import Request, urlopen
 
           WORKFLOWS = ('Workspace CI', 'Performance', 'Public repository check',
-                       'Nix', 'macOS CI', 'Smalltalk tag release', 'fractal-web')
+                       'Nix', 'macOS CI', 'Fractal tag release', 'fractal-web')
 
 
           def identity(run, repository, run_id):

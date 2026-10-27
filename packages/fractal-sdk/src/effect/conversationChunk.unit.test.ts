@@ -44,7 +44,7 @@ describe('native conversation empty evidence', () => {
   })
 
   it('explicitly records the known daemon sender schema gap (issue #1957)', () => {
-    // https://github.com/compoundingtech/smalltalk/issues/1957 — pending sender amendment.
+    // https://github.com/compoundingtech/fractal/issues/1957 — pending sender amendment.
     const decoded = decodeConversationChunk({ ...frame, items: [{
       id: 'timeline-entry/ada', sequence: 0, revision: 1, final: true,
       timestamp: '2026-10-12T00:00:00.000Z', role: 'system', type: 'message',

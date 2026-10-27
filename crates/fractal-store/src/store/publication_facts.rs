@@ -152,7 +152,7 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
 /// Publish a process-lifetime cache invalidation hint after native commit resolution.
 /// This is not authority for an effect. The publication writer reads its own evidence;
 /// physical-effect authorization must independently fence the current declaration. Read failure invalidates every cached proof.
-pub fn install_cache_observer(graph: &GraphStore, runtime: &Arc<SmalltalkRuntime>) {
+pub fn install_cache_observer(graph: &GraphStore, runtime: &Arc<FractalRuntime>) {
     let weak = Arc::downgrade(runtime);
     let observer = graph.connection.observe_commits(move |connection| {
         if let Some(runtime) = weak.upgrade() {
@@ -616,7 +616,7 @@ use super::*;
                 None
             } else {
                 Some(
-                    GraphStore::open(&path, "node", Arc::new(SmalltalkRuntime::default())).unwrap(),
+                    GraphStore::open(&path, "node", Arc::new(FractalRuntime::default())).unwrap(),
                 )
             };
             let revised = if after {

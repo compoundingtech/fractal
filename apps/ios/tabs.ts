@@ -21,7 +21,7 @@ export type DevLink =
   | { kind: 'attention'; id: string }
   | { kind: 'pair'; gateway: string; id: string; code: string };
 
-/** A Debug-only deep link, e.g. `com.compoundingtech.smalltalk.starter://tab/Resources`. */
+/** A Debug-only deep link, e.g. `com.compoundingtech.fractal.starter://tab/Resources`. */
 export function parseDevLink(link: string): DevLink | null {
   let parsed: URL;
   try { parsed = new URL(link); } catch { return null; }

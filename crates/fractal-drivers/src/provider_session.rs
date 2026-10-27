@@ -728,7 +728,7 @@ fn apply_provider_environment(
     }
     for key in removed_env {
         command.env_remove(key);
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         if let Some(new) = crate::contracts::fractal_env_name(key) {
             command.env_remove(new);
         }
@@ -742,7 +742,7 @@ fn apply_provider_environment(
             command.env_remove(legacy);
         }
         command.env(key, value);
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         if let Some(new) = crate::contracts::fractal_env_name(key) {
             command.env(new, value);
         }

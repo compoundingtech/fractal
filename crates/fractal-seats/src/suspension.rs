@@ -1,4 +1,4 @@
-//! The part of `suspension` that moved up from st3-store.
+//! The part of `suspension` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStoreCore;
 use crate::model::ClaimRecord;
@@ -9,6 +9,10 @@ use serde_json::Value;
 pub use crate::native_resume::{CONTINUE_ENV, CONTINUE_PATH_ENV, RESUME_ENV};
 pub use fractal_missions::suspension::*;
 pub use fractal_missions::suspension::{Suspension, blockers, bound_session, current, current_at, publication_action, resume_completed_key, resume_failed_key, resume_started_key, suspend_completed_key, suspend_failed_key, suspend_snapshot_key};
+
+/// The `action` of a request that the next launch of a seat starts a new native session. Unlike
+/// `fresh-context`, it keeps the seat's watches: the seat is the same, only its conversation ends.
+pub const FRESH_SESSION_ACTION: &str = "fresh-session";
 
 /// Launcher-owned declaration identity forwarded into the durable native binding.
 pub const LAUNCH_DESIRED_TOKEN_ENV: &str = "ST3_LAUNCH_DESIRED_TOKEN";
@@ -128,7 +132,7 @@ pub fn continue_session(
     };
     let mut fresh_since = false;
     for claim in store.claims_for(subject, Some("runtime.action.requested"))? {
-        if field(&claim, "action") == Some("fresh-context")
+        if matches!(field(&claim, "action"), Some("fresh-context" | FRESH_SESSION_ACTION))
             && store.claim_is_after(&claim.id, &bound.id)?
         {
             fresh_since = true;
@@ -248,7 +252,11 @@ mod tests {
     fn continuation_refusal_scope_repairs_legacy_and_keeps_later_failure_permanent() {
         for legacy in [false, true] {
             let store = Store::open_memory("node").unwrap();
-            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native","account_ref":"one"}), None);
+            let bind = |incarnation: &str| {
+                continuation_claim(&store, "runtime.observed", json!({"status":"running","incarnation_id":incarnation}), None);
+                continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native","account_ref":"one","incarnation_id":incarnation}), None);
+            };
+            bind("inc-1");
             let key = if legacy { continue_unavailable_key("agent/example", "native") } else {
                 typed_continue_unavailable_key("agent/example", "native", "authored-session-selection", Some("selector"))
             };
@@ -258,13 +266,13 @@ mod tests {
             assert!(continue_session(&store, "agent/example", "omp", Some("one"), Some("selector")).unwrap().is_none());
             assert_eq!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().unwrap().0, "native");
             assert!(continue_session(&store, "agent/example", "omp", Some("two"), None).unwrap().is_none());
-            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native","account_ref":"one"}), None);
+            bind("inc-2");
             assert_eq!(continue_session(&store, "agent/example", "omp", Some("one"), Some("selector")).unwrap().unwrap().0, "native");
             let permanent = typed_continue_unavailable_key("agent/example", "native", "transcript-missing", None);
             continuation_claim(&store, "harness.diagnostic", json!({"code":CONTINUE_UNAVAILABLE_CODE,"status":"transcript-missing","session_id":"native"}), Some(permanent.clone()));
             assert!(store.operation_claim(&permanent).unwrap().is_some());
             assert!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().is_none());
-            continuation_claim(&store, "harness.session-file", json!({"harness":"omp","session_id":"native","account_ref":"one"}), None);
+            bind("inc-3");
             assert!(continue_session(&store, "agent/example", "omp", Some("one"), None).unwrap().is_none());
             assert!(continue_session(&store, "agent/example", "omp", Some("one"), Some("selector")).unwrap().is_none());
         }

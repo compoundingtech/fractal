@@ -185,7 +185,7 @@ fn a_newcomer_gets_signed_claims_with_no_new_step_or_prompt() {
     let rules = newcomer.try_run(&["rules", "ls"]).unwrap();
     assert!(rules.starts_with("no rules"), "{rules}");
     let lockdown = newcomer.try_run(&["rules", "lockdown"]).unwrap();
-    assert!(lockdown.contains("st rules audit"), "{lockdown}");
+    assert!(lockdown.contains("fractal rules audit"), "{lockdown}");
     let rules = newcomer.try_run(&["rules", "ls"]).unwrap();
     assert_eq!(
         rules

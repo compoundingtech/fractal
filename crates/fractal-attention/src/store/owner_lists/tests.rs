@@ -154,13 +154,13 @@ fn arrangements_follow_edits_retirement_replication_reopen_and_forgotten_views()
     // A reopened store publishes the same rows from nothing.
     drop(b);
     let b = Store::open(&path, "birch").unwrap();
-    assert!(b.smalltalk.arrangement_list.published.lock().unwrap().is_none());
+    assert!(b.fractal.arrangement_list.published.lock().unwrap().is_none());
     assert_eq!(refresh_and_check(&b, OwnerView::Arrangements).owners, before.owners);
     // Forgotten views (a checkpoint trim, a replay) read everyone again; a refresh that began
     // before the forget publishes nothing.
     let (reads, full) = store_reads(&b);
     b.forget_current_views();
-    assert!(b.smalltalk.arrangement_list.published.lock().unwrap().is_none());
+    assert!(b.fractal.arrangement_list.published.lock().unwrap().is_none());
     assert_eq!(refresh_and_check(&b, OwnerView::Arrangements).owners, before.owners);
     assert_eq!(store_reads(&b).1, full + 1);
     assert!(store_reads(&b).0 > reads);

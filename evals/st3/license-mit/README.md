@@ -9,7 +9,7 @@ This st3 eval runs the license MIT task with two native Claude Sonnet agents.
   confirms. The KDL records delegation, implementation, verification, and products as nested missions.
   Every eval starts from the frozen `worker/_git` snapshot, rehydrated as `.git` only inside
   the eval’s run workspace.
-- **Gates** (all held-out): structural isolation (sup owns no repo), the Small Talk coordination loop
+- **Gates** (all held-out): structural isolation (sup owns no repo), the Fractal coordination loop
   (delegate → report → verified-confirm post-dating the report), `LICENSE` is canonical MIT, `package.json`
   declares MIT, the change is committed with a clean worktree, and a Codex gate that the confirmation
   cites real evidence (not a bare "done!").

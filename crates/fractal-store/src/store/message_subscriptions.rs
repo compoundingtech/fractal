@@ -191,7 +191,7 @@ pub fn validate_replicated(
 #[cfg(any(test, feature = "test-support"))]
 pub const PERFORMANCE_REGISTRATION: &str = r#"version 2
 subscription "fixture/main-performance-p0" {
-  observer "observer/github/compoundingtech/smalltalk"
+  observer "observer/github/compoundingtech/fractal"
   on "main_performance_failures"
   to "agent/fleet/fixture-project/speed"
   delivery "message"
@@ -200,11 +200,11 @@ subscription "fixture/main-performance-p0" {
 
 #[cfg(any(test, feature = "test-support"))]
 pub const PERFORMANCE_DECLARATIONS: &str = r#"version 2
-resource "github/compoundingtech/smalltalk" { kind "vcs.repository" }
-observer "github/compoundingtech/smalltalk" {
-  resource "resource/github/compoundingtech/smalltalk"
+resource "github/compoundingtech/fractal" { kind "vcs.repository" }
+observer "github/compoundingtech/fractal" {
+  resource "resource/github/compoundingtech/fractal"
   provider "github.repository"
-  locator "compoundingtech/smalltalk"
+  locator "compoundingtech/fractal"
   field "issues"
 }
 agent "fleet/fixture-project/speed" { workspace "."; command "true" }
@@ -251,7 +251,7 @@ mod tests {
         let generic = PERFORMANCE_REGISTRATION
             .replace("fixture/main-performance-p0", "another/registration")
             .replace(
-                "observer/github/compoundingtech/smalltalk",
+                "observer/github/compoundingtech/fractal",
                 "observer/already-declared",
             )
             .replace(

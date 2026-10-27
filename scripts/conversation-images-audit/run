@@ -7,7 +7,7 @@
 # Usage:
 #   run up ST3_BINARY PTY_BINARY  start an instance daemon in a throwaway HOME, seed every case and
 #                              stay until the daemon stops
-#   run look PROFILE [tmux]    open stui under a terminal answering as PROFILE (kitty, iterm2,
+#   run look PROFILE [tmux]    open Fractal's terminal UI under a terminal answering as PROFILE (kitty, iterm2,
 #                              sixel, silent), optionally inside tmux; open SCENE (claude, the
 #                              default: the Claude transcript; gardener: the mail; now: the asks),
 #                              where a drawing terminal loads the first image by itself, then load

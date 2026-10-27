@@ -37,7 +37,9 @@ export const selectedCapturedChange = ({ changes, id }: { readonly changes: read
 /** Only reported participant/call identity; the selected agent is not an attribution fallback. */
 export const capturedProvenance = ({ provenance }: CapturedChange): string => {
   const sender = provenance.sender
+  const kindLabel = sender?.kind === 'st-agent' ? 'agent' : sender?.kind
+  const viaLabel = sender?.via === 'st' ? 'Fractal' : sender?.via === 'wf / st' ? 'wf / Fractal' : sender?.via
   const participant = sender === undefined ? 'Reported sender unknown' :
-    'Reported sender: ' + sender.label + ' (' + sender.kind + ')' + (sender.via === undefined ? '' : ' via ' + sender.via)
+    'Reported sender: ' + sender.label + ' (' + kindLabel + ')' + (viaLabel === undefined ? '' : ' via ' + viaLabel)
   return participant + ' · Tool: ' + provenance.name + ' · Call: ' + provenance.callId + ' · Reported at: ' + provenance.at
 }

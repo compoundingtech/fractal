@@ -39,7 +39,7 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   const cancel = vi.fn()
   const ux = { beginAlertAnswer: vi.fn(() => ({ landed, cancel })) } as unknown as UxTelemetry
   data.attention = [ask('attention/one'), ask('attention/two')]
-  data.act.mockResolvedValueOnce({ _tag: 'Refused', detail: 'st no longer offers this answer here.' }).mockResolvedValueOnce({ _tag: 'Sent' })
+  data.act.mockResolvedValueOnce({ _tag: 'Refused', detail: 'Fractal no longer offers this answer here.' }).mockResolvedValueOnce({ _tag: 'Sent' })
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
@@ -49,7 +49,7 @@ it('times each answered alert until the strip no longer shows it, and drops refu
 
   await click(container, 'Yes')
   await click(container, 'Send')
-  expect(container.querySelector('[role="status"]')?.textContent).toBe('st no longer offers this answer here.')
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Fractal no longer offers this answer here.')
   expect(cancel).toHaveBeenCalledOnce()
 
   await click(container, 'Yes')
@@ -57,7 +57,7 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   expect(data.act).toHaveBeenLastCalledWith({ alert: data.attention[0], action: { type: 'work.done', summary: 'Yes' } })
   expect(landed).not.toHaveBeenCalled()
 
-  // st records the answer: the alert leaves the attention collection and the strip.
+  // Fractal records the answer: the alert leaves the attention collection and the strip.
   data.attention = [ask('attention/two')]
   await render()
   expect(landed).toHaveBeenCalledOnce()

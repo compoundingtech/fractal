@@ -1,4 +1,4 @@
-//! The part of `store` that moved up from st3-store.
+//! The part of `store` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 pub use fractal_delivery::store::identities;
 #[cfg(any(test, feature = "test-support"))]
@@ -102,7 +102,7 @@ pub use fractal_delivery::store::checkpoint_rules::{RULES_VERSION, plan_drops, r
 pub use fractal_delivery::store::limits::{AccountLimit, LIMITS_CATCH_UP_PAGE};
 pub use fractal_delivery::store::limits::ACCOUNT_READING_WINDOW_MS;
 pub use fractal_delivery::store::subagents::{SUBAGENT_KINDS, SubagentView};
-pub use fractal_delivery::store::runtime::SmalltalkRuntime;
+pub use fractal_delivery::store::runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
@@ -1089,7 +1089,7 @@ pub fn enrich_step_queue_for_reconcile_at(
 
 #[cfg(test)]
 mod producer_guard {
-    /// The part of st3-store's producer guard (`store::retirements`) for the message producers that moved up with this crate.
+    /// The part of fractal-store's producer guard (`store::retirements`) for the message producers that moved up with this crate.
     #[test]
     fn moved_message_producers_use_the_common_wrapper() {
         for source in [

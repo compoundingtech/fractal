@@ -217,7 +217,8 @@ fn compare(directory: &Path, shape: Shape) -> (Value, Value) {
 /// keeps every body it read; the bounded audit holds many short ones and keeps a fraction.
 #[test]
 fn the_bounded_audit_holds_shorter_transactions_and_less_memory_than_the_hydrated_one() {
-    let directory = tempfile::tempdir().unwrap();
+    // Its transaction-length bound is about a disk's commits.
+    let directory = fractal_daemon::test_support::disk_tempdir();
     let shape = Shape {
         operations: 1024,
         huge_claims: 1024,

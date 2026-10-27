@@ -16,9 +16,9 @@ lane() {
 }
 
 toolchain() {
-  [ "$(pnpm --version)" = 12.7.0 ] || { echo "pnpm $(pnpm --version) is not 12.7.0" >&2; return 1; }
+  [ "$(pnpm --version)" = 12.15.0 ] || { echo "pnpm $(pnpm --version) is not 12.15.0" >&2; return 1; }
   [ "$(node --version)" = v24.20.0 ] || { echo "Node $(node --version) is not 24.20.0" >&2; return 1; }
-  grep -q '"packageManager": "pnpm@12.7.0"' package.json || { echo 'package.json must declare pnpm@12.7.0' >&2; return 1; }
+  grep -q '"packageManager": "pnpm@12.15.0"' package.json || { echo 'package.json must declare pnpm@12.15.0' >&2; return 1; }
   # The checked-in Buck root is the Nix-rendered consumer root below Genie's three-line header.
   [ -n "${FRACTAL_WEB_BUCK_ROOT:-}" ] || { echo 'run inside nix develop .#web' >&2; return 1; }
   [ ! -s .buckroot ] || { echo '.buckroot must be empty' >&2; return 1; }
@@ -64,10 +64,14 @@ kit_storybook() (
 
 kit_plays() (
   mkdir -p "$kit_receipt_dir"
-  # Sharding is scoped to the kit invocation, and only KIT_PLAY_SET=all is sharded.
+  # On a shared build host (scripts/ci-local-web names its admission program) the plays wait for a heavy-build slot like any compile:
+  # they keep several browsers busy, and without the gate two of them at once took every core. A CI runner has no such program.
+  local -a admitted=()
+  if [ -n "${KIT_PLAY_ADMISSION_BIN:-}" ]; then admitted=("$KIT_PLAY_ADMISSION_BIN" run heavy kit-play --); fi
+  # Sharding is scoped to the kit invocation, and only KIT_PLAY_SET=all is sharded. (One logical command: the assignments prefix node.)
   KIT_STORYBOOK_BUILD_SECONDS=$(cat "$kit_receipt_dir/storybook-build-seconds" 2>/dev/null || echo 0) \
   KIT_PLAY_SHARD_INDEX=${KIT_SHARD_INDEX:-0} KIT_PLAY_SHARD_COUNT=${KIT_SHARD_COUNT:-1} \
-    node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static "$kit_receipt_dir"
+    "${admitted[@]}" node packages/fractal-ui/scripts/kit-play-gate.mjs packages/fractal-ui/storybook-static "$kit_receipt_dir"
 )
 # The four lightweight streams share the runner's four vCPUs; print each stream's output whole
 # once all have finished. Kit browser controls and Storybook run afterwards so they cannot
@@ -139,6 +143,8 @@ stream_kit() {
     true)
       lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
       lane "UI kit timing contracts" node --test packages/fractal-ui/scripts/kit-play-timings.node-test.mjs
+      lane "UI kit worker cap" node --test packages/fractal-ui/scripts/kit-play-workers.node-test.mjs
+      lane "UI kit CPU budget contracts" node --test packages/fractal-ui/scripts/kit-play-budget.node-test.mjs packages/fractal-ui/scripts/kit-play-cpu.node-test.mjs
       ;;
     false)
       printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"

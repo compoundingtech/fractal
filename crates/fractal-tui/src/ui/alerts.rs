@@ -331,7 +331,7 @@ impl Ui {
             (Some(_), [_, _, ..]) => {
                 rows.extend(note_rows(
                     &format!(
-                        "{} calls are unanswered and st cannot tell which one the harness asks about; answer it in the terminal (Ctrl+]):",
+                        "{} calls are unanswered and Fractal cannot tell which one the harness asks about; answer it in the terminal (Ctrl+]):",
                         calls.len()
                     ),
                     width,
@@ -785,7 +785,7 @@ impl Ui {
                 self.flash(notice);
             }
             Some((_, notice)) => self.flash(format!("{notice} demo: nothing was sent")),
-            None => self.flash("st does not offer that answer here: open it in Inbox"),
+            None => self.flash("Fractal does not offer that answer here: open it in Inbox"),
         }
     }
 }
@@ -821,6 +821,7 @@ mod tests {
                 seat: "atlas".into(),
                 seat_id: "agent/example/atlas".into(),
                 text: "Claude asks to use Bash".into(),
+                question: answers.contains(&"answer"),
                 answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
                 episode: "episode-1".into(),
                 call: None,

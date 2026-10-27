@@ -193,7 +193,7 @@ def documented_flake_selector_guard(tree, outputs):
     """Resolve local and this repository's documented selectors at the exact head."""
     checked, placeholders, errors = 0, 0, []
     selector = re.compile(
-        r'(?:\.|github:compoundingtech/smalltalk(?:/[^#\s`"\']+)?)#'
+        r'(?:\.|github:compoundingtech/fractal(?:/[^#\s`"\']+)?)#'
         r'(?P<attribute>[A-Za-z0-9_<>${}.-]+)')
     for path in sorted((tree / 'docs').rglob('*.md')):
         text = path.read_text()

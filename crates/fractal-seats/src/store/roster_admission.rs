@@ -1,4 +1,4 @@
-//! The part of `store::roster_admission` that moved up from st3-store.
+//! The part of `store::roster_admission` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use opentelemetry::trace::TraceContextExt as _;
@@ -9,7 +9,7 @@ pub use fractal_missions::store::roster_admission::{AdmissionState, Blocked, Hol
 pub struct AdmissionGuard {
     // Snapshot, publication, and release all serialize with the actual mutex poll.
     guard: Option<tokio::sync::OwnedMutexGuard<()>>,
-    runtime: Arc<runtime::SmalltalkRuntime>,
+    runtime: Arc<runtime::FractalRuntime>,
     holder: Option<Arc<Holder>>,
     waited: std::time::Duration,
 }
@@ -118,13 +118,13 @@ impl RosterAdmissionStore for Store {
     fn try_admit_agent_resources(&self, class: &'static str) -> Option<AdmissionGuard> {
         debug_assert!(matches!(class, "http" | "ws" | "refresher" | "other"));
         let span = crate::otel::export_enabled().then(tracing::Span::current);
-        let mut state = self.smalltalk.agent_resources_admission_state.lock()
+        let mut state = self.fractal.agent_resources_admission_state.lock()
             .expect("roster admission state poisoned");
-        let guard = self.smalltalk.agent_resources_admission.clone().try_lock_owned().ok()?;
+        let guard = self.fractal.agent_resources_admission.clone().try_lock_owned().ok()?;
         let waited = std::time::Duration::ZERO;
         let holder = state.register(class, std::time::Instant::now(), waited, None, span.as_ref());
         let admission = AdmissionGuard {
-            guard: Some(guard), runtime: Arc::clone(&self.smalltalk), holder, waited,
+            guard: Some(guard), runtime: Arc::clone(&self.fractal), holder, waited,
         };
         drop(state);
         admission.record_admission(class);
@@ -153,9 +153,9 @@ impl RosterAdmissionStore for Store {
         // Budget exhaustion must not produce a false contended sample before Tokio
         // actually enqueues this acquisition. Only the mutex future is unconstrained.
         let mut acquire = std::pin::pin!(tokio::task::unconstrained(
-            self.smalltalk.agent_resources_admission.clone().lock_owned()));
+            self.fractal.agent_resources_admission.clone().lock_owned()));
         let (admission, waited) = std::future::poll_fn(|cx| {
-            let mut state = self.smalltalk.agent_resources_admission_state.lock()
+            let mut state = self.fractal.agent_resources_admission_state.lock()
                 .expect("roster admission state poisoned");
             match acquire.as_mut().poll(cx) {
                 Poll::Pending => {
@@ -172,7 +172,7 @@ impl RosterAdmissionStore for Store {
                     let waited = acquired.duration_since(started);
                     let holder = state.register(class, acquired, waited, blocked.take(), span.as_ref());
                     Poll::Ready((AdmissionGuard {
-                        guard: Some(guard), runtime: Arc::clone(&self.smalltalk), holder, waited,
+                        guard: Some(guard), runtime: Arc::clone(&self.fractal), holder, waited,
                     }, waited))
                 }
             }
@@ -183,7 +183,7 @@ impl RosterAdmissionStore for Store {
     }
 
     fn bind_roster_rebuild(&self, context: &opentelemetry::Context) -> bool {
-        let state = self.smalltalk.agent_resources_admission_state.lock().expect("roster admission state poisoned");
+        let state = self.fractal.agent_resources_admission_state.lock().expect("roster admission state poisoned");
         let Some(holder) = &state.holder else { return false };
         if holder.worker.get() != Some(&std::thread::current().id()) {
             return false;

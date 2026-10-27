@@ -29,6 +29,8 @@ mod client_v0_contract;
 mod cli_inventory_process;
 mod cli_output;
 mod demo_play;
+mod deploy_verify;
+mod web_cli;
 
 // Invoked only by cli_inventory_process's bounded-capture test. Keeping this
 // outside that module preserves its five selected fixture names.
@@ -99,13 +101,15 @@ mod operational_state_contract;
 mod otel_export;
 mod owned_sets;
 mod placement_handoff;
+mod private_notes;
+mod private_notes_restart;
 mod reconcile_pass_perf;
 mod recorder_report;
 mod revision_seats;
 mod seat_queue_perf;
 mod setup;
 mod startup_readiness;
-mod stui_slo_history;
+mod tui_slo_history;
 mod subagent_publisher;
 mod subagents_seat;
 mod terminal_attach;

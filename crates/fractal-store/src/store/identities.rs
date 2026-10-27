@@ -424,7 +424,7 @@ impl IdentityStore for Store {
             }
             occupied(connection, kind, &current, &request.to)?;
             owner_admission(connection, kind, &source.identity, &token, self.origin())?;
-            check_fleet_registry_conn(connection, self.origin(), peers, &self.smalltalk.schema_digest())
+            check_fleet_registry_conn(connection, self.origin(), peers, &self.fractal.schema_digest())
         };
         let (claim, created) = append_claim_with_commit_context(&self.graph, &input, None, None, None, None,
             ClaimCommitContext { admission: Some(&admission), identity_writer: true, ..Default::default() })?;

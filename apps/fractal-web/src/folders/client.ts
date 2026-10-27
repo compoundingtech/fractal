@@ -2,6 +2,7 @@ import { FractalClient } from '@fractal/client'
 import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ArrangementPage, Capabilities, EnvelopeOf } from '@fractal/client'
 import { Schema } from 'effect'
 import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, ArrangementEditParameters as ArrangementEditSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema'
+import { formatDuration } from '@fractal/ui/human-time/format'
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 const isCapabilities = Schema.is(Schema.toEncoded(CapabilitiesSchema))
@@ -67,7 +68,7 @@ export const createFoldersClient = (gateway: ArrangementsGateway, selection: Sel
 import * as Atom from 'effect/reactivity/Atom'
 import type { CollectionSocketFactory } from '@fractal/client'
 import { arrangementActions, type ArrangementActionPort } from '@fractal/sdk/effect'
-import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, st3InventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
+import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, fractalInventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
 import { emptyDoc, type FolderDoc, type Stamp } from './core.mts'
 import { createArrangementEditor, refusalText, type ArrangementEditor, type ArrangementRefusal, type EditOutcome, type SidebarOperation, type StructuralIntent } from './edit.ts'
 export interface FolderState {
@@ -186,7 +187,7 @@ export const sidebarFolders = ({ gateway, socket }: {
             publish({ ...current, phase: 'unavailable', detail: `Arrangement read failed: ${event.error.message}`, readOnly: true })
             return
           case 'Interrupted':
-            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${Math.ceil(event.retryInMs / 1000)}s.`, readOnly: true })
+            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${formatDuration(Math.ceil(event.retryInMs / 1000) * 1000)}.`, readOnly: true })
             return
           case 'Refused':
             publish({ ...current, phase: 'unavailable', detail: `Arrangement updates refused: ${event.error.message}`, readOnly: true })
@@ -206,7 +207,7 @@ const pageHotData = import.meta.hot?.data
 export let folders: Atom.Atom<FolderState> = pageHotData?.pageFolders ?? sidebarFolders({
   gateway: () => {
     const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }
-    return { ...st3InventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
+    return { ...fractalInventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
   },
 })
 

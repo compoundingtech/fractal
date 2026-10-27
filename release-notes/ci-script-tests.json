@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A new CI check, ci-script-tests, runs the CI scripts' own self-tests that read only scripts/, .github/, .st/, nix/ and a few root files, in a sparse copy holding exactly its declared skip-policy inputs; a pull request that touches none of them reuses an earlier signature. genie-freshness keeps the whole-tree tests, lints, licenses and genie --check (about a minute). Both run their tests in parallel.",
+  "replay": {
+    "status": "none",
+    "detail": "CI machinery only; no product protocol, schema, rule or note change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "CI machinery only; no product protocol, schema, rule or note change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "CI machinery only; no product protocol, schema, rule or note change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "CI machinery only; no product protocol, schema, rule or note change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "CI machinery only; no product protocol, schema, rule or note change."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "After merge, once the ci-script-tests job has run green on main, add 'ci-script-tests' to the repository ruleset's required status checks (.github/repo-settings.json.genie.ts) and to the REQUIRED sets of scripts/ci-queue-watch and scripts/check-main-ci."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the change: genie-freshness again runs every test."
+  }
+}

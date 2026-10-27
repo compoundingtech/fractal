@@ -432,7 +432,7 @@ impl Store {
     /// [`published_list::PublishedList::current`], which also refuses a forgotten generation.
     #[cfg(any(test, feature = "test-support"))]
     pub fn published_work(&self) -> Option<Arc<published_list::Publication<WorkRows>>> {
-        self.smalltalk.published_work.newest()
+        self.fractal.published_work.newest()
     }
 
     /// Set how far replicated claims are projected, as a replication pass would, for tests.
@@ -465,23 +465,23 @@ impl Store {
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn seat_lookups(&self) -> usize {
-        self.smalltalk.seat_lookups.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.seat_lookups.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn last_seats_read(&self) -> BTreeSet<String> {
-        self.smalltalk.last_seats_read.lock().unwrap().clone()
+        self.fractal.last_seats_read.lock().unwrap().clone()
     }
 
     /// How many seats' queue orders folds have read, for tests.
     #[cfg(any(test, feature = "test-support"))]
     pub fn seat_order_reads(&self) -> usize {
-        self.smalltalk.seat_order_reads.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.seat_order_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn direct_work_reads(&self) -> usize {
-        self.smalltalk.direct_work_reads.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.direct_work_reads.load(std::sync::atomic::Ordering::Relaxed)
     }
 
 }

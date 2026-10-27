@@ -269,8 +269,8 @@ def stop(group):
     group.wait()
 
 
-def run(st_test, repo, checks, kind, rules, log):
-    """st-test on the checked-out head, watched; (rows, stopped_reason, seconds, io60_peak)."""
+def run(st_test, repo, checks, kind, rules, log, extra=()):
+    """st-test on the checked-out head (and `extra`, more st-test arguments), watched; (rows, stopped_reason, seconds, io60_peak)."""
     global CHILD
     env = dict(os.environ)
     scratch = None
@@ -280,7 +280,7 @@ def run(st_test, repo, checks, kind, rules, log):
             env.update(TMPDIR=str(scratch), TMP=str(scratch), TEMP=str(scratch))
         env['CARGO_TARGET_DIR'] = str(TARGET)
     command = [sys.executable, '-I', str(st_test), '--base', f'origin/{BASE}', '--push', 'origin',
-               '--time-limit', str(rules['time_limit']), *[arg for name in checks for arg in ('--check', name)]]
+               '--time-limit', str(rules['time_limit']), *[arg for name in checks for arg in ('--check', name)], *extra]
     started, peak, reason = now(), io60(), None
     with open(log, 'ab') as sink:
         CHILD = subprocess.Popen(command, cwd=repo, env=env, stdout=sink, stderr=sink, start_new_session=True)

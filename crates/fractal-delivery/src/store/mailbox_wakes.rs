@@ -1,4 +1,4 @@
-//! The part of `store::mailbox_wakes` that moved up from st3-store.
+//! The part of `store::mailbox_wakes` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::DeliveryStore;
 use super::*;
@@ -111,7 +111,7 @@ impl MailboxWakesStore for Store {
         ) -> Subscription {
         // Subscribe to the post-commit feed before establishing the dispatcher's cursor, and
         // register this stream before its first durable read. No replay-to-live gap.
-        let wakes = self.smalltalk.mailbox_wakes.get_or_init(|| {
+        let wakes = self.fractal.mailbox_wakes.get_or_init(|| {
             let events = events.subscribe();
             let cursor = self.mailbox_wake_cursor();
             let weak = Arc::downgrade(self);
@@ -133,8 +133,7 @@ impl MailboxWakesStore for Store {
     }
 
     fn mailbox_wake_health(&self) -> DoctorCheck {
-        let (failures, degraded) = self
-            .smalltalk
+        let (failures, degraded) = self.fractal
             .mailbox_wakes
             .get()
             .map_or((0, false), |wakes| {

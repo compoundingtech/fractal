@@ -48,18 +48,18 @@ There is no App Store or TestFlight build; build it yourself on a Mac with full 
 
 ```sh
 mkdir -p ~/src
-git clone https://github.com/compoundingtech/smalltalk.git ~/src/smalltalk
-cd ~/src/smalltalk
+git clone https://github.com/compoundingtech/fractal.git ~/src/fractal
+cd ~/src/fractal
 corepack enable
 pnpm install --frozen-lockfile
 cd apps/ios
 pnpm exec expo prebuild --platform ios --clean --no-install
 pnpm run pods
 pnpm run export:ios
-open ios/smalltalk.xcworkspace
+open ios/fractal.xcworkspace
 ```
 
-In Xcode, select the **smalltalk** scheme and your connected iPhone. Under **Signing & Capabilities**, choose your own Apple Development team and automatic provisioning; use a unique bundle identifier if your team cannot register the default. Enable Developer Mode on the phone when asked. From `apps/ios`, [build and install](https://docs.expo.dev/guides/local-app-development/) onto the phone:
+In Xcode, select the **fractal** scheme and your connected iPhone. Under **Signing & Capabilities**, choose your own Apple Development team and automatic provisioning; use a unique bundle identifier if your team cannot register the default. Enable Developer Mode on the phone when asked. From `apps/ios`, [build and install](https://docs.expo.dev/guides/local-app-development/) onto the phone:
 
 ```sh
 pnpm exec expo run:ios --device --configuration Release

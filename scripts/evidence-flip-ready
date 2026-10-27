@@ -15,7 +15,10 @@ whether the flip trigger holds (docs/st3/gate-evidence.md, "When a check is read
   - no hidden red: no satisfied line beside the check's own real job (the job named exactly the check, same attempt)
     that concluded `failure`. A real job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red
     is hidden only when a member the skip would skip failed or was cancelled; a red from a member that always runs
-    (upgrade-impact) would show under enforce too, and is reported as `visible_red`, which does not block.
+    (upgrade-impact) would show under enforce too, and is reported as `visible_red`, which does not block. A check with no
+    job of its own (the per-crate `rust-tests`) is judged by the jobs its skip skips, those whose `if` reads it: its real
+    result is `failure` when one of them failed or was cancelled, and that red is hidden. While no job skips on it, it
+    is not ready.
 Prints JSON; exit 0, or 2 when GitHub could not be read. Read only, except `--propose`: for each ready check that is not
 enforced and has no open pull request from `evidence-flip/<check>`, it makes the flip in a temporary worktree of
 origin/main, pushes that branch and opens the pull request (`--dry-run`: prints the diff instead). Exit 1 when a
@@ -149,16 +152,28 @@ def pr_runs(github, since, until, tries=4):
 def skipped_members(workflow, policy):
     """For each aggregate check (its wrapper command is `CHECK aggregate ...`), the jobs a skip of it skips: every other job of
     the workflow that reads needs.evidence-gate-CHECK.outputs.skip, in its `if` or its steps. Any other member (upgrade-impact,
-    fractal-web-changes) always runs, so its red is never hidden by a skip."""
+    fractal-web-changes) always runs, so its red is never hidden by a skip. For a check with no job of its own (rust-tests),
+    the jobs whose `if` reads its skip: a job that only reads it in a step (the linux-gate verdict) is not skipped by it, and
+    its red has other causes. None yet is not an error: the check is shadow until a job skips on it."""
     jobs = {found.group(1): found.group(2) for found in JOB.finditer(workflow)}
     members = {}
     for check, entry in policy.items():
+        reads = f'needs.evidence-gate-{check}.outputs.skip'
         if (((entry.get('kinds') or {}).get('wrapper') or {}).get('command') or [])[1:2] == ['aggregate']:
-            members[check] = tuple(sorted(name for name, body in jobs.items()
-                                          if name != check and f'needs.evidence-gate-{check}.outputs.skip' in body))
+            members[check] = tuple(sorted(name for name, body in jobs.items() if name != check and reads in body))
             if not members[check]:
                 raise ValueError(f'no job of {WORKFLOW} reads the skip output of the aggregate {check}')
+        elif check not in jobs:
+            members[check] = tuple(sorted(name for name, body in jobs.items()
+                                          if any(reads in line for line in re.findall(r'^    if: (.*)$', body, re.M))))
     return members
+
+
+def derived_result(conclusions):
+    """The real result of a check with no job of its own, from its members' conclusions in one attempt."""
+    if any(conclusion in ('failure', 'cancelled') for conclusion in conclusions):
+        return 'failure'
+    return 'success' if 'success' in conclusions else None  # every member skipped: evidence neither way
 
 
 def lines_of(github, job):
@@ -191,7 +206,11 @@ def collect(github, checks, since, until, members):
             if check == job.get('name') or check not in checks or job.get('status') != 'completed' or job.get('conclusion') == 'skipped':
                 continue
             attempt = job.get('run_attempt')
-            wanted.append((run, job, check, real.get((check, attempt)),
+            own = real.get((check, attempt))
+            if own is None and check in members:  # no job of its own: judged by the jobs its skip skips
+                own = derived_result([other.get('conclusion') for other in jobs if other.get('run_attempt') == attempt
+                                      and member_of(other.get('name'), members[check])])
+            wanted.append((run, job, check, own,
                            [other.get('name') for other in jobs if other.get('run_attempt') == attempt
                             and member_of(other.get('name'), members.get(check, ())) and other.get('conclusion') in ('failure', 'cancelled')],
                            superseded(run, [other for other in jobs if other.get('run_attempt') == attempt], members.get(check, ()),
@@ -364,9 +383,11 @@ def web_values_checked(entry):
 PRECONDITIONS = {'linux-gate': clippy_base_pinned, 'fractal-web': web_values_checked}
 
 
-def preconditions(result, check, entry):
+def preconditions(result, check, entry, members=None):
     """Fold a check's preconditions, read from the policy at origin/main, into its trigger result."""
     why = [*result['why_not'], *PRECONDITIONS.get(check, lambda entry: [])(entry)]
+    if members == ():  # a check with no job of its own that no job skips on yet: a red under its skip could not be seen
+        why.append(f'no job of {WORKFLOW} skips on its skip output')
     return {**result, 'ready': not why, 'why_not': why}
 
 
@@ -553,7 +574,8 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         print(f'could not read GitHub or origin/main: {error}', file=sys.stderr)
         return 2
     report = {'as_of': iso(now), 'window_s': WINDOW_S, 'checks': {
-        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now), check, entry)
+        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now), check, entry,
+                             members.get(check))
         for check, entry in policy.items()}, 'presign': presign_rates(rows, now)}
     print(json.dumps(report, indent=2))
     if args.propose:

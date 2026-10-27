@@ -56,6 +56,8 @@ lets only the seat itself write it.
 
 `st agents restart AGENT --now` skips the wait, for a seat that cannot answer (it records `operation: restart-now` on the request). Scripts that restart stub seats use it.
 
+`st agents restart AGENT --fresh-session` starts a new native session instead of continuing the last one. It is refused unless the seat has a handoff that it wrote or marked ready (`st agents handoff ready`) since its last turn began, so the new session always starts from a handoff the seat vouched for; the restart does not ask for one again. The daemon records the request as `fresh_session: true` and, before it launches the replacement, a `runtime.action.requested` claim with `action: fresh-session` newer than the last session binding, so every relaunch before the new session binds also starts a new one. The seat keeps its declaration, watches and work; only its conversation ends. Without the flag a restart continues the last session, as before.
+
 A seat that is not up and ready, such as one that has exited, is blocked at a prompt or is logged
 out, has nobody to ask, so its restart goes ahead at once. A seat that stops answering (a pool seat
 at its limit, for example) costs the deadline, not more. Crashes, `agents stop`, suspend and

@@ -1,5 +1,5 @@
 //! Terminals that draw images also make an address clickable when it is wrapped in an OSC 8
-//! hyperlink, and they open it on the person's own machine even when stui runs over SSH.
+//! hyperlink, and they open it on the person's own machine even when Fractal TUI runs over SSH.
 //! Ratatui counts the width of a cell's text, so the escape cannot ride inside a cell: after a
 //! frame is drawn the few link cells are written again, between the open and close sequences.
 

@@ -260,6 +260,11 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn usage_period(&self, since_ms: Option<u64>, until_ms: Option<u64>) -> Result<Envelope<UsagePeriod>, ClientError> {{ let mut query = Vec::new(); if let Some(since_ms) = since_ms {{ query.push(format!(\"since_ms={{since_ms}}\")); }} if let Some(until_ms) = until_ms {{ query.push(format!(\"until_ms={{until_ms}}\")); }} let query = if query.is_empty() {{ String::new() }} else {{ format!(\"?{{}}\", query.join(\"&\")) }}; self.get(&format!(\"/v1/client/usage{{query}}\")).await }}"
             )?;
+        } else if id == "private-notes.get" {
+            writeln!(
+                out,
+                "    pub async fn private_notes_get(&self, uri: &str) -> Result<Envelope<PrivateNotesSubject>, ClientError> {{ self.get(&format!(\"/v1/client/private-notes/{{}}\", percent_encode(uri))).await }}"
+            )?;
         } else if id == "document.get" {
             writeln!(
                 out,
@@ -446,6 +451,11 @@ fn swift_operation_methods(
             writeln!(
                 out,
                 "    public func usagePeriod(sinceMS: UInt64? = nil, untilMS: UInt64? = nil) async throws -> Envelope<UsagePeriod> {{ var query: [URLQueryItem] = []; if let sinceMS {{ query.append(.init(name: \"since_ms\", value: String(sinceMS))) }}; if let untilMS {{ query.append(.init(name: \"until_ms\", value: String(untilMS))) }}; return try await get(\"v1/client/usage\", query: query) }}"
+            )?;
+        } else if id == "private-notes.get" {
+            writeln!(
+                out,
+                "    public func privateNotesGet(uri: String) async throws -> Envelope<PrivateNotesSubject> {{ try await get(\"v1/client/private-notes/\\(Self.pathSegment(uri))\") }}"
             )?;
         } else if id == "document.get" {
             writeln!(
@@ -765,10 +775,13 @@ fn validate_surfaces(
         "ClientConnections",
         "ClientConnection",
         "UsageLimit",
+        "UsageAccount",
+        "UsageCredits",
         "LaunchPreview",
         "MissionRunSummary",
         "MissionStep",
         "MissionWake",
+        "DeclaredResource",
         "AgentQueue",
         "AgentQueueRun",
         "AgentQueueMove",
@@ -1174,6 +1187,25 @@ fn ts_type(value: &Value) -> Result<String> {
             return Ok(members);
         }
     }
+    // A required-only allOf branch refines optional fields on its referenced
+    // object. Dropping that branch makes returned action fences unusable by
+    // the corresponding typed write method.
+    if let Some(parts) = value.get("allOf").and_then(Value::as_array)
+        && parts.len() == 2
+        && let Some(reference) = parts.iter().find(|part| part.get("$ref").is_some())
+        && let Some(required) = parts.iter()
+            .find(|part| part.as_object().is_some_and(|object| object.len() == 1 && object.contains_key("required")))
+            .and_then(|part| part["required"].as_array())
+    {
+        let keys = required.iter()
+            .map(|key| key.as_str().map(|key| format!("'{key}'")).context("required property"))
+            .collect::<Result<Vec<_>>>()?;
+        let base = ts_type(reference)?;
+        if keys.is_empty() {
+            return Ok(base);
+        }
+        return Ok(format!("{base} & Required<Pick<{base}, {}>>", keys.join(" | ")));
+    }
     if let Some(types) = value.get("type").and_then(Value::as_array) {
         return Ok(types
             .iter()
@@ -1446,6 +1478,11 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(options: {{ since_ms?: number; until_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get('{route}' + query(options), undefined, requestOptions); }}"
             )?;
+        } else if id == "private-notes.get" {
+            writeln!(
+                out,
+                "    async privateNotesGet(uri: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<PrivateNotesSubject>> {{ return this.get(`/v1/client/private-notes/${{encodeURIComponent(uri)}}`, undefined, requestOptions); }}"
+            )?;
         } else if id == "document.get" {
             writeln!(
                 out,
@@ -1563,6 +1600,24 @@ mod tests {
             assert!(models.contains(field), "missing receiver union: {field}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn websocket_senders_use_fractal_without_changing_http_versions() {
+        assert!(RUST_MODELS_TEMPLATE.contains("TERMINAL_SUBPROTOCOL: &str = \"fractal.client.terminal.v0\""));
+        assert!(RUST_MODELS_TEMPLATE.contains("API_VERSION: &str = \"st3.client.v0\""));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientTerminalSubprotocol = \"fractal.client.terminal.v0\""));
+        assert!(SWIFT_MODELS_TEMPLATE.contains("fractalClientAPIVersion = \"st3.client.v0\""));
+        for (template, protocols) in [
+            (RUST_CLIENT_TEMPLATE, &["fractal.client.pty.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+            (TYPESCRIPT_CLIENT_TEMPLATE, &["fractal.client.terminal.v0", "fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+            (SWIFT_CLIENT_TEMPLATE, &["fractal.client.conversation.v0", "fractal.client.collections.v0", "fractal.cap."][..]),
+        ] {
+            for protocol in protocols {
+                assert!(template.contains(protocol), "missing sender spelling: {protocol}");
+            }
+            assert!(template.contains("x-st3-features"));
+        }
     }
 
     #[test]

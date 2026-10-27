@@ -276,7 +276,7 @@ with tempfile.TemporaryDirectory() as directory:
     lane = {'fractal-web': {'result': 'success'}, 'fractal-web-changes': {'result': 'success', 'outputs': {'relevant': 'true', 'kit-inputs': 'true'}},
             'fractal-web-execution': {'result': 'success'}, 'evidence-gate-fractal-web': {'result': 'success', 'outputs': {'skip': 'false'}}}
     linux = {**needs, 'evidence-gate-linux-gate': {'result': 'success', 'outputs': {'skip': 'false'}}}
-    queue_web = dict(GATE_JOB='fractal-web', KIT_SHARD_COUNT='2', KIT_INPUTS='true', KIT_PLAY_SET='all', APP_TEST_SET='all',
+    queue_web = dict(GATE_JOB='fractal-web', KIT_SHARD_COUNT='4', KIT_INPUTS='true', KIT_PLAY_SET='all', APP_TEST_SET='all',
                      GITHUB_EVENT_NAME='merge_group', GITHUB_REF=QUEUE, GITHUB_RUN_ID='9', GITHUB_RUN_ATTEMPT='1')
     pull_web = dict(queue_web, KIT_SHARD_COUNT='1', KIT_PLAY_SET='commit', APP_TEST_SET='related', GITHUB_EVENT_NAME='pull_request',
                     GITHUB_REF='refs/pull/1/merge')
@@ -289,12 +289,12 @@ with tempfile.TemporaryDirectory() as directory:
     done, facts = web_run(lane)
     assert done.returncode == 0, done.stdout
     assert facts['command'] == ['fractal-web', 'aggregate', 'fractal-web', 'fractal-web-changes', 'fractal-web-execution'], facts['command']
-    assert facts['exit_code'] == 0 and facts['output']['shards'] == {'0': 'success', '1': 'success'}
+    assert facts['exit_code'] == 0 and facts['output']['shards'] == {'0': 'success', '1': 'success', '2': 'success', '3': 'success'}
     assert {k: facts['inputs'][k] for k in ('kit_shard_count', 'shard_results', 'kit_inputs', 'kit_play_set', 'app_test_set', 'stage_results')} == {
-        'kit_shard_count': '2', 'shard_results': '0=success,1=success', 'kit_inputs': 'true', 'kit_play_set': 'all', 'app_test_set': 'all',
+        'kit_shard_count': '4', 'shard_results': '0=success,1=success,2=success,3=success', 'kit_inputs': 'true', 'kit_play_set': 'all', 'app_test_set': 'all',
         'stage_results': 'fractal-web=success,fractal-web-changes=success,fractal-web-execution=success'}, facts['inputs']
     assert not [n for n in facts['output']['needs'] if n.startswith(('linux-', 'evidence-gate-'))], 'the linux-gate jobs and the gates are not the lane\'s'
-    # A pull request runs one shard of the per-commit set: the note says exactly that, never the merge queue's two shards of everything.
+    # A pull request runs one shard of the per-commit set: the note says exactly that, never the merge queue's four shards of everything.
     done = helper('aggregate', str(out), env=dict(pull_web, NEEDS_JSON=json.dumps({**linux, **lane})))
     facts = json.loads(out.read_text())
     assert done.returncode == 0 and (facts['inputs']['kit_shard_count'], facts['inputs']['shard_results'], facts['inputs']['kit_play_set'],

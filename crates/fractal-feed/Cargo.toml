@@ -2,7 +2,7 @@
 name = "fractal-feed"
 version = "0.1.0"
 edition = "2024"
-description = "Smalltalk live collection feed, reconnecting subscriptions and read-only snapshots"
+description = "Fractal live collection feed, reconnecting subscriptions and read-only snapshots"
 license = "MIT"
 
 [dependencies]

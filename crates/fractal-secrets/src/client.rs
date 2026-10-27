@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
+use fractal_client::fabric::FabricEndpoint;
 use futures_util::{SinkExt as _, StreamExt as _};
 use pty_client::tty::{FdWriter, is_tty};
 use pty_client::{
@@ -26,17 +27,20 @@ use crate::model::{
 pub enum Endpoint {
     Unix(PathBuf),
     Http(String),
+    Fabric(FabricEndpoint),
 }
 
 impl Endpoint {
-    pub fn parse(value: impl AsRef<str>) -> Self {
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
         let value = value.as_ref();
-        if value.starts_with("http://") || value.starts_with("https://") {
-            Self::Http(value.trim_end_matches('/').into())
+        if value.starts_with("fabric:") {
+            Ok(Self::Fabric(FabricEndpoint::parse(value)?))
+        } else if value.starts_with("http://") || value.starts_with("https://") {
+            Ok(Self::Http(value.trim_end_matches('/').into()))
         } else if let Some(path) = value.strip_prefix("unix://") {
-            Self::Unix(PathBuf::from(format!("/{path}").replace("//", "/")))
+            Ok(Self::Unix(PathBuf::from(format!("/{path}").replace("//", "/"))))
         } else {
-            Self::Unix(PathBuf::from(value))
+            Ok(Self::Unix(PathBuf::from(value)))
         }
     }
 }
@@ -96,6 +100,7 @@ impl Fence {
             token: hex::encode(token),
         }
     }
+
     /// Initial allocation is idempotent under this random request token. Reexec and reconnect
     /// carry the returned epoch; neither the client's clock nor a lost response changes ownership.
     pub async fn bind(&mut self, client: &Client) -> Result<()> {
@@ -110,9 +115,8 @@ impl Fence {
                     return Ok(());
                 }
                 Err(error)
-                    if api_error_code(&error).is_some_and(|code| {
-                        !matches!(code, "internal" | "database-busy" | "database-locked" | "mailbox-session-starting" | "mailbox-authority-unavailable")
-                    }) =>
+                    if api_error_code(&error)
+                        .is_some_and(|code| !retryable_mailbox_bind_code(code)) =>
                 {
                     return Err(error);
                 }
@@ -120,6 +124,18 @@ impl Fence {
             }
         }
     }
+}
+
+fn retryable_mailbox_bind_code(code: &str) -> bool {
+    matches!(
+        code,
+        "internal"
+            | "database-busy"
+            | "database-locked"
+            | "mailbox-session-starting"
+            | "mailbox-authority-unavailable"
+            | "mailbox-runtime-indeterminate"
+    )
 }
 
 /// The daemon route a replication worker hands a read to when it must forward it.
@@ -460,7 +476,7 @@ impl Client {
     pub fn socket_path(&self) -> Option<&std::path::Path> {
         match &self.endpoint {
             Endpoint::Unix(path) => Some(path),
-            Endpoint::Http(_) => None,
+            Endpoint::Http(_) | Endpoint::Fabric(_) => None,
         }
     }
 
@@ -516,6 +532,20 @@ impl Client {
 
     pub async fn post<I: Serialize, O: DeserializeOwned>(&self, path: &str, body: &I) -> Result<O> {
         self.request("POST", path, Some(body)).await
+    }
+
+    /// Verify one GO from the local replica; this request must never use HTTP or sync.
+    pub async fn verify_deploy_go(
+        &self,
+        request: &fractal_schema::deploy::VerifyGoRequest,
+    ) -> Result<fractal_schema::deploy::VerifyGoReceipt> {
+        if !matches!(self.endpoint, Endpoint::Unix(_)) {
+            return Err(crate::model::St3Error::new(
+                "deploy-local-only",
+                "deploy verification requires the local Unix endpoint",
+            ).into());
+        }
+        self.post("/v1/deploy/verify-go", request).await
     }
 
     /// Send a message, retrying one unanswered request with the same idempotency key and body.
@@ -577,6 +607,9 @@ impl Client {
         path: &str,
         body: Option<&I>,
     ) -> Result<O> {
+        if matches!(self.endpoint, Endpoint::Fabric(_)) {
+            FabricEndpoint::validate_path(path)?;
+        }
         let bytes = body
             .map(serde_json::to_vec)
             .transpose()?
@@ -677,7 +710,29 @@ impl Client {
                     bytes,
                     self.deadlines.connect,
                     deadline,
-                    self.person.as_deref(),
+                    RequestAuthority::LocalPerson(self.person.as_deref()),
+                )
+                .await?
+            }
+            Endpoint::Fabric(endpoint) => {
+                let credential = std::env::var_os("FRACTAL_CLIENT_CREDENTIAL")
+                    .map(|value| {
+                        let value = value.into_string().map_err(|_| {
+                            anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL must contain valid UTF-8")
+                        })?;
+                        reqwest::header::HeaderValue::from_str(&format!("Bearer {value}"))
+                            .map_err(|_| anyhow::anyhow!("FRACTAL_CLIENT_CREDENTIAL is not a valid bearer credential"))
+                    })
+                    .transpose()?;
+                let socket = endpoint.dial().await?;
+                unix_request(
+                    &socket,
+                    method,
+                    path,
+                    bytes,
+                    self.deadlines.connect,
+                    deadline,
+                    RequestAuthority::FabricBearer(credential.as_ref()),
                 )
                 .await?
             }
@@ -833,6 +888,9 @@ impl Client {
 
     async fn open_terminal_bridge(&self, path: &str) -> Result<StdUnixStream> {
         match &self.endpoint {
+            Endpoint::Fabric(_) => {
+                anyhow::bail!("native Fabric endpoints do not support WebSocket requests");
+            }
             Endpoint::Unix(socket) => {
                 let endpoint = socket.display().to_string();
                 let stream = tokio::time::timeout(
@@ -1067,10 +1125,10 @@ impl std::error::Error for UnexpectedResponse {}
 fn terminal_request(url: &str) -> Result<tokio_tungstenite::tungstenite::http::Request<()>> {
     let mut request = url.into_client_request()?;
     fractal_client::propagation::inject_headers(request.headers_mut());
-    // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: deploy only after every receiver runs #3430; sunset 2026-11-01.
     request.headers_mut().insert(
         "Sec-WebSocket-Protocol",
-        "st3.terminal.v1"
+        "fractal.terminal.v1"
             .parse()
             .expect("the protocol header is valid"),
     );
@@ -1194,6 +1252,12 @@ where
     Ok(())
 }
 
+/// A tunneled request cannot claim the Unix socket's local-person authority.
+enum RequestAuthority<'a> {
+    LocalPerson(Option<&'a str>),
+    FabricBearer(Option<&'a reqwest::header::HeaderValue>),
+}
+
 async fn unix_request(
     socket: &Path,
     method: &str,
@@ -1201,9 +1265,14 @@ async fn unix_request(
     body: &[u8],
     connect_deadline: Duration,
     deadline: Duration,
-    person: Option<&str>,
+    authority: RequestAuthority<'_>,
 ) -> Result<Vec<u8>> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let (person, authorization) = match authority {
+        RequestAuthority::LocalPerson(person) => (person, None),
+        RequestAuthority::FabricBearer(credential) => (None, credential),
+    };
 
     let started = tokio::time::Instant::now();
     let endpoint = socket.display().to_string();
@@ -1224,6 +1293,11 @@ async fn unix_request(
             body.len()
         )
         .into_bytes();
+        if let Some(authorization) = authorization {
+            request.extend_from_slice(b"Authorization: ");
+            request.extend_from_slice(authorization.as_bytes());
+            request.extend_from_slice(b"\r\n");
+        }
         fractal_client::propagation::inject_current_context(|key, value| {
             request.extend_from_slice(key.as_bytes());
             request.extend_from_slice(b": ");
@@ -1648,6 +1722,90 @@ fn decode_api_response<O: DeserializeOwned>(bytes: &[u8]) -> Result<O> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn fabric_unix_http_roundtrip_carries_bearer_without_local_authority() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fabric.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let byte = stream.read_u8().await.unwrap();
+                request.push(byte);
+                if request.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /v1/client/capabilities HTTP/1.1\r\n"));
+            assert!(request.contains("\r\nAuthorization: Bearer paired-test-token\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("x-st3-person:"));
+            let body = br#"{"api_version":"st3.client.v0","value":{"accepted":true}}"#;
+            let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(body).await.unwrap();
+        });
+        let credential = reqwest::header::HeaderValue::from_static("Bearer paired-test-token");
+        let bytes = unix_request(
+            &socket, "GET", "/v1/client/capabilities", &[],
+            Duration::from_secs(1), Duration::from_secs(1),
+            RequestAuthority::FabricBearer(Some(&credential)),
+        ).await.unwrap();
+        assert_eq!(decode_api_response::<Value>(&bytes).unwrap(), json!({"accepted": true}));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn endpoint_parsing_preserves_local_and_http_and_roundtrips_fabric() {
+        assert!(matches!(Endpoint::parse("/run/fractal.sock").unwrap(),
+            Endpoint::Unix(path) if path == Path::new("/run/fractal.sock")));
+        assert!(matches!(Endpoint::parse("unix:///run/fractal.sock").unwrap(),
+            Endpoint::Unix(path) if path == Path::new("/run/fractal.sock")));
+        assert!(matches!(Endpoint::parse("https://example.invalid/").unwrap(),
+            Endpoint::Http(base) if base == "https://example.invalid"));
+        for target in ["devbox", "DEVBOX", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"] {
+            let value = format!("fabric://{target}/st3-client-v0");
+            let Endpoint::Fabric(endpoint) = Endpoint::parse(&value).unwrap() else {
+                panic!("a Fabric URI must not become a Unix socket");
+            };
+            assert_eq!(endpoint.to_string(), value);
+            assert!(matches!(Endpoint::parse(endpoint.to_string()).unwrap(),
+                Endpoint::Fabric(parsed) if parsed == endpoint));
+        }
+        for value in [
+            "fabric:", "fabric://", "fabric://devbox", "fabric://devbox/",
+            "fabric://devbox/other", "fabric://devbox/st3-client-v0/extra",
+            "fabric://devbox/st3-client-v0?token=secret",
+            "fabric://devbox/st3-client-v0#fragment",
+        ] {
+            assert!(Endpoint::parse(value).is_err(), "{value}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fabric_refuses_private_paths_and_websockets_before_dialing() {
+        let client = Client::new(Endpoint::parse("fabric://unresolved/st3-client-v0").unwrap());
+        assert!(client.socket_path().is_none());
+        assert!(client.local_terminal("agent/test").await.unwrap().is_none());
+        for path in [
+            "/v1/status", "/v1/backup", "/v1/mailbox", "/v1/claims",
+            "/v1/internal/client-read/forward", "/v1/clientish/actions",
+            "/v1/client/../claims", "/v1/client/%2e%2e/claims",
+            "/v1/client/%252e%252e/claims", "/v1/client/%2f..%2fclaims",
+            "//v1/client/actions", "https://example.invalid/v1/client/actions",
+        ] {
+            let error = client.get::<Value>(path).await.unwrap_err();
+            assert!(error.downcast_ref::<fractal_client::ClientError>().is_some(), "{path}: {error:#}");
+            assert!(daemon_unreachable(&error).is_none(), "{path}: {error:#}");
+        }
+        let error = client.open_terminal_bridge("/v1/client/terminal/stream").await.unwrap_err();
+        assert!(error.to_string().contains("do not support WebSocket"));
+        let error = client.open_mailbox(&Fence::default()).await.unwrap_err();
+        assert!(error.to_string().contains("require a local Unix socket"));
+    }
+
     #[test]
     fn local_api_transport_envelopes_accept_old_and_fractal_versions() {
         for version in ["st3.v1", "fractal.v1", "st3.client.v0", "fractal.client.v0"] {
@@ -2036,6 +2194,22 @@ mod tests {
             assert!((base / 2..=(base * 3 / 2).min(Duration::from_secs(30))).contains(&pause));
         }
     }
+    #[test]
+    fn mailbox_bind_retries_only_transient_authority_failures() {
+        for code in [
+            "internal",
+            "database-busy",
+            "database-locked",
+            "mailbox-session-starting",
+            "mailbox-authority-unavailable",
+            "mailbox-runtime-indeterminate",
+        ] {
+            assert!(retryable_mailbox_bind_code(code), "{code}");
+        }
+        for code in ["stale-mailbox-session", "unbound-mailbox", "forbidden"] {
+            assert!(!retryable_mailbox_bind_code(code), "{code}");
+        }
+    }
 
     #[test]
     fn driver_retry_typed_conflict_uses_the_timeout_curve() {
@@ -2398,7 +2572,7 @@ mod tests {
                     ));
                     response
                         .headers_mut()
-                        .insert("Sec-WebSocket-Protocol", "st3.terminal.v1".parse().unwrap());
+                        .insert("Sec-WebSocket-Protocol", "fractal.terminal.v1".parse().unwrap());
                     Ok(response)
                 },
             )
@@ -2416,7 +2590,7 @@ mod tests {
             *observed.lock().unwrap(),
             Some((
                 "/v1/pty/agent%2Fdemo/attach".into(),
-                Some("st3.terminal.v1".into())
+                Some("fractal.terminal.v1".into())
             ))
         );
     }
@@ -2438,7 +2612,7 @@ mod tests {
                 |_request: &Request, mut response: Response| {
                     response
                         .headers_mut()
-                        .insert("Sec-WebSocket-Protocol", "st3.terminal.v1".parse().unwrap());
+                        .insert("Sec-WebSocket-Protocol", "fractal.terminal.v1".parse().unwrap());
                     Ok(response)
                 },
             )
@@ -2552,7 +2726,7 @@ mod tests {
                     ));
                     response
                         .headers_mut()
-                        .insert("Sec-WebSocket-Protocol", "st3.terminal.v1".parse().unwrap());
+                        .insert("Sec-WebSocket-Protocol", "fractal.terminal.v1".parse().unwrap());
                     Ok(response)
                 },
             )
@@ -2570,7 +2744,7 @@ mod tests {
             *observed.lock().unwrap(),
             Some((
                 "/v1/pty/agent%2Fdemo/attach".into(),
-                Some("st3.terminal.v1".into())
+                Some("fractal.terminal.v1".into())
             ))
         );
     }
@@ -2579,6 +2753,22 @@ mod tests {
         root: &Path,
         runtime_id: &str,
         created_at: &str,
+    ) -> std::thread::JoinHandle<Vec<u8>> {
+        pty_session_with_tail(
+            root,
+            runtime_id,
+            created_at,
+            pty_core::protocol::encode_exit(0),
+            false,
+        )
+    }
+
+    fn pty_session_with_tail(
+        root: &Path,
+        runtime_id: &str,
+        created_at: &str,
+        tail: Vec<u8>,
+        close: bool,
     ) -> std::thread::JoinHandle<Vec<u8>> {
         use std::io::{Read as _, Write as _};
         std::fs::create_dir_all(root).unwrap();
@@ -2609,9 +2799,10 @@ mod tests {
                     stream
                         .write_all(&pty_core::protocol::encode_screen(b"straight from the pty"))
                         .unwrap();
-                    stream
-                        .write_all(&pty_core::protocol::encode_exit(0))
-                        .unwrap();
+                    stream.write_all(&tail).unwrap();
+                    if close {
+                        return received;
+                    }
                 }
             }
         })
@@ -2660,6 +2851,41 @@ mod tests {
         output.rewind().unwrap();
         output.read_to_string(&mut shown).unwrap();
         assert!(shown.contains("straight from the pty"), "{shown:?}");
+    }
+
+    #[tokio::test]
+    async fn a_local_attachment_loss_never_claims_that_the_child_exited() {
+        use std::io::{Read as _, Seek as _};
+        for tail in [Vec::new(), vec![12, 0, 0], vec![12, 0, 0, 0, 1, 0]] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("pty");
+            let session = pty_session_with_tail(
+                &root,
+                "worker",
+                "2026-09-29T08:00:00.000Z",
+                tail.clone(),
+                true,
+            );
+            let terminal = LocalTerminal {
+                subject: "agent/worker".into(),
+                runtime_id: "worker".into(),
+                incarnation_id: format!("{}:2026-09-29T08:00:00.000Z", std::process::id()),
+                pty_root: root,
+            };
+            let (io, _input, mut output) = silent_io();
+            let exit = attach_local_terminal_with_io(&terminal, io).await.unwrap();
+            session.join().unwrap();
+            let mut shown = String::new();
+            output.rewind().unwrap();
+            output.read_to_string(&mut shown).unwrap();
+            assert_eq!(exit, 1, "attachment tail {tail:?}: {shown:?}");
+            assert!(shown.contains("connection lost"), "{shown:?}");
+            assert!(!shown.contains("session ended"), "{shown:?}");
+            assert!(!shown.contains("exited with code"), "{shown:?}");
+            if tail.len() == 6 {
+                assert!(shown.contains("client too slow"), "{shown:?}");
+            }
+        }
     }
 
     #[tokio::test]

@@ -1314,7 +1314,7 @@ FROM ends JOIN claims first ON first.id=ends.first_id JOIN claims last ON last.i
 mod tests {
 
     fn commit_budget(store: &Store) -> FoldBudget {
-        *store.smalltalk.client_message_commit_budget.lock().unwrap_or_else(PoisonError::into_inner)
+        *store.fractal.client_message_commit_budget.lock().unwrap_or_else(PoisonError::into_inner)
     }
     use super::*;
 
@@ -1327,7 +1327,7 @@ mod tests {
     }
 
     fn append_message_batch(transaction: &Transaction<'_>, count: usize) -> Result<()> {
-        let runtime = SmalltalkRuntime::default();
+        let runtime = FractalRuntime::default();
         for index in 0..count {
             append_claim_tx(
                 transaction, "node", &format!("message/transaction-{index:04}"),

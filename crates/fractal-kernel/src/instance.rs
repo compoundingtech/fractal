@@ -1,7 +1,7 @@
 //! A named, fully separate st on one machine.
 //!
 //! `st --instance NAME` (or `FRACTAL_INSTANCE=NAME`, with `ST_INSTANCE` fallback) runs a second
-//! Smalltalk next to the default one for testing and for a clean first run. Everything it owns
+//! Fractal next to the default one for testing and for a clean first run. Everything it owns
 //! lives under one directory,
 //! `~/.st-instance/NAME`, so removing that directory (plus the service definitions that point into
 //! it) removes the instance and nothing else:
@@ -39,7 +39,7 @@ use anyhow::{Context as _, Result};
 /// Names the instance for this process and everything it starts.
 pub const ENV: &str = "ST_INSTANCE";
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 const FRACTAL_ENV: &str = "FRACTAL_INSTANCE";
 
 /// Resolve once at each instance boundary, including explicit empty Fractal masking.
@@ -254,7 +254,7 @@ pub unsafe fn activate(name: &str) -> Result<Instance> {
         }
     }
     unsafe { env::set_var(ENV, name) };
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     // Normalize both spellings so every child observes the instance we activated.
     unsafe { env::set_var(FRACTAL_ENV, name) };
     // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -301,7 +301,7 @@ pub fn service_environment() -> Vec<(String, String)> {
     let Some(instance) = current() else {
         return Vec::new();
     };
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
     let mut variables = vec![
         (FRACTAL_ENV.to_owned(), instance.name().to_owned()),
         (ENV.to_owned(), instance.name().to_owned()),
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn instance_aliases_agree_at_every_boundary() {
-        const CHILD: &str = "SMALLTALK_INSTANCE_ALIAS_TEST";
+        const CHILD: &str = "FRACTAL_INSTANCE_ALIAS_TEST";
         if let Ok(case) = env::var(CHILD) {
             let expected = match case.as_str() {
                 "preferred" => Some("new"),

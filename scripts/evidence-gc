@@ -503,7 +503,7 @@ def main(argv):
     parser.add_argument('--as-of', type=int, default=None, help="unix time the plan is computed at (default: main's tip commit time)")
     parser.add_argument('--head', action='append', default=[], help='a commit whose tree is live, besides the branch tips')
     parser.add_argument('--heads-from')
-    parser.add_argument('--repository', default='compoundingtech/smalltalk', help='OWNER/NAME the skip policy is read for')
+    parser.add_argument('--repository', default='compoundingtech/fractal', help='OWNER/NAME the skip policy is read for')
     parser.add_argument('--policy-from', help='revision whose .st/evidence-skip-policy.json says which checks have inputs (default --main)')
     parser.add_argument('--plan-out', help='also write the plan, with its inputs digest, to this file')
     parser.add_argument('--lock-config', help='the unlock, relock and check commands of the protection on the remote\'s evidence tags')

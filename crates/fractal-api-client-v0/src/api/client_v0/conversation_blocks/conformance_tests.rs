@@ -51,7 +51,7 @@ fn every_native_reader_output_conforms_to_client_v0_timeline_entry() {
             exported.extend(prepared);
             conform(&validator, &read(&native, &session, &native.id).unwrap());
             for order in [TimelineOrder::Sequence, TimelineOrder::TimestampSequence] {
-                conform(&validator, &read_slice(&native, &session, &native.id, order, None, usize::MAX).unwrap().items);
+                conform(&validator, &read_slice(&native, &session, &native.id, order, None, usize::MAX, true).unwrap().items);
             }
             for entry in &normalized {
                 if let Some(locator) = entry.get("_source") {
@@ -107,7 +107,7 @@ fn incomplete_native_views_preserve_raw_records_without_invalid_projections() {
 
 #[test]
 fn daemon_sender_is_an_explicit_known_schema_gap_issue_1957() {
-    // https://github.com/compoundingtech/smalltalk/issues/1957
+    // https://github.com/compoundingtech/fractal/issues/1957
     // Pending intake amendment: genuine runtime-authored messages cannot satisfy
     // ParticipantRef. Never omit/relabel the sender or silently skip this case.
     let entry = json!({

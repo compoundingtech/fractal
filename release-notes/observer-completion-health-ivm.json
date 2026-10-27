@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Read observer completion health and subscription state without folding historical cursor payloads inside the writer",
+  "replay": {
+    "status": "changed",
+    "detail": "After serving starts, bounded background loans deterministically hydrate the new local completion-health namespace through indexed subject/kind/index seeks. Open decodes no historical cursor bodies. Preparation refuses incomplete hydration and canonical reads retain their original fold until completion. Each subsequent changed claim updates at most three canonical field candidates. Late arrivals and repaired winners use indexed predecessors rather than replaying subject history. Historical at-index reads remain unchanged."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds local_completion_health_v1_claims, local_completion_health_v1_fields, local_completion_health_v1_pending and local_completion_health_v1_backfill. Only state, revision and reason are materialized; SQL NULL clearing markers are distinct from JSON null. These derived tables contain no cursor and do not replace any prior projection namespace or authoritative claim bytes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No observer cadence, retry, fence narrowing, claim retention or checkpoint changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Replicated claim and cursor shapes remain unchanged. Append carry-forward, StateTransition clearing, repaired-claim exclusion and canonical ordering remain authoritative. Both prepared completion and canonical fallback read narrow state at their SQLite cut. Pending work from an external writer makes preparation ineligible until the canonical transaction catches the projection up."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No manual migration is required. Initial namespace construction runs in the store-open transaction and reads retained observer/subscription history once; its cost depends on that history."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration changes are required. This change does not shrink historical cursor claims or bound future cursor payload sizes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "The namespace is reconstructible from retained authoritative claims. Older releases ignore the new derived tables and continue canonical history reads without converting claim or cursor bytes."
+  }
+}
