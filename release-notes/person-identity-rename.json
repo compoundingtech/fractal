@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "All three repair claim kinds are durable in the retention manifest: reassignment evidence and completed receipts are not an expiring alias or temporary overlay. The retention manifest changes the checkpoint rules digest even though the numeric rules version is unchanged. Upgrade every participating member before invoking repair; mixed builds do not share the same retention digest and older members do not understand the new claims. Do not rely on mixed-build checkpoint progress or review-routing agreement."
+    "detail": "All three repair claim kinds are durable in the retention manifest: reassignment evidence and completed receipts are not an expiring alias or temporary overlay. The retention manifest changes the checkpoint rules digest even though the numeric rules version is unchanged. Upgrade every participating member before invoking repair. The command fails closed unless every configured or active fleet member has advertised the matching registry digest, including on retries. Do not rely on mixed-build checkpoint progress or review-routing agreement."
   },
   "compatibility": {
     "status": "changed",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "changed",
-    "detail": "Upgrade all fleet members, ensure NEW is already known, and submit the repair through one member using a retained explicit idempotency key. Save the full JSON report. Inspect every unchanged attention request, fault card, revision approval and planning-launch approval. Inspect all live_run_references and published_mission_references: update and republish declaration sources for future work, use the authorized run-revision workflow where appropriate for live work, and retain immutable specifications and historical requester attribution. Publishing alone does not revise an existing run. The completed receipt fences OLD against a different destination with person-rename-conflict before any routing writes on that member, preventing competing local OLD-to-A and OLD-to-B requests from splitting the repair. Disconnected members may each initially accept different destinations. After receipts replicate, the earliest completed receipt per OLD in canonical claim order, including envelope ordering, selects one destination consistently for work and review routing. This is eventual convergence, not global admission exclusion before replication; use one member rather than deliberately issuing competing requests. See docs/missions-in-practice.md."
+    "detail": "Rollout is restricted to the operator designated by release approval or that person's explicitly named delegate; this is an operational condition, not additional product authorization. Upgrade all fleet members, ensure NEW is already known, and submit the repair through one member using a retained explicit idempotency key. Save the full JSON report. Inspect every unchanged item and every live_run_references and published_mission_references path. Update and republish declaration sources for future work and use authorized run revision for live work; publishing alone does not revise a run. Historical attribution remains immutable. Completed receipts fence local competing destinations; disconnected repairs converge to the earliest receipt in canonical order after replication, not through global admission exclusion. Do not deliberately issue competing repairs through different members. See docs/site/guides/missions-in-practice.md."
   },
   "recovery": {
     "status": "changed",

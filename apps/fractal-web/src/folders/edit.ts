@@ -1,6 +1,6 @@
-import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@smalltalk/st3-client'
-import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type { ActionFailure, ArrangementActionPort } from '@st3/sdk/effect'
+import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
+import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@fractal/client/schema'
+import type { ActionFailure, ArrangementActionPort } from '@fractal/sdk/effect'
 import { Effect, Schema } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
 

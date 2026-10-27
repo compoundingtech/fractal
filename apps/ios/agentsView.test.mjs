@@ -11,7 +11,7 @@ assert.equal(agentName({ id: 'agent/example/pty-rust/omp', name: 'example/pty-ru
 // A seat named after its host (st agents new NAME) is labelled without the host.
 assert.equal(agentName({ id: 'agent/harbor.image-sorter', name: 'harbor.image-sorter', host_id: 'host/harbor' }), 'Image Sorter');
 assert.equal(agentName({ id: 'agent/v2.parser', name: 'v2.parser', host_id: 'host/harbor' }), 'V2.parser');
-assert.equal(agentName({ id: 'agent/example/smalltalk-ci', name: 'example/smalltalk-ci' }), 'Smalltalk Ci');
+assert.equal(agentName({ id: 'agent/example/fractal-ci', name: 'example/fractal-ci' }), 'Fractal Ci');
 
 // st serves each agent's state; the phone reads it and derives nothing.
 assert.equal(agentState(served('working')), 'working');
@@ -20,10 +20,12 @@ assert.equal(agentState(served('needs_login')), 'needs-login');
 assert.equal(agentState(served('down')), 'down');
 assert.equal(agentState({ state: 'running', harness_state: 'working' }), 'unknown', 'an older daemon serves no presentation');
 // An older st's row shows the state it reports, marked so, and derives nothing.
-import { agentReported } from './agentsView.ts';
-assert.equal(agentReported({ state: 'running' }), 'running · older st');
+import { agentReported, OLDER_ST_NOTE } from './agentsView.ts';
+assert.equal(agentReported({ state: 'running' }), 'running · older Fractal');
 assert.equal(agentReported(served('working')), undefined);
-assert.equal(agentRows([{ ...agent('example/old'), presentation: undefined }], [], 'example-linux', now)[0].reported, 'running · older st');
+assert.equal(agentRows([{ ...agent('example/old'), presentation: undefined }], [], 'example-linux', now)[0].reported, 'running · older Fractal');
+assert.equal(OLDER_ST_NOTE, 'This host runs an older Fractal version: agent states appear as reported.');
+assert.equal(UNMANAGED_GROUP, 'found running · not started by Fractal');
 assert.equal(agentState(served('something-new')), 'unknown');
 assert.equal(agentWord('compacting'), 'compacting');
 assert.equal(agentWord('needs-you'), 'alert');
@@ -73,11 +75,11 @@ assert.equal(filterAgentRows(rows, '  ').length, rows.length);
 
 // A folder holding only one folder joins it on one line.
 assert.deepEqual(compactFolders([
-  'fleet/smalltalk/operations/2026-10-01/operator'.split('/'),
-  'fleet/smalltalk/ci/watcher'.split('/'),
+  'fleet/fractal/operations/2026-10-01/operator'.split('/'),
+  'fleet/fractal/ci/watcher'.split('/'),
   'fleet/cos/standing/cos'.split('/'),
   ['solo'],
-]), [['fleet', 'smalltalk', 'operations/2026-10-01'], ['fleet', 'smalltalk', 'ci'], ['fleet', 'cos/standing'], []]);
+]), [['fleet', 'fractal', 'operations/2026-10-01'], ['fleet', 'fractal', 'ci'], ['fleet', 'cos/standing'], []]);
 
 // The model beside the harness is what the harness last reported, and nothing when st says none.
 assert.equal(agentModel({ usage: { context: { model: 'claude-sonnet-5-5' } } }), 'claude-sonnet-5-5');

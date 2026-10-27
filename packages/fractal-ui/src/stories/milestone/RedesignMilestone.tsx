@@ -1,10 +1,12 @@
-// Workshop-only composition of shipped kit parts (Transcript, WF-1, RC-3 chips, DiffPanel, Composer, ResizableSplit) with the
-// milestone's own shell: a React Aria roster tree, one 32px pane header, an RC-1 subagent card and the shell states.
+// Accepted RM1 reference composition (live app ports slices separately) of shipped kit parts (Transcript, WF-1, RC-3 chips,
+// DiffPanel, Composer, Pane, DockedSplit, ResizableSplit) with the milestone's own roster tree, RC-1 subagent card and shell states.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Dialog, Modal, ModalOverlay } from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import { ResizableSplit, usePersistedSize } from '../../assistant-ui/composition/Shell'
+import { DockedSplit } from '../../assistant-ui/composition/DockedSplit'
+import { Pane, PaneHeaderButton, PaneHeaderToggle } from '../../assistant-ui/composition/Pane'
 import { ConnectionStatus } from '../../assistant-ui/composition/SystemState'
 import { DiffPanel, type DiffRevealRequest } from '../../assistant-ui/composition/DiffPanel'
 import { ResourceChipV1 } from '../../assistant-ui/resources/ResourceCardV1'
@@ -17,7 +19,7 @@ import { lightTheme, type Scheme } from '../../assistant-ui/composition-theme'
 import { borderVars as border, elevationVars as elevation, geometryNumbers, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 import { MilestoneSidebar, type RosterState } from './MilestoneSidebar'
 import { MilestonePalette, type PaletteCommand } from './MilestonePalette'
-import { AgentResultCard, ChangesToggle, HeaderToggle, MilestonePane, MilestoneThread, type PaneTab, type ThreadView } from './MilestonePane'
+import { AgentResultCard, MilestoneThread, PaneGlyph, type PaneTab, type ThreadView } from './MilestonePane'
 import { branchFiles, changedFiles, idleAgentRef, inboxCount, lastSeen, mainAgentRef, mainTurns, milestoneNow, proseResources, reviewerCard, reviewerRef, reviewerTurns, rosterFolders, staleMainTurns } from './milestone-fixtures'
 
 export type MilestoneState = 'slice' | 'loading' | 'empty-roster' | 'empty-thread' | 'no-match' | 'roster-error' | 'thread-unavailable' | 'stale' | 'navigation'
@@ -46,7 +48,6 @@ const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigat
 const modKey = isMac ? '⌘' : 'Ctrl+'
 /** Opens at 304px so the two-line SR-2 row with its metrics line has room; the row stays two lines at every width (RM1-Q1). */
 const sidebarDefault = 304
-const changesDefault = 440
 const narrowQuery = '(max-width: 639px)'
 const subscribeNarrow = (notify: () => void) => {
   const media = window.matchMedia(narrowQuery)
@@ -85,7 +86,6 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const [scheme, setScheme] = React.useState(props.scheme)
   const narrow = React.useSyncExternalStore(subscribeNarrow, () => window.matchMedia(narrowQuery).matches, () => false)
   const [width, setWidth] = usePersistedSize(props.persistKey, sidebarDefault)
-  const [changesWidth, setChangesWidth] = usePersistedSize(`${props.persistKey}.changes`, changesDefault)
   // Docked: collapsed hides the sidebar. Narrow: the sidebar is a modal drawer, open only when the roster is the content.
   const [collapsed, setCollapsed] = React.useState(() => window.matchMedia(narrowQuery).matches && props.state !== 'empty-roster' && props.state !== 'roster-error')
   const [query, setQuery] = React.useState(props.state === 'no-match' ? 'zz-nothing' : '')
@@ -151,7 +151,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
   const shownKey = paneKeys.includes(activeKey) ? activeKey : paneKeys[0]
   const paneTabs = paneKeys.map(key => key === changesKey ? { key, title: 'Changes' } : agentTab(key, phase))
   const sidebarHidden = narrow || collapsed
-  const showSidebar = <HeaderToggle label="Show sidebar" icon="panel" shortcut="Meta+B Control+B" onPress={() => setCollapsed(false)} />
+  const showSidebar = <PaneHeaderButton label="Show sidebar" icon="chevron-right" shortcut="Meta+B Control+B" onPress={() => setCollapsed(false)} />
 
   // The panel header names the change set; the "Changes" surface tab beside it says what kind of view it is.
   const changes = (inPane: boolean) => <DiffPanel open title="feat/metric-track" width="100%" diff={changedFiles[0]!.diff} path={changedFiles[0]!.path} added={2} removed={1}
@@ -206,16 +206,13 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
               </dl>
             </div>
           </div>
-          : <div {...stylex.props(styles.panes)}>
-            <MilestonePane tabs={paneTabs} activeKey={shownKey} onSelectTab={setActiveKey}
-              leading={sidebarHidden ? showSidebar : undefined} actions={narrow ? undefined : <ChangesToggle isSelected={changesOpen} onChange={setChangesOpen} />}>
+          // Docked, Changes sits beside the thread in a kit DockedSplit; the thread keeps its place when Changes toggles.
+          : <DockedSplit persistKey={`${props.persistKey}.changes`} label="Resize changes" onCollapse={() => setChangesOpen(false)} dock={!narrow && changesOpen ? changes(false) : undefined}>
+            <Pane tabs={paneTabs.map(tab => ({ key: tab.key, title: tab.title, glyph: tab.status === undefined ? undefined : <PaneGlyph tab={tab} /> }))} activeKey={shownKey} onSelectTab={setActiveKey}
+              leading={sidebarHidden ? showSidebar : undefined} actions={narrow ? undefined : <PaneHeaderToggle label="Show changes" icon="panel" isSelected={changesOpen} onChange={setChangesOpen} />}>
               {shownKey === changesKey ? changes(true) : thread(shownKey)}
-            </MilestonePane>
-            {!narrow && changesOpen && <>
-              <ResizableSplit id={`${props.persistKey}.changes`} reverse value={changesWidth} min={320} max={720} onChange={setChangesWidth} onToggle={() => setChangesOpen(false)} onReset={() => setChangesWidth(changesDefault)} collapsed={false} label="Resize changes" />
-              <div style={{ width: changesWidth }} {...stylex.props(styles.changesSlot)}>{changes(false)}</div>
-            </>}
-          </div>}
+            </Pane>
+          </DockedSplit>}
       </main>
       <MilestonePalette isOpen={paletteOpen} onOpenChange={setPaletteOpen} agents={agents} commands={commands} frozen={roster === 'stale'} onOpenAgent={openAgent} />
     </ThemedPortal>
@@ -240,8 +237,6 @@ const styles = stylex.create({
   drawer: { width: `min(${sidebarDefault}px, calc(100vw - ${g.gutter40}))`, height: '100%', outline: 'none', boxShadow: elevation.dialog },
   drawerDialog: { height: '100%', outline: 'none' },
   main: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  panes: { display: 'flex', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  changesSlot: { flexShrink: 0, minWidth: 0, height: '100%', borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.border },
   emptyFrame: { flex: '1 1 0', display: 'flex', flexDirection: 'column', minHeight: 0 },
   emptyBar: { display: 'flex', alignItems: 'center', height: g.controlLg, flexShrink: 0, paddingInline: s.sm },
   emptyMain: { flex: '1 1 0', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: s.lg, padding: s.xl, minHeight: 0 },

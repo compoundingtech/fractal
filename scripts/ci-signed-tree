@@ -29,7 +29,9 @@ VERIFIER = 'scripts/evidence-verify'
 POLICY = '.st/evidence-skip-policy.json'
 KEYS = '.st/evidence-keys'
 LANES = '.st/required-lanes.json'
-NOTES = 'refs/notes/evidence/*:refs/notes/evidence/*'
+NOTES = 'refs/notes/evidence'  # records live under refs/notes/evidence/<tree>/: one prefix per tree
+INPUT_NOTES = 'refs/notes/evidence-input'
+TAGS = 'refs/tags/evidence'  # and, protected by a ruleset, under refs/tags/evidence/<tree>/ and refs/tags/evidence/input/<check>/<key>/
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 REPOSITORY = re.compile(r'^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$')
 VERIFIER_TIMEOUT = int(os.environ.get('SIGNED_TREE_VERIFIER_TIMEOUT', '60'))
@@ -99,8 +101,22 @@ def main():
         tree = tree.decode().strip()
         if code != 0 or not OID.match(tree):
             return emit(context, 'error', 'no-head-tree', base=base, seconds=elapsed())
-        code, _ = run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', NOTES)
+        # Only this tree's records (one prefix), plus the input-keyed records of each required check that declares inputs: never the namespace.
+        code, _ = run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{TAGS}/{tree}/*:{TAGS}/{tree}/*',
+                      f'+{NOTES}/{tree}/*:{NOTES}/{tree}/*')
         notes = 'ok' if code == 0 else 'failed'
+        for check, entry in sorted(checks.items()):
+            if isinstance(entry, dict) and entry.get('require', 'off') != 'off' and entry.get('inputs') is not None and re.fullmatch(r'[A-Za-z0-9._-]+', check):
+                code, out = run(sys.executable, VERIFIER, '--repo', '.', '--revision', context['head'], '--check', check, '--project', '--policy-from', base,
+                                '--repository', repository, timeout=VERIFIER_TIMEOUT)
+                try:
+                    key = json.loads(out).get('source_inputs') if code == 0 else None
+                except ValueError:
+                    key = None
+                if isinstance(key, str) and OID.match(key):
+                    prefix, tags = f'{INPUT_NOTES}/{check}/{key}', f'{TAGS}/input/{check}/{key}'
+                    if run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{tags}/*:{tags}/*', f'+{prefix}/*:{prefix}/*')[0] != 0:
+                        notes = 'failed'
         command = [sys.executable, VERIFIER, '--repo', '.', '--tree', tree, '--require-all', '--keys-from', base,
                    '--policy-from', base, '--repository', repository]
         if run('git', 'cat-file', '-e', f'{base}:{LANES}')[0] == 0:

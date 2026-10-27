@@ -27,6 +27,9 @@ pub trait WriterObserver: Send + Sync {
     fn failed(&self, error: Arc<str>);
     /// Called only after native hook coverage and all watched physical tables validate.
     fn coverage_verified(&self) {}
+    /// Resolution while physical coverage is disabled. Consumers may conservatively wake
+    /// readers, but must not publish a selectively invalidated/cached answer.
+    fn coverage_unavailable(&self) {}
     fn published(&self, connection: &Connection);
 }
 
@@ -255,9 +258,11 @@ impl MutationState {
                 }
             }
         }
-        // An unsupported schema is visible once and stays stopped; ordinary appends do not
-        // retry its metadata query. A later supported schema change can publish recovery.
-        if !self.invalid_schema.load(Ordering::Relaxed) {
+        // Do not retry metadata on ordinary writes while unsupported. Consumers still need
+        // a conservative resolution signal until a supported schema is positively verified.
+        if self.invalid_schema.load(Ordering::Relaxed) {
+            self.observer.coverage_unavailable();
+        } else {
             self.observer.published(connection);
         }
     }

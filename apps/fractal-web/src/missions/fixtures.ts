@@ -9,7 +9,7 @@ import {
   type UsageSummaryEncoded,
   type VisualizationEncoded,
   type WorkState,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 import { Option } from 'effect'
 
 /**

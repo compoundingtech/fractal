@@ -197,7 +197,7 @@ fn send_persists_canonical_sender_history_independent_of_every_recipient_box() {
     );
     let filename = String::from_utf8(output.stdout).unwrap().trim().to_string();
     let delivered =
-        st2::message::read_msg(&tmp.path().join("h/recipient/resources/inbox"), &filename).unwrap();
+        fractal_legacy_runner::message::read_msg(&tmp.path().join("h/recipient/resources/inbox"), &filename).unwrap();
     assert_eq!(delivered.from.as_deref(), Some("h.sender"));
 
     fs::remove_file(

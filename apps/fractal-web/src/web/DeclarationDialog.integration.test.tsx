@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { PublicationDefinition, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { PublicationDefinition, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -49,7 +49,7 @@ describe('declaration dialog', () => {
     expect(node.querySelector('h2')?.textContent).toBe('mission/kdl-view')
     expect(node.getAttribute('aria-labelledby')).toBe(node.querySelector('h2')?.id)
     expect(node.querySelector('[data-testid="declaration-language"]')?.textContent).toBe('JSON')
-    expect(node.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('st serves no mission KDL')
+    expect(node.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('Fractal serves no mission KDL')
     expect(node.textContent).toContain('OPENAI_API_KEY')
     expect(node.textContent).not.toContain(SECRET)
     expect(host.contains(node)).toBe(true)

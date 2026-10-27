@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The two delivery purity proptests run 8 fixed-seed cases on pull requests and their 32 random cases in the daily full-scale run",
+  "replay": {"status": "none", "detail": "Test only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product behaviour change."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

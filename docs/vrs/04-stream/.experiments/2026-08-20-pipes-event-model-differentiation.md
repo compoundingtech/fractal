@@ -244,7 +244,7 @@ event exactly when its `from` resolves to a declared source; `stream:` and
 same fact, and duplicating it would create a way for them to disagree.
 
 `src/message.rs:242 parse_message` ignores unknown frontmatter keys
-(`_ => {}`), and `crates/st-wire` has no `deny_unknown_fields`, so both
+(`_ => {}`), and `crates/fractal-wire` has no `deny_unknown_fields`, so both
 directions of version skew are safe by construction — an older reader sees an
 ordinary message with an unusual sender, and an older st2 binary reading a
 newer file loses only the stream coordinates.
@@ -483,7 +483,7 @@ that has to hold.
 ### MESSAGE-R01…R11 — R11 amended, the rest untouched
 
 MESSAGE-R01 through R10 are unaffected: ordinary sends, the sender ledger, the
-commit chain, coverage, and the `st2-wire` shapes do not change. `MessageRow`
+commit chain, coverage, and the `fractal-wire` shapes do not change. `MessageRow`
 gains two optional fields, which MESSAGE-R04's "optional metadata … preserve
 absent versus empty values" already accommodates and which the
 `a_field_this_reader_does_not_know_is_ignored_not_rejected` test already protects.
@@ -846,7 +846,7 @@ Per the guidance, fresh namespaces over in-place migration.
 | `resources/request-state/replies/` | Left in place, no longer written or read. |
 | `st2 request …` | Kept as a deprecated alias for one release: `request send` → `event emit` with `--stream <key> --event-id <key>` derived from the idempotency key, `request reply` → `message reply`, `request status` → `event status`. `request read` is dropped; `message read` supersedes it. |
 | In-flight typed requests across the upgrade | An unreplied request published by the old code is an ordinary inbox message with a JSON body; `message read` shows it, `message reply` answers it, and the old `request status` alias still finds the reply because both scan `in-reply-to`. No fencing needed. |
-| `MessageRow` consumers | Additive optional fields only; `crates/st-wire` has no `deny_unknown_fields` and `a_field_this_reader_does_not_know_is_ignored_not_rejected` is the standing proof. |
+| `MessageRow` consumers | Additive optional fields only; `crates/fractal-wire` has no `deny_unknown_fields` and `a_field_this_reader_does_not_know_is_ignored_not_rejected` is the standing proof. |
 | `RequestEnvelope` / `ReplyEnvelope` / `PublicationRecord` | All three carry `deny_unknown_fields`. They are **not** extended — they are retired with the code that reads them. |
 | The `~` glyph | Every agent sees this string. It is additive: no existing glyph changes meaning, and `?` becomes strictly more precise. |
 

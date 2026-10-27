@@ -135,7 +135,7 @@ Codex `gpt-5.6-sol` is the default model judge.
 
 An eval can use a Claude judge for a specific reason. Record the choice in this inventory and the run report.
 
-## Small Talk message discipline
+## Fractal message discipline
 
 The graph owns planned work, assignment, dependencies, progress, products, and judgement state.
 
@@ -145,7 +145,7 @@ Put mission work in goals and steps. Keep only stable repository facts in `AGENT
 
 Do not disable harness features or reveal held-out gate criteria in agent instructions.
 
-st3 sends one durable Small Talk message when an assigned parent becomes ready.
+st3 sends one durable Fractal message when an assigned parent becomes ready.
 
 Inherited nested steps use the parent message. A nested step sends a new message only when its assignee changes,
 or when its agent submitted the parent while that nested step was still ready.
@@ -156,7 +156,7 @@ An agent sends a direct message for a blocker, an exception, a requested result,
 
 An agent does not send routine progress when graph work state already expresses that progress.
 
-An eval that tests coordination must judge the required Small Talk message sequence.
+An eval that tests coordination must judge the required Fractal message sequence.
 
 An eval must keep enough work state in the graph to survive an agent or daemon restart.
 
@@ -175,7 +175,7 @@ Commit the report with the run evidence. Do not leave the only report in termina
 ```sh
 st2 eval ./evals/st2/license-mit
 st2 eval ./evals/st2/network-smoke
-cargo test -p st3 --test integration examples::
+cargo test -p fractal --test integration examples::
 ```
 
 st3 eval orchestration is exercised through repository integration controllers and is deliberately

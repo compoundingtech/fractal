@@ -4,7 +4,7 @@ import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { Banners, Empty, StatusLine, useDebugScroll, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu } from '../menu';
-import { alertsHeading, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@smalltalk/st3-views';
+import { alertsHeading, homeRows, homeSections, openAlerts, type HomeRow, cleanMessageText, ANSWERS, isRequest, spaced } from '@fractal/views';
 import type { RootParams } from '../navigation';
 import { agentName } from '../agentsView';
 import { alertsEmptyText } from '../alertsEmpty';
@@ -89,7 +89,7 @@ export function NowScreen() {
       refreshControl={refresh}
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
-        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `st now` lists them all.</Note> : null}
+        {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
       </View>}
       style={{ flex: 1 }}
     />

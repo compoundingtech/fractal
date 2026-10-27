@@ -176,6 +176,7 @@ fn exercise(certified: bool, fault: Option<TrimFault>) {
         }).as_object().unwrap().clone(),
     };
     store.set_trim_chunk_envelopes(1);
+    store.set_trim_pause(std::time::Duration::ZERO);
     let interrupt = fault == Some(TrimFault::AfterChunk(1));
     store.set_trim_fault(fault);
     let graph_before = graph_digest(&store.readers.get()).unwrap();

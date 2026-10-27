@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
 
 printf '\n### mission run claim\n'
-"$ST3_BIN" inspect "mission-run/$ST_MISSION_RUN" --json \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+"${FRACTAL_BIN-${ST3_BIN-}}" inspect "mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" --json \
   | jq -c '{status: (.status.subjects[0].actual.fields.status // .status.subjects[0].actual.status)}'
 
 printf '\n### durable work state\n'
-env -u ST_AGENT "$ST3_BIN" work ls --all --json \
-  | jq -c --arg run "mission-run/$ST_MISSION_RUN" \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+env -u FRACTAL_AGENT -u ST_AGENT "${FRACTAL_BIN-${ST3_BIN-}}" work ls --all --json \
+  | jq -c --arg run "mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
       '[.[] | select(.run == $run) | {step, status, assigned_to, available_to, claimant, updated_at_unix_ms}]'
 
 for product in \
@@ -21,7 +25,8 @@ for product in \
   integrated-revision
 do
   printf '\n### product: %s\n' "$product"
-  "$ST3_BIN" inspect "resource/mission-run/$ST_MISSION_RUN/$product" --json \
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  "${FRACTAL_BIN-${ST3_BIN-}}" inspect "resource/mission-run/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/$product" --json \
     | jq -c '[.recent_claims[] | select(.kind == "resource.observed")][0] | {store_index, actor, fields: (.body.fields // .body)}'
 done
 
