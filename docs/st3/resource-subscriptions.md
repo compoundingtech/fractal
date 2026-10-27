@@ -179,7 +179,7 @@ The run’s subjects are `observer/RUN/watch` and `subscription/RUN/watch`.
 
 The subscription stores the selected changes and delivery intent.
 
-A provider locator is an opaque provider value. st does not assign meaning to it outside the registered provider.
+A provider locator is an opaque provider value. Fractal does not assign meaning to it outside the registered provider.
 
 The `github.ref` locator is `OWNER/REPOSITORY@BRANCH`. Branch names can contain `/`. For example:
 
@@ -268,7 +268,7 @@ The GitHub repository provider reads what changed since its cursor. Its first po
 item, up to 10 pages; a larger open listing fails the observation instead of recording part of it.
 After that, it reads the issues listing for items updated since its watermark, which also names
 each closed pull request's merge, and the repository's comments updated since a second watermark.
-A comment watermark starts at the first poll, so st does not read old comments. Each read is
+A comment watermark starts at the first poll, so Fractal does not read old comments. Each read is
 conditional and its URL changes only when something changed, so an idle repository answers 304
 and costs nothing. A read longer than 10 pages records what it read and continues at once.
 
@@ -328,7 +328,7 @@ An unchanged failure creates no new claim. A later success replaces the complete
 
 An observer checks its declared fields. Its effective field set also includes the union of its subscription fields.
 
-st does not fetch once for each target. A subscription update can expand or reduce the observer field set.
+Fractal does not fetch once for each target. A subscription update can expand or reduce the observer field set.
 
 ## The intake pipeline
 

@@ -980,6 +980,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "activity": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text." }),
   /** Structured human ask kind (question, permission, or review); meaningful only while blocked_on is human. */
   "ask": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Structured human ask kind (question, permission, or review); meaningful only while blocked_on is human." }),
+  /** Background job count from the selected current-incarnation harness state report; zero is known empty, null is unknown. */
+  "background_jobs": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Background job count from the selected current-incarnation harness state report; zero is known empty, null is unknown." }),
   /** Current incarnation's harness blocking axis; human means a person must answer before it continues. */
   "blocked_on": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Current incarnation's harness blocking axis; human means a person must answer before it continues." }),
   /** The requested Git worktree repository, base and branch. Present before launch; it does not assert that checkout succeeded. */
@@ -4333,6 +4335,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "not-found",
   "forbidden",
   "unsupported-capability",
+  "peer-too-old",
   "validation-failed",
   "idempotency-conflict",
   "issuer-required",

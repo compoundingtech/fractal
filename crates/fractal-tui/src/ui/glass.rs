@@ -4271,9 +4271,9 @@ pub(crate) fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
 
 /// The glasses capability version st grants this stui. From version 2 (#958) a split carries its
 /// ratio; an older st is never sent one.
-static GLASSES_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static GLASSES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub fn set_glasses_version(version: u32) {
+pub fn set_glasses_version(version: u64) {
     GLASSES_VERSION.store(version, std::sync::atomic::Ordering::Relaxed);
 }
 

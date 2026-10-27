@@ -8767,7 +8767,11 @@ fn publish_changed_harness_state_tx(
             .get("fields")
             .and_then(Value::as_object)
             .is_some_and(|previous| {
-                fields.iter().all(|(name, value)| {
+                // Unlike sparse status axes, the count belongs only to this report.
+                // Dropping it must publish an unknown count rather than retain old jobs.
+                previous.get("background_jobs").and_then(Value::as_u64)
+                    == fields.get("background_jobs").and_then(Value::as_u64)
+                    && fields.iter().all(|(name, value)| {
                     matches!(name.as_str(), "observed_at_ms" | "observed_since_ms" | "status_transition")
                         || previous.get(name) == Some(value)
                 })
@@ -11121,6 +11125,7 @@ fn update_prompt_fence(
         blocked_on: Some("human".into()),
         ask: None,
         input_buffer: None,
+        background_jobs: None,
         exit: None,
         claim,
         since_unix_ms: at.parse()?,
@@ -11180,6 +11185,7 @@ fn claude_attachment_fence(
         blocked_on: Some("channel".into()),
         ask: None,
         input_buffer: None,
+        background_jobs: None,
         exit: None,
         claim,
         since_unix_ms: at.parse()?,
@@ -11314,6 +11320,7 @@ pub fn harness_fold_at(
             blocked_on: None,
             ask: None,
             input_buffer: None,
+            background_jobs: None,
             exit: None,
             claim,
             since_unix_ms: observed_at.parse()?,
@@ -11355,6 +11362,7 @@ pub fn harness_fold_at(
                     blocked_on: Some("human".into()),
                     ask: None,
                     input_buffer: None,
+                    background_jobs: None,
                     exit: None,
                     claim,
                     since_unix_ms: time.parse()?,
@@ -11411,6 +11419,7 @@ pub fn harness_fold_at(
                 blocked_on: Some("human".into()),
                 ask: None,
                 input_buffer: None,
+                background_jobs: None,
                 exit: None,
                 claim,
                 since_unix_ms: observed_at_unix_ms.parse::<u128>()?,
@@ -11493,7 +11502,8 @@ pub fn harness_fold_at(
         if current.is_none()
             && let Some(state) = fields.get("state").and_then(Value::as_str)
         {
-            current = Some((state.to_owned(), claim, observed_at_unix_ms, key));
+            let jobs = crate::model::CurrentHarnessView::reported_background_jobs(state, fields);
+            current = Some((state.to_owned(), claim, observed_at_unix_ms, key, jobs));
         }
         if matches!(fields.get("state").and_then(Value::as_str), Some("ended" | "indeterminate")) {
             optional.entry("blocked_on").or_insert(None);
@@ -11547,7 +11557,7 @@ pub fn harness_fold_at(
         .transpose()?
     } else { None };
     let harness_key = match (&work_activity, current.as_ref()) {
-        (Some(_), Some((_, claim, _, key))) => Some(match key {
+        (Some(_), Some((_, claim, _, key, _))) => Some(match key {
             Some(key) => key.clone(),
             None => canonical::claim_key(connection, claim)?,
         }),
@@ -11557,7 +11567,7 @@ pub fn harness_fold_at(
         && include_work_activity
         && key > runtime_key
         && !seat_status::permission_blocked(
-            current.as_ref().map(|(state, _, _, _)| state.as_str()),
+            current.as_ref().map(|(state, ..)| state.as_str()),
             optional.get("blocked_on").and_then(|v| v.as_deref()),
             optional.get("ask").and_then(|v| v.as_deref()),
         )
@@ -11572,13 +11582,14 @@ pub fn harness_fold_at(
             blocked_on: None,
             ask: None,
             input_buffer: None,
+            background_jobs: None,
             exit: None,
             claim,
             since_unix_ms: observed_at_unix_ms.parse::<u128>()?,
             observed_at_unix_ms: observed_at_unix_ms.parse::<u128>()?,
         }));
     }
-    let Some((mut state, claim, observed_at_unix_ms, _)) = current else {
+    let Some((mut state, claim, observed_at_unix_ms, _, background_jobs)) = current else {
         return Ok(None);
     };
     if seat_status::permission_blocked(
@@ -11608,6 +11619,7 @@ pub fn harness_fold_at(
         blocked_on: optional.remove("blocked_on").flatten(),
         ask: optional.remove("ask").flatten(),
         input_buffer: optional.remove("input_buffer").flatten(),
+        background_jobs,
         exit: optional.remove("exit").flatten(),
         claim,
         since_unix_ms: observed_at_unix_ms,

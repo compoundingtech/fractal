@@ -1,4 +1,4 @@
-# st data authority
+# Fractal data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
 (`crates/fractal-seats/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables

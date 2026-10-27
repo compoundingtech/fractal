@@ -164,13 +164,13 @@ export const normalizeRecording = (script: RecordingScript, rows: readonly Recor
   normalizeWithIdentity(script, rows, anchorMs)
 
 /** Collect only schema-annotated identities, never opaque tool input/output strings. */
-export const recordingIdentities = (script: RecordingScript, rows: readonly RecordingRow[]): readonly string[] => {
-  const identities = new Set<string>()
-  normalizeWithIdentity(script, rows, 0, (value) => { identities.add(value); return value })
-  return [...identities]
+export const recordingIdentities = (script: RecordingScript, rows: readonly RecordingRow[]): ReadonlyMap<string, 'native' | 'resource'> => {
+  const identities = new Map<string, 'native' | 'resource'>()
+  normalizeWithIdentity(script, rows, 0, (value, native) => { identities.set(value, native ? 'native' : 'resource'); return value })
+  return identities
 }
 
-const normalizeWithIdentity = (script: RecordingScript, rows: readonly RecordingRow[], anchorMs: number, mapIdentity?: (value: string) => string): RecordingRow[] => {
+const normalizeWithIdentity = (script: RecordingScript, rows: readonly RecordingRow[], anchorMs: number, mapIdentity?: (value: string, native: boolean) => string): RecordingRow[] => {
   const header = rows.find((row) => row.kind === 'header') ?? fail('/header', 'missing header')
   const baseline = rows.find((row) => row.kind === 'baseline') ?? fail('/baseline', 'missing baseline')
   if (rows.filter((r) => r.kind === 'header').length !== 1 || rows.filter((r) => r.kind === 'baseline').length !== 1) fail('', 'duplicate header or baseline')
@@ -241,7 +241,8 @@ const normalizeWithIdentity = (script: RecordingScript, rows: readonly Recording
     if (!out) { out = `${kind}#${map.size + 1}`; map.set(value, out) }
     return out
   }
-  const identity = (value: string, pointer: string): string => mapIdentity ? mapIdentity(value) : script.id_map[value] ?? (Object.values(script.id_map).includes(value) ? value : fail(pointer, `unknown identity ${value}`))
+  const nativeMessages = new Set<string>()
+  const identity = (value: string, pointer: string): string => mapIdentity ? mapIdentity(value, nativeMessages.has(value)) : script.id_map[value] ?? (Object.values(script.id_map).includes(value) ? value : fail(pointer, `unknown identity ${value}`))
   // allOf/conditional schema paths can declare the same leaf more than once.
   const transformed = new Set<string>()
   const walk = (raw: JsonObject, value: JsonValue, pointer: string, key = ''): JsonValue => {
@@ -249,6 +250,10 @@ const normalizeWithIdentity = (script: RecordingScript, rows: readonly Recording
     const leaf = (result: JsonValue): JsonValue => { transformed.add(pointer); return result }
     const s = resolve(raw)
     const ref = typeof raw.$ref === 'string' ? raw.$ref.split('/').at(-1) : undefined
+    if (ref === 'TimelineMessageBody' && value !== null && typeof value === 'object' && !Array.isArray(value) &&
+      value.from == null && value.to == null && typeof value.message_id === 'string') {
+      nativeMessages.add(value.message_id)
+    }
     if (value !== null && typeof value === 'string') {
       if (s['x-st-codec'] === 'timestamp') return leaf(new Date(instant(value, pointer) + shift).toISOString())
       if (ref === 'SnapshotId' || key === 'snapshot_id') {
