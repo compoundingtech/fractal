@@ -137,7 +137,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
 })
 
 const unreportedLabel = 'Unreported subagents'
-const unreportedReason = 'The number of subagents isn’t reported.'
+const unreportedReason = 'Not reported yet'
 
 /**
  * Running subagents; `undefined` when the harness does not report them. A known count is its own accessible text, with
