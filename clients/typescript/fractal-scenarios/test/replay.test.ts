@@ -344,7 +344,7 @@ describe('collection windows', () => {
     await h.replay.flush()
     stream.subscribe('third', 'missions', 20)
     await h.replay.flush()
-    const stores = h.frames.flatMap((frame) => 'snapshot' in frame ? [frame.snapshot.store_index] : [])
+    const stores = h.frames.flatMap((frame) => frame.snapshot !== undefined ? [frame.snapshot.store_index] : [])
     expect(stores).toEqual([...stores].sort((a, b) => a - b))
     expect(stores.at(-1)).toBeGreaterThan(stores[0]!)
   })
