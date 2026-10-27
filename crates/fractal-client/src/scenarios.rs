@@ -276,19 +276,25 @@ fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Val
     } else {
         allow_excess_fields(&mut schema);
     }
-    apply_wire_codecs(&mut schema);
+    let mut lengths = BTreeMap::new();
+    apply_wire_codecs(&mut schema, &mut lengths)?;
     schema.as_object_mut().context("schema is not an object")?.remove("oneOf");
     let mut out = BTreeMap::new();
     for &name in WIRE_DEFINITIONS {
         schema["$ref"] = Value::String(format!("#/$defs/{name}"));
-        out.insert(name.into(), jsonschema::options()
+        let mut options = jsonschema::options()
             .with_format("date-time", date_time_grammar)
             .with_format("st-timestamp", timestamp_codec)
             // The kit deliberately treats uri-reference as an unconstrained string.
             .with_format("uri-reference", |_| true)
-            .with_keyword("minLength", |parent, _, location| Ok(utf16_length_keyword(parent, location)))
-            .with_keyword("maxLength", |parent, _, location| Ok(utf16_length_keyword(parent, location)))
-            .should_validate_formats(true).build(&schema)?);
+            .should_validate_formats(true);
+        for (format, &(minimum, maximum)) in &lengths {
+            options = options.with_format(format.clone(), move |text| {
+                let length = text.encode_utf16().count() as u64;
+                (minimum..=maximum).contains(&length)
+            });
+        }
+        out.insert(name.into(), options.build(&schema)?);
     }
     Ok(out)
 }
@@ -355,7 +361,7 @@ fn merge_object_intersections(schema: &mut Value, definitions: &Value) -> Result
     Ok(())
 }
 
-fn apply_wire_codecs(schema: &mut Value) {
+fn apply_wire_codecs(schema: &mut Value, lengths: &mut BTreeMap<String, (u64, u64)>) -> Result<()> {
     match schema {
         Value::Object(object) => {
             if object.get("type").is_some_and(|kind| kind == "integer"
@@ -383,11 +389,22 @@ fn apply_wire_codecs(schema: &mut Value) {
                 // Expand ECMAScript whitespace instead of jsonschema's approximate table.
                 *pattern = pattern.replace(r"\s", "\u{0009}-\u{000D}\u{0020}\u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}");
             }
-            for child in object.values_mut() { apply_wire_codecs(child); }
+            if object.contains_key("minLength") || object.contains_key("maxLength") {
+                let minimum = object.remove("minLength").and_then(|bound| bound.as_u64()).unwrap_or(0);
+                let maximum = object.remove("maxLength").and_then(|bound| bound.as_u64()).unwrap_or(u64::MAX);
+                let format = format!("st-utf16-length-{minimum}-{maximum}");
+                lengths.insert(format.clone(), (minimum, maximum));
+                // A separate conjunction preserves any existing format or pattern checks.
+                object.entry("allOf").or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut().context("string length conjunction")?
+                    .push(serde_json::json!({"format": format}));
+            }
+            for child in object.values_mut() { apply_wire_codecs(child, lengths)?; }
         }
-        Value::Array(children) => { for child in children { apply_wire_codecs(child); } }
+        Value::Array(children) => { for child in children { apply_wire_codecs(child, lengths)?; } }
         _ => {}
     }
+    Ok(())
 }
 
 /// The kit's DATE_TIME grammar (ASCII digits, four-digit year, mandatory seconds and zone).
@@ -455,46 +472,6 @@ fn model_input(value: &Value) -> Cow<'_, Value> {
     }
 }
 
-struct Utf16Length {
-    minimum: Option<u64>,
-    maximum: Option<u64>,
-    location: jsonschema::paths::Location,
-}
-
-fn utf16_length_keyword(
-    parent: &serde_json::Map<String, Value>,
-    location: jsonschema::paths::Location,
-) -> Box<dyn jsonschema::Keyword> {
-    Box::new(Utf16Length {
-        minimum: parent.get("minLength").and_then(Value::as_u64),
-        maximum: parent.get("maxLength").and_then(Value::as_u64),
-        location,
-    })
-}
-
-impl jsonschema::Keyword for Utf16Length {
-    fn is_valid(&self, instance: &Value) -> bool {
-        instance.as_str().is_none_or(|text| {
-            let length = text.encode_utf16().count() as u64;
-            self.minimum.is_none_or(|minimum| length >= minimum)
-                && self.maximum.is_none_or(|maximum| length <= maximum)
-        })
-    }
-
-    fn validate<'i>(
-        &self,
-        instance: &'i Value,
-        location: &jsonschema::paths::LazyLocation,
-    ) -> Result<(), jsonschema::ValidationError<'i>> {
-        if self.is_valid(instance) {
-            Ok(())
-        } else {
-            Err(jsonschema::ValidationError::custom(
-                self.location.clone(), location.into(), instance, "string length outside kit UTF-16 bounds",
-            ))
-        }
-    }
-}
 
 fn close_schema(schema: &mut Value) {
     match schema {
