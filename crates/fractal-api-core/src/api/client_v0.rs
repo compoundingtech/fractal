@@ -931,6 +931,11 @@ pub fn mission_list_cards_with(
         .into_iter()
         .map(|d| (d.mission.subject.clone(), d))
         .collect::<BTreeMap<_, _>>();
+    let resource_uris = store.declared_resource_uris(
+        definitions
+            .values()
+            .flat_map(|definition| &definition.mission.resources),
+    )?;
     ids.iter().map(|id| {
         let overview = crate::performance::task("mission_collection/overview", || store.mission_overview(id, 3))?;
         let newest = overview["newest"].as_array().expect("overview previews");
@@ -993,6 +998,8 @@ pub fn mission_list_cards_with(
             "run_details":details,"active_runs":active,"total_runs":overview["total_runs"],
             "run_counts":overview["counts"],"runs_truncated":overview["total_runs"].as_u64().unwrap_or(0)>newest.len() as u64,
             "run_generations":generations,"must_act":must_act,
+            "resources":crate::api::client_declared_resources(
+                definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
             "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
     }).collect()
 }

@@ -186,6 +186,8 @@ export interface ConversationPage {
   readonly items: readonly ConversationItem[]
   /** OMP task-block summaries with addressable child transcripts, never roster session IDs. */
   readonly subagents?: readonly SubagentSummary[]
+  /** Header values include their native source and as_of; absence is not inferred. */
+  readonly header?: Readonly<Record<string, unknown>>
   readonly hasOlder: boolean
   /** Native page provenance; filtered items cannot establish emptiness. */
   readonly observation?: { readonly empty: boolean }
