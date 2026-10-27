@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Swift FractalClient can load committed scenario indexes and slices with pointer-directed millisecond rebasing, preserving opaque content and future conversation entries. Shared-vector and filesystem-enumerating tests cover scenario wire decoding.",
+  "summary": "Swift FractalClient can load committed scenario indexes and slices with pointer-directed millisecond rebasing, including lowercase RFC 3339 separators, preserving opaque content and future conversation entries. Shared-vector and filesystem-enumerating tests cover scenario wire decoding and enforce strict object keys and known enum cases for strict slices.",
   "replay": { "status": "none", "detail": "The native reader loads committed values only; it does not replay application events or generate seeded conversation history." },
   "schema": { "status": "none", "detail": "No database, generated wire model, or shared fixture format changes." },
   "rules": { "status": "none", "detail": "No checkpoint, retention, or fleet coordination changes." },

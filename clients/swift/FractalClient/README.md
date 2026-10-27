@@ -83,8 +83,8 @@ anchor for stable snapshots. `ScenarioReader.rebase(_:times:anchor:nowMillisecon
 available for in-memory JSON values.
 
 Only the JSON pointers in `times` move by `now − anchor`, including pointers inside timeline
-payloads. Timestamp inputs accept RFC 3339 offsets and arbitrary fractional precision, truncate
-to milliseconds **before** shifting, and emit exactly three fractional digits in UTC. Integer
+payloads. Timestamp inputs accept RFC 3339 offsets, lowercase `t`/`z`, and arbitrary fractional
+precision, truncate to milliseconds **before** shifting, and emit exactly three fractional digits in UTC. Integer
 `epoch-ms` values shift exactly. Range errors are `ScenarioError.range(pointer:)` and name the
 affected location. Content, ids, durations, timeline `at_ms`, cast offsets, and diagnostic
 `unknown.known_value` witnesses remain untouched.
@@ -101,6 +101,9 @@ pages from the optional thread `history` descriptor.
 `ScenariosTests` runs every shared `_vectors/rebase.json` case and recursively discovers every
 committed slice JSON file, checks index coverage, and decodes state and timeline wire payloads.
 New slice/event shapes and undeclared future resource/entry kinds fail instead of being skipped.
+Strict slices additionally check wire object keys and known enum cases against the committed
+client schema, including nested values; permissive Codable decoding alone is not strict
+validation. Deliberately tolerant slices continue to decode their original contaminated values.
 Run `swift test --package-path clients/swift/FractalClient --filter ScenariosTests` from the
 repository root on macOS with Swift 6 (macOS 14 or newer).
 

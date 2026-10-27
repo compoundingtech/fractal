@@ -3,6 +3,13 @@ import XCTest
 @testable import FractalClient
 
 final class ScenariosTests: XCTestCase {
+    private var strictWire = true
+    private lazy var strictSchema = Result {
+        try ScenarioStrictWireShape(schema: Data(contentsOf:
+            fixtures.deletingLastPathComponent().deletingLastPathComponent()
+                .appendingPathComponent("docs/st3/client-v0/schemas/client-v0.schema.json")))
+    }
+
     private var fixtures: URL {
         var root = URL(fileURLWithPath: #filePath)
         for _ in 0..<6 { root.deleteLastPathComponent() }
@@ -121,8 +128,46 @@ final class ScenariosTests: XCTestCase {
         XCTAssertThrowsError(try decode(ScenarioConversationEntry.self, malformed))
     }
 
+    func testLowercaseRFC3339SeparatorsRebaseLikeUppercase() throws {
+        let times = [ScenarioTime(pointer: "/at", codec: .timestamp)]
+        let lower: JSONValue = .object(["at": .string("2030-01-01t11:59:00.250999z")])
+        let upper: JSONValue = .object(["at": .string("2030-01-01T11:59:00.250999Z")])
+        let now: Int64 = 1_893_585_601_500
+        XCTAssertEqual(
+            try ScenarioReader.rebase(lower, times: times, anchor: "2030-01-01t12:00:00z", nowMilliseconds: now),
+            try ScenarioReader.rebase(upper, times: times, anchor: "2030-01-01T12:00:00Z", nowMilliseconds: now)
+        )
+    }
+
+    func testStrictSlicesRejectExcessKeysAndFutureKnownObjectEnums() throws {
+        let reader = ScenarioReader(directory: fixtures)
+        let sync = try reader.loadSlice(world: "fleet-mid-refactor", slice: "sync")
+        var capabilities = try object(try object(sync.state).required("capabilities"))
+        capabilities["protocol_features"] = .object([:])
+        let capabilitiesValue = JSONValue.object(capabilities)
+        // Ordinary client decoding intentionally remains tolerant.
+        XCTAssertNoThrow(try JSONDecoder().decode(Capabilities.self, from: JSONEncoder().encode(capabilitiesValue)))
+        XCTAssertThrowsError(try decode(Capabilities.self, capabilitiesValue))
+
+        let roster = try reader.loadSlice(world: "fleet-mid-refactor", slice: "roster")
+        var agent = try object(try XCTUnwrap(try array(try object(roster.state).required("agents")).first))
+        agent["state"] = .string("reconciling")
+        let agentValue = JSONValue.object(agent)
+        XCTAssertNoThrow(try JSONDecoder().decode(Resource.self, from: JSONEncoder().encode(agentValue)))
+        XCTAssertThrowsError(try decode(Resource.self, agentValue))
+
+        // These exact wire values still decode when a slice explicitly opts into tolerance.
+        strictWire = false
+        defer { strictWire = true }
+        XCTAssertNoThrow(try decode(Capabilities.self, capabilitiesValue))
+        XCTAssertNoThrow(try decode(Resource.self, agentValue))
+    }
+
     private func validate(_ slice: ScenarioSlice) throws {
         guard ["strict", "tolerant"].contains(slice.decode) else { throw ShapeError("Unknown decode mode \(slice.decode)") }
+        let previousMode = strictWire
+        strictWire = slice.decode == "strict"
+        defer { strictWire = previousMode }
         let source = try object(slice.source)
         switch try decode(String.self, source.required("_tag")) {
         case "synthetic": try keys(source, required: ["_tag", "seed"]); _ = try decode(Int.self, source.required("seed"))
@@ -324,7 +369,23 @@ final class ScenariosTests: XCTestCase {
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ value: JSONValue) throws -> T {
-        try JSONDecoder().decode(type, from: JSONEncoder().encode(value))
+        if strictWire {
+            let definition: String?
+            switch ObjectIdentifier(type) {
+            case ObjectIdentifier(Resource.self): definition = "Resource"
+            case ObjectIdentifier(ScenarioConversationEntry.self): definition = "TimelineEntry"
+            case ObjectIdentifier(RuntimeResource.self): definition = "Runtime"
+            case ObjectIdentifier(TerminalScreen.self): definition = "TerminalScreen"
+            case ObjectIdentifier(Capabilities.self): definition = "Capabilities"
+            case ObjectIdentifier(ErrorEnvelope.self): definition = "ErrorEnvelope"
+            case ObjectIdentifier([SyncPeer].self):
+                for peer in try array(value) { try strictSchema.get().validate(peer, definition: "SyncPeer") }
+                definition = nil
+            default: definition = nil
+            }
+            if let definition { try strictSchema.get().validate(value, definition: definition) }
+        }
+        return try JSONDecoder().decode(type, from: JSONEncoder().encode(value))
     }
 
     private func object(_ value: JSONValue) throws -> [String: JSONValue] {

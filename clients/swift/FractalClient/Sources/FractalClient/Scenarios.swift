@@ -205,7 +205,7 @@ public struct ScenarioReader: Sendable {
 }
 
 private struct ScenarioClock {
-    private let pattern = try! NSRegularExpression(pattern: #"^([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?(Z|[+-][0-9]{2}:[0-9]{2})$"#)
+    private let pattern = try! NSRegularExpression(pattern: #"^([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})$"#)
 
     func parse(_ text: String, pointer: String) throws -> Int64 {
         let range = NSRange(text.startIndex..., in: text)
@@ -234,7 +234,7 @@ private struct ScenarioClock {
         }
         let zone = text[zoneRange]
         var offset: Int64 = 0
-        if zone != "Z" {
+        if zone != "Z" && zone != "z" {
             let hours = digits(zone, at: 1, count: 2)
             let minutes = digits(zone, at: 4, count: 2)
             guard hours < 24, minutes < 60 else { throw ScenarioError.invalidTime(pointer: pointer) }
