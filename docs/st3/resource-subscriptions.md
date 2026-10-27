@@ -313,7 +313,9 @@ Each observer's cursor stays on the member that polls it, in the GitHub plugin's
 `observer.observed` records status, revision, `changed` and attempt, and no claim this build
 writes carries a cursor. Builds before it wrote the cursor into `observer.observed`: a member
 that has no row for an observer in its database polls from the cursor in that observer's newest
-such claim, and its poll then keeps a row, so it adopts a claim's cursor once per database. A
+such claim. Once a poll there had a cursor, before or after, it keeps a row, even if a later poll
+ends without one, so it adopts a claim's cursor once per database. An observer that never had a
+cursor needs no row: there is nothing to adopt. A
 member without a cursor, such as one that takes over polling or lost its database, reads every
 open item once. Each item is compared with the facts the graph already recorded for it, so that
 poll delivers only what changed since: an item opened meanwhile, or a pull request at a new ready
