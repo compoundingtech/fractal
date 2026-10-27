@@ -1,6 +1,26 @@
 use super::*;
 
 #[test]
+fn assistant_pairing_principal_defaults_to_chatgpt_and_accepts_mcp() {
+    for (flag, expected) in [
+        (None, AssistantPrincipal::Chatgpt),
+        (Some("assistant/chatgpt"), AssistantPrincipal::Chatgpt),
+        (Some("assistant/mcp"), AssistantPrincipal::Mcp),
+    ] {
+        let cli = Cli::try_parse_from(
+            ["st", "devices", "--as", "person/robin", "pair", "--assistant"]
+                .into_iter().chain(flag),
+        ).unwrap();
+        assert!(matches!(cli.command, Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Pair { assistant: Some(principal), .. }), ..
+        }) if principal == expected));
+    }
+    assert!(Cli::try_parse_from([
+        "st", "devices", "--as", "person/robin", "pair", "--assistant", "assistant/forged",
+    ]).is_err());
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",

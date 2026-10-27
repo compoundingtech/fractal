@@ -25,12 +25,20 @@ async fn fixture(scopes: &[&str], pin_trust: bool) -> Fixture {
     fixture_for_owner(scopes,pin_trust,OWNER).await
 }
 
+async fn fixture_principal(scopes: &[&str], pin_trust: bool, principal: &str) -> Fixture {
+    fixture_for_owner_and_principal(scopes, pin_trust, OWNER, principal).await
+}
+
 async fn fixture_for_owner(scopes: &[&str], pin_trust: bool, owner: &str) -> Fixture {
+    fixture_for_owner_and_principal(scopes, pin_trust, owner, PRINCIPAL).await
+}
+
+async fn fixture_for_owner_and_principal(scopes: &[&str], pin_trust: bool, owner: &str, principal: &str) -> Fixture {
     let root=tempfile::tempdir().unwrap();
     let mut state=super::super::super::tests::test_state_named(root.path(),"assistant-proof-tests");
     state.owning_person=Some(owner.into());
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,
-        "device_name":"assistant","assistant_id":PRINCIPAL,"scopes":scopes,
+        "device_name":"assistant","assistant_id":principal,"scopes":scopes,
         "disclosure_consent":true,"consent_evidence":"axe:igubz7"})).unwrap();
     let Json(challenge)=begin(state.clone(),ClientSession::local(Some(owner)).unwrap(),request).await.unwrap();
     let device_key=signing_key();
@@ -63,7 +71,8 @@ impl Fixture {
     fn payload(&self, route: &str, query: &str) -> ReadPayload {
         let uri=format!("/v1/client/assistant/{route}{query}").parse::<axum::http::Uri>().unwrap();
         let parameters=parameters(&uri).unwrap();
-        ReadPayload {issuer:"scg/approval-host".into(),identity:"chatgpt".into(),assistant_id:PRINCIPAL.into(),
+        let principal = self.session().authority_actor;
+        ReadPayload {issuer:"scg/approval-host".into(),identity:principal.strip_prefix("assistant/").unwrap().into(),assistant_id:principal,
             grant_id:self.grant.clone(),policy_revision:self.revision,key_id:"approval-key/test".into(),
             approval_id:"approval/test".into(),execution_id:"execution/test".into(),projection:route.into(),
             max_response_bytes:parameters.get("max_response_bytes").map(|value| value.parse().unwrap()).unwrap_or(DEFAULT_RESPONSE_BYTES),
@@ -131,6 +140,30 @@ async fn assistant_all_six_reads_require_proof_even_on_native_router() {
             assert_eq!(status,StatusCode::FORBIDDEN,"{path} {value}");
             assert!(value.get("value").is_none());
         }
+    }
+}
+
+#[tokio::test]
+async fn proof_principal_and_identity_must_match_the_persisted_grant() {
+    for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+        let fixture = fixture_principal(SCOPES, true, principal).await;
+        let payload = fixture.payload("summary", "");
+        let parameters = payload.parameters.clone();
+        for identity_only in [false, true] {
+            let mut forged = payload.clone();
+            let other = if principal == MCP_PRINCIPAL { PRINCIPAL } else { MCP_PRINCIPAL };
+            if identity_only {
+                forged.identity = other.strip_prefix("assistant/").unwrap().into();
+            } else {
+                forged.assistant_id = other.into();
+            }
+            let authorization = ReadAuthorization { signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                fixture.attestor.sign(signing_bytes(&forged).unwrap().as_bytes()).as_ref()), payload:forged };
+            assert!(verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).is_err());
+        }
+        let authorization = ReadAuthorization { signature:base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            fixture.attestor.sign(signing_bytes(&payload).unwrap().as_bytes()).as_ref()), payload };
+        verify(&fixture.state, &fixture.session(), "/v1/client/assistant/summary", &parameters, &authorization).unwrap();
     }
 }
 
@@ -634,6 +667,29 @@ async fn projection_read_mode(fixture: &mut Fixture, mode: &str) {
     let Json(grant)=super::super::update_policy(State(fixture.state.clone()),
         Extension(ClientSession::local(fixture.state.owning_person.as_deref()).unwrap()),AxumPath(fixture.grant.clone()),Json(policy)).await.unwrap();
     fixture.revision=grant["policy_revision"].as_u64().unwrap();
+}
+
+#[tokio::test]
+async fn assistant_read_receipts_keep_the_grant_principal_in_both_read_modes() {
+    for principal in [PRINCIPAL, MCP_PRINCIPAL] {
+        for caller_bound in [false, true] {
+            let mut fixture = fixture_principal(SCOPES, !caller_bound, principal).await;
+            if caller_bound {
+                projection_read_mode(&mut fixture, "caller-bound-allow").await;
+            }
+            let payload = fixture.payload("summary", "");
+            let header = (!caller_bound).then(|| fixture.header(&payload, &fixture.attestor));
+            let (status, value, _) = fixture.request("/v1/client/assistant/summary", header.as_deref()).await;
+            assert_eq!(status, StatusCode::OK, "{principal}: {value}");
+            fixture.state.assistant_receipts.flush().await.unwrap();
+            for kind in ["custom.client.assistant.v1.read-used", OUTCOME] {
+                let claims = fixture.state.store.claims_for_kind_at(kind, None, true, 100).unwrap().claims;
+                assert_eq!(claims.len(), 1);
+                assert_eq!(claims[0].actor.as_deref(), Some(fixture.session().actor.as_str()));
+                assert_eq!(claims[0].body["fields"]["principal"], principal);
+            }
+        }
+    }
 }
 
 #[tokio::test]

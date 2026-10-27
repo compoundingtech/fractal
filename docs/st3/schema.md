@@ -13,7 +13,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `account` | `account/NAME` | no | A model account: its provider, owner, plan and where its login lives. |
 | `agent` | `agent/RUN/LOCAL_ID` | no | A mission-run agent runtime. |
 | `arrangement` | `arrangement/person/NAME/UUIDv7` | no | A permanently person-owned shared folder arrangement. |
-| `assistant` | `assistant/chatgpt[/session/assistant-grant/ID]` | no | An external assistant principal or its grant-bound audit session, never a person. |
+| `assistant` | `assistant/{chatgpt\|mcp}[/session/assistant-grant/ID]` | no | An external assistant principal or its grant-bound audit session, never a person. |
 | `attention` | `attention/ID` | yes | An explicit request for human attention. |
 | `checkpoint` | `checkpoint/DAY` | no | A checkpoint that trims replicated history dated before a UTC day. |
 | `checkpoint-excusal` | `checkpoint-excusal/ID` | no | A person's excusal of an unreachable writer from checkpoints. |
