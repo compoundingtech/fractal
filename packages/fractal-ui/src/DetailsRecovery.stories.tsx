@@ -10,7 +10,7 @@ import { DetailsPane, type DetailsLayoutIntent, type DetailsVariants } from './a
 import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
 import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
-import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
+import type { SyncStatus } from './assistant-ui/sync-presentation/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'

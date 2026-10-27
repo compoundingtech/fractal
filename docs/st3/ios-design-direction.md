@@ -36,7 +36,7 @@ After merge: **Home and alert detail → Agents → Conversation and alert strip
 [packages/fractal-ui]: ../../packages/fractal-ui/README.md
 [LiveAgentWorkspace]: ../../apps/fractal-web/src/web/LiveAgentWorkspace.tsx
 [ConversationPane]: ../../apps/fractal-web/src/web/ConversationPane.tsx
-[sync-line]: ../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts
+[sync-line]: ../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts
 [App]: ../../apps/ios/App.tsx
 [navigation]: ../../apps/ios/navigation.ts
 [ui]: ../../apps/ios/ui.tsx
