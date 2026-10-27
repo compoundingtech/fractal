@@ -427,7 +427,7 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     assert_eq!(notification_claim.body["fields"]["assistant_owner"], OWNER);
     assert_eq!(notification_claim.body["fields"]["assistant_session_actor"], paired.session_actor);
     let metadata = notification.assistant_metadata().unwrap();
-    let ding = fractal_drivers::ding::st3_notification_with_metadata(
+    let ding = fractal_drivers::ding::fractal_notification_with_metadata(
         &notification.subject, &notification.from, &notification.to, notification.title.as_deref(),
         &notification.content, "test-body-digest",
         fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },
@@ -503,7 +503,7 @@ async fn existing_agent_outside_recipient_allowlist_succeeds_and_person_scope_re
     let projected = h.state.store.messages(Some(AGENT), true).unwrap().pop().unwrap();
     assert_eq!(projected.from, "assistant/chatgpt");
     let metadata = projected.assistant_metadata().unwrap();
-    let notification = fractal_drivers::ding::st3_notification_with_metadata(
+    let notification = fractal_drivers::ding::fractal_notification_with_metadata(
         &projected.subject, &projected.from, &projected.to, projected.title.as_deref(),
         &projected.content, &"0".repeat(64),
         fractal_drivers::ding::NotificationMetadata { attachments: &[], assistant: Some(&metadata) },

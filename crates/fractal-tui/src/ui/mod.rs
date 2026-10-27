@@ -8889,7 +8889,7 @@ mod tests {
     }
 
     #[test]
-    fn a_first_page_st_keeps_refusing_says_why_while_stui_tries_again() {
+    fn a_first_page_fractal_keeps_refusing_says_why_while_tui_tries_again() {
         let mut ui = Ui::new(demo::world());
         show(&mut ui, 1);
         let agent = ui.selected_id().unwrap();

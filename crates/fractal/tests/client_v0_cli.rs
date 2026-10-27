@@ -1843,7 +1843,7 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn attention_discuss_sends_the_message_stui_chat_about_this_sends() {
+async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = test_state(root.path());

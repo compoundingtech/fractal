@@ -1033,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_look_that_does_not_hold_never_ends_stui_and_a_hangup_does() {
+    fn a_closed_look_that_does_not_hold_never_ends_tui_and_a_hangup_does() {
         let mut run = 0;
         // Looks that find the terminal closed now and then, with keys arriving between them,
         // never add up.

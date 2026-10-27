@@ -282,7 +282,7 @@ async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
+async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
     use fractal_client::{Fence, MessageSendParameters, device::Profile};
     use std::os::unix::fs::PermissionsExt as _;
     let member = tempfile::tempdir().unwrap();
@@ -409,7 +409,7 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member() {
+async fn daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member() {
     let member = tempfile::tempdir().unwrap();
     let device = tempfile::tempdir().unwrap();
     let state = state(member.path(), "member-cedar");
