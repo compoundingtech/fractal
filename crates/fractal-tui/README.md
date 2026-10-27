@@ -17,6 +17,14 @@ decoded with the details inventory and supply available launch previews; the TUI
 does not have a standalone launch inventory screen. A bad slice stops demo startup
 before terminal raw mode, naming the slice and failing wire-value pointer.
 
+The demo renders the slices' initial state only: timeline updates and recorded history
+are validated but not played back. Tolerant-decode slices are rejected, not silently
+accepted. The selected identity is fixed to `person/robin`, with `host/meadow` as the
+snapshot host; roster and inventory rows themselves come from the slices. Worktrees
+are explicitly unavailable because the kit does not model them (the live graph also
+has no worktree collection). Clients and Usage remain loading: these screens do not
+yet have a scenario-backed projection.
+
 `fixtures/clients/demo-world.json` is only a derived client contract, not demo input.
 Regenerate it and the text capture `tests/fixtures/scenario-demo.golden` with
 `STUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.

@@ -111,7 +111,9 @@ fn load_at(sources: &[(&str, &str)], now: i64) -> Result<DemoWorld> {
                 Load::Ready(adapt::preview(name, &variant.normalized_mission)));
         }
     }
-    Ok(DemoWorld { world: adapt::world_at(&model, person, &extras, &snapshot.created_at), terminals, arrangements })
+    let mut world = adapt::world_at(&model, person, &extras, &snapshot.created_at);
+    world.worktrees = Load::Failed("The scenario kit does not model worktrees".into());
+    Ok(DemoWorld { world, terminals, arrangements })
 }
 
 /// Product callers use `load` to report errors before entering terminal raw mode.
@@ -201,6 +203,8 @@ mod tests {
         let demo = load().unwrap();
         assert_eq!(demo.world.agents.items().len(), 4);
         assert_eq!(demo.world.devices.items().len(), 2);
+        assert!(matches!(&demo.world.worktrees, Load::Failed(message)
+            if message == "The scenario kit does not model worktrees"));
         assert_eq!(demo.world.missions.items().len(), 1);
         let mission = &demo.world.missions.items()[0];
         assert_eq!(mission.word, Word::Stalled);

@@ -241,7 +241,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
         machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model, now), extras.window_errors.get("machines")),
-        worktrees: Load::Ready(Vec::new()),
+        worktrees: Load::Failed("Worktrees are not modeled by the graph".into()),
         devices: loaded_or_why(
             model.devices.snapshot.is_some(),
             model

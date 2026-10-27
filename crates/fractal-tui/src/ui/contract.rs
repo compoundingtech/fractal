@@ -230,6 +230,7 @@ fn scenario_demo_first_frames_match_golden() {
         ("Roster", Pane::List(1)),
         ("Mission", Pane::Mission(Some(world.missions.items()[0].id.clone()))),
         ("Fleet", Pane::List(3)),
+        ("Worktrees unavailable", Pane::List(5)),
         ("Machine and devices", Pane::Machine(Some("machine/meadow".into()))),
         ("Conversation", Pane::Agent(Some("agent/example/atlas/builder".into()))),
         ("Agent details", Pane::Agent(Some("agent/example/atlas/builder".into()))),
