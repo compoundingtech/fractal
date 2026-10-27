@@ -75,6 +75,22 @@ pub enum StartCompletion {
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
+        let failed_start = self.store.runtime_start_for(&prepared.subject.subject)?;
+        let recovery_lock = if let Some(pending) = &failed_start {
+            if prepared.request.is_none() {
+                return Ok(false);
+            }
+            let Some(lock) = self.store.try_runtime_start_lock(&prepared.subject.subject)? else {
+                return Ok(false);
+            };
+            let observation = self.runtime.observe_start(&prepared.member)?;
+            if !self.stale_failed_start_ready(pending, observation.as_ref())? {
+                return Ok(false);
+            }
+            Some(lock)
+        } else {
+            None
+        };
         let id = uuid::Uuid::now_v7().to_string();
         prepared
             .launch_member
@@ -97,6 +113,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             dispatched: false,
             receipted: false,
         };
+        if let Some(pending) = &failed_start {
+            // Operation metadata, retained across queueing and daemon restart. The admission
+            // writer uses this exact ID, never whichever start happens to be pending later.
+            operation.body["stale_failed_start"] = Value::from(pending.id.clone());
+        }
         match self
             .store
             .admit_runtime_start(&mut operation, MAX_START_JOBS)?
@@ -105,6 +126,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(false);
             }
             RuntimeStartAdmission::Admitted | RuntimeStartAdmission::CapacityBusy => {}
+        }
+        drop(recovery_lock);
+        if let Some(pending) = &failed_start {
+            self.record_once(
+                &operation.subject,
+                "runtime.reconcile-decision",
+                BTreeMap::from([
+                    ("key".into(), Value::from(format!("restart-superseded-failed-start:{}", pending.id))),
+                    ("decision".into(), Value::from("restart-superseded-failed-start")),
+                    ("reason".into(), Value::from("current restart intent atomically replaced a stale failed start after absent-runtime and producer-lock checks")),
+                ]),
+            )?;
         }
         self.start_changed(&operation.subject);
         self.start_queued_job(&operation)?;
@@ -164,6 +197,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             let _lock = lock;
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
+                anyhow::ensure!(store.runtime_start_intent_current(&id)?,
+                    "restart lifecycle intent changed before launch");
                 store.owned_desired_guard(&prepared.subject)?;
                 anyhow::ensure!(store.helper_launcher_alive(&subject)?,
                     "the helper's launcher run has ended");

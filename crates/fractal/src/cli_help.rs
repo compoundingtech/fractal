@@ -323,6 +323,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_command_help_uses_fractal_product_prose() {
+        fn inspect(command: &mut clap::Command) {
+            let help = command.render_long_help().to_string();
+            for line in help.lines() {
+                // These describe real installed compatibility aliases, not product prose.
+                if line.contains(
+                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty)",
+                ) || line.contains("Install Fractal (st3 and the st link) and pty")
+                {
+                    continue;
+                }
+                for word in line.split_whitespace() {
+                    // The executable override is a protected option, not the product name.
+                    if word == "--st" {
+                        continue;
+                    }
+                    let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+                    assert!(
+                        !matches!(word, "st" | "st3" | "stui" | "Smalltalk" | "SmallTalk"),
+                        "old product wording in {} help: {line}",
+                        command.get_name()
+                    );
+                }
+            }
+            for child in command.get_subcommands_mut() {
+                inspect(child);
+            }
+        }
+        inspect(&mut Cli::command());
+    }
+
+    #[test]
     fn root_help_groups_every_public_command_once_and_opens_with_examples() {
         let default = root_help(false);
         let all = root_help(true);

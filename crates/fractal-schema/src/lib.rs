@@ -4786,6 +4786,16 @@ mod tests {
                     ("next_check_unix_ms".into(), Value::String("1000".into())),
                 ]),
             ),
+            (
+                "observer/run/throttled",
+                "observer.state",
+                BTreeMap::from([
+                    ("state".into(), Value::String("healthy".into())),
+                    ("error_code".into(), Value::String("local-observer-budget".into())),
+                    ("reason".into(), Value::String("local observer budget reached, next slot at 1000 (Unix ms)".into())),
+                    ("next_check_unix_ms".into(), Value::String("1000".into())),
+                ]),
+            ),
         ];
         for (subject, kind, fields) in cases {
             registry().validate_claim(subject, kind, &fields).unwrap();

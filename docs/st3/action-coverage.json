@@ -930,6 +930,30 @@
       "verification": "real CLI against an isolated paired gateway; generated/imported Ed25519/P-256 keys; credential/key profile reloaded; signed messages verify"
     },
     {
+      "command": "st devices fabric disable",
+      "description": "Remove st's device grants and the client gateway's Fabric exposure",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_devices_fabric_enable_status_and_disable_touch_only_st_peers"
+      ],
+      "verification": "real CLI with a recording fabric; only st-device peers change"
+    },
+    {
+      "command": "st devices fabric enable",
+      "description": "Expose the client gateway over Fabric so pairing grants each device it, inbound-only",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_devices_fabric_enable_status_and_disable_touch_only_st_peers"
+      ],
+      "verification": "real CLI with a recording fabric; only st-device peers change"
+    },
+    {
+      "command": "st devices fabric status",
+      "description": "Show the client gateway's Fabric exposure and the devices st granted",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::cli_devices_fabric_enable_status_and_disable_touch_only_st_peers"
+      ],
+      "verification": "real CLI with a recording fabric; only st-device peers change"
+    },
+    {
       "command": "st devices grant inspect",
       "description": "Show one assistant grant's scopes, expiry, policy revision and consent without its credential",
       "tests": [

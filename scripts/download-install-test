@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise download integrity, quiet installation, platform selection and launch."""
+"""Exercise download integrity, visible installation, platform selection and launch."""
 import hashlib
 import json
 import os
@@ -10,6 +10,12 @@ import tarfile
 import tempfile
 
 repo = Path(__file__).resolve().parent.parent
+# Both entry points are distributed independently, so neither can source the other.
+# Keep their portable ownership definitions identical.
+def ownership_guard(path):
+    return path.read_text().split('refuse_nix_path() (', 1)[1].split('\n)', 1)[0]
+
+assert ownership_guard(repo / 'install.sh') == ownership_guard(repo / 'scripts/install-release')
 with tempfile.TemporaryDirectory() as d:
     root = Path(d)
     tools = root / 'tools'; tools.mkdir()
@@ -63,7 +69,8 @@ exec "{real}" "$@"
         return subprocess.run(['sh', str(repo / 'install.sh'), *args], env={**env, **(extra or {})},
                               input='', text=True, capture_output=True, timeout=20)
     result = install('--no-run')
-    assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
+    assert result.returncode == 0 and 'Installed st3' in result.stdout and result.stderr == '', result
+    assert 'Upgrading Fractal' not in result.stdout, result
     installed = root / 'home/.local/bin'
     assert (installed / 'st').readlink() == Path('st3')
     assert (installed / 'fractal').readlink() == Path('st3')
@@ -73,21 +80,22 @@ exec "{real}" "$@"
     assert receipt['target'] == 'x86_64-unknown-linux-gnu' and receipt['installed_at'].endswith('Z'), receipt
     assert (installed.parent / 'share/fractal-web/index.html').read_text() == '<!doctype html><title>Fractal</title>'
     result = install('--tag', 'v0.3.18')
-    assert result.returncode == 0 and result.stdout == 'st3-fixture\n' and result.stderr == '', result
+    assert result.returncode == 0 and result.stdout.endswith('st3-fixture\n') and result.stderr == '', result
+    assert 'Upgrading Fractal' in result.stdout and 'Installed CLI:' in result.stdout, result
     assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'v0.3.18'
     # Optional metadata failures must not turn a committed installation into a
     # failure, skip launch, overwrite the previous receipt, or leave staging files.
     previous_receipt = (installed / 'RELEASE.json').read_bytes()
     for failure in ['version', 'mktemp', 'mv']:
         result = install('--tag', 'v0.3.19', extra={'FAIL_RECEIPT': failure})
-        assert result.returncode == 0 and result.stdout == 'st3-fixture\n', (failure, result)
+        assert result.returncode == 0 and result.stdout.endswith('st3-fixture\n'), (failure, result)
         assert result.stderr == 'install: warning: release receipt unavailable; continuing with the installed binary\n', (failure, result)
         assert (installed / 'RELEASE.json').read_bytes() == previous_receipt
         assert not list(installed.glob('RELEASE.json.*')), failure
     (installed / 'fractal').unlink()
     (installed / 'fractal').write_text('foreign command')
     result = install('--no-run')
-    assert result.returncode == 0 and result.stdout == '', result
+    assert result.returncode == 0 and 'Upgrading Fractal' in result.stdout, result
     assert 'leaving fractal unchanged:' in result.stderr, result
     assert (installed / 'fractal').read_text() == 'foreign command'
     assert (installed / 'st').readlink() == Path('st3')
@@ -104,7 +112,7 @@ exec "{real}" "$@"
     assert '/download/v0.3.18/fractal-x86_64-unknown-linux-gnu.tar.gz' in requests
     assert 'smalltalk-x86_64-unknown-linux-gnu.tar.gz' not in requests
     result = install('--edge', '--no-run')
-    assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
+    assert result.returncode == 0 and 'Upgrading Fractal' in result.stdout and result.stderr == '', result
     assert (root / 'requests').read_text().count('/download/edge/') == 2
     assert json.loads((installed / 'RELEASE.json').read_text())['tag'] == 'edge'
     result = install('--edge', '--tag', 'v0.3.18', '--no-run')
@@ -126,6 +134,69 @@ exec "{real}" "$@"
     assert result.returncode != 0 and 'supported platforms' in result.stderr, result
     result = install('--tag', '../other')
     assert result.returncode != 0 and 'invalid release tag' in result.stderr, result
+    # The downloader preserves safety diagnostics from the archive installer.
+    checksum.write_text(correct)
+    # Similar names outside the actual package-manager roots remain installable.
+    for relative in ['profiles/per-user/alice/bin', 'profiles/home-manager/bin', 'unmanaged/.nix-profile/bin']:
+        ordinary = root / 'non-nix' / relative
+        result = install('--tag', 'v0.3.18', '--bin-dir', str(ordinary), '--no-run')
+        assert result.returncode == 0 and result.stderr == '', result
+        assert (ordinary / 'st3').is_file()
+    (installed / 'st3').write_text('#!/bin/sh\ncase "$*" in\n--version) echo "fractal old-build";;\n"service status --json") echo \'{"services":[{"running":true}]}\';;\n*) exit 9;;\nesac\n')
+    result = install('--no-run')
+    assert result.returncode == 0 and 'Upgrading Fractal fractal old-build' in result.stdout, result
+    assert 'A daemon is running; it keeps its current build' in result.stderr, result
+    assert str(installed / 'st') + ' service restart' in result.stderr, result
+    (installed / 'st3').unlink()
+    (installed / 'st3').symlink_to('/nix/store/missing-fractal/bin/st3')
+    result = install('--no-run')
+    assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+    assert 'docs/reference/home-manager' in result.stderr, result
+    assert (installed / 'st3').readlink() == Path('/nix/store/missing-fractal/bin/st3')
+    (installed / 'st3').unlink()
+    (installed / 'st3').write_bytes(original)
+    (installed / 'st3').chmod(0o755)
+    # The managed generation can be a dangling ancestor, not the leaf symlink.
+    for mode in ['default', 'custom', 'ancestor', 'relative']:
+        state = root / ('xdg-' + mode)
+        if mode == 'default':
+            state = root / 'home/.local/state'
+        profile = state / 'nix/profiles/home-manager'
+        if mode == 'ancestor':
+            profile = root / 'arbitrary-generation'
+        if mode == 'relative':
+            physical_parent = root / 'relative-physical/extra'
+            physical_parent.mkdir(parents=True)
+            logical_parent = root / 'relative-parent'
+            logical_parent.symlink_to(physical_parent, target_is_directory=True)
+            profile = logical_parent / 'generation'
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        target = '/nix/store/gc-collected-fractal'
+        if mode == 'relative':
+            target = os.path.relpath('/nix/store', profile.parent.resolve()) + '/./missing/../gc-collected-fractal'
+        profile.symlink_to(target)
+        destination = root / ('dangling-' + mode) / 'bin'
+        destination.mkdir(parents=True)
+        (destination / 'st3').symlink_to(profile / 'bin/st3')
+        result = install('--no-run', '--bin-dir', str(destination),
+                         extra={'XDG_STATE_HOME': '' if mode == 'default' else str(state)})
+        assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+        assert (destination / 'st3').readlink() == profile / 'bin/st3'
+        assert profile.readlink() == Path(target)
+        assert not (destination / 'pty').exists()
+    # Profile anchors and candidates must use the same physical HOME spelling.
+    logical_home = root / 'logical-home'
+    logical_home.symlink_to(root / 'home', target_is_directory=True)
+    destination = root / 'alias-bin'
+    destination.mkdir()
+    for relative in ['.nix-profile/bin/st3', '.local/state/nix/profiles/home-manager/bin/st3']:
+        target = logical_home / relative
+        (destination / 'st3').symlink_to(target)
+        result = install('--no-run', '--bin-dir', str(destination),
+                         extra={'HOME': str(logical_home), 'XDG_STATE_HOME': ''})
+        assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+        assert (destination / 'st3').readlink() == target
+        (destination / 'st3').unlink()
     # Exact published v0.3.17 installer from source f4cec96e414fee2a780910730b019fe6bdbddc1d.
     # It rejects --quiet and requires the historical four-command payload.
     payload_installer = payload / 'install.sh'
@@ -148,7 +219,13 @@ exec "{real}" "$@"
     checksum.write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + archive.name + '\n')
     legacy_bin = root / 'legacy-bin'
     result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin), '--no-run')
-    assert result.returncode == 0 and result.stdout == '' and result.stderr == '', result
+    assert result.returncode == 0 and 'Installed st3' in result.stdout and result.stderr == '', result
     assert sorted(p.name for p in legacy_bin.iterdir()) == ['RELEASE.json', 'pty', 'st', 'st3', 'st3-migrate', 'stui']
     assert '/download/v0.3.17/smalltalk-x86_64-unknown-linux-gnu.tar.gz' in (root / 'requests').read_text()
-print('Download installer integrity, quiet install, launch and platform controls passed')
+    # Even a retained archive without its own guard cannot replace Nix-owned commands.
+    (legacy_bin / 'st3').unlink()
+    (legacy_bin / 'st3').symlink_to('/nix/store/missing-fractal/bin/st3')
+    result = install('--tag', 'v0.3.17', '--bin-dir', str(legacy_bin), '--no-run')
+    assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
+    assert (legacy_bin / 'st3').readlink() == Path('/nix/store/missing-fractal/bin/st3')
+print('Download installer integrity, visible install, launch and platform controls passed')
