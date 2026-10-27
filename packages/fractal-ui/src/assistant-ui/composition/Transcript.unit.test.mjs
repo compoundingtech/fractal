@@ -264,14 +264,20 @@ test('a contiguous reasoning run cut by the six-row edge mounts whole, and only 
   assert.doesNotMatch(markup, /data-item-id="before\/9"/)
 })
 
-test('a tool call ends a reasoning run, so thoughts before it stay outside the bound', () => {
+for (const trailingRows of [3, 6]) test(`a work-log reasoning disclosure stays whole across an interleaved tool with ${trailingRows} trailing rows`, () => {
   const tool = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
-  const items = [...range('before', 0, 6).map(answerRow), thought('early/0'), thought('early/1'), tool, ...range('run', 0, 3).map(thought), ...range('after', 0, 3).map(answerRow)]
+  const early = range('early', 0, 2)
+  const later = range('run', 0, 3)
+  const after = range('after', 0, trailingRows)
+  const items = [...range('before', 0, 6).map(answerRow), ...early.map(thought), tool, ...later.map(thought), ...after.map(answerRow)]
   const markup = renderSource([sourceTurn('split-turn', items)])
-  assert.deepEqual(mountedSourceIds(markup), [...range('run', 0, 3), ...range('after', 0, 3)])
-  // Hidden source rows must not mount as work-log call rows either; call rows carry data-tool-status.
-  assert.match(markup, /data-testid="work-log"/)
-  assert.doesNotMatch(markup, /data-tool-status=/)
+  const crossesDisclosure = trailingRows < transcriptInitialSourceRowCount
+  assert.deepEqual(mountedSourceIds(markup), crossesDisclosure ? [...early, tool.id, ...later, ...after] : after)
+  assert.deepEqual(renderedMessageIds(markup), after)
+  assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, crossesDisclosure ? 1 : 0)
+  assert.doesNotMatch(markup, /data-item-id="before\/5"/)
+  // Tools inside the whole disclosure mount; tools wholly outside the window remain deferred.
+  assert.equal(/data-tool-status=/.test(markup), crossesDisclosure)
 })
 
 test('the newest prompt and a cut reasoning run combine without mounting the rows between them', () => {

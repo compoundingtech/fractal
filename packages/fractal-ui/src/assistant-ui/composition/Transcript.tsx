@@ -255,10 +255,11 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
+/** The work log lists tools separately, so all nonblank thoughts of one turn share a disclosure. */
+const workLogReasoning = (items: readonly ConversationItem[]) => items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
 const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
-  // The work log lists tool calls separately, so every thought of the turn is visually adjacent: one disclosure.
-  const reasoning = turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
+  const reasoning = workLogReasoning(turn.items)
   const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning')
   // A shown block continues a prose run when it and the block before it are the same sender's adopted prose.
   const continues = shown.map((item, index) => [item, shown[index - 1]].every(entry => entry?._tag === 'Text' && entry.role === 'assistant' && stranded?.has(entry.id) !== true) && turn.senderCaptions?.[item.id] === turn.senderCaptions?.[shown[index - 1]!.id])
@@ -296,13 +297,26 @@ const staticSubscription = () => () => undefined
 /** One conversation item in source order; a turn's prompt is its own row. */
 interface SourceRow { readonly item: ConversationItem; readonly turnId: string; readonly prompt: boolean }
 /**
- * The mounted source rows for a viewport start: the suffix from `startIndex`, widened so it never cuts a contiguous
- * reasoning run (adjacent Reasoning items of one turn), plus the latest prompt alone when the suffix omits it, so the
+ * The mounted source rows for a viewport start: the suffix from `startIndex`, widened so it never cuts a work-log
+ * reasoning disclosure (including interleaved tools), plus the latest prompt alone when the suffix omits it, so the
  * reader keeps what they asked without the rows between it and the suffix.
  */
 function sourceWindow(rows: readonly SourceRow[], startIndex: number): { readonly start: number; readonly shown: number; readonly pinnedPrompt?: string } {
   let start = Math.min(startIndex, rows.length)
-  while (start > 0 && start < rows.length && rows[start]!.item._tag === 'Reasoning' && rows[start - 1]!.item._tag === 'Reasoning' && rows[start - 1]!.turnId === rows[start]!.turnId) start--
+  if (start > 0 && start < rows.length) {
+    const turnId = rows[start]!.turnId
+    let turnStart = start
+    let turnEnd = start + 1
+    while (turnStart > 0 && rows[turnStart - 1]!.turnId === turnId) turnStart--
+    while (turnEnd < rows.length && rows[turnEnd]!.turnId === turnId) turnEnd++
+    const turnRows = rows.slice(turnStart, turnEnd)
+    const reasoning = workLogReasoning(turnRows.map(row => row.item))
+    if (reasoning.length > 0) {
+      const first = turnStart + turnRows.findIndex(row => row.item.id === reasoning[0]!.id)
+      const last = turnStart + turnRows.findIndex(row => row.item.id === reasoning[reasoning.length - 1]!.id)
+      if (first < start && last >= start) start = first
+    }
+  }
   let latestPrompt = rows.length - 1
   while (latestPrompt >= 0 && !rows[latestPrompt]!.prompt) latestPrompt--
   const pinnedPrompt = latestPrompt >= 0 && latestPrompt < start ? rows[latestPrompt]!.item.id : undefined
