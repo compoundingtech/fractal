@@ -965,6 +965,18 @@ The normal warm HTTP fixture
 a cached first page and prints its elapsed time. These are deterministic cache/admission
 regressions with diagnostic timings, not production latency guarantees.
 
+Published runtime and terminal resources keep the current shared status, harness and membership
+authority. Their cold status reductions omit full claim-id history and desired conflicts.
+The actual-state fold walks canonical order newest first and stops once the six consumed fields
+resolve; membership resolves status and retains the owning mission's mode for eval classification.
+Explicit nulls and state-transition field clearing retain the forward fold's semantics.
+Runtime source selection reuses the indexed per-origin selection used by runtime identity,
+reading the whole causal graph only when a rival requires an ancestry check.
+
+The published-list owner, cache invalidation and public full-status responses are unchanged.
+Measure cold reductions and published-list refill work independently of warm endpoint latency;
+a body-decode bound is not an endpoint latency guarantee.
+
 Every five seconds a dedicated native thread attempts a passive WAL checkpoint outside the
 writer queue. Once every frame is backfilled, it attempts `TRUNCATE` with zero busy timeout.
 Active readers or writers defer recycling; the daemon never waits for them while holding the
