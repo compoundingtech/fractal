@@ -76,6 +76,17 @@ impl Store {
         }).optional()?)
     }
 
+    fn fault_step_effective_state(&self, subject: &str) -> Result<Option<FaultStepState>> {
+        let connection = self.readers.get();
+        let mut step = person_work::step(&connection, &normalize_step_run(subject))?;
+        if let Some(step) = &mut step {
+            // step_run applies these fences at wall-clock time, not the fault's as_of.
+            // Keep that reducer, but omit queue, timing, wake and presentation enrichment.
+            apply_effective_step_state(&connection, step, now_ms())?;
+        }
+        Ok(step.map(FaultStepState::from))
+    }
+
     /// A step's name within its mission, while st has the step.
     pub fn step_path(&self, step: &str) -> Result<Option<String>> {
         Ok(self
@@ -1469,7 +1480,7 @@ impl Store {
             return Ok(None);
         }
         let current = if MINIMAL {
-            self.fault_step_state(step_subject)?
+            self.fault_step_effective_state(step_subject)?
         } else {
             self.step_run(step_subject)?.map(FaultStepState::from)
         };

@@ -434,3 +434,60 @@ fn fault_snapshot_reference_preserves_exhausted_wake_fences() {
     assert!(assert_reference_snapshot_parity(&store, now_ms())
         .iter().all(|fault| !fault.item.title.starts_with("exhausted wake")));
 }
+
+#[test]
+fn fault_snapshot_reference_preserves_effective_readiness_after_lease_expiry() {
+    let (store, _run, step) = exhausted_snapshot_fixture();
+    store.work_action(
+        &step.subject,
+        "claim",
+        &WorkRequest {
+            wait_ms: None,
+            actor: Some("agent/node.worker".into()),
+            incarnation: Some("worker-current".into()),
+            summary: None,
+            reason: None,
+            evidence: Vec::new(),
+            idempotency_key: "snapshot-expiring-claim".into(),
+        },
+    ).unwrap();
+    assert_eq!(store.step_run(&step.subject).unwrap().unwrap().status, "claimed");
+    expire_work_lease_by_claim(&store, &step.subject, "agent/node.worker", "worker-current");
+    let effective = store.step_run(&step.subject).unwrap().unwrap();
+    assert_eq!(effective.status, "ready");
+    assert!(effective.readiness_epoch > step.readiness_epoch);
+    let stored: (String, u32) = store.connection.read().query_row(
+        "SELECT status, readiness_epoch FROM step_runs WHERE subject=?1",
+        [&step.subject],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(stored.0, "claimed", "the snapshot must derive readiness, not read it raw");
+    assert_eq!(effective.readiness_epoch, stored.1 + 1);
+    append_snapshot_wake(&store, &effective, "expired-lease");
+    let faults = assert_reference_snapshot_parity(&store, now_ms());
+    let wakes = faults.iter()
+        .filter(|fault| fault.item.title.starts_with("exhausted wake"))
+        .collect::<Vec<_>>();
+    assert_eq!(wakes.len(), 1);
+    assert_eq!(wakes[0].item.title, "exhausted wake expired-lease");
+}
+
+#[test]
+fn fault_snapshot_reference_preserves_effective_readiness_after_person_wait() {
+    let (store, _run, step) = exhausted_snapshot_fixture();
+    store.set_step_state(&step.subject, "waiting-person", None).unwrap();
+    let effective = store.step_run(&step.subject).unwrap().unwrap();
+    assert_eq!(effective.status, "ready", "no remaining person asks block the step");
+    assert_eq!(effective.readiness_epoch, step.readiness_epoch + 1);
+    let stored: String = store.connection.read().query_row(
+        "SELECT status FROM step_runs WHERE subject=?1", [&step.subject], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(stored, "waiting-person");
+    append_snapshot_wake(&store, &effective, "person-wait-ended");
+    let faults = assert_reference_snapshot_parity(&store, now_ms());
+    let wakes = faults.iter()
+        .filter(|fault| fault.item.title.starts_with("exhausted wake"))
+        .collect::<Vec<_>>();
+    assert_eq!(wakes.len(), 1);
+    assert_eq!(wakes[0].item.title, "exhausted wake person-wait-ended");
+}
