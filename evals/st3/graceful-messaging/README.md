@@ -5,7 +5,7 @@ installs a new st binary at the same path and then restarts the daemon. Before t
 driver kept executing the deleted binary, and on 2026-09-29 a message to a Claude seat showed
 `sent` and never reached the session until the harness was restarted.
 
-`scripts/st3-graceful-messaging-eval/run ST3_BIN OUT HARNESS...` runs it once. It starts one fresh
+`scripts/fractal-graceful-messaging-eval/run ST3_BIN OUT HARNESS...` runs it once. It starts one fresh
 isolated daemon from a copy of `ST3_BIN` and one seat for each named harness: `claude`, `codex`,
 `omp`, `pi`, or `opencode`. The seats get no authored prompt; st3 supplies the boot contract. Once
 every seat is idle, the runner does what a deploy does. It installs a replacement at the daemon's

@@ -19,6 +19,12 @@ cd "$sparse"
 . scripts/ci-parallel-tests
 
 python3 scripts/script-process-test
+python3 scripts/tests/test_fractal_ui_test_client.py
+python3 -m unittest discover -s scripts/fractal-messaging-faults-eval -p 'test_*.py'
+for test in fractal-idle-soak-preflight-test fractal-idle-soak-report-test \
+  fractal-message-soak-report-test fractal-message-soak-test-last-seen; do
+  bash "scripts/$test"
+done
 parallel_tests \
   ci-ready-pr-test ci-draft-admission-test ci-workflow-concurrency-test check-ci-runner-test ci-namespace-usage-test \
   ci-mail-redelivery-canaries-test ci-test-partitions-test ci-test-archive-test ci-build-memory-test ci-evidence-source-test \
@@ -30,4 +36,7 @@ parallel_tests \
   ci-evidence-gate-test evidence-flip-ready-test evidence-skip-report-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test \
   ci-nextest-flaky-test nix-typescript-client-test ci-nix-fixed-outputs-test nix-evidence-job-test ci-nextest-test ci-local-web-test ci-sparse-tree-test \
   ci-rust-test-notes-test lane-definition-closure-test review-risk-test review-validate-test \
-  check-pty-boot-identities-test
+  check-pty-boot-identities-test \
+  fractal-script-paths-test fractal-events-test fractal-fleet-leave-diagnostics-test \
+  fractal-test-process-test fractal-test-evidence-test fractal-boot-canaries-offers-test \
+  fractal-delivery-probe-test fractal-discord-bridge-test fractal-discord-probe-test

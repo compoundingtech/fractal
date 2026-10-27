@@ -138,7 +138,7 @@ of the agent there: they select and click as the agent and have no actions of th
 
 ## Tests
 
-`scripts/st3-subagents-eval/run` runs an isolated daemon with stand-in Claude seats that report
+`scripts/fractal-subagents-eval/run` runs an isolated daemon with stand-in Claude seats that report
 subagents through the real hooks, with no model. `crates/fractal/tests/subagents_seat.rs` runs it. It
 covers:
 
