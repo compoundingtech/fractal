@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Freeze the first stable hosted kit calibration anchor at 117.06443668107127 normalized cost units",
+  "replay": {"status": "none", "detail": "CI policy only."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "The measured commit set remains 162 cases."},
+  "compatibility": {"status": "changed", "detail": "Pull requests enforce calibrated CPU cost at at most 110% of the frozen anchor from run 40426980313. The anchor is fixed before evaluating subsequent runs."},
+  "downtime": {"status": "none", "detail": "No deployment impact."},
+  "manual": {"status": "none", "detail": "The checked-in workflow supplies the anchor; no operator action."},
+  "recovery": {"status": "none", "detail": "No persisted state changes. Historical runs without calibration cannot be judged retroactively."}
+}
