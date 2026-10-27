@@ -14,6 +14,7 @@ import {
   type St3Options,
   type SyncStatus,
   syncStatusFromFailure,
+  openPtySession,
 } from '@fractal/sdk/effect'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -157,6 +158,7 @@ export const liveSource = ({
     messageSend: 'ungranted',
     attachmentUpload: 'ungranted',
     terminalInput: 'ungranted',
+    terminalControl: 'ungranted',
   }
   setDebug('Wf.socketErrors', 0)
   setDebug('Wf.socketLive', 0)
@@ -803,6 +805,7 @@ export const liveSource = ({
       } else changedFrom = Math.min(changedFrom, projection.changedFrom)
       return {
         items,
+        subagents: timeline.subagents,
         ...(timeline.header === undefined ? {} : { header: timeline.header }),
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
@@ -1100,6 +1103,7 @@ export const liveSource = ({
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
+            terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
           })
         }),
       )
@@ -1167,6 +1171,11 @@ export const liveSource = ({
       prompts: gatewayPromptAnswers(client),
       alertActions: gatewayAlertActions(client),
       documents: gatewayDocuments(client),
+      // Same origin and transport as `client`; the gateway injects the credential and keeps the
+      // capability subprotocol on the WebSocket upgrade.
+      terminalRaw: {
+        open: (options) => openPtySession({ ...options, baseUrl, fetch }),
+      },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.

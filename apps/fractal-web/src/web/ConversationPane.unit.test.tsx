@@ -30,7 +30,7 @@ vi.mock('../data/react.tsx', async () => {
   useNow: () => 1000,
   useNowSnapshot: () => 1000,
   usePausedNow: () => undefined,
-  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
   useAttention: () => ({ _tag: 'Waiting' }),
   })
 })
@@ -77,6 +77,47 @@ describe('ConversationPane kit composition', () => {
     expect(html).not.toContain('Cancel:')
     expect(html).not.toContain('role="progressbar"')
     expect(html).not.toContain('Connecting')
+  })
+
+  it('does not repeat the parent name in a single-thread tab strip', () => {
+    const html = render()
+    expect(html).not.toContain('role="tablist"')
+    expect(html).not.toContain('data-agent-thread-strip')
+    expect(html).toContain('textarea')
+  })
+
+  it('shows only children with task-block conversation references as thread tabs', () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [], hasOlder: false, subagents: [
+        { id: 'review', name: 'Reviewer', status: 'running', conversation: { session_id: 'session/external-child-review' } },
+        { id: 'other-harness', name: 'Count only', status: 'running' },
+      ],
+    } }
+    const html = render()
+    expect(html).toContain('Subagents')
+    expect(html).toContain('Reviewer')
+    expect(html).not.toContain('Count only')
+  })
+
+  it('uses a human fallback label instead of a raw child identifier', () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: [], hasOlder: false, subagents: [
+        { id: 'internal-task-identifier', status: 'running', conversation: { session_id: 'session/external-child-unnamed' } },
+      ],
+    } }
+    const html = render()
+    expect(html).toContain('Subagent 1')
+    expect(html).not.toContain('internal-task-identifier')
+    expect(html).toContain('Main')
+  })
+
+  it('never mounts a composer for a read-only thread', () => {
+    source.feed = observed(scenario.slice(0, 5))
+    const html = renderToStaticMarkup(<ConversationPane agentRef="session/external-child-review" agentName="Reviewer" onOpenTool={() => {}} readOnly />)
+    expect(html).toContain('data-testid="transcript-scroll"')
+    expect(html).not.toContain('textarea')
+    expect(html).not.toContain('conversation-composer-dock')
+    expect(html).not.toContain('Cancel:')
   })
 
   it('groups a scenario page into turns with rendered markdown and the reasoning disclosure', () => {
@@ -205,8 +246,8 @@ describe('ConversationPane kit composition', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    // The empty-publication placeholder adds the fourth div.
-    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div'])
+    // The retained parent host and empty-publication placeholder are structural, not transcript presentation.
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const workspace = readFileSync(new URL('./LiveAgentWorkspace.tsx', import.meta.url), 'utf8')
     expect(workspace).toContain('<RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={workspaceView(chosen)} hidden={narrow && selectedPane === \'changes\'} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={select} ux={ux} /></RegisteredPortal>')
