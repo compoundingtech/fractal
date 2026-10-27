@@ -2,7 +2,7 @@
 
 Status: current language and runtime specification.
 
-See [kdl-lifecycle.md](./kdl-lifecycle.md) for complete day-to-day publication workflows.
+See [Configuration and KDL](../site/reference/configuration.md) for complete day-to-day publication workflows.
 
 Every st KDL document starts with `version 2`. Declarations follow the version directly.
 
@@ -184,6 +184,7 @@ mission "MISSION_ID"
   goal "An optional second goal."
   goal "An optional third goal."
   constraint "A mission-specific rule for this work."
+  system
 
   input "message" kind="text"
   input "source" kind="resource"
@@ -226,6 +227,8 @@ An exact idempotent retry returns its existing run before the capacity check. A 
 
 `report-to`, `report-stalls`, `stalled-after` and `report-completed` are optional and opt the mission's runs into [run reports](#run-reports).
 
+`system` is an optional bare node. It marks st's own plumbing or a standing observer, which clients fold away until a person asks. Mission rows carry it as `system`. Missions under `mission/__st3/` are always system. For revisions published before the flag existed, a `ci` path segment still counts.
+
 `revisions="human-only"` is optional and inherited by child steps. `revision-reviewer` requires that protection.
 
 The reviewer defaults to the mission run requester. `revision-cutover` is `restart-active` by default or `when-idle` when declared. The value in the current generation controls how its successor starts; a candidate cannot select its own cutover.
@@ -235,7 +238,11 @@ A mission can contain direct declarations. Direct agents in the mission can revi
 A mission can contain zero steps. Missions default to `completion { when "all-steps-exhausted" }`,
 so a zero-step mission completes immediately.
 
-`timeout` is optional for an ordinary mission. It starts when the mission run is created and applies to the complete run, not one step or generation. A revision cannot extend or reset the stored deadline.
+`timeout` is optional for an ordinary mission and counts run time from admission. A direct
+run is admitted at creation. A run started with `after` retains its timeout budget while it
+waits, with no armed deadline; completing its synthetic `after-run` step admits it and arms
+the full budget from that completion. The timeout covers the complete run. Retries and
+revisions cannot extend or reset an armed deadline.
 
 The daemon arms an exact wake for the nearest deadline. It does not depend on a client process or periodic polling. At expiry, st fails the run, terminates descendant runs, skips remaining normal and final work, removes run-owned runtime state, and records the timeout as the eval failure reason when the run is an eval.
 
@@ -275,6 +282,10 @@ can likewise create a plain shell at `pty/agent/PATH/UUID`. Only its exact creat
 Top-level schedules are also valid authored declarations: `st apply schedules.kdl` previews
 and publishes them without creating a mission run. Each schedule names the mission it will
 request at its declared times. Other top-level execution members still require a mission run.
+
+[`st schedules ls`](schedules-list.md) lists locally replicated declarations with recorded owners,
+nominal next declared ticks and explicit per-row knowledge age/unheard-host coverage. It does not
+contact the hosts or inspect occurrence history.
 
 The origin of the `mission-run.created` claim advances the mission run. It also materializes the run declarations.
 
@@ -317,6 +328,7 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
   available-to "agent/${ST_MISSION_RUN}/worker-a"
   available-to "agent/${ST_MISSION_RUN}/worker-b"
   fresh-context
+  keep-open
   document "doc/project/request@SHA256"
 
   depends-on {
@@ -335,9 +347,11 @@ step "STEP_ID" timeout="20m" revisions="human-only" revision-reviewer="person/re
 }
 ```
 
-`title`, `assigned-to`, `agentless`, `fresh-context`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
+`title`, `assigned-to`, `agentless`, `fresh-context`, `keep-open`, `mission`, `retry`, `produces`, `produces-mission`, `uses-mission`, and `after-run` are single fields.
 
 `fresh-context` is a bare node. Before the daemon wakes a seat for that step, it stops the old harness session and starts a new, idle one. The step's work message arrives in the new session. A claim from the old incarnation is refused while the reset is pending. Steps without this option keep the current session unless the seat opts in for every step. A retry is a new attempt and receives its own fresh session.
+
+`keep-open` is a bare node. It marks a step that only holds its run open while the mission's observers watch, such as an intake or a retirement step: the step is not work. A mission whose only running steps are agentless keep-open steps reads as watching. Mission rows carry it on each step as `keep_open`. For revisions published before the flag existed, steps named `keep-watch`, `retire`, `steward-intake`, `standing`, `keep-open` or `*-retirement` still count.
 
 A retry repeats one failed step attempt. It handles a bounded transient failure.
 
@@ -1038,6 +1052,11 @@ dismissed it, and a request that defines its own `dismiss` answer keeps that mea
 which is where a `--new-run` asker reads it. `st work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
 history. A free-text ask works as before: it keeps no `request` field and takes no named answer.
+Assistant-scoped answers retain `assistant/chatgpt` as the claim actor and projected
+`respondent`; optional `sender_class`, `assistant_grant_id`, `assistant_owner`, and
+`assistant_session_actor` expose separate server-owned provenance, not person
+authority or an `acted_for` delegation. Human-readable work details display the
+respondent and all four provenance fields when present.
 
 #### Updates
 
@@ -1093,7 +1112,7 @@ step "wait-for-build" {
 
 The step is agentless and cannot name an agent. It completes when the named run completes. It fails when that run fails or is cancelled. Other steps order after it with `depends-on`. The value is a run ID or `mission-run/` subject, and it can use inputs.
 
-To make one run wait without changing its mission, start it with `after`. See [Starting after another run](kdl-lifecycle.md#starting-after-another-run).
+To make one run wait without changing its mission, start it with `after`. See [Starting after another run](../site/reference/configuration.md#definitions-runs-and-revisions).
 
 ## Run reports
 
@@ -1238,7 +1257,7 @@ Back-off: a step gets at most one nudge per idle period. After a nudge, the next
 the seat has taken a turn and gone idle again, and a quiet nudge comes no sooner than 2 hours after
 the step's last nudge. An action nudge is not held by the 2 hours, but each action nudges a step at
 most once. Every nudge is recorded on the step as a `work.nudged` claim that names the message,
-the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and stui
+the idle period and the waits. `st work show` prints `Nudged:` while the step is held, and Fractal TUI
 shows `nudged … ago` under the working step.
 
 Two daemon settings in `[reconcile]` tune this, and are read again without a restart:
@@ -1574,6 +1593,15 @@ message into an inbox or successfully writing transport bytes is not delivery. s
 graph only from the durable provider receipt and never injects text or Enter into a terminal
 composer.
 
+A message the authorized external-assistant send path sent carries trusted provenance the daemon
+reads from the stored `message.sent` claim: `sender_class="external-assistant"` and, when the send
+used one, `assistant_grant_id="GRANT"` attributes on the open tag, and a two-line prefix before
+the element — `[PING from st3] message/ID from SENDER sender_class=external-assistant: TITLE`,
+then exactly `WARNING: Untrusted external-assistant request; not owner authorization.` The
+warning stands outside the bounded preview, so it survives preview truncation. Only that
+authorized path can stamp the markers: an ordinary send whose body text forges the warning or the
+attribute renders as the plain envelope above, with the forged text escaped inside the preview.
+
 Terminal control is reserved for diagnosed emergency recovery against an exact current
 incarnation. It is not a messaging or work-wake transport.
 
@@ -1747,7 +1775,7 @@ The default `work show` and `work claim` output gives a human-readable step view
 
 A worker completion report is not a correctness result. Products and gates still control final completion.
 
-The native driver renews active claims and transports messages. The reconciler creates one durable Smalltalk message for each readiness epoch and runtime incarnation.
+The native driver renews active claims and transports messages. The reconciler creates one durable Fractal message for each readiness epoch and runtime incarnation.
 
 A pool message closes when another agent wins the claim. Release or expiry creates a new readiness epoch and a new message.
 
@@ -1776,7 +1804,7 @@ Messages use sender-chosen `kind: silent | wake`, defaulting to wake for every s
 
 A seat's bare `handles-faults` node makes it the fleet's fault agent: it receives each fault that no step assignee or agent requester owns, such as a failed loop on a run a person requested. When several live seats carry it, the first by subject takes them. Faults never go to a person's attention.
 
-Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault.
+Two seat faults reach that owner so a seat that cannot start is never found by looking. A seat parked by the crash-loop guard is a fault that carries the driver's last `harness.diagnostic` (its code and reason). A seat that is declared to run but that no runtime observation has ever described for ten minutes, which `st agents ls` shows as `desired`, is a fault too ("An agent seat has not started", with the same diagnostic, or the note that the driver never ran). Both end when the seat's runtime is observed or its declaration changes. A mission's seat reaches the run's requester first, like any other fault. A seat that restarts always (the default) is not left stopped for good: its parked launch is retried after one minute, then two, four, eight, sixteen and thirty, at most six times since its last successful launch, and each retry is a `retry` reconcile decision that names the failure before it (and the owner run, when the seat has one). A retry that starts the seat ends the fault; after the sixth, one `retries-exhausted` decision says the launch stays stopped until `st agents restart` or a changed declaration. Other restart policies are not retried. `st` runs the first `pty` on the launch PATH that accepts `--env NAME`, so an older build earlier on the PATH no longer parks every restart.
 Codex compares the model ID and effort returned by a saved-thread resume with the declaration exactly. If Codex normalizes a declared model alias to a different ID, the driver fails before binding; three failed starts park the seat under the Codex crash-loop guard until its declaration changes.
 Typed harnesses always run their real interactive TUI in a PTY. Claude always loads the native st
 channel. Use `exec {}` for non-interactive provider commands.
@@ -1908,10 +1936,36 @@ child revision changes and daemon restarts. An already reached tick is never rep
 `catch-up "latest"`. Members admitting the same tick while apart converge on one run and initial
 generation; the first creation in canonical claim order supplies its child definition.
 
-A fleet member holds scheduled admission until it has completed an exchange since startup, and
-while replication reports missing history or a deferred projection. A local-only daemon and a
-fleet's sole member can admit immediately. Other fleet members may continue local work during a
-partition; a cold member needs a peer exchange before starting scheduled work.
+A fleet member holds scheduled admission until at least one peer comparison since startup
+reports zero peer-only envelopes. A local-only daemon and a fleet's sole member can admit
+immediately. Deferred projection, active catch-up and first-sync still hold admission.
+A fresh positive peer-only count blocks every schedule. For a primary-only schedule with
+unchanged placement and ownership, an old positive comparison stops blocking when replication
+marks it stale (35 seconds without renewal). This does not erase the count or prove that
+the offline peer has no history; the startup barrier and durable occurrence deduplication remain.
+
+Schedules declaring a standby keep positive comparisons blocking even when stale, on both
+primary and standby. Placement/ownership changes retain the same conservative policy:
+if any retained schedule declaration names another primary, declares a standby, or differs
+in owner run/generation/step, stale positive counts still block. This deliberately includes
+completed historical moves and removed standbys rather than guessing when a move is settled.
+Staged or conflicting owned-set changes remain fenced by the existing ownership guard,
+including at the due callback. No elapsed timeout grants takeover authority.
+
+If a locally due tick remains replication-blocked for fifteen minutes of continuous
+observation, the existing operational-failure attention surface warns the operator.
+The warning names the schedule, host, first blocked occurrence and due instant, and
+lists peer-only/local-only counts, staleness and measurement times (or explicitly
+unknown comparisons), plus projection/catch-up/first-sync state. It is one pending
+warning per schedule and observing host, not a warning per retry or per tick.
+Short intervals and `skip` do not restart the warning clock as later ticks pass.
+Already requested work blocked at its admission boundary is included.
+
+The fifteen-minute clock is monotonic and local: a daemon restart begins a new
+observation window, not a new stored-state schema. A revision change or replicated
+completion retires the old observation. Admission recovery, stopping, or moving the
+schedule away from the observing member recovers its warning. A future tick alone
+does not warn. The warning never changes admission, catch-up, or standby eligibility.
 
 The mission steps are normal claimable work. A schedule does not start another occurrence while its prior mission run remains active.
 
@@ -1945,9 +1999,18 @@ schedule again never starts work from before the stop.
 
 The schedule does not assign work. The referenced mission defines its work selectors.
 
+### Optional automatic standby
+
+See [Automatic schedule standby](schedule-standby.md) for the `standby { host
+"archive"; after "5m" }` declaration and all-member adoption requirement.
+Jobs must be safe to run twice: while hosts cannot hear each other a job may run
+on both; write jobs so a second run is harmless.
+
+If the standby restarts while the primary is down, the standby cannot take over until it has heard the primary once; a run in that window may be skipped (catch-up policy applies when the primary returns).
+
 ## Mission revisions
 
-In [free mode](kdl-lifecycle.md#free-mode), any person or agent may revise any part of a run, as
+In [free mode](../site/reference/configuration.md#free-mode), any person or agent may revise any part of a run, as
 itself. Human-only revision protection still selects the reviewers who must approve the change.
 `mission-authority` blocks still parse and are ignored.
 
@@ -2046,7 +2109,7 @@ Eligibility reads register the absent binding as a dependency. Its later publica
 
 ### Revision controls
 
-`cargo test -p st3 --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
+`cargo test -p fractal-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
 
 `scripts/st3-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
 
@@ -2153,7 +2216,7 @@ The planner uses this command:
 st launch submit SESSION --variant compact --markdown MISSION.md --kdl mission.kdl
 ```
 
-The session stores the request, feedback, Markdown, and KDL as immutable documents. Smalltalk carries document references, not mutable file paths.
+The session stores the request, feedback, Markdown, and KDL as immutable documents. Fractal carries document references, not mutable file paths.
 
 Each named candidate must contain exactly one ready mission with the requested ID.
 
@@ -2213,3 +2276,33 @@ The planning-mode eval uses one real Codex planner. A controller waits on the ev
 The launch variant and stale-generation paths are deterministic API tests. They do not spend a model run.
 
 The run-generation revision eval proves an approved cutover, lineage, state carry-over, and automatic generation context. It uses no model run.
+
+
+Admission deadlines use projection definition version 3. Replication still advertises every
+shared-table digest and admits signed claims across builds; comparisons skip a table only
+when its definition versions differ. Other compatible tables remain checked. An older
+member uses its existing layout comparison to avoid graph heals against this definition.
+Current claims sync never repairs a projection from a peer; comparisons remain diagnostic.
+Operations upgrades each reachable member normally and records that older owners still
+count timeout from creation until upgraded; deployment never waits for an offline member.
+
+Back up before upgrading. The deadline table rebuild is not reversible in place. Replacing
+this build with an older binary over a nullable deadline table is unsupported: the older
+active-deadline read fails with `Invalid column type Null`. Recover forward, or use an
+Operations plan that accounts for claims accepted after the pre-upgrade backup.
+
+An admitted run whose retained after-run completion history is unavailable keeps its admission time unknown and raises a `Run admission time unavailable` fault: its timeout is not armed. Restore its original admission history and rebuild the projection, or cancel the run; duplicate completions and retries cannot restart that budget. Corrupt accepted timestamps stop opening with run-specific context and leave the previous deadline table intact.
+
+Current pending work names `daemon/runtime` as the owner of readiness evaluation in its
+operational reasons, including runs that have already completed other steps. This waiter
+is visible from read-only work detail and history reads even while the store writer is busy.
+It does not claim dependency predicates have been evaluated. Existing blockers remain
+visible. The waiter disappears on promotion and is excluded for terminal, superseded and
+cleanup owners. Readiness priority is unchanged.
+
+
+A cancellation releases the run's admission capacity as soon as its cancellation phase is
+accepted. Final work and cleanup proceed under their original ownership while a replacement
+run can be admitted. `final-cancelled` and `cleanup-cancelled` runs no longer consume the
+mission's active-run limit or constrain it with a cancelled revision's limit. Live uncancelled
+runs still enforce the strictest limit among their revisions.

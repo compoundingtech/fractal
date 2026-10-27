@@ -5,6 +5,7 @@ import hashlib
 import importlib.machinery
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -14,6 +15,13 @@ import unittest
 from unittest.mock import patch
 
 sys.dont_write_bytecode = True
+# st2#3014: git exports GIT_DIR (and more) to a hook, and `git -C <tmp>` below would still act on the caller's repository. Fixtures here need none.
+for _name in [name for name in os.environ if name.startswith('GIT_')]:
+    del os.environ[_name]
+# Re-establish fixture-only configuration after dropping caller repository selectors.
+# Otherwise the scrub also removes an outer isolation setting and restores host
+# signing/hooks while these synthetic repositories create their commits.
+os.environ.update(GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null')
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / 'scripts/ci-evidence-source'
 loader = importlib.machinery.SourceFileLoader('source_receipt', str(SCRIPT))
@@ -25,14 +33,14 @@ loader.exec_module(source_receipt)
 class WorkflowBoundary(unittest.TestCase):
     def test_generated_producer_has_the_same_bytes_as_the_pinned_recipe(self):
         workflow = (ROOT / '.github/workflows/fleet.yml').read_text()
-        job = workflow.split('  evidence-source:\n', 1)[1].split('  upgrade-impact:\n', 1)[0]
+        job = re.split(r'(?m)^  [A-Za-z0-9_-]+:\n', workflow.split('  evidence-source:\n', 1)[1], maxsplit=1)[0]  # up to the next job
         embedded = job.split("<<'EVIDENCE_SOURCE_PY'\n", 1)[1].split('          EVIDENCE_SOURCE_PY\n', 1)[0]
         recipe = '\n'.join(line.removeprefix('          ') for line in embedded.splitlines()) + '\n'
         self.assertEqual(recipe.encode(), SCRIPT.read_bytes())
         self.assertIn('    continue-on-error: true\n', job)
         self.assertIn('      contents: read\n', job)
         self.assertNotRegex(job, r'(?m)^    needs:|secrets\.|GH_TOKEN|contents: write')
-        gate = workflow.split('  linux-gate:\n', 1)[1].split('\n  perf-cost:', 1)[0]
+        gate = workflow.split('  linux-gate:\n', 1)[1].split('\n  isolation-vm:', 1)[0]
         self.assertNotIn('evidence-source', gate)
         self.assertIn('ci-evidence-source-' + chr(36) + '{{ github.run_attempt }}', job)
 
@@ -192,6 +200,42 @@ class SourceReceipt(unittest.TestCase):
 
 
 class FixtureIsolation(unittest.TestCase):
+    def test_fixture_ignores_caller_signing_and_hooks_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / 'home'
+            home.mkdir()
+            marker = root / 'invoked'
+            hooks = root / 'hooks'
+            hooks.mkdir()
+            program = hooks / 'commit-msg'
+            program.write_text(f'#!/bin/sh\nprintf invoked > {json.dumps(str(marker))}\nexit 1\n')
+            program.chmod(0o755)
+            config = home / '.gitconfig'
+            child = """
+import os, runpy, sys, unittest
+namespace = runpy.run_path(sys.argv[1])
+assert os.environ['GIT_CONFIG_GLOBAL'] == '/dev/null'
+assert os.environ['GIT_CONFIG_SYSTEM'] == '/dev/null'
+case = namespace['SourceReceipt']('test_dispatch_identity_does_not_invent_a_pull_request')
+result = unittest.TextTestRunner().run(unittest.TestSuite([case]))
+sys.exit(not result.wasSuccessful())
+"""
+            for kind, contents in [
+                ('signing', '[commit]\n\tgpgSign = true\n[gpg]\n\tformat = openpgp\n'
+                    f'\tprogram = {json.dumps(str(program))}\n'),
+                ('hooks', '[commit]\n\tgpgSign = false\n[core]\n'
+                    f'\thooksPath = {json.dumps(str(hooks))}\n'),
+            ]:
+                with self.subTest(kind=kind):
+                    config.write_text(contents)
+                    done = subprocess.run([sys.executable, '-c', child, str(Path(__file__).resolve())],
+                        env={**os.environ, 'HOME': str(home), 'XDG_CONFIG_HOME': str(home / '.config'),
+                             'GIT_CONFIG_GLOBAL': str(config), 'GIT_CONFIG_SYSTEM': str(config)},
+                        capture_output=True, text=True)
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                    self.assertFalse(marker.exists(), f'caller {kind} program was invoked')
+
     def test_fixture_does_not_launch_inherited_automatic_maintenance(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

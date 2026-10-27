@@ -47,6 +47,8 @@ export interface IconButtonProps extends Omit<AriaButtonProps, 'className' | 'st
   readonly size?: 'sm' | 'md'
   readonly isActive?: boolean
   readonly tooltipPlacement?: 'top' | 'bottom' | 'left' | 'right'
+  /** Host geometry override, e.g. a touch-sized target in a narrow layout. */
+  readonly stylexStyle?: stylex.StyleXStyles
 }
 
 /** Compact icon-only button whose tooltip names the action and shortcut. */
@@ -57,6 +59,7 @@ export const IconButton = ({
   size = 'sm',
   isActive = false,
   tooltipPlacement = 'bottom',
+  stylexStyle,
   ...props
 }: IconButtonProps) => (
   <TooltipTrigger delay={600} closeDelay={0}>
@@ -64,7 +67,7 @@ export const IconButton = ({
       aria-label={label}
       {...(isActive ? { 'aria-pressed': true } : {})}
       {...props}
-      {...stylex.props(styles.button, styles[size], isActive && styles.active)}
+      {...stylex.props(styles.button, styles[size], isActive && styles.active, stylexStyle)}
     >
       {icon}
     </AriaButton>

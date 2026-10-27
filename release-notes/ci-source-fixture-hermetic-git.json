@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep source-receipt test fixtures independent of caller Git signing and hooks configuration after sanitizing repository-selecting environment variables. Refs #3366, #3336, #3257.",
+  "replay": { "status": "none", "detail": "Test-only change; no replay or stored data changes." },
+  "schema": { "status": "none", "detail": "No published schema or contract changes." },
+  "rules": { "status": "none", "detail": "No runtime rules or production Git configuration changes." },
+  "compatibility": { "status": "none", "detail": "Only disposable source-receipt fixtures use isolated global/system Git configuration. The production receipt helper is unchanged." },
+  "downtime": { "status": "none", "detail": "No deployment or runtime change." },
+  "manual": { "status": "none", "detail": "No operator action or host Git configuration change required." },
+  "recovery": { "status": "none", "detail": "No durable state or recovery changes." }
+}

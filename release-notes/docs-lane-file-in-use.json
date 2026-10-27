@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The evidence docs now say that the lane file is in use: st-test and evidence-wrap write its digest, the verifier holds lane-bound signer levels to it, and the gate reads it from the base",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change; documentation only."},
+  "compatibility": {"status": "none", "detail": "Documentation only."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}

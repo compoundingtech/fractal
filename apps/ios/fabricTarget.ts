@@ -44,8 +44,9 @@ export function fabricTargetFromText(text: string): FabricTarget | null {
   return fabricTargetFromQuery(at >= 0 ? trimmed.slice(at + 1) : trimmed);
 }
 
-/** What a build may carry: `EXPO_PUBLIC_ST3_FABRIC_DEFAULT`, set in an ignored env file on the build host. A repository build has none. */
-export function buildFabricDefault(raw: string | undefined = process.env.EXPO_PUBLIC_ST3_FABRIC_DEFAULT): FabricTarget | null {
+/** A build may carry `EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT` (legacy `EXPO_PUBLIC_ST3_FABRIC_DEFAULT`) in an ignored env file. A repository build has none. */
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
+export function buildFabricDefault(raw: string | undefined = process.env.EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT ?? process.env.EXPO_PUBLIC_ST3_FABRIC_DEFAULT): FabricTarget | null {
   return fabricTargetFromQuery(raw);
 }
 
@@ -204,4 +205,14 @@ export function credentialFor(overFabric: boolean, member: FabricMember | null, 
   if (!overFabric) return deviceCredential;
   if (!member) return null;
   return member.device ? deviceCredential : ownCredential ?? null;
+}
+
+/**
+ * The list a build opens with when nothing is saved: its default target as the member that uses this
+ * device's own pairing. A phone paired through its form has only that pairing, so the built target
+ * must use it; as a member of its own it would wait for a pairing it can never have, and the carrier
+ * would never dial it.
+ */
+export function builtFabricMembers(built: FabricTarget | null): FabricMember[] {
+  return built ? [{ ...built, name: defaultMemberName(0), device: true }] : [];
 }

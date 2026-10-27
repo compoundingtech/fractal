@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 exec >controller.log 2>&1
 
 readonly REQUESTER=person/eval-requester
-readonly RUN_SUFFIX=${ST_MISSION_RUN//\//-}
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+fractal_selected=${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}
+readonly RUN_SUFFIX=${fractal_selected//\//-}
 readonly REVIEWER=person/eval-attention
 
 standing_run=""
