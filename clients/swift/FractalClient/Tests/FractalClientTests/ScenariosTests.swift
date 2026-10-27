@@ -159,6 +159,39 @@ final class ScenariosTests: XCTestCase {
         XCTAssertEqual(try decoder.decode(ScenarioDetailsState.self, from: encoder.encode(details)).launchVariants.map(\.id), details.launchVariants.map(\.id))
     }
 
+    func testOptionalStatePayloadsSurviveTypedRoundTrip() throws {
+        var rosterRoot = try object(JSONDecoder().decode(JSONValue.self,
+            from: Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/roster.json"))))
+        var rosterState = try object(rosterRoot.required("state"))
+        let agent = try XCTUnwrap(array(rosterState.required("agents")).first)
+        let history: JSONValue = .array([.object([
+            "_tag": .string("changes"), "at_ms": .number(-1), "store": .number(1),
+            "upserts": .array([agent]), "removes": .array([]),
+        ])])
+        rosterState["recorded_history"] = history
+        rosterRoot["state"] = .object(rosterState)
+        let rosterSlice = try decode(ScenarioSlice.self, .object(rosterRoot))
+        try validate(rosterSlice)
+        let roster = try rosterSlice.decodeState(ScenarioRosterState.self)
+        XCTAssertEqual(roster.recordedHistory, try array(history))
+        let encodedRoster = try object(JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(roster)))
+        XCTAssertEqual(encodedRoster["recorded_history"], history)
+
+        var detailsRoot = try object(JSONDecoder().decode(JSONValue.self,
+            from: Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/details.json"))))
+        var detailsState = try object(detailsRoot.required("state"))
+        // Normalize through the wire model so optional-null encoding is not part of this assertion.
+        let resources = try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode([decode(Resource.self, agent)]))
+        detailsState["resources"] = resources
+        detailsRoot["state"] = .object(detailsState)
+        let detailsSlice = try decode(ScenarioSlice.self, .object(detailsRoot))
+        try validate(detailsSlice)
+        let details = try detailsSlice.decodeState(ScenarioDetailsState.self)
+        XCTAssertEqual(details.resources?.count, 1)
+        let encodedDetails = try object(JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(details)))
+        XCTAssertEqual(encodedDetails["resources"], resources)
+    }
+
     func testInventoriesAreRequiredAndStrictlyValidated() throws {
         for (sliceName, fields) in [("roster", ["sessions", "devices"]), ("details", ["launches", "launch_variants"])] {
             for field in fields {
@@ -260,15 +293,21 @@ final class ScenariosTests: XCTestCase {
         let state = try object(slice.state)
         switch slice.slice {
         case "roster":
-            try keys(state, required: ["agents", "machines", "runtimes", "sessions", "devices", "order"], optional: ["arrangements", "resources"])
+            try keys(state, required: ["agents", "machines", "runtimes", "sessions", "devices", "order"], optional: ["arrangements", "resources", "recorded_history"])
             _ = try slice.decodeState(ScenarioRosterState.self)
             for key in ["agents", "machines", "runtimes", "arrangements", "resources"] {
                 if let values = state[key] { try resources(values, at: "/state/\(key)", slice: slice) }
             }
+            if let history = state["recorded_history"] {
+                for (index, value) in try array(history).enumerated() {
+                    try event(value, at: "/state/recorded_history/\(index)", slice: slice)
+                }
+            }
         case "details":
-            try keys(state, required: ["missions", "work", "launches", "launch_variants"])
+            try keys(state, required: ["missions", "work", "launches", "launch_variants"], optional: ["resources"])
             _ = try slice.decodeState(ScenarioDetailsState.self)
             for key in ["missions", "work"] { try resources(state.required(key), at: "/state/\(key)", slice: slice) }
+            if let values = state["resources"] { try resources(values, at: "/state/resources", slice: slice) }
         case "attention":
             let fields = ["attention", "messages"]
             try keys(state, required: Set(fields))

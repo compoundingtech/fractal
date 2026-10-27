@@ -86,8 +86,9 @@ affected location. Content, ids, durations, timeline `at_ms`, cast offsets, and 
 
 `ScenarioSlice.state` and `.timeline` retain their kit envelopes. `ScenarioRosterState` and
 `ScenarioDetailsState` are Codable envelopes with required, typed session/device and
-launch/launch-variant inventories, including explicitly empty inventories. Other envelopes
-can use `decodeState` and `decodeTimeline` with small structs containing the real wire models.
+launch/launch-variant inventories, including explicitly empty inventories. Both preserve optional
+`resources`; roster also preserves `recorded_history` as original JSON changes envelopes.
+Other envelopes can use `decodeState` and `decodeTimeline` with small structs containing the real wire models.
 For conversation thread `items`, use `ScenarioConversationEntry`: `.known(TimelineEntry)` for
 recognized types and `.unknown(JSONValue)` for genuinely future types. Recognized-but-malformed
 entries throw; future entries remain opaque rather than being replaced by diagnostic witnesses.

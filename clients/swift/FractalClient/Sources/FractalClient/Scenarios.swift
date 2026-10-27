@@ -79,6 +79,13 @@ public struct ScenarioRosterState: Codable, Sendable {
     public let devices: [DeviceResource]
     public let order: [String]
     public let arrangements, resources: [Resource]?
+    /// Original captured changes envelopes, preserved like `ScenarioSlice.timeline`.
+    public let recordedHistory: [JSONValue]?
+
+    enum CodingKeys: String, CodingKey {
+        case agents, machines, runtimes, sessions, devices, order, arrangements, resources
+        case recordedHistory = "recorded_history"
+    }
 }
 
 /// Detail transport state. Empty launch inventories are explicit, not missing fields.
@@ -86,9 +93,10 @@ public struct ScenarioDetailsState: Codable, Sendable {
     public let missions, work: [Resource]
     public let launches: [LaunchResource]
     public let launchVariants: [LaunchVariantResource]
+    public let resources: [Resource]?
 
     enum CodingKeys: String, CodingKey {
-        case missions, work, launches
+        case missions, work, launches, resources
         case launchVariants = "launch_variants"
     }
 }
