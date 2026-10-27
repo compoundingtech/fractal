@@ -401,6 +401,7 @@ mission "person-work" state="ready" {{
                     "progress",
                     &crate::model::WorkRequest {
                         wait_ms: None,
+                        wait_on: None,
                         actor: Some("agent/alder.asker".into()),
                         incarnation: Some("asker-one".into()),
                         summary: Some(eta.clone()),

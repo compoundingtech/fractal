@@ -56,6 +56,7 @@ fn act(store: &Store, subject: &str, actor: &str, action: &str, wait_ms: Option<
             action,
             &WorkRequest {
                 wait_ms,
+                wait_on: None,
                 actor: Some(actor.into()),
                 incarnation: Some(format!("{actor}-1")),
                 summary: Some(format!("{action} by {actor}")),
