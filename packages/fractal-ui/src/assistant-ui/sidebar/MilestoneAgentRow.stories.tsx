@@ -157,6 +157,7 @@ export const scenarioExemptions: readonly string[] = [
   'SubagentCount:contract-fixture',
   'SubagentCountLight:contract-fixture',
   'SubagentCountPress:contract-fixture',
+  'SubagentCountPressLight:contract-fixture',
   'TitleReach:contract-fixture',
   'TitleReachLight:contract-fixture',
   'TwoLineAndNesting:contract-fixture',
@@ -697,16 +698,26 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       if (expected === null) { await expect(chip).toBeNull(); continue }
       const tag = chip!.querySelector<HTMLElement>('[data-count-text]')!
       await expect(tag.textContent).toBe(expected)
-      // The unreported count shows "?" but is spoken as "Unreported subagents".
+      // The unreported count shows "?", is spoken as "Unreported subagents" and is described by why it is unknown: static
+      // metadata, yet its own focus stop so keyboard users reach its tooltip too.
       if (expected === '? subagents') {
         await expect(chip).toHaveAttribute('data-subagent-count', 'unknown')
         await expect(tag).toHaveAttribute('aria-hidden', 'true')
-        await expect(chip!.textContent).toContain('Unreported subagents')
+        await expect(within(chip!).getByRole('img', { name: unreportedName, description: unreportedReason })).toHaveAttribute('tabindex', '0')
       }
       const titleElement = row.querySelector<HTMLElement>('[data-row-column="title"]')!
       const where = `${host.dataset.countHost} · "${title}"`
-      // Every flat row has room for the full count: the word is painted, not compacted.
-      await expect(getComputedStyle(chip!.querySelector('[data-count-word]')!).position, `${where}: count word compacted`).toBe('static')
+      // The 240px sidebar's rows go bare: the count alone, its word visually hidden but still in the text for assistive
+      // tech. Desktop 320px rows have room for the word; phone rows reserve space for the touch action column.
+      const word = chip!.querySelector<HTMLElement>('[data-count-word]')!
+      const compact = getComputedStyle(word).position === 'absolute'
+      const nameWidth = row.querySelector('[data-row-column="name"]')!.getBoundingClientRect().width
+      if (host.dataset.countHost !== 'phone-320') await expect(compact, `${where}: desktop count word mode`).toBe(host.dataset.width === '240')
+      await expect(compact, `${where}: compact mode disagrees with the 192px name threshold (name ${nameWidth}px)`).toBe(nameWidth < 192)
+      if (compact) {
+        await expect(word.getBoundingClientRect().width, `${where}: compact word still painted`).toBeLessThanOrEqual(1)
+        await expect(tag.getBoundingClientRect().width, `${where}: bare count wider than its digits`).toBeLessThanOrEqual(28)
+      } else await expect(tag.getBoundingClientRect().width, `${where}: full count lost its word`).toBeGreaterThan(40)
       const titleBox = titleElement.getBoundingClientRect(), chipBox = chip!.getBoundingClientRect(), tagBox = tag.getBoundingClientRect()
       const name = row.querySelector('[data-row-column="name"]')!.getBoundingClientRect()
       const time = row.querySelector('[data-row-column="time"]')!.getBoundingClientRect()
@@ -722,8 +733,9 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       await expect(tag.scrollWidth, `${where}: count clipped`).toBeLessThanOrEqual(tag.clientWidth + 1)
       await expect(getComputedStyle(tag).whiteSpace).toBe('nowrap')
       await expect(getComputedStyle(tag).color).toBe(soft)
-      // The title truncates first: whole while title, gap and full count fit the name column, otherwise an ellipsis that
-      // keeps a readable stretch (the ~24px the compact threshold reserves). At 320px every short title is whole.
+      // The title truncates first: whole while title, gap and count fit the name column, otherwise an ellipsis that keeps
+      // a readable stretch: the full count starts only above a 192px name column, reserving at least 96px for the title.
+      // At 320px every short title is whole.
       const fits = titleElement.scrollWidth + 6 + tagBox.width <= name.width + 1
       if (longCountTitles.includes(title)) await expect(fits, `${where}: fixture title should be long enough to truncate`).toBe(false)
       else if (host.dataset.width === '320') await expect(fits, `${where}: short title should fit beside the count at 320px`).toBe(true)
@@ -731,12 +743,12 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       else {
         await expect(titleElement.scrollWidth, `${where}: title should truncate (name ${name.width}px, count ${tagBox.width}px)`).toBeGreaterThan(titleElement.clientWidth)
         await expect(getComputedStyle(titleElement).textOverflow).toBe('ellipsis')
-        await expect(titleBox.width, `${where}: truncated title under the readable minimum (name ${name.width}px, count ${tagBox.width}px)`).toBeGreaterThanOrEqual(24)
+        await expect(titleBox.width, `${where}: truncated title under the readable minimum (name ${name.width}px, count ${tagBox.width}px)`).toBeGreaterThanOrEqual(96)
       }
     }
   }
-  // Deep nesting at 240px: the count fits its name column (full, then bare, then gone) and never covers time or signal;
-  // titles still truncate and keep their text, and every count keeps its full text for assistive tech.
+  // Deep nesting at 240px: the count fits its name column (bare, then gone) and never covers time or signal; titles
+  // still truncate and keep their text, and every count keeps its full text for assistive tech.
   const deep = surfaceRoot.querySelector<HTMLElement>('[data-host="count-deep"]')!
   await expect(Math.abs(deep.getBoundingClientRect().width - 240)).toBeLessThanOrEqual(1)
   const deepRows = await waitFor(() => { const found = [...deep.querySelectorAll<HTMLElement>('[data-milestone-row]')].filter(row => row.closest('[inert]') === null); expect(found).toHaveLength(deepCounts.length); return found })
@@ -770,10 +782,10 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
     modes.add(compact ? 'compact' : 'full')
     if (compact) {
       // Bare count: the word is visually hidden but still in the text.
-      await expect(name.width, `${at}: bare count on a name column of 104px or more`).toBeLessThan(104 + 0.5)
+      await expect(name.width, `${at}: bare count on a name column of 192px or more`).toBeLessThan(192 + 0.5)
       await expect(name.width, `${at}: bare count on a name column under 48px`).toBeGreaterThanOrEqual(48 - 0.5)
       await expect(word.getBoundingClientRect().width, `${at}: compact word still painted`).toBeLessThanOrEqual(1)
-    } else await expect(name.width, `${at}: full count on a name column under 104px`).toBeGreaterThanOrEqual(104 - 0.5)
+    } else await expect(name.width, `${at}: full count on a name column under 192px`).toBeGreaterThanOrEqual(192 - 0.5)
     const tagBox = tag.getBoundingClientRect()
     const tagAt = `${at} tag ${tagBox.left}–${tagBox.right}px, ${compact ? 'compact' : 'full'}`
     await expect(tagBox.left, `${tagAt}: count starts before the name column`).toBeGreaterThanOrEqual(name.left - 0.5)
@@ -785,12 +797,46 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
   await expect(modes.has('compact'), `deep modes seen: ${[...modes].join(', ')}`).toBe(true)
   await expect(modes.has('hidden'), `deep modes seen: ${[...modes].join(', ')}`).toBe(true)
   const [red, green, blue] = getComputedStyle(surfaceRoot).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
-  await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(surfaceRoot.getAttribute('data-scheme') === 'light')
+  const light = surfaceRoot.getAttribute('data-scheme') === 'light'
+  await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(light)
+  // The static "?" explains itself at 240px (bare) and 320px (with its word), by pointer hover and keyboard focus.
+  for (const key of ['desktop-240', 'desktop-320'] as const) {
+    const host = surfaceRoot.querySelector<HTMLElement>(`[data-count-host="${key}"]`)!
+    await expectExplained(within(host).getByRole('img', { name: unreportedName }), surfaceRoot, unreportedReason, light, key)
+  }
+}
+
+const unreportedName = 'Unreported subagents'
+const unreportedReason = 'The number of subagents isn’t reported.'
+/**
+ * The count's kit tooltip says `text` on pointer hover and on keyboard focus, portals inside the themed `root` and paints
+ * its inverted surface (light on a dark root), and replaces the row's hover card instead of stacking on it.
+ */
+const expectExplained = async (trigger: HTMLElement, root: HTMLElement, text: string, light: boolean, where: string) => {
+  // Establish pointer modality before entering: userEvent sends pointerenter before its first pointermove after a key.
+  await userEvent.hover(root)
+  await userEvent.hover(trigger)
+  const hovered = await within(document.body).findByRole('tooltip').catch(error => { throw new Error(`${where}: hover did not disclose ${text}`, { cause: error }) })
+  await expect(hovered, `${where}: hover tooltip`).toHaveTextContent(text)
+  await expect(root.contains(hovered), `${where}: tooltip outside the themed root`).toBe(true)
+  await expect(paintedLuminance(hovered) > 0.5, `${where}: tooltip surface not inverted`).toBe(!light)
+  await waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]'), `${where}: hover card stacked under the tooltip`).toBeNull())
+  await userEvent.unhover(trigger)
+  await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
+  // Keyboard modality, then focus: the same explanation opens without a pointer.
+  trigger.focus()
+  await userEvent.tab({ shift: true })
+  await userEvent.tab()
+  await expect(trigger).toHaveFocus()
+  const focused = await within(document.body).findByRole('tooltip').catch(error => { throw new Error(`${where}: keyboard focus did not disclose ${text}`, { cause: error }) })
+  await expect(focused, `${where}: focus tooltip`).toHaveTextContent(text)
+  trigger.blur()
+  await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
 }
 
 export const SubagentCount: StoryObj<{ scheme: Scheme }> = {
   name: 'Subagent count · after the title · 240/320 desktop and phone',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify the count copy, placement, title truncation and one-line fit at 240px and 320px desktop and phone widths. A 240px tree includes depth 8 and continues to depth 12 to verify full, bare and hidden count modes without covering the trailing metadata slot.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify count copy, placement, title truncation and one-line fit at 240px and 320px desktop and phone widths. Tight name columns use a bare count, while desktop 320px retains the word; the full label remains available to assistive tech. The unreported count carries an accessible description and kit tooltip on hover and keyboard focus. A 240px tree includes depth 8 and continues to depth 12 to verify bare and hidden count modes without covering trailing metadata.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <SubagentCountMatrix scheme={scheme} />,
   play: subagentCountPlay,
@@ -798,22 +844,22 @@ export const SubagentCount: StoryObj<{ scheme: Scheme }> = {
 export const SubagentCountLight: StoryObj<{ scheme: Scheme }> = { ...SubagentCount, name: 'Subagent count · after the title · 240/320 desktop and phone · light', args: { scheme: 'light' } }
 
 const countPressItems: readonly AgentItem[] = [toItem(countRow('press', 'Review the subagent switching flow', 2), 0), toItem(countRows[3], 0)]
-function SubagentCountPressTree() {
+function SubagentCountPressTree({ width }: { readonly width: 240 | 320 }) {
   const [selected, setSelected] = React.useState<string>()
   const [pressed, setPressed] = React.useState<readonly string[]>([])
   // Stable: the row is memoized.
   const onSubagentsPress = React.useCallback((row: Row) => setPressed(refs => [...refs, row.ref]), [])
-  return <section aria-label="Count press" data-host="count-press" data-selected={selected} data-subagents={pressed.join(' ') || undefined} {...stylex.props(styles.column, styles.width320, styles.tree)}>
+  return <section aria-label={`Count press · ${width}px`} data-host={width === 320 ? 'count-press' : 'count-press-240'} data-selected={selected} data-subagents={pressed.join(' ') || undefined} {...stylex.props(styles.column, width === 320 ? styles.width320 : styles.width240, styles.tree)}>
     <SidebarTree aria-label="Agents with subagent counts" items={countPressItems} expandedKeys={new Set()} onExpandedChange={() => {}} onAction={key => setSelected(String(key))}
       renderRow={(item, state) => <MilestoneAgentRow row={item.row} now={storyNow} touchDisclosure={touchDisclosure(state)} onSubagentsPress={onSubagentsPress} />} />
   </section>
 }
 
-export const SubagentCountPress: Story = {
+export const SubagentCountPress: StoryObj<{ scheme: Scheme }> = {
   name: 'Subagent count · own press never activates the row',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A fixed tree with a counted and an unreported agent verifies the count button by pointer and keyboard reaches only its own callback, never tree selection, while the row title still activates.' } },
-  args: { row: base },
-  render: () => <main {...stylex.props(styles.root)}><ThemePortal><SubagentCountPressTree /></ThemePortal></main>,
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed 320px and 240px trees with a counted and an unreported agent verify the count button by pointer and keyboard reaches only its own callback, never tree selection, while the row title still activates; the 240px button shows the bare count, and each button explains itself in the themed kit tooltip on hover and keyboard focus, the unreported one also as its accessible description.' } },
+  args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
+  render: ({ scheme }) => <main data-testid="count-press-root" data-scheme={scheme} {...stylex.props(styles.root, scheme === 'light' && lightTheme)}><ThemePortal><div {...stylex.props(styles.matrix)}><SubagentCountPressTree width={320} /><SubagentCountPressTree width={240} /></div></ThemePortal></main>,
   play: async ({ canvasElement }) => {
     const host = canvasElement.querySelector<HTMLElement>('[data-host="count-press"]')!
     const [counted, unknown] = countPressItems.map(item => item.row) as [Row, Row]
@@ -841,8 +887,21 @@ export const SubagentCountPress: Story = {
     await userEvent.click(row(counted.title).querySelector('[data-row-column="title"]')!)
     await waitFor(() => expect(host).toHaveAttribute('data-selected', counted.ref))
     await expect(host).toHaveAttribute('data-subagents', `${counted.ref} ${counted.ref} ${unknown.ref}`)
+    // Explained at both widths: bare "2" at 240px with "2 subagents" as its name and tooltip, the word painted at 320px;
+    // the unreported button is described by its reason, which is also its tooltip.
+    const root = within(canvasElement).getByTestId('count-press-root')
+    const light = root.getAttribute('data-scheme') === 'light'
+    for (const key of ['count-press', 'count-press-240'] as const) {
+      const tree = root.querySelector<HTMLElement>(`[data-host="${key}"]`)!
+      const known = within(within(tree).getByRole('row', { name: counted.title })).getByRole('button', { name: '2 subagents' })
+      await expect(getComputedStyle(known.querySelector('[data-count-word]')!).position, `${key}: count word mode`).toBe(key === 'count-press-240' ? 'absolute' : 'static')
+      await expectExplained(known, root, '2 subagents', light, `${key} · counted`)
+      const unreported = within(within(tree).getByRole('row', { name: unknown.title })).getByRole('button', { name: unreportedName, description: unreportedReason })
+      await expectExplained(unreported, root, unreportedReason, light, `${key} · unreported`)
+    }
   },
 }
+export const SubagentCountPressLight: StoryObj<{ scheme: Scheme }> = { ...SubagentCountPress, name: 'Subagent count · own press never activates the row · light', args: { scheme: 'light' } }
 /** The first painted background at or above `element`, as relative luminance: overlays are judged by the surface they paint. */
 const paintedLuminance = (element: Element) => {
   for (let node: Element | null = element; node !== null; node = node.parentElement) {
