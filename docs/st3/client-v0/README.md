@@ -2563,6 +2563,10 @@ a timer per subscriber. It rechecks demand after admission and again when its bl
 starts. A new revisioned subscription requests a complete view. Without demand, including after
 queued notifications are consumed, inputs remain dirty but catch-up and trim do not refold the
 roster. Full projection reset clears the current publication and changes its epoch even while idle.
+Startup queues one complete publication after its bounded head, even before any read.
+An explicit or local-activity refresh request remains demand until that attempt answers it,
+including across admission and blocking-worker queues. A subscription wake alone is not such
+a request: dropping its last receiver can still cancel an otherwise unrequested refresh.
 
 `AgentsPublicationMetadata` identifies the publication with an opaque UUID `node_epoch` and
 an increasing epoch-local `revision`. Restart, full projection reset or revision exhaustion starts a new epoch;
