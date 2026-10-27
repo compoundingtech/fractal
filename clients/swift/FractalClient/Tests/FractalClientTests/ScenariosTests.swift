@@ -328,6 +328,41 @@ final class ScenariosTests: XCTestCase {
         }
     }
 
+    func testYearZeroUsesFloorDivisionAndRejectsOffsetBeforeKitRange() throws {
+        XCTAssertEqual(try ScenarioClock().parse("0000-01-01T00:00:00Z", pointer: ""), -62_167_219_200_000)
+        XCTAssertEqual(
+            try ScenarioReader.rebase(.string("0000-01-01T00:00:00Z"),
+                times: [.init(pointer: "", codec: .timestamp)],
+                anchor: "0000-03-01T00:00:00Z", nowMilliseconds: 0),
+            .string("1969-11-02T00:00:00.000Z")
+        )
+        try assertStrictMutationRejected(slice: "roster") { root in
+            var state = try object(root.required("state"))
+            var agents = try array(state.required("agents"))
+            var agent = try object(agents[0])
+            agent["updated_at"] = .string("0000-01-01T00:00:00+00:01")
+            agents[0] = .object(agent)
+            state["agents"] = .array(agents)
+            root["state"] = .object(state)
+        }
+    }
+
+    func testTimestampRejectsTrailingNewline() throws {
+        let timestamp = "2030-01-01T12:00:00Z\n"
+        XCTAssertThrowsError(try ScenarioReader.rebase(.string(timestamp),
+            times: [.init(pointer: "", codec: .timestamp)],
+            anchor: "2030-01-01T12:00:00Z", nowMilliseconds: 0))
+        try assertStrictMutationRejected(slice: "roster") { root in
+            var state = try object(root.required("state"))
+            var agents = try array(state.required("agents"))
+            var agent = try object(agents[0])
+            agent["updated_at"] = .string(timestamp)
+            agents[0] = .object(agent)
+            state["agents"] = .array(agents)
+            root["state"] = .object(state)
+        }
+    }
+
     func testStrictCodecBoundaryValuesAreAccepted() throws {
         let syncData = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/sync.json"))
         var sync = try object(JSONDecoder().decode(JSONValue.self, from: syncData))
