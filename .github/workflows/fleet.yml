@@ -3880,6 +3880,7 @@ jobs:
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
               "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
+              "apps/fractal-web/src/web/subagentThreadFocus.ts",
               "apps/fractal-web/src/web/useNativeDetails.ts",
               "apps/fractal-web/src/web/workspaceView.ts",
               "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
