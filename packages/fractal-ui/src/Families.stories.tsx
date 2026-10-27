@@ -4,10 +4,11 @@ import { Families } from './Families'
 import type { Theme } from './kit'
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Component families',
   component: Families,
   args: { direction: 'folio', scheme: 'light', density: 'comfortable' },
-  parameters: {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Families owns authored changed-file, worktree and actor-state examples without a domain-data props seam; these fixed examples compare component tokens and density. Conversion requires exposing that seam." },
     a11y: {
       options: {
         rules: {
@@ -32,6 +33,12 @@ const meta = {
   },
 } satisfies Meta<typeof Families>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllFamilies:contract-fixture',
+  'FamiliesDark:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 export const AllFamilies: Story = {}
 export const FamiliesDark: Story = { args: { scheme: 'dark' } }

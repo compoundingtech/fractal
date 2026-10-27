@@ -1,4 +1,4 @@
-import type { TerminalModes } from '@smalltalk/st3-client/schema'
+import type { TerminalModes } from '@fractal/client/schema'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'

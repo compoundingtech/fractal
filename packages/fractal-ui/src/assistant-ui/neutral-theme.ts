@@ -21,7 +21,6 @@ const textVarsTheme = stylex.createTheme(textVars, {
   fg: '#f5f5f5',
   fgMuted: '#818181',
   fgSoft: 'rgba(245, 245, 245, 0.8)',
-  fgFaint: 'rgba(245, 245, 245, 0.52)',
   sidebarFgMuted: '#a3a3a3',
 })
 
@@ -31,6 +30,8 @@ const borderVarsTheme = stylex.createTheme(borderVars, {
   glassBorder: 'rgba(255, 255, 255, 0.05)',
   controlBorder: 'rgba(255, 255, 255, 0.025)',
   focusBorder: 'rgba(255, 255, 255, 0.08)',
+  rail: 'rgba(255, 255, 255, 0.1)',
+  railStrong: 'rgba(255, 255, 255, 0.12)',
 })
 
 const accentVarsTheme = stylex.createTheme(accentVars, {
@@ -61,7 +62,7 @@ const typeVarsTheme = stylex.createTheme(typeVars, {
   uiSize: '14px', uiLeading: '20px',
   metaSize: '12px', metaLeading: '16px',
   denseSize: '11px',
-  codeSize: '13px',
+  codeSize: '13px', codeLeading: '18px',
   bodySize: '14px', bodyLeading: '22.75px',
   weightMedium: '500',
   microSize: '10px', weightRegular: '400', weightSemibold: '600', weightBold: '700',
@@ -78,7 +79,6 @@ const radiusVarsTheme = stylex.createTheme(radiusVars, {
 const spaceVarsTheme = stylex.createTheme(spaceVars, {
   xs2: '2px', xs: '4px', sm: '6px', md: '8px', lg: '12px', xl: '16px', xxl: '20px',
   zero: '0', hairline: '1px', xxxs: '1px', row: '10px', section: '24px', control: '28px', panel: '32px',
-  proseGap: '10px',
 })
 
 const geometryVarsTheme = stylex.createTheme(geometryVars, {
@@ -88,14 +88,14 @@ const geometryVarsTheme = stylex.createTheme(geometryVars, {
   panelDefault: '540px', panelMin: '360px',
   controlSm: '24px', controlMd: '28px', controlLg: '32px',
   toolRow: '24px',
-  menuRow: '32px',
+  menuRow: '28px', checkbox: '14px',
   gutter: 'clamp(12px, 1.25vw, 20px)',
   drawerDefault: '220px', drawerMin: '120px',
   footer: '40px',
   heroSize: '30px', heroLeading: '36px',
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
-  toolIndent: '28px', gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px',
+  gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px',
   sidebarRow: '48px', sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',
   focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
@@ -110,7 +110,7 @@ const geometryVarsTheme = stylex.createTheme(geometryVars, {
   inventoryColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 48rem)': 'repeat(2, minmax(0, 1fr))', '@media (min-width: 80rem)': 'repeat(4, minmax(0, 1fr))' },
   workshopColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 80rem)': 'minmax(0, 1fr) 340px' },
   contextColumns: { default: 'minmax(0, 1fr)', '@media (min-width: 64rem)': '250px minmax(0, 1fr)' },
-  menuMin: '208px', sectionTitle: '18px', dialogTitle: '20px', switchSelectedLeft: 'calc(100% - 16px)',
+  menuMin: '208px', menuMax: '320px', sectionTitle: '18px', dialogTitle: '20px', switchSelectedLeft: 'calc(100% - 16px)',
   sidebarThree: '68px', workExpandedMax: 'min(18rem, 50dvh)', timelineStub: '16px',
   transcriptFrameHeight: '640px',
   estimatedMessageHeight: '160px',
@@ -119,7 +119,7 @@ const geometryVarsTheme = stylex.createTheme(geometryVars, {
 
 const motionVarsTheme = stylex.createTheme(motionVars, {
   fast: '150ms', standard: '200ms', reveal: '600ms', spin: '1s', pulse: '2s',
-  ease: 'ease', linear: 'linear',
+  ease: 'ease', linear: 'linear', surfaceTransform: 'scale(0.98)',
 })
 
 const elevationVarsTheme = stylex.createTheme(elevationVars, {

@@ -22,7 +22,7 @@ Do not add a heading, list markers, or other lines.
 
 Run `bash verify.sh` after you write the result. Correct the result until the verifier passes.
 
-Before you inspect `inventory.json` or write `RESULT.md`, publish the complete execution mission to st3.
+Before you inspect `inventory.json` or write `RESULT.md`, publish the complete execution mission to Small Talk.
 Publish one ready mission with ID `eval/mission-document-lift/work`.
 
 The KDL file must start with `version 2`. Put the mission directly after the version declaration.
@@ -50,5 +50,5 @@ produces {
 Its goal must tell the worker to run this exact command after the verifier passes:
 
 ```sh
-st3 claim resource/${ROOT_ST_MISSION_RUN}/mission-result resource.observed --field kind=custom.st3.document-result --field state=published
+st claim resource/${ROOT_ST_MISSION_RUN}/mission-result resource.observed --field kind=custom.st3.document-result --field state=published
 ```

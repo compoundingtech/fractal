@@ -1,4 +1,4 @@
-// From compoundingtech/smalltalk#1641, commit 4f74464e0b22ea889a09d9271d076c3c6fd85df8.
+// From compoundingtech/fractal#1641, commit 4f74464e0b22ea889a09d9271d076c3c6fd85df8.
 export interface DebugBag { [key: string]: number }
 export interface Counters {
   readonly getDebug: (key: string) => number
@@ -21,4 +21,3 @@ export const createCounters = (): Counters => {
 }
 export const counters = createCounters()
 export const { getDebug, setDebug, incrDebug } = counters
-export const incrDebugRuntime = incrDebug

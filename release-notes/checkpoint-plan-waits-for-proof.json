@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "st replication checkpoint plan waits for a running checkpoint proof instead of failing, and refuses with a retryable checkpoint-proof-in-progress when it runs too long",
+  "replay": {"status": "none", "detail": "No replay or projection changes; the plan captures, plans and proves exactly as before."},
+  "schema": {"status": "none", "detail": "No database, claim kind or schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged; members may upgrade in any order."},
+  "compatibility": {"status": "changed", "detail": "POST /v1/checkpoint/plan now waits up to 60 s while another checkpoint proof owns the scratch lock, then answers HTTP 503 with the new code checkpoint-proof-in-progress instead of 500 internal. st replication checkpoint plan asks again for up to four more minutes and prints one waiting line to stderr. The route is not part of client-v0, so no generated client changes. The daemon's scheduled checkpoint never waits on a plan."},
+  "downtime": {"status": "none", "detail": "A daemon restart to install the build; no additional startup work."},
+  "manual": {"status": "none", "detail": "Nothing to configure. Scripts that matched the 500 message may match the checkpoint-proof-in-progress code instead."},
+  "recovery": {"status": "none", "detail": "Swap back to the previous binary freely; nothing is persisted."}
+}

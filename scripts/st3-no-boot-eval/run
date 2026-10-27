@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Prove that st starts a seat idle. One fresh isolated daemon starts a seat for every named
 # harness in a Git workspace that still holds what older releases rendered: a `.st3/boot.md` and
 # a `.st3/` line in the Git exclude file. For each seat the eval requires that:
@@ -61,7 +62,8 @@ harness_block() {
 
 root="$(mktemp -d /tmp/nbe.XXXXXX)"
 socket="$root/st3.sock"
-st3() { ST3_ENDPOINT="$socket" ST3_DAEMON_WAIT="${ST3_DAEMON_WAIT:-60}" "$root/bin/st3" "$@"; }
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+st3() { FRACTAL_ENDPOINT="$socket" ST3_ENDPOINT="$socket" FRACTAL_DAEMON_WAIT="${FRACTAL_DAEMON_WAIT-${ST3_DAEMON_WAIT:-60}}" ST3_DAEMON_WAIT="${FRACTAL_DAEMON_WAIT-${ST3_DAEMON_WAIT:-60}}" "$root/bin/st3" "$@"; }
 
 # transcripts HARNESS: every native transcript file the seat has written, one per line. A restart
 # can resume the same file or start another, so the checks count across all of them.
@@ -171,7 +173,8 @@ env -i HOME="$HOME" USER="$USER" LOGNAME="$USER" SHELL="$SHELL" LANG="${LANG:-C.
   >>"$root/daemon.log" 2>&1 </dev/null &
 echo $! >"$root/daemon.pid"
 for _ in $(seq 1 300); do
-  ST3_DAEMON_WAIT=0 st3 conversations ls person/eval --json >/dev/null 2>&1 && break
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  FRACTAL_DAEMON_WAIT=0 ST3_DAEMON_WAIT=0 st3 conversations ls person/eval --json >/dev/null 2>&1 && break
   sleep 0.2
 done
 
@@ -192,7 +195,7 @@ done
 } >"$root/seats.kdl"
 cp "$root/seats.kdl" "$out/evidence/seats.kdl"
 started_at=$(now_ms)
-st3 agents apply "$root/seats.kdl" --as person/eval >"$out/evidence/apply.txt"
+st3 apply "$root/seats.kdl" --no-gate-check --as person/eval >"$out/evidence/apply.txt"
 
 declare -A idle_ok start_turns start_working st3_left exclude_left skill_ok
 for harness in "${harnesses[@]}"; do
@@ -228,7 +231,7 @@ done
   echo '}'
 } >"$root/mission.kdl"
 cp "$root/mission.kdl" "$out/evidence/mission.kdl"
-st3 missions publish "$root/mission.kdl" --as person/eval >"$out/evidence/publish.txt"
+st3 apply "$root/mission.kdl" --as person/eval >"$out/evidence/publish.txt"
 st3 --json missions start eval/no-boot --id nb --workspace "$root/ws" --as person/eval >"$out/evidence/start.json"
 declare -A message
 for harness in "${harnesses[@]}"; do
@@ -263,9 +266,21 @@ for harness in "${harnesses[@]}"; do
   old="$(agent_json "$harness" | jq -r '.value.incarnation_id // empty')"
   before_restart[$harness]="$(turn_entries "$harness")"
   for proc in /proc/[0-9]*; do
-    { tr '\0' '\n' <"$proc/environ"; } 2>/dev/null | grep -qxF "ST_AGENT=agent/nb.$harness" || continue
+    # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    { tr '\0' '\n' <"$proc/environ"; } 2>/dev/null | awk -v identity="agent/nb.$harness" '
+      /^FRACTAL_AGENT=/ { preferred_set = 1; preferred = substr($0, 15) }
+      /^ST_AGENT=/ { legacy_set = 1; legacy = substr($0, 10) }
+      END {
+        if (preferred_set && preferred != "" && legacy_set && preferred != legacy) {
+          print "conflicting identity environment: FRACTAL_AGENT and ST_AGENT" > "/dev/stderr"
+          exit 1
+        }
+        exit ((preferred_set ? preferred : legacy) != identity)
+      }
+    ' || continue
     { tr '\0' ' ' <"$proc/cmdline"; } 2>/dev/null | grep -q " driver $harness " || continue
-    kill -TERM "${proc#/proc/}" 2>/dev/null || true
+    python3 "$repo/scripts/script_process.py" "${proc#/proc/}" 15 \
+      --endpoint "$socket" --contains " driver $harness "
   done
   restarted_at[$harness]=$(now_ms)
   if wait_idle "$harness" "$old"; then restart_ok[$harness]=1; else restart_ok[$harness]=0; fi

@@ -5,7 +5,8 @@ import {
   Revision,
   decodeUnknownSync,
   type AgentEncoded,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
+import { openAgent, type DecodedAgent } from '@fractal/sdk/effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
@@ -13,13 +14,7 @@ import { flushSync } from 'react-dom'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
 // Node tests stub only the CSS runtime; render identity and feed equality are under test.
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
-  props: () => ({}),
-}))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 import { sameFolderFleet } from '../shell/AgentFolders.tsx'
 import { useAgentAttentionCounts } from '../shell/AgentAttention.tsx'
@@ -30,7 +25,7 @@ import { createProjections } from './projections.ts'
 import { DataSourceProvider, useAgent, useFleetSelection, useTerminalConnected } from './react.tsx'
 import { type Feed, type Fleet, observed } from './source.ts'
 
-const first = decodeUnknownSync(
+const firstRow = decodeUnknownSync(
   Agent,
   'strict',
 )({
@@ -47,7 +42,9 @@ const first = decodeUnknownSync(
   revision: '1',
   updated_at: '2026-10-04T12:00:00.000Z',
 } satisfies AgentEncoded)
-const second: Agent = { ...first, id: 'agent/second', name: 'Second' }
+const secondRow: Agent = { ...firstRow, id: 'agent/second', name: 'Second' }
+const first = openAgent(firstRow)
+const second = openAgent(secondRow)
 const card = decodeUnknownSync(Attention)({
   kind: 'attention',
   id: 'attention/second',
@@ -58,7 +55,7 @@ const card = decodeUnknownSync(Attention)({
   detail: 'Independent request',
   priority: 'normal',
   state: 'open',
-  actions: [],
+  actions: ['work.done'],
   revision: '1',
   requested_at: '2026-10-04T12:00:00.000Z',
   updated_at: '2026-10-04T12:00:00.000Z',
@@ -66,7 +63,7 @@ const card = decodeUnknownSync(Attention)({
 const world: FixtureProjections = {
   now: 0,
   events: [],
-  agents: [first, second],
+  agents: [firstRow, secondRow],
   missions: [],
   attention: [],
   conversations: {},
@@ -80,7 +77,7 @@ const equalManualFleet = (left: Feed<Fleet>, right: Feed<Fleet>) =>
 
 it('updates only the changed row, not the manual collection, opened agent or terminal', () => {
   const registry = AtomRegistry.make()
-  const agents = Atom.make<Feed<readonly Agent[]>>(observed({ value: world.agents })).pipe(
+  const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [first, second] })).pipe(
     Atom.keepAlive,
   )
   const attention = Atom.make<Feed<readonly Attention[]>>(observed({ value: [] })).pipe(
@@ -133,7 +130,7 @@ it('updates only the changed row, not the manual collection, opened agent or ter
   try {
     render(first.id)
     const before = { ...renders }
-    const changed: Agent = {
+    const changed: DecodedAgent = {
       ...second,
       name: 'Renamed second',
       revision: decodeUnknownSync(Revision)('2'),
@@ -144,8 +141,8 @@ it('updates only the changed row, not the manual collection, opened agent or ter
     flushSync(() => registry.set(attention, observed({ value: [card] })))
     expect(renders).toEqual({ ...afterAgent, second: afterAgent.second + 1 })
     const beforeMetadata = { ...renders }
-    const freshFirst: Agent = { ...first, revision: decodeUnknownSync(Revision)('3') }
-    const freshSecond: Agent = { ...changed, revision: decodeUnknownSync(Revision)('3') }
+    const freshFirst: DecodedAgent = { ...first, revision: decodeUnknownSync(Revision)('3') }
+    const freshSecond: DecodedAgent = { ...changed, revision: decodeUnknownSync(Revision)('3') }
     flushSync(() => registry.set(agents, observed({ value: [freshFirst, freshSecond] })))
     flushSync(() =>
       registry.set(
@@ -229,7 +226,7 @@ it('invalidates folder membership/order only for active filter dependencies', ()
     },
   })
   expect(sameFolderFleet(left, right, defaultFilters)).toBe(true)
-  expect(sameFolderFleet(left, right, { ...defaultFilters, needsMe: true })).toBe(false)
+  expect(sameFolderFleet(left, right, { ...defaultFilters, hideEnded: true })).toBe(false)
   expect(sameFolderFleet(left, right, { ...defaultFilters, query: 'Changed' })).toBe(false)
   expect(sameFolderFleet(left, right, { ...defaultFilters, sort: 'activity' })).toBe(false)
   expect(sameFolderFleet(left, right, { ...defaultFilters, sort: 'status' })).toBe(false)
@@ -242,4 +239,19 @@ it('invalidates folder membership/order only for active filter dependencies', ()
       statuses: ['idle'],
     }),
   ).toBe(false)
+})
+
+it('invalidates folder membership when a fact read by an active facet changes', () => {
+  const fleet = createProjections().fleetFromAgents([first, second])
+  const left = observed({ value: fleet })
+  const agent = fleet.agents[0]!
+  const retooled = observed<Fleet>({ value: { ...fleet, agents: [{ ...agent, harness: 'codex' }, fleet.agents[1]!] } })
+  const moved = observed<Fleet>({ value: { ...fleet, agents: [{ ...agent, checkout: { _tag: 'Known', value: { repository: 'example/other', base: 'main', branch: 'feature' } } }, fleet.agents[1]!] } })
+  const finished = observed({ value: { ...fleet, agents: [{ ...agent, state: 'done' }, fleet.agents[1]!] } })
+  expect(sameFolderFleet(left, retooled, { ...defaultFilters, query: 'tool:omp' })).toBe(false)
+  expect(sameFolderFleet(left, retooled, { ...defaultFilters, query: 'repo:example' })).toBe(true)
+  expect(sameFolderFleet(left, moved, { ...defaultFilters, query: 'repo:example' })).toBe(false)
+  expect(sameFolderFleet(left, finished, { ...defaultFilters, query: 'state:done' })).toBe(false)
+  expect(sameFolderFleet(left, finished, { ...defaultFilters, hideEnded: true })).toBe(false)
+  expect(sameFolderFleet(left, finished, defaultFilters)).toBe(true)
 })

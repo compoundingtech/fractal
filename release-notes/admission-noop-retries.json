@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Replication admission no longer rewrites unchanged envelope receipts or record classifications when retrying validation, reducing SQLite work for backlogs with unknown claims.",
+  "replay": {"status": "none", "detail": "Admission classifications and repaired-record behavior are unchanged."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Record updated_at_unix_ms advances on semantic changes rather than identical validation retries. No consumer uses it as a last-attempt clock."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

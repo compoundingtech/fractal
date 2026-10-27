@@ -8,7 +8,7 @@ import {
   syncStatusFromFreshness,
   type FollowFreshness,
   type SyncStatus,
-} from '@st3/sdk/effect'
+} from '@fractal/sdk/effect'
 
 import { initialFeedSync, observeFeedSync, transitionFeedSync } from './feedSync.ts'
 
