@@ -86,16 +86,16 @@ fn scenarios_decode_every_committed_slice() {
 #[test]
 fn scenarios_declared_mode_is_enforced_without_repairing_wire_values() {
     let mut slice = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
-    slice.state["agents"][0]["state"] = Value::String("future-scenario-state".into());
+    slice.state["agents"][0]["state"] = Value::String("reconciling".into());
     assert!(slice.decode().is_err(), "strict must reject unknown enum strings");
     slice.decode = DecodeMode::Tolerant;
     let values = slice.decode().unwrap();
     let agent = values.iter().find(|value| value.pointer == "/state/agents/0").unwrap();
     let WireValue::Resource(fractal_client::Resource::Agent(agent)) = &agent.value else { panic!("expected typed agent") };
-    assert_eq!(agent.state, "future-scenario-state");
+    assert_eq!(agent.state, "reconciling");
 
     let mut slice = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
-    slice.state["agents"][0]["future_scenario_field"] = Value::Bool(true);
+    slice.state["agents"][0]["protocol_features"] = serde_json::json!(["future-protocol"]);
     assert!(slice.decode().is_err(), "strict must reject extra keys");
     slice.decode = DecodeMode::Tolerant;
     assert!(slice.decode().is_ok());
