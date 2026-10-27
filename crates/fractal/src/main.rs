@@ -10224,7 +10224,7 @@ fn timeline_entries_text(session_id: &str, items: &[ClientTimelineEntry]) -> Str
 
 fn unseen_timeline_entries(
     entries: &[ClientTimelineEntry],
-    seen: &mut BTreeMap<String, (u32, u64)>,
+    seen: &mut BTreeMap<String, (u64, u64)>,
 ) -> Vec<ClientTimelineEntry> {
     let mut changed = Vec::new();
     for entry in entries {

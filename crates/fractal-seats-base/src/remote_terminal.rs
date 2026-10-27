@@ -64,10 +64,11 @@ impl Painter {
         let shown = screen.rows.min(local_rows);
         // A taller remote screen shows its top rows while they hold the cursor, and otherwise its
         // bottom rows, moving up only as far as the cursor.
-        let first_row = if screen.cursor.row < shown {
-            0
-        } else {
-            (screen.rows - shown).min(screen.cursor.row)
+        let cursor_row = usize::try_from(screen.cursor.row).ok();
+        let first_row = match cursor_row {
+            Some(row) if row < shown => 0,
+            Some(row) => (screen.rows - shown).min(row),
+            None => screen.rows - shown,
         };
         let mut rows = vec![String::new(); shown];
         for line in &screen.lines {
@@ -86,7 +87,11 @@ impl Painter {
             let _ = write!(out, "\x1b[{};1H\x1b[0m\x1b[J", shown + 1);
         }
         let cursor = &screen.cursor;
-        if cursor.visible {
+        if cursor.visible
+            && let Some(row) = cursor_row.filter(|row| *row < screen.rows)
+            && let Ok(column) = usize::try_from(cursor.column)
+            && column < screen.columns
+        {
             let style = match (cursor.style, cursor.blinking) {
                 (TerminalCursorStyle::Block, true) => 1,
                 (TerminalCursorStyle::Block, false) => 2,
@@ -99,8 +104,8 @@ impl Painter {
             let _ = write!(
                 out,
                 "\x1b[{};{}H\x1b[{style} q\x1b[?25h",
-                cursor.row - first_row + 1,
-                cursor.column + 1
+                row - first_row + 1,
+                column + 1
             );
         }
         out.push_str("\x1b[?7h\x1b[?2026l");

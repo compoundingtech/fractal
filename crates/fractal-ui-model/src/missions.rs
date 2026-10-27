@@ -117,7 +117,7 @@ pub struct Step {
     pub goals: Vec<String>,
     pub constraints: Vec<String>,
     pub gates: Vec<String>,
-    pub attempt: u32,
+    pub attempt: u64,
     pub blockers: Vec<String>,
 }
 

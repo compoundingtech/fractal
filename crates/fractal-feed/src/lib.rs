@@ -127,7 +127,7 @@ impl Window {
 }
 
 /// The glasses capability version whose glasses are splits of tab groups.
-const GLASSES_VERSION: u32 = 1;
+const GLASSES_VERSION: u64 = 1;
 
 /// The most glasses st keeps live for one person.
 const GLASSES: usize = 100;
@@ -145,7 +145,7 @@ pub enum Update {
     Degraded(String),
     /// The granted glasses shape, delivered before its window. The embedding UI chooses how
     /// to store glasses for this version; the feed owns no application state.
-    GlassesVersion(u32),
+    GlassesVersion(u64),
     /// Optional inventory admission and the member build, discovered once per connection.
     InventorySupport { granted: bool, member_build: Option<String> },
     /// A window's current items, in st's display order.
