@@ -6,7 +6,7 @@ import { HarnessNotice } from './assistant-ui/composition/HarnessNotice'
 import { Button } from './assistant-ui/composition/Controls'
 import { UnsupportedRecord } from './assistant-ui/composition/UnsupportedRecord'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
-import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel, compareBackgroundJobStates, type BackgroundJobState, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessWeight } from './assistant-ui/embrace-data/model'
+import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel, orderBackgroundJobs, type BackgroundJobState, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessWeight } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
@@ -45,12 +45,34 @@ export const scenarioExemptions: readonly string[] = [
 ]
 type Story = StoryObj<typeof meta>
 
+const assertFirstLineAccessories = async (notice: HTMLElement, wrapped = false) => {
+  const label = within(notice).getByTestId('harness-title')
+  const accessories = [notice.querySelector('svg')!, within(notice).getByTestId('harness-kind')]
+  // Hidden or collapsed boxes must fail before any position comparison.
+  for (const element of [label, ...accessories]) {
+    await expect(element).toBeVisible()
+    const box = element.getBoundingClientRect()
+    await expect(box.width).toBeGreaterThan(0)
+    await expect(box.height).toBeGreaterThan(0)
+  }
+  const labelBox = label.getBoundingClientRect()
+  const lineHeight = parseFloat(getComputedStyle(label).lineHeight)
+  await expect(lineHeight).toBeGreaterThan(0)
+  if (wrapped) await expect(labelBox.height).toBeGreaterThanOrEqual(2 * lineHeight)
+  const firstLineCentre = labelBox.top + lineHeight / 2
+  for (const accessory of accessories) {
+    const box = accessory.getBoundingClientRect()
+    await expect(Math.abs(box.top + box.height / 2 - firstLineCentre)).toBeLessThanOrEqual(1)
+  }
+}
+
 export const Dark: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     for (const weight of ['row', 'card']) {
       const column = within(canvas.getByTestId(`harness-weight-${weight}`))
       await expect(column.getAllByTestId('harness-notice')).toHaveLength(harnessWeightExamples.length)
+      for (const notice of column.getAllByTestId('harness-notice')) await assertFirstLineAccessories(notice)
       const failedJob = column.getAllByTestId('harness-notice').find(node => node.dataset.itemId === 'weight/failed-job')!
       await expect(within(failedJob).getByTestId('harness-kind')).toHaveTextContent('failed')
       const completedJob = column.getAllByTestId('harness-notice').find(node => node.dataset.itemId === 'weight/job')!
@@ -144,7 +166,7 @@ const mixedArrival: readonly { readonly name: string; readonly state: Background
 const mixedSummary = '5 background jobs · 1 failed, 1 running, 1 cancelled, 1 status not reported, 1 completed'
 const jobGroup = (id: string, jobs: typeof mixedArrival): NoticeItem => {
   const outcomes = backgroundJobOutcomeCounts(jobs.map(job => job.state))
-  const orderedJobs = [...jobs].sort((a, b) => compareBackgroundJobStates(a.state, b.state))
+  const orderedJobs = orderBackgroundJobs(jobs, job => job.state)
   return { _tag: 'Event', id, kind: 'background-job', title: `${jobs.length} background jobs · ${backgroundJobOutcomeSummary(outcomes)}`, text: orderedJobs.map(job => job.name).join('\n'), sender: omp, data: {},
     notice: { _tag: 'BackgroundJobGroup', outcomes, payload: orderedJobs.map(job => `- ${job.name}: ${backgroundJobStateLabel(job.state)}`).join('\n'), raw: '' } }
 }
@@ -161,11 +183,11 @@ const outcomeRows = (reversed: boolean): readonly NoticeItem[] => [
 /** Grouped and single outcomes share one language: only failure is red with an alert, only completion earns a check. */
 function MixedJobOutcomes({ scheme, width }: { readonly scheme: Scheme; readonly width: 'narrow' | 'wide' }) {
   const [reversed, setReversed] = React.useState(false)
-  return <section aria-label="Mixed job outcomes" data-scheme={scheme} {...stylex.props(styles.root, width === 'narrow' ? styles.narrow : styles.wide, ...baselineTheme, scheme === 'light' && lightTheme)}>
+  return <section aria-label="Mixed job outcomes" data-scheme={scheme} {...stylex.props(styles.root, width === 'narrow' ? styles.narrow : styles.wide, styles.mixedRoot, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <div {...stylex.props(styles.controls)}><Button variant="outline" onPress={() => setReversed(value => !value)}>Reverse arrival order</Button></div>
     {variants.map(({ weight, name }) => <section key={weight} aria-label={name} data-testid={`mixed-outcomes-${weight}`} {...stylex.props(styles.column)}>
       <h2 {...stylex.props(styles.title)}>{name}</h2>
-      {outcomeRows(reversed).map(item => <HarnessNotice key={item.id} weight={weight} item={item} />)}
+      {outcomeRows(reversed).map(item => <div key={item.id} {...stylex.props(item.id === 'mixed/failed-group' && styles.forcedWrap)}><HarnessNotice weight={weight} item={item} /></div>)}
     </section>)}
   </section>
 }
@@ -184,14 +206,7 @@ const mixedOutcomes = (scheme: Scheme, width: 'narrow' | 'wide'): Story => ({
       const group = row(weight, 'mixed/failed-group')
       await expect(group).toHaveTextContent(mixedSummary)
       await expect(within(group).getByTestId('harness-excerpt')).toHaveTextContent(/^Browser checks Type check Migration dry run Lint Docs build$/)
-      const header = group.firstElementChild!
-      await expect(getComputedStyle(header).alignItems).toBe('baseline')
-      const label = header.querySelector('span')!
-      const firstLineBottom = label.getBoundingClientRect().top + parseFloat(getComputedStyle(label).lineHeight)
-      // Both accessories stay within the first text line even when the title wraps.
-      for (const accessory of [header.querySelector('svg')!, pill(weight, 'mixed/failed-group')]) {
-        await expect(accessory.getBoundingClientRect().bottom).toBeLessThanOrEqual(firstLineBottom + 1)
-      }
+      await assertFirstLineAccessories(group, true)
       await expect(pill(weight, 'mixed/failed-group')).toHaveTextContent('failed')
       await expect(icon(weight, 'mixed/failed-group')).toBe(alertPath)
       const neutral = getComputedStyle(pill(weight, 'mixed/quiet-group')).color
@@ -228,6 +243,8 @@ export const MixedJobOutcomesLight440: Story = mixedOutcomes('light', 'narrow')
 
 const styles = stylex.create({
   root: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(22rem, 1fr))', gap: s.section, minHeight: '100vh', padding: s.section, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
+  mixedRoot: { gridTemplateColumns: 'repeat(auto-fit, minmax(min(22rem, 100%), 1fr))', maxWidth: '100%', boxSizing: 'border-box' },
+  forcedWrap: { maxWidth: '18rem' },
   wide: { width: g.polishWide, maxWidth: '100%' },
   narrow: { width: g.polishNarrow },
   controls: { gridColumn: '1 / -1' },
