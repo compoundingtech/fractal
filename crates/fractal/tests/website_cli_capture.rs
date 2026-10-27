@@ -244,76 +244,20 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
             "changelogs-progress",
             "vitest and zod are minor. Parser 3.0 drops the old flag syntax.",
         );
-        // The maintainer runs Codex, working, so the TUI shows its conversation (with
-        // "Conversation first" on): its native Codex session, merged with its messages. Like a
-        // managed Codex agent, its driver state binds the runtime's provider incarnation to the
-        // native thread, and the session file is the conversation's source.
-        let incarnation = format!("{maintainer}:1");
-        let provider_incarnation = "codex:maintainer-1";
-        let native_id = "website-app-maintainer";
-        let home = dir.join("home");
-        let _ = std::fs::remove_dir_all(&home);
-        let now = chrono::Utc::now();
-        let transcript = home
-            .join(".codex/sessions")
-            .join(now.format("%Y/%m/%d").to_string())
-            .join(format!("rollout-{native_id}.jsonl"));
-        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
-        std::fs::write(
-            &transcript,
-            format!(
-                "{}\n",
-                json!({"type": "session_meta", "timestamp": now.to_rfc3339(),
-                       "payload": {"id": native_id, "cwd": "/work/app", "source": "test"}})
-            ),
-        )
-        .unwrap();
-        let driver = dir
-            .join("drivers")
-            .join(&hex::encode(Sha256::digest(maintainer.as_bytes()))[..24])
-            .join("state");
+        // Both agents run Codex and are working. The TUI shows the maintainer's conversation (with
+        // "Conversation first" on): its native Codex session, merged with its messages.
+        let _ = std::fs::remove_dir_all(dir.join("home"));
         let _ = std::fs::remove_dir_all(dir.join("drivers"));
-        std::fs::create_dir_all(&driver).unwrap();
-        let agent = maintainer.trim_start_matches("agent/");
-        std::fs::write(
-            driver.join("runtime.json"),
-            json!({"agent": agent, "incarnation": provider_incarnation}).to_string(),
-        )
-        .unwrap();
-        std::fs::write(
-            driver.join("binding.json"),
-            json!({"agent": agent, "runtimeIncarnation": provider_incarnation, "threadId": native_id})
-                .to_string(),
-        )
-        .unwrap();
-        for (kind, fields) in [
-            (
-                "runtime.observed",
-                json!({"status": "running", "runtime_id": "maintainer-runtime",
-                       "incarnation_id": incarnation, "terminal": false}),
-            ),
-            (
-                "harness.observed",
-                json!({"state": "working", "driver": "codex", "incarnation_id": incarnation,
-                       "evidence_incarnation": provider_incarnation}),
-            ),
-        ] {
-            store
-                .append_claim(&ClaimInput {
-                    subject: maintainer.clone(),
-                    kind: kind.into(),
-                    actor: Some(maintainer.clone()),
-                    fields: serde_json::from_value(fields).unwrap(),
-                    evidence: Vec::new(),
-                    expected_subject: None,
-                    idempotency_key: Some(format!("maintainer-{kind}")),
-                })
-                .unwrap();
-        }
-        let mut entries = CodexSession {
-            path: transcript,
-            calls: 0,
-        };
+        let mut notes = CodexSession::working(&store, &dir, &reviewer);
+        notes.say(
+            "user",
+            "Mission app/update-deps, step changelogs: read the changelogs of every update.",
+        );
+        notes.shell(
+            "gh release view v3.0.0 -R acme/parser",
+            Some("Breaking: `--flag=value` is gone. Pass `--flag value`."),
+        );
+        let mut entries = CodexSession::working(&store, &dir, &maintainer);
         entries.say(
             "user",
             "Mission app/update-deps, step update: a deps PR with CI green.",
@@ -485,7 +429,24 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         );
     }
     println!("CAPTURE READY {}", socket.display());
+    let mut beat = std::time::Instant::now() - std::time::Duration::from_secs(60);
     while !dir.join("stop").exists() {
+        // The app seed's agents are working Codex sessions. A real one's delivery process polls
+        // its mailbox and reports itself every few seconds. Without that the daemon calls the
+        // agent's message path stopped and the TUI shows it broken.
+        if app && beat.elapsed() > std::time::Duration::from_secs(10) {
+            let report = json!({
+                "transport": "app-server",
+                "pid": std::process::id(),
+                "image": fractal_drivers::reexec::running_identity().map(|identity| identity.token()),
+                "ready": true,
+            })
+            .to_string();
+            for agent in ["agent/app/maintainer", "agent/app/reviewer"] {
+                fractal_daemon::delivery_presence::record(agent, &report);
+            }
+            beat = std::time::Instant::now();
+        }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
     server.abort();
@@ -521,6 +482,72 @@ struct CodexSession {
 }
 
 impl CodexSession {
+    /// Seeds `agent` as a managed Codex agent that is working: its runtime and harness
+    /// observations, the driver state binding its provider incarnation to the native thread, and
+    /// the native session file, which is the conversation's source. Returns that session.
+    fn working(store: &Store, dir: &Path, agent: &str) -> Self {
+        let name = agent.trim_start_matches("agent/");
+        let incarnation = format!("{agent}:1");
+        let provider_incarnation = format!("codex:{name}:1");
+        let native_id = format!("website-{}", name.replace('/', "-"));
+        let now = chrono::Utc::now();
+        let path = dir
+            .join("home/.codex/sessions")
+            .join(now.format("%Y/%m/%d").to_string())
+            .join(format!("rollout-{native_id}.jsonl"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type": "session_meta", "timestamp": now.to_rfc3339(),
+                       "payload": {"id": native_id, "cwd": "/work/app", "source": "test"}})
+            ),
+        )
+        .unwrap();
+        let driver = dir
+            .join("drivers")
+            .join(&hex::encode(Sha256::digest(agent.as_bytes()))[..24])
+            .join("state");
+        std::fs::create_dir_all(&driver).unwrap();
+        std::fs::write(
+            driver.join("runtime.json"),
+            json!({"agent": name, "incarnation": provider_incarnation}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            driver.join("binding.json"),
+            json!({"agent": name, "runtimeIncarnation": provider_incarnation, "threadId": native_id})
+                .to_string(),
+        )
+        .unwrap();
+        for (kind, fields) in [
+            (
+                "runtime.observed",
+                json!({"status": "running", "runtime_id": format!("{name}-runtime"),
+                       "incarnation_id": incarnation, "terminal": false}),
+            ),
+            (
+                "harness.observed",
+                json!({"state": "working", "driver": "codex", "incarnation_id": incarnation,
+                       "evidence_incarnation": provider_incarnation}),
+            ),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: agent.into(),
+                    kind: kind.into(),
+                    actor: Some(agent.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("{agent}:{kind}")),
+                })
+                .unwrap();
+        }
+        CodexSession { path, calls: 0 }
+    }
+
     fn append(&mut self, payload: Value) {
         use std::io::Write as _;
         let record = json!({
