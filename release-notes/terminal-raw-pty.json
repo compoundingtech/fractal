@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Visible terminal panes use st3.client.pty.v0 WebSockets for output. ATTACH sends typing, paste and element-driven size votes; PEEK sends no DATA, RESIZE or RESET. Failed ATTACH falls back to PEEK and ordered gateway input, while failed PEEK or emulator loading falls back to the projected screen. Explicit gateway resize remains available without ATTACH. The keyboard strip is replaced by direct terminal focus. Hidden or unloaded pages close input sessions and drop queued keys; typing resumes only after a fresh focus or click gesture."
+    "detail": "Visible terminal panes use st3.client.pty.v0 WebSockets for output. ATTACH sends typing, paste and element-driven size votes; PEEK sends no DATA, RESIZE or RESET, and renews its selected-use lease only while the pane and page are foreground-selected. Failed ATTACH falls back to PEEK and ordered gateway input, while failed PEEK or emulator loading falls back to the projected screen. Explicit gateway resize remains available without ATTACH. The keyboard strip is replaced by direct terminal focus. Hidden or unloaded pages synchronously release writable attachments and their size votes, close input sessions and drop queued keys; restored focus alone cannot rearm typing, which requires a fresh user gesture."
   },
   "downtime": {
     "status": "none",

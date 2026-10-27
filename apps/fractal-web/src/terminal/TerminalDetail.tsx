@@ -12,7 +12,7 @@ import type { NativeSubjectProps } from '../resources/react.tsx'
 import { DomTerminal } from './DomTerminal.tsx'
 import { unavailableTerminalHistory } from './historySource.ts'
 import { defaultTerminalPalette } from './palette.ts'
-import { rawTyping, TerminalSurface, useRawTerminal, type TerminalTyping } from './RawTerminal.tsx'
+import { TerminalSurface, useRawTerminal, type TerminalTyping } from './RawTerminal.tsx'
 import {
   rawModeFor,
   terminalChip,
@@ -134,7 +134,8 @@ export const TerminalDetail = React.memo(
         ? { _tag: 'ReadOnly', reason: encoder.message }
         : decided
     // After a page hide the focused field still waits for a click, so the chip must not say Typing.
-    const chip = terminalChip({ raw: raw.preparation, presentation, input, typing: typing && !(input._tag === 'Gateway' && gateway.disarmed) })
+    const disarmed = input._tag === 'Gateway' ? gateway.disarmed : input._tag === 'Attach' && raw.disarmed
+    const chip = terminalChip({ raw: raw.preparation, presentation, input, typing: typing && !disarmed })
     const controls = (
       <>
         <Badge variant={chipVariant[chip.tone]} size="sm" role="status" data-terminal-mode={presentation._tag} data-terminal-input-path={input._tag}>
@@ -173,7 +174,7 @@ export const TerminalDetail = React.memo(
               : 'stale'
       const sink: TerminalTyping | undefined =
         input._tag === 'Attach'
-          ? rawTyping(handle)
+          ? raw.typing
           : input._tag === 'Gateway'
             ? { encoder: handle.encoder, modes: () => handle.terminal.modes(), ...gateway }
             : undefined

@@ -258,14 +258,14 @@ export const ptyFallback = (state: PtyState): { readonly reason: 'refused' | 'fa
 /** Minimal browser socket boundary for injectable transports. */
 export interface PtySocket {
   binaryType: string
-  send(data: ArrayBuffer): void
+  send(data: ArrayBuffer | string): void
   close(code?: number, reason?: string): void
   onopen: ((event: unknown) => void) | null
   onmessage: ((event: { readonly data: unknown }) => void) | null
   onclose: ((event: { readonly code: number; readonly reason: string }) => void) | null
   onerror: ((event: unknown) => void) | null
 }
-/** Construct a binary socket with the required capability subprotocols. */
+/** Construct a raw-terminal socket with binary PTY frames and out-of-band text controls. */
 export type PtySocketFactory = (url: string, protocols: ReadonlyArray<string>) => PtySocket
 /** The browser WebSocket behind the minimal socket boundary. */
 const browserSocket: PtySocketFactory = (url, protocols) => {
@@ -292,7 +292,7 @@ export type PtyOutput = { _tag: 'Screen'; bytes: Uint8Array } | { _tag: 'Data'; 
 export interface PtySession {
   readonly mode: PtyMode
   readonly state: SubscriptionRef.SubscriptionRef<PtyState>
-  /** Send DATA only while a live ATTACH; input is never retained for a retry. A PEEK sends nothing. */
+  /** Send DATA only while a live ATTACH; input is never retained for a retry. A PEEK never sends DATA. */
   readonly send: (bytes: Uint8Array) => boolean
   /** Remember the next attach size and resize a live ATTACH immediately. A PEEK has no size vote. */
   readonly resize: (size: PtySize) => void
@@ -300,7 +300,7 @@ export interface PtySession {
   readonly resetInputModes: () => boolean
 }
 
-/** Run fresh-capability reconnects for the lifetime of the caller's scope. */
+/** Run fresh-capability reconnects until the caller's scope closes or its pane signal aborts. */
 export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
   readonly baseUrl: string
   readonly target: PtyTarget
@@ -308,6 +308,10 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
   /** The ATTACH size; a PEEK only watches the shared geometry. */
   readonly size: PtySize
   readonly onOutput: (output: PtyOutput) => void
+  /** Renew PEEK observation only while selected in the foreground. Omitted means no renewal. */
+  readonly isForegroundSelected?: () => boolean
+  /** Synchronously release the attachment and observation lease when the pane is hidden. */
+  readonly signal?: AbortSignal
   readonly fetch?: typeof fetch
   readonly socket?: PtySocketFactory
   readonly maxAttempts?: number
@@ -321,6 +325,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
   let liveSocket: PtySocket | undefined
   let writable = false
   let disposed = false
+  let closeLiveAttempt = () => {}
   const transition = (event: PtyEvent) => {
     current = ptyTransition({ state: current, event, ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }) })
     return SubscriptionRef.set(state, current)
@@ -337,6 +342,17 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
       return false
     }
   }
+  const dispose = () => {
+    if (disposed) return
+    disposed = true
+    if (current._tag === 'Live') write({ _tag: 'Detach' })
+    writable = false
+    closeLiveAttempt()
+    liveSocket?.close(1000)
+    Effect.runSync(transition({ _tag: 'Closed' }))
+  }
+  options.signal?.addEventListener('abort', dispose, { once: true })
+  if (options.signal?.aborted === true) dispose()
   const attempt = Effect.fn('st3.pty.connect')(function* () {
     const grant = yield* Effect.result(requestPtyAttachment(options))
     if (Result.isFailure(grant)) {
@@ -358,9 +374,34 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
     socket.binaryType = 'arraybuffer'
     const reader = makePtyFrameReader()
     let ended = false
+    let renewal: NodeJS.Timeout | number | undefined
+    let activitySequence = 0
+    const stopRenewal = () => {
+      clearTimeout(renewal)
+      renewal = undefined
+    }
+    closeLiveAttempt = () => {
+      stopRenewal()
+      Queue.offerUnsafe(events, { _tag: 'Closed' })
+    }
+    // The daemon's 60-second idle lease is renewed out of band, never with writable PTY frames.
+    const renewSelectedUse = () => {
+      renewal = undefined
+      if (ended || disposed) return
+      if (options.isForegroundSelected?.() === true) {
+        try {
+          socket.send(JSON.stringify({ type: 'selected-use', sequence: ++activitySequence }))
+        } catch (cause) {
+          lose(String(cause))
+          return
+        }
+      }
+      renewal = setTimeout(renewSelectedUse, 20_000)
+    }
     const lose = (issue: string) => {
       if (ended || disposed) return
       ended = true
+      stopRenewal()
       writable = false
       Queue.offerUnsafe(events, { _tag: 'SocketLost', issue })
       socket.close()
@@ -371,6 +412,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
         socket.send(encodePtyFrame(attach ? { _tag: 'Attach', ...size } : { _tag: 'Peek', plain: false, full: false }).buffer as ArrayBuffer)
         resizePending = false
         Queue.offerUnsafe(events, { _tag: 'SocketOpened' })
+        if (!attach && options.isForegroundSelected !== undefined) renewSelectedUse()
       } catch (cause) {
         lose(String(cause))
       }
@@ -388,6 +430,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
         if (frame._tag === 'Data' || frame._tag === 'Screen' || frame._tag === 'Geometry' || frame._tag === 'Exit') Queue.offerUnsafe(events, frame)
         if (frame._tag === 'Exit') {
           ended = true
+          stopRenewal()
           writable = false
           socket.close()
           break
@@ -413,6 +456,7 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
         }
       }
     }).pipe(Effect.ensuring(Effect.sync(() => {
+      stopRenewal()
       socket.onopen = null
       socket.onmessage = null
       socket.onclose = null
@@ -431,12 +475,9 @@ export const openPtySession = Effect.fn('st3.pty.session')(function* (options: {
       }
     }
   }), scope)
-  yield* Effect.addFinalizer(() => Effect.gen(function* () {
-    disposed = true
-    if (current._tag === 'Live') write({ _tag: 'Detach' })
-    writable = false
-    liveSocket?.close(1000)
-    yield* transition({ _tag: 'Closed' })
+  yield* Effect.addFinalizer(() => Effect.sync(() => {
+    options.signal?.removeEventListener('abort', dispose)
+    dispose()
   }))
   return {
     mode: options.mode,

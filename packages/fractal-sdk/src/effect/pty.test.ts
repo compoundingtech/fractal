@@ -125,7 +125,7 @@ const settle = Effect.promise(async () => {
 const target = { terminalId: 'terminal/a/b', incarnation: 'runtime/new incarnation' }
 class Gateway {
   readonly requests: { url: string; init: RequestInit | undefined }[] = []
-  readonly sockets: { url: string; protocols: readonly string[]; socket: PtySocket; sent: ArrayBuffer[]; closes: (number | undefined)[] }[] = []
+  readonly sockets: { url: string; protocols: readonly string[]; socket: PtySocket; sent: ArrayBuffer[]; controls: string[]; closes: (number | undefined)[] }[] = []
   readonly fetch: typeof fetch = async (url, init) => {
     this.requests.push({ url: String(url), init })
     const { mode } = JSON.parse(String(init?.body)) as { readonly mode: string }
@@ -133,9 +133,10 @@ class Gateway {
   }
   readonly factory = (url: string, protocols: readonly string[]): PtySocket => {
     const sent: ArrayBuffer[] = []
+    const controls: string[] = []
     const closes: (number | undefined)[] = []
-    const socket: PtySocket = { binaryType: '', onopen: null, onmessage: null, onclose: null, onerror: null, send: data => sent.push(data), close: code => { closes.push(code) } }
-    this.sockets.push({ url, protocols, socket, sent, closes })
+    const socket: PtySocket = { binaryType: '', onopen: null, onmessage: null, onclose: null, onerror: null, send: data => { if (typeof data === 'string') controls.push(data); else sent.push(data) }, close: code => { closes.push(code) } }
+    this.sockets.push({ url, protocols, socket, sent, controls, closes })
     queueMicrotask(() => socket.onopen?.({}))
     return socket
   }
@@ -294,4 +295,155 @@ it.live('a PEEK watches the same byte stream but never writes DATA, RESIZE or RE
   const socket = gateway.sockets[0]!
   expect(read(new Uint8Array(socket.sent.at(-1)!))).toEqual([{ _tag: 'Detach' }])
   expect(socket.closes).toContain(1000)
+}))
+
+it.live('renews a foreground-selected PEEK beyond the idle lease without reconnecting or writing PTY input', () => Effect.gen(function* () {
+  const gateway = new Gateway()
+  yield* Effect.gen(function* () {
+    const session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode: 'peek', size: { rows: 24, cols: 80 }, isForegroundSelected: () => true, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+    yield* settle
+    const socket = gateway.sockets[0]!
+    socket.socket.onmessage?.({ data: encodePtyFrame({ _tag: 'Geometry', rows: 24, cols: 80 }).buffer })
+    yield* settle
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+    expect(socket.controls.map(control => JSON.parse(control))).toEqual(
+      [1, 2, 3, 4, 5].map(sequence => ({ type: 'selected-use', sequence })),
+    )
+    expect(gateway.requests).toHaveLength(1)
+    expect(gateway.sockets).toHaveLength(1)
+    expect(socket.closes).toEqual([])
+    expect((yield* SubscriptionRef.get(session.state))._tag).toBe('Live')
+    expect(session.send(bytes)).toBe(false)
+    session.resize({ rows: 30, cols: 90 })
+    expect(session.resetInputModes()).toBe(false)
+    expect(socket.sent.flatMap(buffer => read(new Uint8Array(buffer)))).toEqual([{ _tag: 'Peek', plain: false, full: false }])
+  }).pipe(Effect.scoped)
+  const socket = gateway.sockets[0]!
+  const count = socket.controls.length
+  yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+  expect(socket.controls).toHaveLength(count)
+  expect(vi.getTimerCount()).toBe(0)
+}))
+
+it.live('does not renew hidden or unselected PEEK sessions, and resumes only for foreground selection', () => Effect.gen(function* () {
+  const gateway = new Gateway()
+  let visible = false
+  let selected = true
+  yield* Effect.gen(function* () {
+    yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode: 'peek', size: { rows: 24, cols: 80 }, isForegroundSelected: () => visible && selected, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+    yield* settle
+    const socket = gateway.sockets[0]!
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+    expect(socket.controls).toEqual([])
+    visible = true
+    selected = false
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+    expect(socket.controls).toEqual([])
+    selected = true
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(20_000))
+    expect(socket.controls).toEqual(['{"type":"selected-use","sequence":1}'])
+    visible = false
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+    expect(socket.controls).toHaveLength(1)
+  }).pipe(Effect.scoped)
+  expect(vi.getTimerCount()).toBe(0)
+}))
+
+it.live('does not implicitly renew a PEEK or send selected-use on ATTACH', () => Effect.gen(function* () {
+  for (const mode of ['peek', 'attach'] as const) {
+    const gateway = new Gateway()
+    yield* Effect.gen(function* () {
+      yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode, size: { rows: 24, cols: 80 }, ...(mode === 'attach' ? { isForegroundSelected: () => true } : {}), onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+      yield* settle
+      yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+      expect(gateway.sockets[0]!.controls).toEqual([])
+    }).pipe(Effect.scoped)
+  }
+}))
+
+it.live('cancels PEEK renewal on socket loss and restarts sequencing on the fresh socket', () => Effect.gen(function* () {
+  const gateway = new Gateway()
+  yield* Effect.gen(function* () {
+    yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode: 'peek', size: { rows: 24, cols: 80 }, isForegroundSelected: () => true, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+    yield* settle
+    const first = gateway.sockets[0]!
+    first.socket.onclose?.({ code: 1006, reason: 'drop' })
+    yield* settle
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(500))
+    yield* settle
+    const second = gateway.sockets[1]!
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+    expect(first.controls).toEqual(['{"type":"selected-use","sequence":1}'])
+    expect(second.controls.map(control => JSON.parse(control))).toEqual(
+      [1, 2, 3, 4, 5].map(sequence => ({ type: 'selected-use', sequence })),
+    )
+    expect(gateway.requests).toHaveLength(2)
+  }).pipe(Effect.scoped)
+  expect(vi.getTimerCount()).toBe(0)
+}))
+
+it.live('abort synchronously releases live ATTACH and PEEK sessions before asynchronous scope cleanup', () => Effect.gen(function* () {
+  for (const mode of ['attach', 'peek'] as const) {
+    const gateway = new Gateway()
+    const controller = new AbortController()
+    yield* Effect.gen(function* () {
+      const session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode, size: { rows: 24, cols: 80 }, signal: controller.signal, isForegroundSelected: () => true, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+      yield* settle
+      const socket = gateway.sockets[0]!
+      socket.socket.onmessage?.({ data: encodePtyFrame({ _tag: 'Geometry', rows: 24, cols: 80 }).buffer })
+      yield* settle
+      controller.abort()
+      // No yielding: page-hide must release the vote before its handler returns.
+      expect(read(new Uint8Array(socket.sent.at(-1)!))).toEqual([{ _tag: 'Detach' }])
+      expect(socket.closes).toContain(1000)
+      expect(session.send(bytes)).toBe(false)
+      expect(session.resetInputModes()).toBe(false)
+      expect(Effect.runSync(SubscriptionRef.get(session.state))).toEqual({ _tag: 'Closed' })
+      expect(vi.getTimerCount()).toBe(0)
+      const sentCount = socket.sent.length
+      session.resize({ rows: 30, cols: 90 })
+      controller.abort()
+      expect(socket.sent).toHaveLength(sentCount)
+      const controlCount = socket.controls.length
+      yield* settle
+      yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+      expect(socket.controls).toHaveLength(controlCount)
+      expect(gateway.requests).toHaveLength(1)
+    }).pipe(Effect.scoped)
+  }
+}))
+
+it.live('an already-aborted pane never requests a capability or opens a socket', () => Effect.gen(function* () {
+  const gateway = new Gateway()
+  const controller = new AbortController()
+  controller.abort()
+  yield* Effect.gen(function* () {
+    const session = yield* openPtySession({ baseUrl: 'https://alpha.example/', target, mode: 'peek', size: { rows: 24, cols: 80 }, signal: controller.signal, isForegroundSelected: () => true, onOutput: () => {}, fetch: gateway.fetch, socket: gateway.factory })
+    yield* settle
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+    expect(yield* SubscriptionRef.get(session.state)).toEqual({ _tag: 'Closed' })
+    expect(gateway.requests).toEqual([])
+    expect(gateway.sockets).toEqual([])
+  }).pipe(Effect.scoped)
+}))
+
+it.live('abort during capability acquisition prevents a late grant from opening a socket', () => Effect.gen(function* () {
+  const gateway = new Gateway()
+  const controller = new AbortController()
+  let releaseGrant = () => {}
+  const pending = new Promise<void>(resolve => { releaseGrant = resolve })
+  yield* Effect.gen(function* () {
+    const session = yield* openPtySession({
+      baseUrl: 'https://alpha.example/', target, mode: 'peek', size: { rows: 24, cols: 80 }, signal: controller.signal, isForegroundSelected: () => true, onOutput: () => {},
+      fetch: async (url, init) => { await pending; return gateway.fetch(url, init) },
+      socket: gateway.factory,
+    })
+    yield* settle
+    controller.abort()
+    releaseGrant()
+    yield* settle
+    yield* Effect.promise(() => vi.advanceTimersByTimeAsync(80_000))
+    expect(yield* SubscriptionRef.get(session.state)).toEqual({ _tag: 'Closed' })
+    expect(gateway.sockets).toEqual([])
+  }).pipe(Effect.scoped)
 }))

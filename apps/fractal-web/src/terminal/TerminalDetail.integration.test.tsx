@@ -101,6 +101,8 @@ interface FakeSession {
   readonly emit: (output: PtyOutput) => void
   readonly go: (state: PtyState) => Promise<void>
   closed: boolean
+  /** The SDK's selected-use gate as the pane passed it; a PEEK renews its lease only while it holds. */
+  readonly foreground: () => boolean
 }
 
 /** A raw port whose sessions the test drives: state transitions, output frames, and recorded DATA. */
@@ -108,7 +110,7 @@ const rawSessions = () => {
   const opened: FakeSession[] = []
   const decode = new TextDecoder()
   const port: RawTerminalPort = {
-    open: ({ target, mode, size, onOutput }) =>
+    open: ({ target, mode, size, onOutput, signal, isForegroundSelected }) =>
       Effect.gen(function* () {
         const state = yield* SubscriptionRef.make<PtyState>({ _tag: 'Connecting', attempt: 1 })
         let current: PtyState = { _tag: 'Connecting', attempt: 1 }
@@ -124,9 +126,19 @@ const rawSessions = () => {
             Effect.runSync(SubscriptionRef.set(state, next))
           }),
           closed: false,
+          foreground: isForegroundSelected,
         }
         opened.push(entry)
+        // As the SDK: the scope or the pane's signal, whichever ends first, detaches at once.
+        const close = () => {
+          entry.closed = true
+          current = { _tag: 'Closed' }
+          Effect.runSync(SubscriptionRef.set(state, current))
+        }
+        signal.addEventListener('abort', close, { once: true })
+        if (signal.aborted) close()
         yield* Effect.addFinalizer(() => Effect.sync(() => {
+          signal.removeEventListener('abort', close)
           entry.closed = true
         }))
         const session: PtySession = {
@@ -453,6 +465,74 @@ describe('raw terminal', () => {
     expect(opened[0]!.closed).toBe(true)
     expect(opened[1]!.target).toEqual({ terminalId: otherScreen.terminal_id, incarnation: otherScreen.runtime_incarnation })
     expect(opened[1]!.sent).toEqual([])
+  })
+
+  it.each(['hidden', 'pagehide'] as const)('detaches the ATTACH and its size vote inside the %s event, and types again only after a click', async (how) => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    const first = opened[0]!
+    await live(first, '$ ')
+    await act(async () => field()!.focus())
+    await act(async () => press('l', 'KeyL'))
+    expect(first.sent).toEqual(['l'])
+    await relayout()
+    expect(first.resized).toEqual([expect.objectContaining({ cols: 100 })])
+    await act(async () => {
+      if (how === 'pagehide') window.dispatchEvent(new Event('pagehide'))
+      else {
+        Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
+        document.dispatchEvent(new Event('visibilitychange'))
+      }
+      // Released inside the event itself, before React renders or the bfcache freezes the page.
+      expect(first.closed).toBe(true)
+    })
+    await drain()
+    // While hidden nothing reattaches, types or votes a size.
+    expect(opened).toHaveLength(1)
+    await relayout()
+    expect(first.resized).toHaveLength(1)
+    expect(first.sent).toEqual(['l'])
+    await act(async () => {
+      Reflect.deleteProperty(document, 'visibilityState')
+      if (how === 'pagehide') window.dispatchEvent(new Event('pageshow'))
+      else document.dispatchEvent(new Event('visibilitychange'))
+    })
+    // The returning page attaches afresh, but a key alone is not the gesture that resumes typing.
+    await vi.waitFor(() => expect(opened).toHaveLength(2))
+    const second = opened[1]!
+    expect(second.mode).toBe('attach')
+    await live(second, '$ ')
+    await act(async () => press('x', 'KeyX'))
+    expect(second.sent).toEqual([])
+    expect(first.sent).toEqual(['l'])
+    expect(chip()?.textContent).toBe('Click to type')
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+      'Typing stopped while this page was hidden; nothing was sent. Click the terminal to type again.',
+    )
+    // A click on the terminal is the gesture: the next key types on the new socket.
+    await act(async () => field()!.dispatchEvent(new MouseEvent('mouseup', { bubbles: true })))
+    expect(chip()?.textContent).toBe('Typing')
+    await act(async () => press('y', 'KeyY'))
+    expect(second.sent).toEqual(['y'])
+    expect(host.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('keeps a PEEK watching while the page is hidden, renewing its lease only in the foreground', async () => {
+    const { opened, port } = rawSessions()
+    await mount({ terminal: observed({ value: screen }), terminalRaw: port, grants: watchOnly })
+    await vi.waitFor(() => expect(opened).toHaveLength(1))
+    const session = opened[0]!
+    expect(session.mode).toBe('peek')
+    await live(session, 'peek prompt$ ')
+    expect(session.foreground()).toBe(true)
+    await leavePage('hidden')
+    expect(session.closed).toBe(false)
+    expect(session.foreground()).toBe(false)
+    await returnToPage()
+    await drain()
+    expect(opened).toHaveLength(1)
+    expect(session.foreground()).toBe(true)
   })
 })
 

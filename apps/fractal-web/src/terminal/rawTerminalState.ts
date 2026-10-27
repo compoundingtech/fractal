@@ -30,6 +30,10 @@ export interface RawTerminalPort {
     readonly mode: PtyMode
     readonly size: PtySize
     readonly onOutput: (output: PtyOutput) => void
+    /** Aborted when the page is hidden: the session detaches at once, before the page can freeze. */
+    readonly signal: AbortSignal
+    /** A PEEK renews its selected-use lease only while this holds. */
+    readonly isForegroundSelected: () => boolean
   }) => Effect.Effect<PtySession, never, Scope.Scope>
 }
 

@@ -1172,7 +1172,7 @@ export const liveSource = ({
       // Same origin and transport as `client`; the gateway injects the credential and keeps the
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
-        open: ({ target, mode, size, onOutput }) => openPtySession({ baseUrl, target, mode, size, onOutput, fetch }),
+        open: (options) => openPtySession({ ...options, baseUrl, fetch }),
       },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({

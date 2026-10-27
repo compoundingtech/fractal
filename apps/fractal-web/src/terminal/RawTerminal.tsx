@@ -136,17 +136,51 @@ const inactive: Atom.Atom<AsyncResult.AsyncResult<RawTerminalHandle, RawTerminal
 ).pipe(Atom.keepAlive)
 const unsubscribed = () => () => {}
 
+/**
+ * Aborted the moment the page is hidden (`visibilitychange` to hidden, `pagehide`). The listener runs
+ * inside the event, so the SDK detaches the writable socket and drops its size vote before a
+ * background tab or the bfcache can keep them; React re-rendering afterwards is too late.
+ */
+const pageHideSignal = Effect.acquireRelease(
+  Effect.sync(() => {
+    const controller = new AbortController()
+    const hide = () => controller.abort()
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') hide()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', hide)
+    if (document.visibilityState === 'hidden') hide()
+    return {
+      signal: controller.signal,
+      remove: () => {
+        document.removeEventListener('visibilitychange', onVisibility)
+        window.removeEventListener('pagehide', hide)
+      },
+    }
+  }),
+  ({ remove }) => Effect.sync(remove),
+).pipe(Effect.map(({ signal }) => signal))
+
 /** The raw session of a pane while it is visible, and what the pane can say about it. */
 export interface RawTerminal {
   readonly preparation: RawPreparation
   readonly handle: RawTerminalHandle | undefined
   readonly snapshot: RawSnapshot | undefined
+  /** Typing over the ATTACH: DATA frames on the same socket, encoded under the emulator's modes. */
+  readonly typing: TerminalTyping | undefined
+  /** A page hide stopped this ATTACH's typing; keys wait for the next focus or click. */
+  readonly disarmed: boolean
 }
 
 /**
  * Own one raw session for `target` while `active`. The atom's scope owns the emulator, encoder and
  * socket; leaving, hiding, retargeting the pane or changing the mode closes it (DETACH) and nothing
  * is replayed.
+ *
+ * An ATTACH also ends the moment the page is hidden, and a fresh one opens when the page returns.
+ * Its typing is then disarmed: a key alone, or the focus the browser restores, sends nothing; only a
+ * click or a focus by navigation does, as for gateway typing. A PEEK keeps watching while hidden.
  */
 export const useRawTerminal = ({
   port,
@@ -167,10 +201,43 @@ export const useRawTerminal = ({
 }): RawTerminal => {
   const terminalId = target?.terminalId
   const incarnation = target?.incarnation
+  const binding = terminalId === undefined || incarnation === undefined ? undefined : `${terminalId}\u0000${incarnation}`
+  // Each hide and return is a new epoch, so a hide and return React renders as one still reopens.
+  const [page, setPage] = React.useState(() => ({ epoch: 0, hidden: document.visibilityState === 'hidden' }))
+  // The binding a page hide stopped. The ref answers keys synchronously; the state re-renders the chip.
+  const hiddenStop = React.useRef<string | undefined>(undefined)
+  const [stoppedFor, setStoppedFor] = React.useState<string | undefined>(undefined)
+  const stopForPage = React.useEffectEvent(() => {
+    if (mode !== 'attach' || !active || binding === undefined) return
+    hiddenStop.current = binding
+    setStoppedFor(binding)
+  })
+  React.useEffect(() => {
+    const hide = () => {
+      stopForPage()
+      setPage((current) => (current.hidden ? current : { epoch: current.epoch + 1, hidden: true }))
+    }
+    const show = () => {
+      if (document.visibilityState === 'hidden') return
+      setPage((current) => (current.hidden ? { epoch: current.epoch + 1, hidden: false } : current))
+    }
+    const onVisibility = () => (document.visibilityState === 'hidden' ? hide() : show())
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', hide)
+    window.addEventListener('pageshow', show)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', hide)
+      window.removeEventListener('pageshow', show)
+    }
+  }, [])
+  const attach = mode === 'attach'
+  const open = active && !(attach && page.hidden)
+  const epoch = attach ? page.epoch : 0
   // The attach size and fallback title are read once per session, from the render that targets it;
   // later geometry travels as RESIZE frames and the title comes from the emulator.
   const resource = React.useMemo(() => {
-    if (port === undefined || terminalId === undefined || incarnation === undefined || !active) return inactive
+    if (port === undefined || terminalId === undefined || incarnation === undefined || !open) return inactive
     return Atom.make(
       Effect.gen(function* () {
         const native = yield* Effect.tryPromise({
@@ -196,7 +263,16 @@ export const useRawTerminal = ({
         )
         const view = makeRawView({ terminal, meta: { terminalId, incarnation, fallbackTitle: title } })
         yield* Effect.addFinalizer(() => Effect.sync(view.dispose))
-        const session = yield* port.open({ target: { terminalId, incarnation }, mode, size, onOutput: view.output })
+        // Only a writable ATTACH is cut by a page hide; a PEEK keeps watching and its lease lapses.
+        const signal = mode === 'attach' ? yield* pageHideSignal : new AbortController().signal
+        const session = yield* port.open({
+          target: { terminalId, incarnation },
+          mode,
+          size,
+          onOutput: view.output,
+          signal,
+          isForegroundSelected: () => document.visibilityState === 'visible',
+        })
         yield* SubscriptionRef.changes(session.state).pipe(
           Stream.runForEach((state) => Effect.sync(() => view.state(state))),
           Effect.forkScoped,
@@ -204,7 +280,7 @@ export const useRawTerminal = ({
         return { session, encoder, terminal, view } satisfies RawTerminalHandle
       }),
     ).pipe(Atom.setIdleTTL(0))
-  }, [port, terminalId, incarnation, mode, active])
+  }, [port, terminalId, incarnation, mode, open, epoch])
   const result = useAtomValue(resource)
   const handle = AsyncResult.isSuccess(result) ? result.value : undefined
   const subscribe = React.useMemo(() => handle?.view.subscribe ?? unsubscribed, [handle])
@@ -220,7 +296,25 @@ export const useRawTerminal = ({
         : snapshot === undefined
           ? { _tag: 'Preparing' }
           : { _tag: 'Session', state: snapshot.state }
-  return { preparation, handle, snapshot }
+  const typing: TerminalTyping | undefined =
+    handle === undefined || !attach
+      ? undefined
+      : {
+          encoder: handle.encoder,
+          modes: () => handle.terminal.modes(),
+          send: (bytes) => {
+            if (hiddenStop.current !== undefined && hiddenStop.current === binding) return pageHidden
+            return handle.session.send(bytes) ? undefined : notConnected
+          },
+          arm: () => {
+            // A hidden page cannot take a gesture; whatever focus it reports there arms nothing.
+            if (document.visibilityState === 'hidden' || hiddenStop.current === undefined) return
+            hiddenStop.current = undefined
+            setStoppedFor(undefined)
+          },
+          notice: stoppedFor !== undefined && stoppedFor === binding ? pageHidden : undefined,
+        }
+  return { preparation, handle, snapshot, typing, disarmed: stoppedFor !== undefined && stoppedFor === binding }
 }
 
 const selectionInside = (element: HTMLElement | null) => {
@@ -251,14 +345,7 @@ export interface TerminalTyping {
 
 const notConnected = 'The terminal is not connected. Nothing was sent, and keys are never replayed.'
 
-/** Typing over a raw ATTACH: DATA frames on the same socket, encoded under the emulator's modes. */
-export const rawTyping = (handle: RawTerminalHandle): TerminalTyping => ({
-  encoder: handle.encoder,
-  modes: () => handle.terminal.modes(),
-  send: (bytes) => (handle.session.send(bytes) ? undefined : notConnected),
-  arm: () => {},
-  notice: undefined,
-})
+const pageHidden = 'Typing stopped while this page was hidden; nothing was sent. Click the terminal to type again.'
 
 /** Props of the terminal surface. */
 export interface TerminalSurfaceProps {

@@ -1342,6 +1342,8 @@ describe('raw terminal stream', () => {
           mode: 'attach',
           size: { cols: 80, rows: 24 },
           onOutput: () => {},
+          signal: new AbortController().signal,
+          isForegroundSelected: () => true,
         })
         yield* settle
         expect(gateway.rawAttachments).toEqual([{
@@ -1355,20 +1357,23 @@ describe('raw terminal stream', () => {
     ),
   )
 
-  it.live('requests a view-only PEEK capability through the same gateway', () =>
+  it.live('requests a view-only PEEK capability through the same gateway and renews its selected-use lease while foreground', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
-        const sockets: string[] = []
+        const sockets: Array<{ readonly url: string; readonly sent: unknown[]; onopen: ((event: unknown) => void) | null }> = []
         vi.stubGlobal('WebSocket', class {
           binaryType = ''
-          onopen = null
+          onopen: ((event: unknown) => void) | null = null
           onmessage = null
           onclose = null
           onerror = null
-          constructor(url: string) {
-            sockets.push(url)
+          readonly sent: unknown[] = []
+          constructor(readonly url: string) {
+            sockets.push(this)
           }
-          send() {}
+          send(data: unknown) {
+            this.sent.push(data)
+          }
           close() {}
         })
         const session = yield* live.source.terminalRaw!.open({
@@ -1376,6 +1381,8 @@ describe('raw terminal stream', () => {
           mode: 'peek',
           size: { cols: 80, rows: 24 },
           onOutput: () => {},
+          signal: new AbortController().signal,
+          isForegroundSelected: () => true,
         })
         yield* settle
         expect(session.mode).toBe('peek')
@@ -1384,7 +1391,10 @@ describe('raw terminal stream', () => {
           body: { runtime_incarnation: 'incarnation-example', mode: 'peek' },
         }])
         expect(sockets).toHaveLength(1)
-        expect(sockets[0]).toMatch(/\/v1\/client\/terminals\/example\/raw-stream\?incarnation=incarnation-example&mode=peek$/)
+        expect(sockets[0]!.url).toMatch(/\/v1\/client\/terminals\/example\/raw-stream\?incarnation=incarnation-example&mode=peek$/)
+        // The source forwards the pane's foreground gate: the open PEEK renews its lease as text, never as a PTY frame.
+        sockets[0]!.onopen?.({})
+        expect(sockets[0]!.sent.filter((data) => typeof data === 'string')).toEqual([JSON.stringify({ type: 'selected-use', sequence: 1 })])
       }).pipe(Effect.scoped),
     ),
   )
