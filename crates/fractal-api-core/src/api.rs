@@ -3776,6 +3776,7 @@ fn client_agent_cards_presented(
                 "owner_run_id": subject.owner_run,
                 "driver": driver,
                 "harness_state": harness_state.as_deref().map(|state| if state == "needs-login" { "unauthenticated" } else { state }),
+                "background_jobs": subject.harness.as_ref().and_then(|harness| harness.background_jobs),
                 "end_reason": end_reason,
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
