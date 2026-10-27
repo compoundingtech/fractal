@@ -93,6 +93,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         "/v1/mission-runs/example%2Fdemo%2F1/revision",
         "/v1/missions/example%2Fdemo/retire",
         "/v1/subscription-requests/release/subscription-request%2Fexample",
+        "/v1/persons/rename",
         "/v1/reviews/step-run/example",
         "/v1/schema/registrations",
         "/v1/custom/reply",

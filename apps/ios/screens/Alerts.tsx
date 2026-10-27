@@ -25,11 +25,12 @@ export function AlertsStrip({ agentId, entries }: { agentId: string; entries: Re
   const calls = useMemo(() => pendingCalls(entries), [entries]);
   // One line until it is opened, as in the Fractal terminal UI: the cards take the conversation's room only when asked for.
   const [expanded, setExpanded] = useState(false);
+  const { palette } = useTextAppearance();
   if (!alerts.length) return null;
   // Opened, one alert starts open; with several, each opens on a tap.
   const isOpen = (id: string) => (alerts.length === 1) !== toggled.has(id);
   const toggle = (id: string) => setToggled(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  return <View style={{ backgroundColor: theme.mantle }}>
+  return <View style={{ backgroundColor: palette.mantle }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${alerts.length} alert${alerts.length === 1 ? '' : 's'}, ${expanded ? 'hide' : 'show'}`} onPress={() => setExpanded(open => !open)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 6 }}>
       <T numberOfLines={1} style={{ flex: 1 }}><T bold color={theme.person}>◆ {alerts.length} alert{alerts.length === 1 ? '' : 's'}</T><T dim> · </T><T>{alerts[0]!.title}</T></T>
       <T dim>{expanded ? '▾ hide' : '▸ show'}</T>
@@ -45,7 +46,8 @@ function AlertCard({ item, agentId, open, onToggle, calls }: { item: KeptAttenti
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const seats = (item.conversation_ids ?? []).filter(id => id !== agentId).map(id => { const seat = data.agents.find(candidate => candidate.id === id); return seat ? agentName(seat) : id.replace(/^agent\//, ''); });
   const from = (() => { const asker = data.agents.find(candidate => candidate.id === (item.requester_id ?? agentId)); return asker ? agentName(asker) : (item.requester_id ?? agentId).replace(/^agent\//, ''); })();
-  return <View style={{ borderLeftWidth: 3, borderLeftColor: theme.person, backgroundColor: theme.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
+  const { palette } = useTextAppearance();
+  return <View style={{ borderLeftWidth: 3, borderLeftColor: palette.person, backgroundColor: palette.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}>
       <T numberOfLines={open ? undefined : 1}><T bold color={theme.person}>◆ alert  </T><T bold>{item.title}</T></T>
       {open ? null : <T dim numberOfLines={1}>{attentionKindLabel(item.attention_kind)} · waited {ago(item.requested_at)}</T>}
@@ -123,7 +125,7 @@ function PromptAnswerView({ item, calls }: { item: KeptAttention; calls: Pending
           return <Button key={choice} label={`${on ? '✓ ' : ''}${option.label}`} color={on ? theme.green : theme.text} disabled={disabled} onPress={() => choose(index, choice, question.multiSelect)} />;
         })}
       </View>
-    </View>) : shown.map(each => <View key={each.id} style={{ backgroundColor: appearance.system ? appearance.colors.grouped : theme.crust, borderRadius: 4, padding: 8, gap: 2 }}>
+    </View>) : shown.map(each => <View key={each.id} style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.crust, borderRadius: 4, padding: 8, gap: 2 }}>
       <T bold color={theme.person}>{each.tool}</T>
       {each.lines.map((line, index) => <T key={index} selectable>{line}</T>)}
     </View>)}

@@ -48,13 +48,13 @@ export function Banners() {
   return <View>
     {error ? <Banner text={error} onPress={() => setError('')} /> : null}
     {pairingIssue ? <Banner text={pairingIssue} onPress={() => setPairingIssue('')} /> : null}
-    {status === 'offline' ? <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : theme.mantle, paddingHorizontal: 12, paddingBottom: 8 }}>
+    {status === 'offline' ? <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.mantle, paddingHorizontal: 12, paddingBottom: 8 }}>
       <Banner tone="warning" text={`${offlinePresentation(hasSynced).title}${connectionIssue ? ` · reconnecting on its own: ${connectionIssue}` : ''}`} />
       <Button label="reconnect now" onPress={() => actions.reconnect()} />
     </View> : null}
     {behind ? <Banner tone="warning" text={behind} /> : null}
     {failed.length && status === 'online' ? <Banner tone="warning" text={`not loaded: ${failed.map(([key, message]) => `${key} (${message})`).join(' · ')}`} /> : null}
-    {busy ? <ActivityIndicator color={theme.accent} style={{ paddingVertical: 4 }} /> : null}
+    {busy ? <ActivityIndicator color={appearance.color(theme.accent)} style={{ paddingVertical: 4 }} /> : null}
   </View>;
 }
 

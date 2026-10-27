@@ -868,7 +868,7 @@ fn plain_st_first_run_shows_the_setup_screen_starts_daemon_and_opens_home() {
     });
     let mut output = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(45);
-    // The checklist screen, driven by keys: the machine's name is cleared and typed, "Start st when
+    // The checklist screen, driven by keys: the machine's name is cleared and typed, "Start Fractal when
     // I log in" is unticked, and the one action is pressed. Without any agent installed it ends
     // by itself and the interface opens.
     for (prompt, answer) in [
