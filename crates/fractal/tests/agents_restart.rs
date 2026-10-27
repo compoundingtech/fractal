@@ -912,7 +912,11 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
         .unwrap()
         .unwrap()
         .0;
-    let node = fractal_daemon::graph::render_desired_node(&original.desired).unwrap();
+    let uris = fixture
+        .store
+        .declared_resource_uris(&fractal_daemon::graph::declared_resources(&original.desired))
+        .unwrap();
+    let node = fractal_daemon::graph::render_agent_node(&original.desired, &uris).unwrap();
     let intent = fractal_daemon::parse_intent(&format!("version 2\n{node}\n"), "restart-test").unwrap();
     let mut options = fractal_daemon::store::owned_sets::Options {
         set: "garden".into(),

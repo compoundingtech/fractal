@@ -227,6 +227,7 @@ pub fn parse_intent_with_owner(
     };
     for node in &declarations {
         parse_desired_node(node, None, &mut context)?;
+        collect_mission_resources(node, &mut context)?;
     }
     for node in document.nodes() {
         collect_document_refs(node, &mut context.document_refs)?;
@@ -694,6 +695,98 @@ fn merge_mission_run_declaration(
 pub fn planning_planner_subject(session: &str) -> String {
     let digest = hex::encode(Sha256::digest(session.as_bytes()));
     format!("agent/planner.{}", &digest[..20])
+}
+
+/// A `resource` child of an agent or mission names an ordinary graph resource. An exact absolute
+/// URI addresses the `uri.reference` subject `resource/uri/SHA256(URI)`, so every declaration of
+/// one URI shares one subject. The owner keeps only the typed edge to that subject.
+pub(crate) fn parse_declared_resource(
+    node: &KdlNode,
+) -> Result<(crate::model::DeclaredResourceReference, Option<DesiredSubject>), St3Error> {
+    let reference = parse_declared_resource_reference(node)?;
+    if reference.kind != crate::model::ResourceReferenceKind::Uri {
+        return Ok((reference, None));
+    }
+    let uri = property_string(node, "uri")?.expect("a uri reference was validated");
+    let local = uri_reference_name(&uri);
+    let mut kind = KdlNode::new("kind");
+    kind.entries_mut().push(kdl::KdlEntry::new("uri.reference"));
+    let mut locator = KdlNode::new("uri");
+    locator.entries_mut().push(kdl::KdlEntry::new(uri));
+    let mut body = KdlDocument::new();
+    body.nodes_mut().extend([kind, locator]);
+    let mut resource = KdlNode::new("resource");
+    resource.entries_mut().push(kdl::KdlEntry::new(local.as_str()));
+    resource.set_children(body);
+    let subject = namespaced("resource", &local);
+    Ok((
+        reference,
+        Some(DesiredSubject {
+            accountable: None,
+            subject,
+            kind: "resource".into(),
+            desired: canonical_node(&resource)?,
+            member: None,
+            // A URI subject is shared by every declaration that names it, so no run owns it.
+            owner_run: None,
+            owner_generation: None,
+            owner_step: None,
+        }),
+    ))
+}
+
+/// Two declarations of one URI produce the identical subject, which one publication keeps once.
+fn insert_declared_resource(
+    context: &mut ParseContext,
+    resource: DesiredSubject,
+) -> Result<(), St3Error> {
+    if context.subjects.get(&resource.subject) == Some(&resource) {
+        return Ok(());
+    }
+    insert_subject(context, resource)
+}
+
+/// A published mission's resource references become desired subjects with the publication, as
+/// an agent's do. Only a top-level mission names resources.
+fn collect_mission_resources(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
+    if node.name().value() != "mission" {
+        return Ok(());
+    }
+    for child in node.children().iter().flat_map(|children| children.nodes()) {
+        if is_resource_reference(child) {
+            let (_, resource) = parse_declared_resource(child)?;
+            if let Some(resource) = resource {
+                insert_declared_resource(context, resource)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The typed resource edges an agent declaration names, in authored order.
+pub fn declared_resources(desired: &Value) -> Vec<crate::model::DeclaredResourceReference> {
+    desired
+        .get("resources")
+        .and_then(|resources| serde_json::from_value(resources.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The exact URI that a desired `uri.reference` resource declares.
+pub fn declared_uri(resource: &Value) -> Option<&str> {
+    let field = |name: &str| {
+        resource
+            .get("children")?
+            .as_array()?
+            .iter()
+            .find(|child| child.get("name").and_then(Value::as_str) == Some(name))?
+            .get("arguments")?
+            .as_array()?
+            .first()?
+            .as_str()
+    };
+    (field("kind")? == "uri.reference")
+        .then(|| field("uri"))
+        .flatten()
 }
 
 fn parse_resource_declaration(node: &KdlNode, context: &mut ParseContext) -> Result<(), St3Error> {
@@ -1354,6 +1447,33 @@ fn parse_agent(
     }
 
     let mut desired = canonical_node(node)?;
+    // The body keeps no copy of a resource: the declaration stores typed edges to subjects.
+    let mut references = Vec::new();
+    let mut resource_names = BTreeSet::new();
+    for child in children
+        .nodes()
+        .iter()
+        .filter(|child| child.name().value() == "resource")
+    {
+        let (reference, resource) = parse_declared_resource(child)?;
+        if !resource_names.insert(reference.name.clone()) {
+            return Err(St3Error::new(
+                "duplicate-resource-name",
+                format!("agent `{subject}` repeats resource `{}`", reference.name),
+            ));
+        }
+        if let Some(resource) = resource {
+            insert_declared_resource(context, resource)?;
+        }
+        references.push(reference);
+    }
+    if let Some(children) = desired.get_mut("children").and_then(Value::as_array_mut) {
+        children.retain(|child| child.get("name").and_then(Value::as_str) != Some("resource"));
+    }
+    if !references.is_empty() {
+        desired["resources"] =
+            serde_json::to_value(references).expect("resource references serialize");
+    }
     normalize_agent_under(&mut desired, &host, context.owner_run.as_deref());
     let accountable = fractal_schema::accountable::from_desired(&desired)
         .map_err(|e| St3Error::new(e.code, e.message))?.map(str::to_owned);
@@ -1535,15 +1655,21 @@ fn parse_structure(node: &KdlNode, kind: &str, context: &mut ParseContext) -> Re
         }
         _ => namespaced(kind, &name),
     };
+    let desired = canonical_node(node)?;
+    let owner_run = if kind == "resource" && declared_uri(&desired).is_some() {
+        None
+    } else {
+        context.owner_run.clone()
+    };
     insert_subject(
         context,
         DesiredSubject {
             accountable: None,
             subject,
             kind: kind.into(),
-            desired: canonical_node(node)?,
+            desired,
             member: None,
-            owner_run: context.owner_run.clone(),
+            owner_run,
             owner_generation: None,
             owner_step: None,
         },
@@ -1821,8 +1947,11 @@ fn rewrite_owned_references(subjects: &mut BTreeMap<String, DesiredSubject>, run
                 }
             }
             Value::Object(values) => {
-                for value in values.values_mut() {
-                    rewrite(value, aliases);
+                // Typed resource metadata is authored data, not run-local references.
+                for (key, value) in values {
+                    if key != "resources" {
+                        rewrite(value, aliases);
+                    }
                 }
             }
             _ => {}
@@ -1862,8 +1991,10 @@ fn rewrite_owned_references(subjects: &mut BTreeMap<String, DesiredSubject>, run
                         *value = Value::String(format!("agent/{run}/{local}"));
                     }
                 }
-                for value in values.values_mut() {
-                    rewrite_agent_parties(value, run);
+                for (key, value) in values {
+                    if key != "resources" {
+                        rewrite_agent_parties(value, run);
+                    }
                 }
             }
             _ => {}
@@ -2187,6 +2318,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), St3Err
         "tags",
         "render",
         "harness",
+        "resource",
         "fresh-context",
         "bind-terminal",
         "one-shot",
@@ -2816,11 +2948,40 @@ fn validate_resource(node: &KdlNode) -> Result<(), St3Error> {
     let body = node
         .children()
         .ok_or_else(|| St3Error::new("missing-resource-body", "a resource needs a kind"))?;
-    reject_unknown_children(body, &["kind"], "resource", "resource")?;
+    reject_unknown_children(body, &["kind", "uri"], "resource", "resource")?;
     let kind = required_child_string(body, "kind", "resource")?;
     fractal_schema::registry()
         .validate_resource_kind(&kind)
         .map_err(|error| St3Error::new(error.code, error.message))?;
+    let uri = child_string(body, "uri")?;
+    match (kind.as_str(), uri) {
+        ("uri.reference", Some(uri)) => {
+            validate_resource_uri(&uri)?;
+            let name = first_string(node)?;
+            if name != uri_reference_name(&uri) {
+                return Err(St3Error::new(
+                    "invalid-resource-uri",
+                    format!(
+                        "a uri.reference resource is named `{}` after its exact URI",
+                        uri_reference_name(&uri)
+                    ),
+                ));
+            }
+        }
+        ("uri.reference", None) => {
+            return Err(St3Error::new(
+                "missing-resource-uri",
+                "a uri.reference resource needs `uri`",
+            ));
+        }
+        (_, Some(_)) => {
+            return Err(St3Error::new(
+                "invalid-resource-uri",
+                "only a uri.reference resource declares `uri`",
+            ));
+        }
+        (_, None) => {}
+    }
     Ok(())
 }
 

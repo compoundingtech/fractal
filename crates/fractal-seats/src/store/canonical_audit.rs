@@ -24,6 +24,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("identity_names", &[]),
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
+    ("declared_resource_edges", &[]),
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
@@ -528,7 +529,7 @@ fn write_audit_history(source: &Store) {
     publish_takeover(
         source,
         &format!(
-            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
+            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\"; resource \"change\" subject=\"resource/audit/pull-request/1\" reason=\"Review the change.\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
         ),
         "audit-desired",
     );

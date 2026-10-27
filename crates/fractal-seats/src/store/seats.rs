@@ -1721,8 +1721,8 @@ impl SeatsStore for Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h67815d20ea1f owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
-             WHERE owner_run IN (
+            /* sqlite-large-value: allow-for-now lv-h738ce7626839 owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
+             WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
             [run_id],
@@ -1733,7 +1733,7 @@ impl SeatsStore for Store {
                  FROM desired
                  JOIN mission_runs
                    ON desired.owner_run='mission-run/' || mission_runs.id
-                 WHERE mission_runs.root_run_id=?1
+                 WHERE mission_runs.root_run_id=?1 AND desired.subject NOT LIKE 'resource/uri/%'
                  ORDER BY desired.subject",
             )?;
             statement

@@ -5718,6 +5718,43 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
 }
 
 #[test]
+fn generic_declaration_rendering_preserves_nested_agent_resource_references() {
+    use fractal_daemon::graph::{declared_resources, render_desired_node};
+    let source = r#"version 2
+agent "example/worker" {
+  workspace "/tmp"
+  command "sleep 1000"
+  resource "explicit" subject="resource/example/known" reason="Keep the explicit edge"
+  resource "unresolved" subject="resource/example/not-yet-published" reason="Keep unresolved work"
+}
+"#;
+    let original = fractal_daemon::parse_intent(source, "studio").unwrap();
+    let desired = &original.subjects["agent/example/worker"].desired;
+    let expected = declared_resources(desired);
+    assert_eq!(expected.len(), 2);
+    for tree in [
+        desired.clone(),
+        serde_json::json!({
+            "name": "host",
+            "arguments": ["studio"],
+            "properties": {},
+            "children": [desired],
+        }),
+    ] {
+        let rendered = render_desired_node(&tree).unwrap();
+        let parsed = fractal_daemon::parse_intent(
+            &format!("version 2\n{rendered}\n"),
+            "studio",
+        )
+        .unwrap();
+        assert_eq!(
+            declared_resources(&parsed.subjects["agent/example/worker"].desired),
+            expected,
+        );
+    }
+}
+
+#[test]
 fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() {
     assert!(Cli::try_parse_from(["st3", "agents"]).is_err());
 
@@ -5771,7 +5808,7 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     else {
         panic!("agents start did not parse");
     };
-    let kdl = agent_start_document(&args, None).unwrap();
+    let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(

@@ -89,6 +89,7 @@ pub mod roster_controls;
 #[cfg(test)]
 pub mod roster_fresh_proof_tests;
 pub mod step_labels;
+mod resource_references;
 pub mod operation_audit;
 pub mod push_registrations;
 pub mod mission_provenance;
@@ -2052,6 +2053,9 @@ impl LocalSeats {
 }
 
 pub struct Store {
+    // Fields drop in declaration order: release the backfill's queue owner before the
+    // graph joins its writer. A worker retains a sender only for its current bounded step.
+    _resource_backfill: Option<resource_references::BackfillWorker>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
@@ -2417,7 +2421,12 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { graph, fractal, standby_observations: Default::default() })
+        // Fold preexisting declaration edges in bounded writer batches off the open path.
+        #[cfg(not(test))]
+        let resource_backfill = resource_references::spawn_backfill(&graph.connection);
+        #[cfg(test)]
+        let resource_backfill = None;
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2432,7 +2441,11 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { graph, fractal, standby_observations: Default::default() })
+        #[cfg(not(test))]
+        let resource_backfill = resource_references::spawn_backfill(&graph.connection);
+        #[cfg(test)]
+        let resource_backfill = None;
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2444,7 +2457,7 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -3126,11 +3139,11 @@ impl Store {
                 }
                 let desired_changed = intent.subjects.iter().any(|(subject, desired)| {
                     current_desired_row_tx(transaction, subject)
-                        .map(|current| {
-                            current
-                                .as_ref()
-                                .is_none_or(|row| row.revision != desired_revision(desired))
+                        .map_err(internal)
+                        .and_then(|current| {
+                            desired_matches(current.as_ref(), desired, &desired_revision(desired))
                         })
+                        .map(|unchanged| !unchanged)
                         .unwrap_or(true)
                 });
                 let missions_changed = intent.missions.values().any(|mission| {
@@ -3334,8 +3347,9 @@ impl Store {
                 for (subject, desired) in &intent.subjects {
                     let revision = desired_revision(desired);
                     let current = current_desired_row_tx(transaction, subject).map_err(internal)?;
-                    if current.as_ref().is_some_and(|row| row.revision == revision)
-                        && !owned_plan.as_ref().is_some_and(|p| p.materialize.contains(subject)) {
+                    if desired_matches(current.as_ref(), desired, &revision)?
+                        && (crate::graph::declared_uri(&desired.desired).is_some()
+                            || !owned_plan.as_ref().is_some_and(|p| p.materialize.contains(subject))) {
                         tokens.insert(
                             subject.clone(),
                             intent_leaves_tx(transaction, subject).map_err(internal)?,
@@ -3344,7 +3358,11 @@ impl Store {
                     }
                     let predecessors = intent_leaves_tx(transaction, subject).map_err(internal)?;
                     let mut body = serde_json::to_value(desired).map_err(internal)?;
-                    if let Some(plan) = &owned_plan { body["owned_set"] = json!(plan.preview.set); }
+                    if let Some(plan) = &owned_plan
+                        && crate::graph::declared_uri(&desired.desired).is_none()
+                    {
+                        body["owned_set"] = json!(plan.preview.set);
+                    }
                     if let Some(set) = one_shot_sets.get(subject) { body["owned_set"] = json!(set); }
                     if !receipt_attached {
                         smallclaims::store::idempotency::attach(&mut body,idempotency_key).map_err(internal)?;
@@ -7594,6 +7612,9 @@ fn select_desired_row(rows: Vec<(String, String, String)>) -> Result<Option<Desi
     }
     selected
         .map(|(revision, claim_id, desired)| {
+            // URI-addressed subjects are shared across declarations, so no run owns them.
+            // The reserved prefix distinguishes them from run-owned legacy resources.
+            let shared_uri = desired.subject.starts_with("resource/uri/");
             Ok(DesiredRow {
                 kind: desired.kind,
                 revision,
@@ -7603,8 +7624,8 @@ fn select_desired_row(rows: Vec<(String, String, String)>) -> Result<Option<Desi
                     .member
                     .map(|member| canonical_serialized_json_text(&member))
                     .transpose()?,
-                owner_run: desired.owner_run,
-                owner_generation: desired.owner_generation,
+                owner_run: if shared_uri { None } else { desired.owner_run },
+                owner_generation: if shared_uri { None } else { desired.owner_generation },
             })
         })
         .transpose()
@@ -7633,6 +7654,42 @@ pub fn current_desired_row_tx(
         )
         .optional()
         .map_err(Into::into)
+}
+
+/// URI subjects are content-addressed shared facts, not mutable run declarations. Comparing
+/// their body also preserves the original claim when an older writer stamped run ownership.
+fn desired_matches(
+    current: Option<&DesiredRow>,
+    desired: &DesiredSubject,
+    revision: &str,
+) -> Result<bool, St3Error> {
+    if desired.kind == "resource"
+        && crate::graph::declared_uri(&desired.desired).is_some()
+        && (desired.owner_run.is_some()
+            || desired.owner_generation.is_some()
+            || desired.owner_step.is_some())
+    {
+        return Err(St3Error::new(
+            "run-owned-uri-resource",
+            format!("shared URI resource `{}` cannot be run-owned", desired.subject),
+        ));
+    }
+    let Some(current) = current else {
+        return Ok(false);
+    };
+    if desired.subject.starts_with("resource/uri/") {
+        if current.kind == desired.kind
+            && current.body == canonical_json_text(&desired.desired).map_err(internal)?
+            && desired.member.is_none()
+        {
+            return Ok(true);
+        }
+        return Err(St3Error::new(
+            "immutable-uri-resource",
+            format!("shared URI resource `{}` cannot be changed", desired.subject),
+        ));
+    }
+    Ok(current.revision == revision)
 }
 
 pub fn desired_revision(desired: &DesiredSubject) -> String {
@@ -9204,11 +9261,13 @@ fn desired_lineage_from_at_tx(
 }
 
 /// Preserve the existing launch-token boundary for restart budgets and crash-loop recovery.
+/// Human labels and declared resource edges do not change an agent's launch.
 fn presentation_only_change(previous: &Value, next: &Value) -> bool {
     let parse = |body: &Value| {
         let mut desired = serde_json::from_value::<DesiredSubject>(body.clone()).ok()?;
         (desired.kind == "agent").then_some(())?;
         desired.set_display_name(None).ok()?;
+        desired.desired.as_object_mut()?.remove("resources");
         Some(desired)
     };
     matches!((parse(previous), parse(next)), (Some(previous), Some(next)) if previous == next)
@@ -15923,7 +15982,11 @@ pub fn select_replicated_desired(
     message_subscriptions::validate_replicated(transaction, claim, desired)?;
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h1d69f6c9f6ba owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, member, owner_run, owner_generation, owner_step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            /* sqlite-large-value: allow-for-now lv-hcc7ebd85e8b8 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, member, owner_run, owner_generation, owner_step)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+               CASE WHEN ?1 LIKE 'resource/uri/%' THEN NULL ELSE ?7 END,
+               CASE WHEN ?1 LIKE 'resource/uri/%' THEN NULL ELSE ?8 END,
+               CASE WHEN ?1 LIKE 'resource/uri/%' THEN NULL ELSE ?9 END)
              ON CONFLICT(subject) DO UPDATE SET kind=excluded.kind, revision=excluded.revision, claim_id=excluded.claim_id, body=excluded.body, member=excluded.member, owner_run=excluded.owner_run, owner_generation=excluded.owner_generation, owner_step=excluded.owner_step",
             params![
                 desired.subject,
@@ -15978,8 +16041,11 @@ fn select_desired_repair_tx(
     }
     let desired = serde_json::from_value::<DesiredSubject>(replacement.body.clone())?;
     transaction.execute(
-        /* sqlite-large-value: allow-for-now lv-h0dbe6fee7209 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, member, owner_run, owner_generation, owner_step)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+        /* sqlite-large-value: allow-for-now lv-hcd8430ba4161 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject, kind, revision, claim_id, body, member, owner_run, owner_generation, owner_step)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6,
+           CASE WHEN ?1 LIKE 'resource/uri/%' THEN NULL ELSE ?7 END,
+           CASE WHEN ?1 LIKE 'resource/uri/%' THEN NULL ELSE ?8 END,
+           CASE WHEN ?1 LIKE 'resource/uri/%' THEN NULL ELSE ?9 END)
          ON CONFLICT(subject) DO UPDATE SET kind=excluded.kind, revision=excluded.revision,
             claim_id=excluded.claim_id, body=excluded.body, member=excluded.member,
             owner_run=excluded.owner_run, owner_generation=excluded.owner_generation,
@@ -21031,6 +21097,7 @@ const PROJECTION_DIGEST_TABLES: &[(&str, &[&str])] = &[
     ("identity_names", &[]),
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
+    ("declared_resource_edges", &[]),
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
