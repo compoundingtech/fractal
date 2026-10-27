@@ -12,7 +12,7 @@ const envelope = (value: unknown) => ({ api_version: 'st3.client.v0', snapshot: 
 const kdl = 'version 2\nagent "builder" {\n    env {\n        GH_TOKEN "<redacted>"\n    }\n}\n'
 const agentWire = { id: 'agent/builder', kdl, revision: 'rev-7', revisions: ['rev-6', 'rev-7'], tree: {} }
 
-// One secret per environment/embedded-declaration position of st's MissionSpec serde shape.
+// One secret per environment/embedded-declaration position of Fractal's MissionSpec serde shape.
 const SECRET = {
   missionGate: 'sk-mission-gate', stepGate: 'sk-step-llm-gate', missionKdl: 'sk-mission-kdl', stepKdl: 'sk-step-kdl',
   metric: 'sk-loop-metric', loopRound: 'sk-loop-round-gate', loopUntil: 'sk-loop-until', completion: 'sk-completion-gate',
@@ -81,7 +81,7 @@ describe('declaration subjects', () => {
 })
 
 describe('agent declaration read', () => {
-  it('asks st for the canonical KDL with environment values withheld and shows it verbatim', async () => {
+  it('asks Fractal for the canonical KDL with environment values withheld and shows it verbatim', async () => {
     const { urls, reads } = recordingGateway(agentWire)
     const value = await Effect.runPromise(reads.agentDeclaration.read('agent/builder'))
     const request = urls.find(url => url.includes('/v1/client/agent-declarations/'))

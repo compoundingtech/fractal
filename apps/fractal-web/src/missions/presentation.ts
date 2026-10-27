@@ -1,4 +1,4 @@
-import type * as St3 from '@fractal/client/schema'
+import type * as Fractal from '@fractal/client/schema'
 import type { DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
 
@@ -6,8 +6,8 @@ import words from '../../../../fixtures/clients/words.json' with { type: 'json' 
 import { leafText } from '../data/projections.ts'
 
 // The mission presentation of docs/clients/ui-contract.md ("Presentation projections",
-// "Mission"), derived in the app until st serves it on the missions collection (#2646). The
-// fields and words are the contract's, so reading st's projection replaces only this file. The
+// "Mission"), derived in the app until Fractal serves it on the missions collection (#2646). The
+// fields and words are the contract's, so reading Fractal's projection replaces only this file. The
 // precedence is `fractal-ui-model::missions::adapt`'s, first match wins.
 
 export type MissionWord = (typeof words.mission)[number]['id']
@@ -42,8 +42,8 @@ export type MissionPresentation = {
 export const MISSION_WORDS: readonly MissionWord[] = words.mission.map((word) => word.id)
 export const missionWord = (id: MissionWord) => words.mission.find((word) => word.id === id)!
 
-type Step = St3.MissionStep & { readonly keep_open?: boolean }
-type Row = St3.Mission & { readonly system?: boolean }
+type Step = Fractal.MissionStep & { readonly keep_open?: boolean }
+type Row = Fractal.Mission & { readonly system?: boolean }
 
 const ACTIVE = new Set(['claimed', 'working', 'running', 'verifying'])
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
@@ -53,7 +53,7 @@ const missionSteps = (mission: Row): readonly Step[] => {
   const runs = mission.run_details ?? []
   const open = runs.filter((run) => !FINISHED.has(run.status))
   const shown = open.length > 0 ? open : runs.slice(-1)
-  return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly St3.MissionStep[]))
+  return shown.flatMap((run) => Option.getOrElse(run.steps, () => [] as readonly Fractal.MissionStep[]))
 }
 
 const queuedFor = (agents: readonly DecodedAgent[], work: string) =>
@@ -81,11 +81,11 @@ export const presentMission = ({
   agents,
   attention,
 }: {
-  readonly mission: St3.Mission
+  readonly mission: Fractal.Mission
   /** The agents collection: names, and who queues each ready step. */
   readonly agents: readonly DecodedAgent[]
   /** Open attention, already the reader's. */
-  readonly attention: readonly St3.Attention[]
+  readonly attention: readonly Fractal.Attention[]
 }): MissionPresentation => {
   const row = mission as Row
   const work = missionSteps(row)
@@ -177,12 +177,12 @@ export const presentMission = ({
   }
 }
 
-/** Missions in `words.json` order, st's order within each word. */
+/** Missions in `words.json` order, Fractal's order within each word. */
 export const sortMissions = <T extends { readonly presentation: MissionPresentation }>(rows: readonly T[]): readonly T[] =>
   rows.map((row, index) => ({ row, index }))
     .sort((a, b) => MISSION_WORDS.indexOf(a.row.presentation.word) - MISSION_WORDS.indexOf(b.row.presentation.word) || a.index - b.index)
     .map(({ row }) => row)
 
-/** Hidden by default, in the client as the contract says: st's own, never started, or settled before today. */
+/** Hidden by default, in the client as the contract says: Fractal's own, never started, or settled before today. */
 export const hiddenByDefault = (presentation: MissionPresentation, startOfToday: number): boolean =>
   presentation.system || presentation.word === 'not_started' || (presentation.settled_at !== null && presentation.settled_at < startOfToday)

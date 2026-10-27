@@ -44,7 +44,7 @@ const lastObservedRoster = ({ loading, state }: WireSlice<'roster'>): { readonly
       status, statusLabel: statuses[status].label, freshness: 'stale',
       statusSince: agent.since == null ? undefined : Date.parse(agent.since), lastActivityAt,
       lastTurn: lastActivityAt === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', kind: 'activity', at: lastActivityAt },
-      childrenKnown: false, children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' },
+      subagentObservation: { _tag: 'NotReported' }, children: [], usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' },
     }
   })
   return { rows, observedAt: Math.max(...state.agents.map(agent => Date.parse(agent.updated_at))) }

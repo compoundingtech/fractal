@@ -468,6 +468,18 @@ pub async fn get_usage(
         row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
     }
     if let Some((config, policy)) = policy {
+        // Entries of `keep` whose seat is no longer declared: they keep nothing. Only reported.
+        let kept = config.keep.clone();
+        let live = blocking_store({
+            let store = state.store.clone();
+            move || store.declared_seats(&kept)
+        })
+        .await?;
+        let retired_keep = config
+            .keep
+            .iter()
+            .filter(|seat| !live.contains(*seat))
+            .collect::<Vec<_>>();
         for (row, limit) in report["limits"]
             .as_array_mut()
             .into_iter()
@@ -480,6 +492,8 @@ pub async fn get_usage(
             "stop_at_weekly_percent": config.stop_at_weekly_percent,
             "exempt_accounts": config.exempt_accounts,
             "exempt_harnesses": config.exempt_harnesses,
+            "keep": config.keep,
+            "keep_retired": retired_keep,
         });
     }
     Ok(Json(report))
@@ -593,6 +607,16 @@ pub struct StatusQuery {
     /// Only the subject's current harness; see `Store::status_harness_only`.
     #[serde(default)]
     harness_only: bool,
+}
+
+pub async fn resource_referrers(
+    State(state): State<AppState>,
+    AxumPath(subject): AxumPath<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.declared_resource_referrers(&subject))
+        .await
+        .map(Json)
 }
 
 /// One subject's desired record. Each Claude seat's status line reads it on every render (every

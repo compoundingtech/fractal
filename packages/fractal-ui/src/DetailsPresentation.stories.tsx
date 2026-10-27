@@ -33,7 +33,7 @@ import { accountingNoteSummary, spendWindowReason } from '../../../apps/fractal-
 
 interface Args { scheme: 'light'|'dark'; width: 440|1440; opening:'UserOpened'|'Restored' }
 const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),inspector:(width:number)=>({display:'flex',flexDirection:'column',width,maxWidth:'100%',height:720,minHeight:0,overflow:'hidden',backgroundColor:surface.canvas}),canvas:{backgroundColor:surface.canvas},pane:{height:660},comparison:{display:'flex',flexWrap:'wrap',alignItems:'flex-start',gap:space.xl,backgroundColor:surface.canvas},card:{width:440,maxWidth:'100%',height:640},control:{color:text.fg,backgroundColor:surface.controlFill,borderWidth:0,borderRadius:radius.control,paddingInline:space.sm,paddingBlock:space.xs,marginInlineEnd:space.xs,fontFamily:type.fontSans,fontSize:type.metaSize,cursor:'pointer',':focus-visible':{outlineWidth:geometry.focusRing,outlineStyle:'solid',outlineColor:accent.primary}}})
-const meta={title:'Fractal UI/Details Presentation',parameters:{scenario:{_tag:'contract-fixture',reason:'Fixed omitted overview/timing facts and wholly unreported trace groups isolate one-line identity, single missing-group copy, opening focus, removed-opener fallback and section-visibility contracts. Host-owned open/intent state and these exact gaps must remain controlled rather than follow catalog agent data.'},layout:'fullscreen'},args:{scheme:'dark',width:440,opening:'UserOpened'},render:function Render({scheme,width,opening}:Args){
+const meta={excludeStories:['scenarioExemptions'],title:'Fractal UI/Details Presentation',parameters:{scenario:{_tag:'contract-fixture',reason:'Fixed omitted overview/timing facts and wholly unreported trace groups isolate one-line identity, single missing-group copy, opening focus, removed-opener fallback and section-visibility contracts. Host-owned open/intent state and these exact gaps must remain controlled rather than follow catalog agent data.'},layout:'fullscreen'},args:{scheme:'dark',width:440,opening:'UserOpened'},render:function Render({scheme,width,opening}:Args){
   const [open,setOpen]=React.useState(false)
   const [showOpener,setShowOpener]=React.useState(true)
   const returnRef=React.useRef<HTMLDivElement>(null)
@@ -44,6 +44,28 @@ const meta={title:'Fractal UI/Details Presentation',parameters:{scenario:{_tag:'
   return <div ref={returnRef} role="region" aria-label="Details host" tabIndex={-1} data-testid="details-return-region" {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{showOpener&&<Button onPress={()=>{setOpeningOverride(undefined);setOpen(true)}} {...stylex.props(styles.control)}>Open details</Button>}<Button onPress={()=>{setOpeningOverride('UserOpened');setOpen(true)}} {...stylex.props(styles.control)}>Open as user</Button><Button onPress={()=>setShowOpener(false)} {...stylex.props(styles.control)}>Remove opener</Button>{open&&<div {...stylex.props(styles.pane)}><DetailsPane key={openingOverride??opening} {...inputs} overview={overview} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state="partial" intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} onClose={()=>setOpen(false)} closeFocusTarget={()=>returnRef.current} opening={{_tag:openingOverride??opening}}/></div>}</ThemePortal></div>
 }} satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'DesktopReasonDescriptions:contract-fixture',
+  'NarrowValueColumns:contract-fixture',
+  'Opening:contract-fixture',
+  'PhoneDetails:contract-fixture',
+  'ProductionDesktopAccountingNote:contract-fixture',
+  'ProductionDesktopSubagentLoading:contract-fixture',
+  'ProductionDesktopSubagentRetained:contract-fixture',
+  'ProductionDesktopSubagentUnavailable:contract-fixture',
+  'ProductionPhoneAccountingNote:contract-fixture',
+  'ProductionPhoneDetails:contract-fixture',
+  'ProductionPhoneSubagentLoading:contract-fixture',
+  'ProductionPhoneSubagentRetained:contract-fixture',
+  'ProductionPhoneSubagentUnavailable:contract-fixture',
+  'RemovedOpener:contract-fixture',
+  'Restored:contract-fixture',
+  'StandaloneRetainedFailure:contract-fixture',
+  'StandaloneSectionVisibility:contract-fixture',
+]
 type Story=StoryObj<typeof meta>
 function requireContract(value:unknown,cause:string):asserts value {if(!value)throw new Error(cause)}
 async function rejectsControl(cause:string,check:()=>void|Promise<void>){let rejected=false;try{await check()}catch(error){requireContract(error instanceof Error&&error.message===cause,'Unexpected negative control failure');rejected=true}requireContract(rejected,`Negative control did not reject: ${cause}`)}

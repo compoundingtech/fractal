@@ -5,9 +5,9 @@
 //! A failure with no response head says only that this node saw no response. The peer may have
 //! accepted the request and acted on it before the connection was lost.
 //!
-//! Every attempt, whatever its outcome, first exports and signs its payload (`exchange_inner`
-//! exports, `post_signed_to` serializes, digests and signs before `send`). A policy that retries
-//! sooner repeats that local work, including any sealing export does under the writer.
+//! Each logical exchange first exports and signs its payload (`exchange_inner` exports,
+//! `post_signed_to` serializes, digests and signs). Its one fresh-connection transport retry
+//! reuses those buffered signed bytes; a later logical attempt repeats the local work.
 //!
 //! A passing run records only that each observation fell inside the asserted set. Which branch
 //! it took (an incomplete message or a reset, for the closing link) is printed only when an
@@ -107,6 +107,109 @@ async fn read_request(stream: &mut tokio::net::TcpStream) -> usize {
         body += count;
     }
     length
+}
+
+#[tokio::test]
+async fn pooled_socket_blackhole_times_out_without_recovery_and_retries_on_fresh_connection() {
+    for recover in [false, true] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stale, _) = listener.accept().await.unwrap();
+            read_request(&mut stale).await;
+            stale.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+            // Simulate a carrier/proxy that leaves TCP established but stops
+            // forwarding this stream. Do not read or close the pooled socket.
+            let (mut fresh, _) = listener.accept().await.unwrap();
+            assert_eq!(read_request(&mut fresh).await, 960_927);
+            fresh.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await.unwrap();
+            drop(stale);
+        });
+        let http = replication_http_client();
+        let url = format!("http://{address}{EXCHANGE_PATH}");
+        http.get(&url).send().await.unwrap().bytes().await.unwrap();
+        let request = http.post(&url)
+            .timeout(Duration::from_millis(100))
+            .body(vec![b'x'; 960_927]).build().unwrap();
+        let timing = ExchangeTiming {
+            id: uuid::Uuid::now_v7().to_string(),
+            started: std::time::Instant::now(),
+            server: false,
+            boundaries: Default::default(),
+        };
+        if recover {
+            let response = send_exchange_request(&http, request, EXCHANGE_PATH, &timing).await.unwrap();
+            assert_eq!(response.bytes().await.unwrap().as_ref(), b"ok");
+            server.await.unwrap();
+        } else {
+            let error = http.execute(/* sqlite-large-value: allow-for-now lv-hb9d8c8433655 owner=smallclaims::sync::transport_error_tests TODO=trace-statement-and-value-representation */ request).await.unwrap_err();
+            assert!(error.is_timeout(), "{error:?}");
+            server.abort();
+            let _ = server.await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn fresh_connection_retry_is_once_and_does_not_retry_received_headers_or_other_paths() {
+    for (path, response) in [
+        (EXCHANGE_PATH, None),
+        (EXCHANGE_PATH, Some(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".as_slice())),
+        (CHECKPOINT_PATH, None),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted = Arc::clone(&connects);
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                read_request(&mut stream).await;
+                if let Some(response) = response {
+                    stream.write_all(response).await.unwrap();
+                }
+                // EOF before headers, or a complete application refusal.
+            }
+        });
+        let http = replication_http_client();
+        let request = http.post(format!("http://{address}{path}"))
+            .body("payload").build().unwrap();
+        let timing = ExchangeTiming {
+            id: uuid::Uuid::now_v7().to_string(),
+            started: std::time::Instant::now(),
+            server: false,
+            boundaries: Default::default(),
+        };
+        let result = send_exchange_request(&http, request, path, &timing).await;
+        assert_eq!(result.is_ok(), response.is_some());
+        assert_eq!(connects.load(std::sync::atomic::Ordering::Relaxed),
+            if path == EXCHANGE_PATH && response.is_none() { 2 } else { 1 });
+        server.abort();
+        let _ = server.await;
+    }
+}
+
+#[tokio::test]
+async fn replication_client_expires_idle_connections_before_reuse() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stale, _) = listener.accept().await.unwrap();
+        read_request(&mut stale).await;
+        stale.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        let (mut fresh, _) = listener.accept().await.unwrap();
+        read_request(&mut fresh).await;
+        fresh.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await.unwrap();
+        drop(stale);
+    });
+    let http = replication_http_client();
+    let url = format!("http://{address}{EXCHANGE_PATH}");
+    http.get(&url).send().await.unwrap().bytes().await.unwrap();
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    // No retry helper: expiry itself must force a fresh connection.
+    http.get(&url).timeout(Duration::from_secs(1)).send().await.unwrap().bytes().await.unwrap();
+    server.await.unwrap();
 }
 
 #[tokio::test]
@@ -231,6 +334,8 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
                 server: true,
                 boundaries: Default::default(),
             };
+            timing.record("head-received");
+            timing.record("body-read-complete");
             timing.record("server-ingress");
             let ingress = timing.server_boundaries()[0].unwrap();
             if complete {
@@ -239,7 +344,7 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
                 timing.record("backend-done");
             }
             timing.record("response-headers-ready");
-            timing.summarize_server(if complete { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE });
+            timing.summarize_server(if complete { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, 960_927);
             // A late backend completion or explicit promotion must not emit extra INFO.
             timing.record("backend-done");
             timing.promote();
@@ -248,6 +353,9 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
             let summary = &events[0];
             assert_eq!(summary["correlation_id"], "test-correlation");
             assert_eq!(summary["status"], if complete { "200" } else { "503" });
+            assert!(summary.contains_key("head_received_unix_ms"));
+            assert!(summary.contains_key("body_read_complete_unix_ms"));
+            assert_eq!(summary["request_body_bytes"], "960927");
             assert_eq!(summary["server_ingress_unix_ms"], ingress.unix_ms.to_string());
             assert_eq!(summary["server_ingress_elapsed_us"], ingress.elapsed_us.to_string());
             assert_eq!(summary["backend_done"], complete.to_string());
@@ -256,6 +364,114 @@ fn server_emits_one_info_summary_even_for_fast_success_and_incomplete_backend() 
             assert!(summary.contains_key("response_headers_ready_unix_ms"));
             assert!(summary.contains_key("response_headers_ready_elapsed_us"));
         });
+    }
+}
+
+#[tokio::test]
+async fn exchange_body_observation_counts_bytes_and_logs_incomplete_upload_once() {
+    use futures_util::{StreamExt as _, stream};
+    use tracing::instrument::WithSubscriber as _;
+
+    for outcome in ["complete", "error", "cancelled"] {
+        let capture = SummaryCapture::default();
+        async {
+            let timing = Arc::new(ExchangeTiming::server(&HeaderMap::new()));
+            timing.record("head-received");
+            let first = stream::once(async { Ok::<_, std::io::Error>(Bytes::from_static(b"partial")) });
+            let stream = match outcome {
+                "complete" => first.chain(stream::empty()).boxed(),
+                "error" => first.chain(stream::once(async {
+                    Err(std::io::Error::other("upload interrupted"))
+                })).boxed(),
+                _ => first.chain(stream::pending()).boxed(),
+            };
+            let body = axum::body::Body::new(ExchangeRequestBody {
+                inner: axum::body::Body::from_stream(stream),
+                timing: Arc::clone(&timing),
+                bytes: 0,
+                complete: false,
+                failed: false,
+            });
+            let read = axum::body::to_bytes(body, MAX_EXCHANGE_BYTES);
+            if outcome == "cancelled" {
+                let mut read = Box::pin(read);
+                assert!(futures_util::poll!(read.as_mut()).is_pending());
+                drop(read);
+            } else {
+                let result = read.await;
+                assert_eq!(result.is_ok(), outcome == "complete");
+                if let Ok(bytes) = result {
+                    assert_eq!(bytes.as_ref(), b"partial");
+                    timing.record("server-ingress");
+                    timing.record("response-headers-ready");
+                    timing.summarize_server(StatusCode::OK, bytes.len());
+                }
+            }
+            let events = capture.0.lock().unwrap();
+            assert_eq!(events.len(), 1, "{outcome}: {events:?}");
+            let event = &events[0];
+            assert_eq!(event["request_body_bytes"], "7");
+            assert!(event.contains_key("head_received_unix_ms"));
+            if outcome == "complete" {
+                assert_eq!(event["message"], "replication exchange server summary");
+                assert!(event.contains_key("body_read_complete_unix_ms"));
+            } else {
+                assert_eq!(event["message"], "replication exchange request body incomplete");
+                assert_eq!(event["body_read_error"], (outcome == "error").to_string());
+                assert!(timing.boundary("body-read-complete").is_none());
+                assert!(timing.boundary("server-ingress").is_none());
+            }
+        }.with_subscriber(capture.clone()).await;
+    }
+}
+
+#[tokio::test]
+async fn exchange_middleware_observes_head_before_bytes_extraction() {
+    use axum::body::{Body, Bytes};
+    use axum::extract::Extension;
+    use tower::ServiceExt as _;
+    use tracing::instrument::WithSubscriber as _;
+
+    let capture = SummaryCapture::default();
+    let correlation = uuid::Uuid::now_v7().to_string();
+    let app = Router::new().route(EXCHANGE_PATH, post(
+        |Extension(timing): Extension<Arc<ExchangeTiming>>, body: Bytes| async move {
+            assert!(timing.boundary("head-received").is_some());
+            assert!(timing.boundary("body-read-complete").is_some());
+            timing.record("server-ingress");
+            timing.record("response-headers-ready");
+            timing.summarize_server(StatusCode::OK, body.len());
+            StatusCode::OK
+        },
+    ).layer(axum::middleware::from_fn(observe_exchange_body)));
+    let response = app.clone().oneshot(axum::http::Request::builder()
+        .method("POST").uri(EXCHANGE_PATH)
+        .header(EXCHANGE_CORRELATION_HEADER, &correlation)
+        .body(Body::from("payload")).unwrap())
+        .with_subscriber(capture.clone()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    {
+        let events = capture.0.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["correlation_id"], correlation);
+        assert_eq!(events[0]["request_body_bytes"], "7");
+    }
+    for method in ["HEAD", "POST"] {
+        capture.0.lock().unwrap().clear();
+        let response = app.clone().oneshot(axum::http::Request::builder()
+            .method(method).uri(EXCHANGE_PATH)
+            .body(Body::empty()).unwrap())
+            .with_subscriber(capture.clone()).await.unwrap();
+        let events = capture.0.lock().unwrap();
+        if method == "HEAD" {
+            assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+            assert!(events.is_empty(), "empty probe is not an interrupted upload");
+        } else {
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0]["request_body_bytes"], "0");
+            assert!(events[0].contains_key("body_read_complete_unix_ms"));
+        }
     }
 }
 
@@ -306,7 +522,7 @@ async fn failure_stage_distinguishes_connected_timeout_from_refused_connect() {
 }
 
 #[tokio::test]
-async fn failure_stage_does_not_invent_a_connect_for_a_pooled_connection() {
+async fn pooled_failure_reports_the_fresh_retry_connection_when_it_also_times_out() {
     use crate::replication::ReplicationClientStage;
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -330,7 +546,7 @@ async fn failure_stage_does_not_invent_a_connect_for_a_pooled_connection() {
         &serde_json::json!({}), false,
     ).await.unwrap_err();
     let failure = error.downcast_ref::<ReplicationExchangeFailure>().unwrap();
-    assert_eq!(failure.client_stage, Some(ReplicationClientStage::PooledOrUnknown));
+    assert_eq!(failure.client_stage, Some(ReplicationClientStage::Connected));
     assert_eq!(failure.code, "replication-timeout");
     server.abort();
     let _ = server.await;

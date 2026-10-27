@@ -1,9 +1,12 @@
 // Paths are relative to this Storybook configuration directory.
 export const storyGlobs: string[] = [
   '../src/**/*.stories.tsx',
+  '../../../apps/fractal-web/src/embed/Embed.stories.tsx',
   '../../../apps/fractal-web/src/web/ColdOpen.stories.tsx',
   '../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx',
   '../../../apps/fractal-web/src/web/ComposerImages.stories.tsx',
+  '../../../apps/fractal-web/src/web/NativeTranscript.stories.tsx',
+  '../../../apps/fractal-web/src/web/TranscriptImages.stories.tsx',
   '../../../apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx',
   '../../../apps/fractal-web/src/web/SidebarChrome.stories.tsx',
   '../../../apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx',

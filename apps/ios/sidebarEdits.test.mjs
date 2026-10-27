@@ -43,7 +43,7 @@ for (const name of ["", "  ", "a\n", "a\u0085b", "é".repeat(129)]) assert.throw
 assert.equal(folderName(" é "), "é");
 assert.equal(folderName("é".repeat(128)).length, 128);
 
-// A retired Sidebar is learned from st's refusal to create it again.
+// A retired Sidebar is learned from Fractal's refusal to create it again.
 const refused = code => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable: false, details: {} }, 409);
 assert.equal(sidebarRetired(refused('arrangement-retired')), true);
 assert.equal(sidebarRetired(refused('arrangement-exists')), false);

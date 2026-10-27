@@ -157,6 +157,9 @@ unset LD_PRELOAD
 # TMPDIR, which are removed at exit, and the account's builds share one server (127.0.0.1:4226): every compile through it then failed
 # ("sccache: error: Failed to create temp dir") until it was stopped. The kept build directory (CARGO_TARGET_DIR) is the local cache.
 unset RUSTC_WRAPPER CARGO_BUILD_RUSTC_WRAPPER
+# The workspace crates build without debug info, as CI builds them (buildEnv in .github/workflows/workspace-ci.ts): a dev box never
+# builds more than CI does. Cargo.toml's dev and test profiles keep debug = 1 for a plain `cargo build` or `cargo test`.
+export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 # Each test process gets a TMPDIR of its own under this run's (scripts/ci-test-tmpdir, as the cargo target runner nextest honours): on a
 # shared TMPDIR, one test that left an empty `.git` at its top made every later test there see a repository that is not one (2026-10-23,
 # 21 failures in one local run; the stray /tmp/.git on the build hosts came the same way). A CI runner is fresh for every job.
@@ -173,10 +176,14 @@ log_root=${CI_LOCAL_LOG_DIR:-$real_home/.cache/ci-local-logs}
 log_dir=$log_root/run-$(date -u +%Y%m%dT%H%M%SZ)-$$
 mkdir -p "$log_dir"
 echo "ci-local: stage logs in $log_dir"
-# Keep the latest 10 runs' logs (CI_LOCAL_LOG_DIR itself, when given, is the caller's and is not pruned).
+# Keep the latest 10 runs' logs, and those of every run still going: a run that waits hours for build slots on a busy
+# host is older than ten later runs, and it still writes to its directory (CI_LOCAL_LOG_DIR itself, when given, is the
+# caller's and is not pruned).
 if [ -z "${CI_LOCAL_LOG_DIR:-}" ]; then
   # shellcheck disable=SC2012
-  ls -1dt "$log_root"/run-* 2>/dev/null | tail -n +11 | while IFS= read -r old; do rm -rf "$old"; done
+  ls -1dt "$log_root"/run-* 2>/dev/null | tail -n +11 | while IFS= read -r old; do
+    kill -0 "${old##*-}" 2>/dev/null || rm -rf "$old"
+  done
 fi
 # One line per build-slot wait as it starts and ends, `wait|slot EPOCH STAGE`, to CI_LOCAL_QUEUE_LOG when the caller names one: scripts/st-test
 # reads it while the run goes on, so its time limit counts only the time the stages run, not the time they wait for a slot.

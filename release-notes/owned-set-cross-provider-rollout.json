@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Owned-set rollouts retain their admission refusal for harness-family changes, with an additional reconciliation guard against carrying a native session across providers.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "No wire changes. Cross-provider owned-set rollouts remain unsupported and are rejected before draining. Same-provider native-session and login-account continuity checks are unchanged." },
+  "downtime": { "status": "none", "detail": "No change to rollout admission or the existing drain and fenced-stop sequence." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Reconciliation refuses cross-provider native-session injection or verification if an admission guard is relaxed in the future." }
+}

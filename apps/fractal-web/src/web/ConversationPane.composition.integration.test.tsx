@@ -59,7 +59,7 @@ vi.mock('../data/react.tsx', async () => {
     return () => { source.clockListeners.delete(listener) }
   }, () => source.now),
   useNowSnapshot: () => source.now,
-  useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', attachmentUpload: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted' }),
+  useGrants: () => ({ actions: 'ungranted', messageSend: source.sendable ? 'granted' : 'ungranted', attachmentUpload: source.sendable ? 'granted' : 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }),
   usePausedNow: () => undefined,
   useAttention: () => ({ _tag: 'Waiting' }),
   })
@@ -134,6 +134,8 @@ beforeEach(() => {
   source.sendable = false
   source.agentControls = undefined
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // React Aria uses CSS.escape when the notice returns focus to a collection tab; jsdom omits it.
+  if (globalThis.CSS?.escape === undefined) vi.stubGlobal('CSS', { escape: (value: string) => value.replace(/[^\w-]/g, char => `\\${char}`) })
   // jsdom has no layout observers; the kit instantiates one while attaching scroll.
   // Test-environment sizing (react-aria renders every row) needs no measured entries.
   vi.stubGlobal('ResizeObserver', class {
@@ -173,6 +175,43 @@ const mount = async (ux?: UxTelemetry, strictMode = false) => {
 const text = () => container.textContent ?? ''
 
 describe('ConversationPane composition activation', () => {
+  it('keeps the parent composer mounted while child tabs remain read-only', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: {
+      items: scenario, hasOlder: false, observation: { empty: false },
+      subagents: [{ id: 'review', name: 'Reviewer', status: 'running', conversation: { session_id: 'session/external-child-review' } }],
+    } }
+    source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
+    source.sendable = true
+    await mount()
+    const composer = container.querySelector('[data-testid="conversation-composer-dock"]')!
+    const parent = container.querySelector<HTMLElement>('[role="tab"][data-thread-id="agent/selected"]')!
+    expect(parent.textContent).toBe('Main')
+    const child = container.querySelector<HTMLElement>('[role="tab"][data-thread-id="session/external-child-review"]')!
+    await act(async () => child.click())
+    const notice = container.querySelector<HTMLElement>('[data-thread-read-only]')!
+    expect(notice.textContent).toContain('Subagent thread')
+    expect(notice.closest('[data-thread-panel]')?.lastElementChild).toBe(notice)
+    expect(container.querySelectorAll('[data-testid="conversation-composer-dock"]')).toHaveLength(1)
+    expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBe(composer)
+    expect(composer.closest('[hidden]')).not.toBeNull()
+    expect(container.querySelector('[data-thread-item]')).toBeNull()
+    await act(async () => notice.querySelector<HTMLButtonElement>('button')!.click())
+    expect(container.querySelector('[data-thread-read-only]')).toBeNull()
+    expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBe(composer)
+    expect(composer.closest('[hidden]')).toBeNull()
+  })
+
+  it('keeps the not-found composer pinned without promising that the missing conversation will load', async () => {
+    source.sendable = true
+    source.feed = { _tag: 'Unavailable', reason: 'failed', code: 'not-found', detail: 'synthetic diagnostic' }
+    await mount()
+    expect(container.querySelector('[data-testid="transcript-unavailable"]')?.textContent).toContain('Conversation not found')
+    expect(container.querySelector('[data-testid="composer-footer"]')?.textContent).toContain('Conversation not found')
+    expect(text()).not.toContain('Messages can be sent once this conversation loads.')
+    expect(source.composerProps.at(-1)?.disabledReason).toBe('Conversation not found')
+    expect(container.querySelector<HTMLTextAreaElement>('textarea')?.disabled).toBe(true)
+    expect(container.querySelector<HTMLElement>('[data-testid="conversation-composer-dock"]')?.style.flexShrink).toBe('0')
+  })
   it('registers the real composer field and only the latest turn, including a newly mounted transcript tail', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
@@ -249,7 +288,6 @@ describe('ConversationPane composition activation', () => {
     expect([...container.querySelectorAll('[data-testid="thinking-entry"] [data-conversation-entry-id]')].map(element => element.textContent))
       .toEqual(reasoning.map(item => item._tag === 'Reasoning' ? item.text : ''))
   })
-
   it('insets the composer dock so its focus outline stays inside the viewport', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     await mount()
