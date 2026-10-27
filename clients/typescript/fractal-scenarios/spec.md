@@ -205,6 +205,12 @@ after it (see [Store versions](#store-versions)).
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
 | `sync` | `capabilities` envelope, the [sync script](#sync-matrix) and the `expected` sync status per surface | see [Replay dispatch](#replay-dispatch) |
 
+Synthetic details missions include `run_details`, derived from the same work inventory at
+the baseline and after every details change. Each run's progress, step states and claimants
+match its work rows; the cast maps each `work/...` ID to its `step-run/...` identity.
+Work-only changes also publish the affected mission's joined run details. Recorded slices
+remain unmodified captures.
+
 Creation events carry the complete thread or terminal record, including pagination or runtime,
 cast and screens metadata. Resources are genuinely absent before creation, rather than hidden
 empty records. Creating an existing key replaces its record; removal deletes membership.
