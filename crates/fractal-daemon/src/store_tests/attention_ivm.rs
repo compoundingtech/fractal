@@ -140,7 +140,7 @@ ClaimInput {
 }
 
 fn custom(store: &Store, subject: &str, person: &str) {
-let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hab6b9af2a047 owner=fractal_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
+let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h41156add8dbb owner=fractal_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
     "../../../../examples/fractal/custom-review.json"
 ))
 .unwrap();
@@ -477,7 +477,7 @@ assert!(
 fn missing_document_dependency_and_recovery_match_full_reader() {
 let store = Store::open_memory("alder").unwrap();
 let views = views(&store);
-let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h2e8c25e17330 owner=fractal_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
+let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h4d57a65fa5d3 owner=fractal_daemon::store_tests::attention_ivm TODO=trace-statement-and-value-representation */ include_str!(
     "../../../../examples/fractal/custom-review.json"
 ))
 .unwrap();
