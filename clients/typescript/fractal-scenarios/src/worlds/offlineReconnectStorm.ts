@@ -57,10 +57,10 @@ export const syntheticOfflineReconnectStorm: WorldDefinition = {
     ]).sort((a, b) => a.at_ms - b.at_ms)
     return {
       roster: { kind: 'roster', variant: 'default', source, decode: 'strict', loading: false,
-        state: { agents: generated.map((value) => value.agent), runtimes,
+        state: { sessions: [], devices: [], agents: generated.map((value) => value.agent), runtimes,
           machines: ctx.cast.hosts.map((host) => resources.machine(ctx, host, runtimes.filter((runtime) => runtime.owner_host_id === host.id).map((runtime) => runtime.id), [])), order: ctx.cast.agents.map((member) => member.id) }, timeline: [] },
       details: { kind: 'details', variant: 'default', source, decode: 'strict', loading: false,
-        state: { missions: [resources.mission(ctx, mission, 'running', -120_000)], work: [resources.work(ctx, { mission, step: 0, state: 'claimed', updatedMs: -120_000, claimant: builder, goals: ['Verify readiness, canary checks and error budget'] })] }, timeline: [] },
+        state: { launches: [], launch_variants: [], missions: [resources.mission(ctx, mission, 'running', -120_000)], work: [resources.work(ctx, { mission, step: 0, state: 'claimed', updatedMs: -120_000, claimant: builder, goals: ['Verify readiness, canary checks and error budget'] })] }, timeline: [] },
       attention: { kind: 'attention', variant: 'default', source, decode: 'strict', loading: false, state: { attention: [], messages: [] }, timeline: [] },
       conversation,
       terminal: { kind: 'terminal', variant: 'default', source, decode: 'strict', loading: false, state: { terminals: [] }, timeline: [] },
