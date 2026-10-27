@@ -11,7 +11,7 @@ function isStaleFence(error: unknown): boolean {
     && 'code' in error.response && error.response.code === 'stale-fence';
 }
 
-/** An st that predates unfenced typing refuses a key without the screen's sequence, and says so. */
+/** A Fractal version that predates unfenced typing refuses a key without the screen's sequence, and says so. */
 export function wantsScreenSequence(error: unknown): boolean {
   const message = !!error && typeof error === 'object' && 'response' in error && !!error.response && typeof error.response === 'object' && 'message' in error.response
     ? String(error.response.message) : '';
@@ -27,7 +27,7 @@ export async function withFreshTerminalFence<T>(
   expectedIncarnation: string,
   action: (fence: TerminalFence) => Promise<T>,
 ): Promise<T> {
-  // st fences terminal actions to its whole store's index, which a busy host moves several
+  // Fractal fences terminal actions to its whole store's index, which a busy host moves several
   // times a second; a fresh read and a quick resend usually lands.
   for (let attempt = 0; attempt < FENCE_ATTEMPTS; attempt++) {
     const screen = await client.terminalScreen(terminalId);

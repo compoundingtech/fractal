@@ -9,7 +9,7 @@ final `FLAKY a/b [...]` lines instead. Prints `nextest flaky: N`, appends `flaky
 is set, and writes those FLAKY lines to FILE when N is not 0 (removing FILE otherwise): Workspace CI uploads
 FILE as `nextest-flaky-<lane>-<N>` for `st slo`'s flakes objective, which reads only the name.
 
-With CI_TEST_FLAKY=PATH (scripts/st-test sets it for linux-gate) it also writes the flaky tests' names to PATH, one
+With CI_TEST_FLAKY=PATH (scripts/fractal-test sets it for linux-gate) it also writes the flaky tests' names to PATH, one
 `BINARY TEST` per line (empty when there are none): evidence-wrap --input-file records them as the note's flaky_tests, so a
 signed run that passed only on a retry says which tests did.
 """

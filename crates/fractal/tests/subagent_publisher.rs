@@ -26,22 +26,19 @@ async fn serve(
     tokio::task::JoinHandle<anyhow::Result<()>>,
 ) {
     let store = Arc::new(Store::open(&root.join("graph.db"), "publisher-test").unwrap());
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "publisher-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "publisher-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let socket = root.join("st3.sock");
     let path = socket.clone();
     let server =
@@ -349,7 +346,7 @@ async fn a_codex_run_cut_short_by_its_harness_still_counts_its_tokens() {
 /// `native-1`. The seat is declared, so the agents list shows it.
 fn omp_channel(store: &Store, agent_dir: &Path) -> fractal_drivers::pi_channel::EventObserver {
     let intent = fractal_daemon::parse_intent(
-        "version 2\nagent \"example/omp\" { workspace \"/tmp\"; command \"true\"; }",
+        "version 2\nagent \"example/omp\" { workspace \"/tmp\"; harness \"omp\" {}; }",
         "example",
     )
     .unwrap();
@@ -373,13 +370,14 @@ fn omp_channel(store: &Store, agent_dir: &Path) -> fractal_drivers::pi_channel::
 /// The `subagents` of the omp seat's row in the agents list.
 async fn listed_subagents(client: &Client) -> Value {
     let agents: Value = client.get("/v1/client/agents").await.unwrap();
-    agents["items"]
+    let agent = agents["items"]
         .as_array()
         .unwrap()
         .iter()
         .find(|agent| agent["id"] == OMP_SEAT)
-        .unwrap_or_else(|| panic!("the omp seat is listed: {agents}"))["subagents"]
-        .clone()
+        .unwrap_or_else(|| panic!("the omp seat is listed: {agents}"));
+    assert_eq!(agent["driver"], "omp", "the fixture declares an OMP harness");
+    agent["subagents"].clone()
 }
 
 fn subagent_frame(event: &str) -> Value {

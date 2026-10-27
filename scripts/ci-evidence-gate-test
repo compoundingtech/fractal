@@ -40,7 +40,7 @@ CHECKS = ('linux-gate', 'typescript-client', 'genie-freshness', 'ci-script-tests
 # The checks with an entry in the skip policy: every gated one (fractal-web's entry is shadow, see its own tests).
 POLICY_CHECKS = CHECKS
 # Every evidence gate job: the checks above and rust-tests, whose note covers one crate and whose gate asks whether every workspace
-# member has one (evidence-verify --members; its end-to-end test is scripts/st-test-test's PerCrate).
+# member has one (evidence-verify --members; its end-to-end test is scripts/fractal-test-test's PerCrate).
 GATED = CHECKS + ('rust-tests',)
 WEEK = 7 * 24 * 3600
 # The wrapper notes' exact strings, as the note jobs record them (nix-evidence, #2795 / #2803), written out
@@ -762,6 +762,35 @@ class EndToEnd(unittest.TestCase):
         fields = self.assertRuns(s['base'], 'main moved a protected file', **self.pr_env(s))
         self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
 
+    def test_main_changing_only_a_list_read_at_the_base_keeps_the_head_tree(self):
+        # The keys, the author list and the log key are read at the accepted base when a note is judged, never from the head tree: main
+        # changing one after the branch point does not void a head signature (2026-10-26: a key rotation on main made finished runs stale).
+        rotated = lambda: self.f.keys.read_text() + f'fleet/rotated namespaces="git" {self.f.key("rotated").with_suffix(".pub").read_text()}'
+        log_key = lambda: f'log/evidence namespaces="git" {self.f.key("log-key").with_suffix(".pub").read_text()}'
+        for path, content in (('.st/evidence-keys', rotated), ('.st/evidence-authors.json', lambda: json.dumps({**self.AUTHORS, 'logins': ['alice', 'bob', 'carol']})),
+                              ('.st/evidence-log-key', log_key)):
+            with self.subTest(path):
+                self.tmp_reset()
+                s = self.pull_request(main_files={path: content()})
+                self.assertIn(path, self.f.git('diff', '--name-only', s['base'], s['tip']).split())
+                record = self.note(s['head'], s['head_tree'], seconds=1)
+                fields, outputs = self.run_gate(s['tip'], **self.pr_env(s))
+                self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], outputs['record']), ('skip', 'head', 'used', record))
+
+    def test_main_changing_the_required_lanes_after_the_branch_point_still_falls_back(self):
+        s = self.pull_request(main_files={'.st/required-lanes.json': '{}\n'})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['base'], 'main moved the required lanes', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
+
+    def test_a_key_rotation_on_main_that_drops_the_signer_still_refuses_the_head_note(self):
+        kept = ''.join(line for line in self.f.allowed if not line.startswith('fleet/ci '))
+        s = self.pull_request(main_files={'.st/evidence-keys': kept})
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields = self.assertRuns(s['tip'], 'the base no longer trusts the signer', **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree']), ('head', 'used'))
+        self.assertNotEqual(fields['outcome'], 'satisfied')
+
     def test_a_base_without_the_signing_script_falls_back(self):
         s = self.pull_request(signing=False)
         self.note(s['head'], s['head_tree'], seconds=1)
@@ -980,7 +1009,7 @@ class EndToEnd(unittest.TestCase):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
         enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        # rust-tests (per crate, scripts/st-test) has a policy entry and a gate job of its own, in shadow (enforce false).
+        # rust-tests (per crate, scripts/fractal-test) has a policy entry and a gate job of its own, in shadow (enforce false).
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests',)))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
@@ -1481,8 +1510,8 @@ class EndToEnd(unittest.TestCase):
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
             'head_tree', 'behind', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'log', 'log_head', 'log_age_s', 'log_missing',
-            'log_fetch', 'members', 'missing', 'manifests_fetch', 'members_fetch', 'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt',
-            'fork', 'verifier_sha256', 'gate_sha256'])
+            'log_fetch', 'log_unlogged', 'log_unlogged_crates', 'log_unlogged_observed_at', 'members', 'missing', 'manifests_fetch',
+            'members_fetch', 'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         # The per-crate fields are '-' for a check that is not per crate.
         self.assertEqual([fields[k] for k in ('members', 'missing', 'manifests_fetch', 'members_fetch')], ['-'] * 4)
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),

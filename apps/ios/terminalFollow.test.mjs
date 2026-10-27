@@ -56,7 +56,7 @@ const errorFrame = (code, message) => ({ kind: 'error', id: 'terminal', collecti
   assert.equal(sockets.length, 2);
   assert.equal(terminalSubscriptions(sockets[1]).at(-1).capability, 'capability-3');
 
-  // st also says stale-fence when the owner is briefly out of reach: the same incarnation is
+  // Fractal also says stale-fence when the owner is briefly out of reach: the same incarnation is
   // attached again.
   sockets[1].frame(errorFrame('stale-fence', 'the terminal owner is not reachable'));
   assert.match(issues.at(-1), /reconnecting/);
