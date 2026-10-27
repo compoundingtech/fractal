@@ -97,8 +97,13 @@ const restoringStoryUrl = (play: NonNullable<Story['play']>): NonNullable<Story[
 }
 
 const workspace = async (canvasElement: HTMLElement) => {
-  // Readiness follows the mounted transcript lane, not a historical fixture row outside its initial suffix.
-  await expect(await within(canvasElement).findByTestId('transcript-scroll', {}, { timeout: 60000 })).toBeVisible()
+  // Match ConversationPane's commitment observer: a real turn exists and adoption's placeholder is gone.
+  await waitFor(() => {
+    const lane = within(canvasElement).getByTestId('transcript-scroll')
+    expect(lane).toBeVisible()
+    expect(within(lane).queryByTestId('transcript-placeholder')).toBeNull()
+    expect(within(lane).getAllByTestId('transcript-turn')[0]).toBeVisible()
+  }, { timeout: 60000 })
   const narrow = window.matchMedia(narrowLayoutQuery).matches
   return { canvas: within(canvasElement), narrow, header: within(within(canvasElement).getByTestId('thread-header')) }
 }
