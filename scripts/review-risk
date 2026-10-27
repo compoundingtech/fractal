@@ -75,16 +75,55 @@ def unquote(name):
     return out.decode(errors="replace")
 
 
+TEST_MODULE = re.compile(r"^#\[cfg\(test\)\]\n(?:pub(?:\([a-z]+\))? )?mod tests \{\n", re.M)
+HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def test_block_start(text):
+    """The 1-based line of the `#[cfg(test)]` that opens a trailing `mod tests { ... }` in a Rust file's TEXT, or None.
+
+    Trailing means rustfmt-shaped and last: after the module's opening line every line is blank or indented, except the module's own
+    closing brace as the file's last line. Anything else (code after the module, a raw string at column 0) is not read as a test
+    block, so the lines stay scored.
+    """
+    found = None
+    for found in TEST_MODULE.finditer(text):
+        pass
+    if found is None:
+        return None
+    rest = text[found.end():].split("\n")
+    while rest and not rest[-1].strip():
+        rest.pop()
+    if not rest or rest[-1] != "}" or any(line and not line[0].isspace() for line in rest[:-1]):
+        return None
+    return text.count("\n", 0, found.start()) + 1
+
+
 def read_diff(repo, base, head):
     """(paths, lines): the changed paths, and per path its (marker, line) pairs, marker '+' or '-'.
 
     Renames are not followed: a moved file shows as a deletion of the old path and an addition of the new one, so the old path
     still counts. Paths come NUL-separated and unquoted, so a path with a non-ASCII character or a space is read as it is.
+
+    Lines inside a trailing `#[cfg(test)] mod tests` block of a Rust file (added lines by their place in the head, removed lines by
+    their place in the merge base) are test code: they are left out of the returned lines, so no content rule reads them, and counted
+    only in the third value, the total of changed lines. The file still counts as changed.
     """
     names = subprocess.check_output(["git", "diff", "--name-only", "--no-renames", "-z", f"{base}...{head}"], cwd=repo, text=True, errors="replace").split("\0")
     text = subprocess.check_output(["git", "-c", "core.quotePath=false", "diff", "-U0", "--no-color", "--no-renames", f"{base}...{head}"],
                                    cwd=repo, text=True, errors="replace")
-    lines, current, header = {}, None, False
+    merge_base = subprocess.run(["git", "merge-base", base, head], cwd=repo, text=True, capture_output=True).stdout.strip() or base
+    starts = {}
+
+    def block_start(revision, path):
+        if not path.endswith(".rs"):
+            return None
+        if (revision, path) not in starts:
+            shown = subprocess.run(["git", "show", f"{revision}:{path}"], cwd=repo, capture_output=True)
+            starts[(revision, path)] = test_block_start(shown.stdout.decode(errors="replace")) if shown.returncode == 0 else None
+        return starts[(revision, path)]
+
+    lines, current, header, total, old_no, new_no = {}, None, False, 0, 0, 0
     for line in text.split("\n"):
         if line.startswith("diff --git"):
             current, header = None, True
@@ -96,9 +135,19 @@ def read_diff(repo, base, head):
             current = target[2:] if target.startswith("b/") else current
         elif line.startswith("@@"):
             header = False
+            hunk = HUNK.match(line)
+            old_no, new_no = (int(hunk.group(1)), int(hunk.group(2))) if hunk else (0, 0)
         elif not header and current and line[:1] in ("+", "-"):
-            lines.setdefault(current, []).append((line[0], line[1:]))
-    return [name for name in names if name], lines
+            total += 1
+            added = line[0] == "+"
+            start = block_start(head if added else merge_base, current)
+            if start is None or (new_no if added else old_no) < start:
+                lines.setdefault(current, []).append((line[0], line[1:]))
+            if added:
+                new_no += 1
+            else:
+                old_no += 1
+    return [name for name in names if name], lines, total
 
 
 def higher(left, right):
@@ -157,8 +206,7 @@ def main():
         rules, risky, engine = rule_files(args.repo, args.base, args.rules_from_checkout, folder)
         if rules.get("version") != 1:
             raise SystemExit(f"{RULES}: unsupported version")
-        paths, lines = read_diff(args.repo, args.base, args.head)
-        changed = sum(len(pairs) for pairs in lines.values())
+        paths, lines, changed = read_diff(args.repo, args.base, args.head)
         reasons = score(rules, paths, lines, risky, engine)
     large = rules.get("large")
     if large and changed >= large["changed_lines"]:

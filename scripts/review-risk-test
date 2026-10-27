@@ -64,6 +64,52 @@ class ReviewRisk(unittest.TestCase):
         self.assertEqual(result["level"], "high")
         self.assertEqual(self.rules(result)["schema"], "high")
 
+    def test_a_table_in_a_test_file_does_not_score_as_schema(self):
+        for path in ("crates/fractal-store/src/store/plain_tests.rs", "crates/fractal-store/src/store/tests.rs",
+                     "crates/fractal-store/src/store/tests/fixture.rs", "crates/smallclaims/src/window_test.rs"):
+            self.write(path, 'fn t() { exec("CREATE TABLE t (id)"); }\n')
+        result = self.risk()
+        self.assertEqual(result["level"], "low", result)
+        self.assertNotIn("schema", self.rules(result))
+
+    SOURCE = "pub fn run() {}\n"
+    TESTS = '#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn it_runs() {\n        run();\n    }\n}\n'
+
+    def start_from(self, text):
+        """A base whose Rust file already holds TEXT, and a change branch from it."""
+        self.git("checkout", "-q", "main")
+        self.write("crates/fractal-store/src/store/inline.rs", text)
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "inline")
+        self.git("checkout", "-q", "-B", "change")
+
+    def test_a_table_added_inside_a_trailing_test_module_does_not_score_but_the_same_line_above_it_does(self):
+        self.start_from(self.SOURCE + "\n" + self.TESTS)
+        fixture = '        exec("CREATE TABLE t (id)");\n'
+        self.write("crates/fractal-store/src/store/inline.rs", self.SOURCE + "\n" + self.TESTS.replace("        run();\n", "        run();\n" + fixture))
+        result = self.risk()
+        self.assertEqual(result["level"], "low", result)
+        self.assertNotIn("schema", self.rules(result))
+        self.assertEqual(result["changed_lines"], 1)
+        self.write("crates/fractal-store/src/store/inline.rs", 'pub fn run() { exec("CREATE TABLE t (id)"); }\n\n' + self.TESTS)
+        result = self.risk()
+        self.assertEqual(self.rules(result).get("schema"), "high", result)
+
+    def test_a_table_removed_from_a_trailing_test_module_does_not_score(self):
+        fixture = '        exec("CREATE TABLE t (id)");\n'
+        self.start_from(self.SOURCE + "\n" + self.TESTS.replace("        run();\n", "        run();\n" + fixture))
+        self.write("crates/fractal-store/src/store/inline.rs", self.SOURCE + "\n" + self.TESTS)
+        result = self.risk()
+        self.assertNotIn("schema", self.rules(result), result)
+
+    def test_a_module_called_tests_that_is_not_last_is_still_scored(self):
+        after = "pub fn later() {}\n"
+        self.start_from(self.SOURCE + "\n" + self.TESTS + "\n" + after)
+        fixture = '        exec("CREATE TABLE t (id)");\n'
+        self.write("crates/fractal-store/src/store/inline.rs",
+                   self.SOURCE + "\n" + self.TESTS.replace("        run();\n", "        run();\n" + fixture) + "\n" + after)
+        self.assertEqual(self.rules(self.risk()).get("schema"), "high")
+
     def test_deleting_data_is_high_in_source_and_ignored_in_tests(self):
         self.write("crates/fractal-store/src/store/plain_tests.rs", 'fn t() { exec("DELETE FROM t"); }\n')
         self.assertEqual(self.risk()["level"], "low")
