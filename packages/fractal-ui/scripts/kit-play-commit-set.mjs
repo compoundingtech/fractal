@@ -49,7 +49,9 @@ export const MERGE_ONLY = [
 export const BOTH_WIDTHS = [
   'fractal-app-composer-images--several-images',
   'fractal-app-transcript-images--loaded',
-  'fractal-ui-composer--footer-width-budget',
+  'fractal-ui-composer--footer-width-budget-narrow',
+  'fractal-ui-composer--footer-width-budget-medium',
+  'fractal-ui-composer--footer-width-budget-wide',
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
   'fractal-ui-sidebar-agent-row--densities-and-children',
@@ -66,11 +68,15 @@ const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
 // in only one outer browser case. FilterBehavior retains functional coverage in all four cases.
 export const KIT_CASE_OVERRIDES = new Map([
   ['fractal-ui-transcript--no-green-all-states-light', []],
-  ['fractal-ui-composer--footer-width-budget-light', []],
+  ['fractal-ui-composer--footer-width-budget-narrow-light', []],
+  ['fractal-ui-composer--footer-width-budget-medium-light', []],
+  ['fractal-ui-composer--footer-width-budget-wide-light', []],
   ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
   // Portal theme inheritance must run in light as well as dark on every commit.
   ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],
 ])
+const APP_MODULE_STATES = ['loading', 'empty', 'populated', 'failed-tool', 'offline', 'unavailable', 'scripted-repair']
+export const APP_MODULE_SUITE_IDS = ['fractal-app-liveagentworkspace', 'fractal-app-conversationpane'].flatMap(suite => APP_MODULE_STATES.map(state => `${suite}--${state}`))
 export const APP_CASE_OVERRIDES = new Map([
   // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
   ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
@@ -79,6 +85,9 @@ export const APP_CASE_OVERRIDES = new Map([
   ['fractal-narrow-layout--breakpoint-density-coarse', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
   // Pointer and Escape dismissal restore the opening trigger in tablet and phone drawers.
   ['fractal-narrow-layout--drawer-focus-return', [['dark', 899], ['light', 440]]],
+  // The production module suites prove each availability state mounts the real module; none depends on width
+  // or scheme, so each state runs once, dark at desktop width (14 merge cases rather than 56).
+  ...APP_MODULE_SUITE_IDS.map(id => [id, [['dark', 1440]]]),
 ])
 // The production build includes both inventories; every named story remains required.
 export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])

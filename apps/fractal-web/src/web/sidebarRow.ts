@@ -93,7 +93,7 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
   // The active-child lease proves membership, not activity, usage or a last-turn time.
   status: 'unobserved', statusLabel: 'Not observed', freshness: stale ? 'stale' : 'live',
   usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' },
-  subagentObservation: { _tag: 'NotReported' }, children: [],
+  subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, children: [],
 })
 
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
@@ -116,8 +116,9 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
   // The canonical state drives both the G3 glyph and its sentence-case word.
   // Lifecycle takes precedence over harness activity: a stopped idle harness is Ended, not Idle.
   const statusLabel = statuses[status].label
-  // OMP supports subagent observations; other harnesses opt in only by reporting a roster.
-  const supportsSubagents = agent.harness === 'omp' || agent.subagents !== undefined
+  // Preserve the real projection's driver capability; visual harness metadata can omit non-observing/unknown drivers.
+  const observesSubagents = agent.driver?._tag === 'Observing'
+  const awaitingFirstReport = observesSubagents && (agent.state === 'desired' || agent.state === 'starting')
   // Stale observations retain the same last-verified facts as the row status, including children and their count.
   const subagentsKnown = agent.subagents !== undefined
   return {
@@ -131,7 +132,8 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
     missionInfo,
     needsMe,
     subagentCount: subagentsKnown ? agent.subagents!.length : undefined,
-    subagentObservation: { _tag: subagentsKnown ? 'Reported' : supportsSubagents ? 'Unavailable' : 'NotReported' },
+    subagentObservation: subagentsKnown ? { _tag: 'Reported' } : awaitingFirstReport ? { _tag: 'Unavailable' } :
+      { _tag: 'NotReported', reason: { _tag: observesSubagents ? 'DaemonVersion' : 'Harness' } },
     children: agent.subagents?.map(child => sidebarSubagentRow({ parent: agent, child, stale })) ?? [],
     // Cost is optional and may use another currency; never present unknown spend as $0.
     usage: agent.usage._tag === 'Known' ? {

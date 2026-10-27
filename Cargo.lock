@@ -1731,6 +1731,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "ciborium",
  "crossterm",
  "fractal-schema",
@@ -1740,6 +1741,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "iroh-base",
+ "jsonschema",
  "libc",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -1953,6 +1955,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
@@ -2479,6 +2482,7 @@ version = "0.1.0"
 name = "fractal-store"
 version = "0.1.0"
 dependencies = [
+ "agent-spec",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -2509,6 +2513,7 @@ dependencies = [
  "notify",
  "opentelemetry",
  "opentelemetry_sdk",
+ "parking_lot",
  "proptest",
  "pty-client",
  "pty-core",
