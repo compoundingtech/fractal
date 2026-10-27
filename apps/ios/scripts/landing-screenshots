@@ -182,7 +182,7 @@ run node --input-type=module -e '
   const { name, version } = require("ws/package.json");
   console.log(JSON.stringify({ name, version, path: import.meta.resolve("ws"), server: typeof WebSocketServer }));
 '
-start_service "$out/demoGateway.log" node demoGateway.mjs 8791
+start_service "$out/demoGateway.log" node --experimental-transform-types demoGateway.mjs 8791
 gateway_pid="$service_pid"
 wait_service "$gateway_pid" 'http://127.0.0.1:8791/v1/client/capabilities' "$out/demoGateway.log"
 start_service "$out/metro.log" corepack pnpm exec expo start --localhost --port 8081 --clear
@@ -234,7 +234,7 @@ appId: com.compoundingtech.fractal.starter
 # Maestro matches text case-insensitively by default; do not tap the navigation title.
 - tapOn: '(?-i:^pair this device$)'
 - extendedWaitUntil:
-    visible: '.*Approve the widget release.*'
+    visible: '.*Review the loadUser rename.*'
     timeout: 30000
 - assertNotVisible: '.*Open debugger to view warnings.*'
 FLOW
@@ -243,10 +243,10 @@ stop_pairing_log
 for view in now conversation; do
   if [[ "$view" = now ]]; then
     link='com.compoundingtech.fractal.starter://tab/Now'
-    expected='Approve the widget release'
+    expected='Review the loadUser rename'
   else
-    link='com.compoundingtech.fractal.starter://agent?id=agent/example/beacon'
-    expected='beacon'
+    link='com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder'
+    expected='Atlas Builder'
   fi
   cat > "$out/navigate.yaml" <<FLOW
 appId: com.compoundingtech.fractal.starter

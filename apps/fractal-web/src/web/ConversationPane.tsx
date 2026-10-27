@@ -9,6 +9,7 @@ import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
+import { nativeTurnFooter } from './NativeTurnFooter.tsx'
 import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
@@ -204,6 +205,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
+      renderTurnFooter={nativeTurnFooter}
       onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       attachmentImages={{ state: images.state, load: (attachment, messageId) => { void images.load(attachment, messageId) } }}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
