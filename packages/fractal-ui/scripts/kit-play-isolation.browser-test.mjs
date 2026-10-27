@@ -96,7 +96,7 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
           self.addEventListener('message', event => {
             if (event.data?.type !== 'navigate-audit') return
             event.waitUntil((async () => {
-              const audit = (await self.clients.matchAll({ type: 'window' })).find(client => client.url === event.data.from)
+              const audit = (await self.clients.matchAll({ type: 'window' })).find(client => client.id !== event.source.id && client.url === event.data.from)
               await audit.navigate(event.data.url)
               event.ports[0].postMessage('navigated')
             })())
