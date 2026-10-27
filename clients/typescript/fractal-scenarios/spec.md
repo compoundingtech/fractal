@@ -185,6 +185,12 @@ Agent rows include `subagents` (empty when none are running) only for observing 
 Each entry gets increasing `sequence`, `revision` 1 unless revised, and a timestamp from the
 time model. A streaming entry is emitted as revisions with `final: false` until its last revision.
 
+Native harness turn headers keep non-`message/` body `message_id` values, including
+normalized provider UUIDs (`native/scenario-...`). Like the daemon, they omit `from`/`to`;
+their user/assistant roles distinguish the person from the agent. Only real graph mail
+uses `message/` IDs and carries sender/recipient fields. Timeline entry IDs remain
+`timeline-entry/...` in either case.
+
 ### Slices
 
 A slice holds the state at `now` (offset 0) and a timeline of events after `now` (offset > 0).
@@ -204,6 +210,20 @@ after it (see [Store versions](#store-versions)).
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
 | `sync` | `capabilities` envelope, the [sync script](#sync-matrix) and the `expected` sync status per surface | see [Replay dispatch](#replay-dispatch) |
+
+Synthetic details missions include `run_details`, derived from the same work inventory at
+the baseline and after every details change. Each run's progress, step states and claimants
+match its work rows; the cast maps each `work/...` ID to its `step-run/...` identity.
+This is the cast `work` ↔ `stepRun` mapping: Work keeps `work`; run details use `stepRun`.
+Synthetic missions also include `presentation`, using the daemon's mission/step word
+precedence, display ordering, roster ownership and queue facts, open human gates, action
+offers and progress. Its step IDs are the same `stepRun` IDs as `run_details`, and its
+done count is the number of completed steps, not a client fallback.
+Work-only changes also publish the affected mission's joined run details. Recorded slices
+remain unmodified captures.
+`crates/fractal-ui-model/tests/scenarios.rs` proves synthetic presentations match the real
+daemon presentation function at the baseline and each committed details change, using
+the corresponding roster queues and open human gates rather than a second expected model.
 
 Creation events carry the complete thread or terminal record, including pagination or runtime,
 cast and screens metadata. Resources are genuinely absent before creation, rather than hidden
@@ -1193,30 +1213,31 @@ Stories whose consumer initially mounts only part of a conversation may declare
 `parameters.scenario.window`, typed by `ScenarioStoryParameter` from `/storybook/check`:
 
 ```ts
-// Transcript uses initialTailCount={2}; EmbraceScrollViewport historyBatchSize=4.
-window: { _tag: 'tail', turns: 2, historyBatch: 4 }
+// Transcript mounts transcriptInitialSourceRowCount=6 source rows, plus the latest prompt.
+window: { _tag: 'sourceRows', rows: 6 }
 ```
 
 The tagged union also accepts `{ _tag: 'all' }`, equivalent to omitting the window,
-including for empty or loading baselines; vacuity validation applies only to tail windows.
-The check derives each thread's turns from folded wire entries: user text content opens a
-turn; an assistant-content/tool-call prefix is one turn. It selects the final N turns per
-thread, not the final N entries; threads with at most N + historyBatch turns mount whole,
-matching EmbraceScrollViewport's short-conversation rule. The check requires their markers and counts.
+including for empty or loading baselines; vacuity validation applies only to source-row windows.
+The check derives each thread's source rows from folded wire entries: user or assistant text
+content and tool calls, one row each. It selects the final N source rows per thread plus the
+thread's latest user prompt, without the rows between them; threads with at most N source rows
+mount whole. Scenario wire entries carry no reasoning, so Transcript's rule of mounting a
+reasoning run that crosses the bound whole never widens the window here. The check requires their markers and counts.
 Other slices retain their full marker contract. World-switch contrast selection uses the
 same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
 The story must state the consumer's real mount rule, with a comment naming that rule; this
 is not permission to choose arbitrary convenient data or split the transcript.
 Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
-Transcript's initial tail count and EmbraceScrollViewport's history batch size. Stories
-can use this shared value instead of copying the counts; a consumer-side test guards it.
+Transcript's initial source-row count. Stories can use this shared value instead of copying
+the count; a consumer-side test guards it.
 
-`MountedWindow` failures reject invalid tail counts/history batches, a baseline tail window
+`MountedWindow` failures reject invalid row counts, a baseline source-row window
 selecting zero entries, or one excluding every marker from a marker-bearing conversation.
 Genuinely empty/loading contrast sides still participate as contentless contrasts.
 Without a window, the all-source marker contract is unchanged. The mounted check does not
 prove history reveal or a reply deliberately held back by an interaction harness: browser
-plays must separately prove both, and a tail window cannot express an arbitrary held-back
+plays must separately prove both, and a source-row window cannot express an arbitrary held-back
 reply within a mounted turn.
 
 The kit's own tests include a negative case: a story that declares slices but renders fixed text

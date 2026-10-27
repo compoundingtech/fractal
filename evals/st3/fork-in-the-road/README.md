@@ -1,6 +1,6 @@
 # Fork in the road
 
-This st3 eval runs a four-agent design panel with native Codex seats.
+This Fractal eval runs a four-agent design panel with native Codex seats.
 
 The three proposal agents are grouped under the synthesis agent for visualization only.
 

@@ -1,4 +1,4 @@
-# Weird Git Setup eval for st3
+# Weird Git Setup eval for Fractal
 
 This eval materializes a linked Git worktree before it starts one Codex worker.
 

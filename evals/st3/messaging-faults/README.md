@@ -8,7 +8,7 @@ extension and consumes `sendUserMessage`. No model or LLM judge runs, and the re
 never polls a mailbox. This measures the transport and harness integration boundary;
 it does not prove a real model's response time or every harness's integration.
 
-Run outside an st seat, since the sender acts as `person/eval`. For example:
+Run outside a Fractal seat, since the sender acts as `person/eval`. For example:
 
 ```sh
 setsid -f env -i HOME="$HOME" USER="$USER" PATH="$PATH" \

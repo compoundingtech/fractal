@@ -1,6 +1,6 @@
 # Seat status truth
 
-One place in st decides what a seat's status is: the agent card that `overlay_agent_resources`
+One place in Fractal decides what a seat's status is: the agent card that `overlay_agent_resources`
 (`crates/fractal-api-core/src/api.rs`) finishes on every read, with the read's own clock. Fractal TUI, the phone app,
 the web app and `st agents show` render that card. None of them re-derives a state from the raw
 fields, so they cannot disagree.
@@ -14,22 +14,22 @@ fields, so they cannot disagree.
 | `state: down`, `down_since` | A declared seat with no running session and no harness report within a heartbeat (11 minutes; a driver at an empty prompt reports every five minutes) once the launch window has passed. `down_since` is when it last reported after its launch, or when it began waiting if it never has; the report time is the driver's own clock value, so a driver with a skewed clock moves `down_since` by the same amount. Never shown as starting, working or idle. |
 | `current_work[].holder_down_since` | Set on every step a `down` seat holds: the step's progress and activity were written by a holder that has no session. |
 | `harness_state: working`, `observation: stale` | A turn can run for hours without a new harness claim, so a `working` report is kept until the harness says otherwise. `silent_since` already says how long the seat has been quiet. |
-| `harness_state: indeterminate`, `observation: stale` | Only a `ready` or `idle` report lapses after the window: st has not heard from the harness. Fractal TUI and the phone app show this as idle for a reachable seat; the card does not claim it. |
+| `harness_state: indeterminate`, `observation: stale` | Only a `ready` or `idle` report lapses after the window: Fractal has not heard from the harness. Fractal TUI and the phone app show this as idle for a reachable seat; the card does not claim it. |
 
 ## What `down` means, and what it does not
 
-`down` is a statement about st's session for the seat: a declaration exists, the runtime row is not
+`down` is a statement about Fractal's session for the seat: a declaration exists, the runtime row is not
 running, and no harness has reported lately. It is not proof that no process exists. A pty daemon
 and its driver can outlive a runtime row stuck at `pending`; while such a seat reports, the card
 says `running`; when it stops reporting, the card says `down` and `st terminals screen` finds no
 session for it too. Finding the process and relaunching a seat that declares `restart always` belong to
 the launch and reconcile path, not to the label.
 
-## A seat st cannot place on a host
+## A seat Fractal cannot place on a host
 
-When two hosts both claim a seat's runtime, st cannot say which one runs it, and `st terminals`
+When two hosts both claim a seat's runtime, Fractal cannot say which one runs it, and `st terminals`
 refuses with `runtime-authority-indeterminate`. The card keeps `state: waiting` and
-`reachability: indeterminate`, and its `reason` reads "st cannot tell which host runs this agent; its
+`reachability: indeterminate`, and its `reason` reads "Fractal cannot tell which host runs this agent; its
 processes may be running" unless the harness gave a reason of its own. The card does not call the
 seat running, stopped or down, and the conflicting claims stay as they are. `st agents show` prints
 the same sentence in place of "Still starting". The apps keep their present word for the state until
