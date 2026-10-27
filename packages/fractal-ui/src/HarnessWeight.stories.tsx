@@ -6,7 +6,7 @@ import { HarnessNotice } from './assistant-ui/composition/HarnessNotice'
 import { Button } from './assistant-ui/composition/Controls'
 import { UnsupportedRecord } from './assistant-ui/composition/UnsupportedRecord'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
-import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel, type BackgroundJobState, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessWeight } from './assistant-ui/embrace-data/model'
+import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel, compareBackgroundJobStates, type BackgroundJobState, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessWeight } from './assistant-ui/embrace-data/model'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { surfaceVars as surface, textVars as ink, borderVars as border, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
@@ -144,8 +144,9 @@ const mixedArrival: readonly { readonly name: string; readonly state: Background
 const mixedSummary = '5 background jobs · 1 failed, 1 running, 1 cancelled, 1 status not reported, 1 completed'
 const jobGroup = (id: string, jobs: typeof mixedArrival): NoticeItem => {
   const outcomes = backgroundJobOutcomeCounts(jobs.map(job => job.state))
-  return { _tag: 'Event', id, kind: 'background-job', title: `${jobs.length} background jobs · ${backgroundJobOutcomeSummary(outcomes)}`, text: jobs.map(job => job.name).join('\n'), sender: omp, data: {},
-    notice: { _tag: 'BackgroundJobGroup', outcomes, payload: jobs.map(job => `- ${job.name}: ${backgroundJobStateLabel(job.state)}`).join('\n'), raw: '' } }
+  const orderedJobs = [...jobs].sort((a, b) => compareBackgroundJobStates(a.state, b.state))
+  return { _tag: 'Event', id, kind: 'background-job', title: `${jobs.length} background jobs · ${backgroundJobOutcomeSummary(outcomes)}`, text: orderedJobs.map(job => job.name).join('\n'), sender: omp, data: {},
+    notice: { _tag: 'BackgroundJobGroup', outcomes, payload: orderedJobs.map(job => `- ${job.name}: ${backgroundJobStateLabel(job.state)}`).join('\n'), raw: '' } }
 }
 const subagent = (id: string, status: string): NoticeItem => ({ _tag: 'Event', id, kind: 'subagent-result', title: `RowWorker · ${status} · 2m`, text: 'Subagent result', sender: omp, data: {},
   notice: { _tag: 'SubagentResult', taskId: 'RowWorker', agent: 'task', status, duration: '2m', payload: 'Subagent result', raw: '' } })
@@ -182,6 +183,15 @@ const mixedOutcomes = (scheme: Scheme, width: 'narrow' | 'wide'): Story => ({
     for (const { weight } of variants) {
       const group = row(weight, 'mixed/failed-group')
       await expect(group).toHaveTextContent(mixedSummary)
+      await expect(within(group).getByTestId('harness-excerpt')).toHaveTextContent(/^Browser checks Type check Migration dry run Lint Docs build$/)
+      const header = group.firstElementChild!
+      await expect(getComputedStyle(header).alignItems).toBe('baseline')
+      const label = header.querySelector('span')!
+      const firstLineBottom = label.getBoundingClientRect().top + parseFloat(getComputedStyle(label).lineHeight)
+      // Both accessories stay within the first text line even when the title wraps.
+      for (const accessory of [header.querySelector('svg')!, pill(weight, 'mixed/failed-group')]) {
+        await expect(accessory.getBoundingClientRect().bottom).toBeLessThanOrEqual(firstLineBottom + 1)
+      }
       await expect(pill(weight, 'mixed/failed-group')).toHaveTextContent('failed')
       await expect(icon(weight, 'mixed/failed-group')).toBe(alertPath)
       const neutral = getComputedStyle(pill(weight, 'mixed/quiet-group')).color
@@ -205,7 +215,7 @@ const mixedOutcomes = (scheme: Scheme, width: 'narrow' | 'wide'): Story => ({
       await expect(row(weight, 'mixed/failed-group')).toHaveTextContent(mixedSummary)
       await expect(pill(weight, 'mixed/failed-group')).toBe(before[index])
       await expect(pill(weight, 'mixed/failed-group')).toHaveTextContent('failed')
-      await expect(within(row(weight, 'mixed/failed-group')).getByTestId('harness-excerpt')).toHaveTextContent(/^Type check/)
+      await expect(within(row(weight, 'mixed/failed-group')).getByTestId('harness-excerpt')).toHaveTextContent(/^Browser checks Type check Migration dry run Lint Docs build$/)
     }
     const read = within(row('row', 'mixed/failed-group')).getByRole('button', { name: 'Read results' })
     await userEvent.click(read)

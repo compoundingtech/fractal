@@ -54,10 +54,11 @@ export const backgroundJobStateLabel = (state: BackgroundJobState): string => {
 
 /** Reader rank for grouped job outcomes: failures first, success last, never arrival order. A new state fails typecheck here. */
 const outcomeRank: Record<BackgroundJobState, number> = { failed: 0, running: 1, cancelled: 2, unknown: 3, completed: 4 }
+export const compareBackgroundJobStates = (a: BackgroundJobState, b: BackgroundJobState): number => outcomeRank[a] - outcomeRank[b]
 export const backgroundJobOutcomeCounts = (states: Iterable<BackgroundJobState>): readonly BackgroundJobOutcomeCount[] => {
   const counts = new Map<BackgroundJobState, number>()
   for (const state of states) counts.set(state, (counts.get(state) ?? 0) + 1)
-  return [...counts].sort(([a], [b]) => outcomeRank[a] - outcomeRank[b]).map(([state, count]) => ({ state, count }))
+  return [...counts].sort(([a], [b]) => compareBackgroundJobStates(a, b)).map(([state, count]) => ({ state, count }))
 }
 export const backgroundJobOutcomeSummary = (outcomes: readonly BackgroundJobOutcomeCount[]): string =>
   outcomes.map(({ state, count }) => `${count} ${backgroundJobStateLabel(state)}`).join(', ')

@@ -66,7 +66,7 @@ const styles = stylex.create({
   rowIndent: { marginInlineStart: s.xl },
   pill: { flexShrink: 0, paddingInline: s.sm, borderRadius: r.full, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, color: ink.fgMuted, fontSize: t.denseSize },
   pillFailed: { borderColor: status.dangerMuted, color: status.dangerFg },
-  header: { display: 'flex', alignItems: 'center', gap: s.sm },
+  header: { display: 'flex', alignItems: 'baseline', gap: s.sm },
   label: { minWidth: 0, flex: 1, overflowWrap: 'anywhere', fontWeight: 500 },
   time: { flexShrink: 0, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums' },
   excerpt: { marginBlock: s.xs, color: ink.fgMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
