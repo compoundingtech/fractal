@@ -282,7 +282,8 @@ fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Val
             for field in header["required"].as_array().context("missing header required fields")? {
                 if !required.contains(field) { required.push(field.clone()); }
             }
-            *definition = object;
+            // Replace only this conjunction, not sibling oneOf/conditional constraints.
+            definition["allOf"] = Value::Array(vec![object]);
         }
     }
     close_schema(&mut schema);

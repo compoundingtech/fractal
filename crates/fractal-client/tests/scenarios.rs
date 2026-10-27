@@ -257,3 +257,35 @@ fn scenarios_decode_all_committed_inventory_roots() {
         slice.decode().expect("tolerant inventories must accept future fields");
     }
 }
+
+#[test]
+fn scenarios_strict_preserves_sibling_device_variant_constraints() {
+    let roster = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
+    let person = roster.state["devices"][0].clone();
+    assert_eq!(person["grant_kind"], "person");
+    let mut slice = roster;
+    slice.state["devices"] = serde_json::json!([person]);
+    slice.decode().expect("a complete person device must pass strict decoding");
+    let mut missing_person = slice.clone();
+    missing_person.state["devices"][0].as_object_mut().unwrap().remove("person_id");
+    assert!(missing_person.decode().is_err(), "a person device requires person_id");
+
+    let pairing = client_fixture("assistant-pairing.json");
+    let grant = &pairing["value"]["grant"];
+    let mut assistant = person.clone();
+    assistant.as_object_mut().unwrap().remove("person_id");
+    assistant["grant_kind"] = Value::String("assistant".into());
+    for field in ["principal", "sender_class", "session_actor"] {
+        assistant[field] = pairing["value"][field].clone();
+    }
+    assistant["grant_id"] = grant["id"].clone();
+    assistant["policy_revision"] = grant["policy_revision"].clone();
+    assistant["minimal_read_mode"] = grant["minimal_read_mode"].clone();
+    slice.state["devices"] = serde_json::json!([assistant]);
+    slice.decode().expect("a complete assistant device must pass strict decoding");
+    for field in ["principal", "sender_class", "grant_kind", "grant_id", "policy_revision", "minimal_read_mode"] {
+        let mut incomplete = slice.clone();
+        incomplete.state["devices"][0].as_object_mut().unwrap().remove(field);
+        assert!(incomplete.decode().is_err(), "an assistant device requires {field}");
+    }
+}

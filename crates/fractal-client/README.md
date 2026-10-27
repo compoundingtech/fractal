@@ -43,7 +43,8 @@ Call `slice.rebased(now_epoch_ms)?` to shift only its declared instant pointers,
 Roster decoding includes the session/device inventories; details decoding includes launches
 and launch variants. Resource wire values are boxed inside `WireValue`.
 Strict slices reject unknown object fields, enum cases and discriminated-union tags while
-preserving explicitly schema-declared open maps (including error details). Tolerant slices
+preserving explicitly schema-declared open maps (including error details) and variant-specific
+constraints such as person/assistant device requirements. Tolerant slices
 retain the production models' forward-compatible behavior. Diagnostic `unknown` repair
 witnesses never replace wire data. Replay offsets, durations and opaque content are not shifted.
 
