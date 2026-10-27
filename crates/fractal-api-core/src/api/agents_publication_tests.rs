@@ -143,14 +143,14 @@ async fn agents_publication_summary_request_after_idle_registers_demand_and_reco
     })).unwrap();
     let session = client_v0::ClientSession::local(None).unwrap();
     for reset in [false, true] {
-        roster_resilience_runtime(store, "agent/summary-demand", if reset { "reset" } else { "new" });
-        if reset {
-            store.forget_current_views();
-        }
         store.fractal.agent_roster_read_at.store(
             (client_now_ms() as u64).saturating_sub(300_001),
             std::sync::atomic::Ordering::Release,
         );
+        roster_resilience_runtime(store, "agent/summary-demand", if reset { "reset" } else { "new" });
+        if reset {
+            store.forget_current_views();
+        }
         assert!(!store.agents_publication_demand());
         let summary = || {
             client_v0::summary::shared(&app, &session, &request,
@@ -218,4 +218,65 @@ fn agents_publication_last_subscriber_leaving_in_blocking_queue_skips_materializ
         assert_eq!(store.agent_resources_builds_for_test(), before);
         assert!(store.agents_publication().is_none());
     });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn agents_publication_startup_completes_without_subscriber_or_read_grace() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    roster_resilience_runtime(&app.store, "agent/startup-publication", "startup");
+    // The legacy publication watch does not contribute revisioned subscriber demand.
+    let mut published = app.store.subscribe_agent_roster();
+    start_agent_roster(&app);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while app.store.agents_publication().is_none() {
+            published.changed().await.unwrap();
+        }
+    }).await.expect("startup must publish the complete roster without a reader");
+    assert!(!app.store.agents_publication_demand(), "startup grants one refresh, not a read grace");
+}
+
+#[tokio::test]
+async fn agents_publication_activity_request_survives_subscriber_loss_and_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    roster_resilience_runtime(store, "agent/activity-demand", "new");
+    let subscriber = store.subscribe_agents_publications();
+    let held = store.admit_agent_resources("other").await;
+    let mut refresh = std::pin::pin!(refresh_agent_roster_admitted(Arc::clone(store), false));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(Future::poll(refresh.as_mut(), &mut context).is_pending());
+    // A projection invalidation uses the real local-activity wake and records pending demand.
+    store.forget_current_views();
+    drop(subscriber);
+    assert!(store.agents_publication_demand());
+    drop(held);
+    refresh.await.unwrap().unwrap();
+    assert!(store.agents_publication().is_some());
+    assert!(!store.agents_publication_demand(), "the activity request is acknowledged once");
+}
+
+#[tokio::test]
+async fn agents_publication_explicit_request_outlives_the_read_grace_while_queued() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    roster_resilience_runtime(store, "agent/explicit-demand", "new");
+    store.request_agent_roster_refresh();
+    let held = store.admit_agent_resources("other").await;
+    let mut refresh = std::pin::pin!(refresh_agent_roster_admitted(Arc::clone(store), false));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(Future::poll(refresh.as_mut(), &mut context).is_pending());
+    store.fractal.agent_roster_read_at.store(
+        (client_now_ms() as u64).saturating_sub(300_001),
+        std::sync::atomic::Ordering::Release,
+    );
+    assert!(store.agents_publication_demand(), "an unanswered request remains demand");
+    drop(held);
+    refresh.await.unwrap().unwrap();
+    assert!(store.agents_publication().is_some());
+    assert!(!store.agents_publication_demand());
 }

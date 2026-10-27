@@ -708,12 +708,20 @@ impl FractalRuntime {
     /// long catch-up or trim that forgets once per chunk does not refold it once per chunk.
     pub fn agents_publication_demand(&self) -> bool {
         let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
-        self.presented_agents.has_subscribers() || (read_at != 0
-            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64)
+        self.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire) != 0
+            || self.presented_agents.has_subscribers() || (read_at != 0
+                && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64)
     }
 
     pub fn wake_read_roster(&self) {
-        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| self.agents_publication_demand()) {
+        if self.agents_publication_demand() {
+            self.request_roster_refresh();
+        }
+    }
+
+    /// A queued startup, explicit-read or local-activity request remains demand until answered.
+    pub fn request_roster_refresh(&self) {
+        if let Some(wake) = self.agent_roster_refresh.get() {
             let _ = self.agent_roster_requested_at.compare_exchange(
                 0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
