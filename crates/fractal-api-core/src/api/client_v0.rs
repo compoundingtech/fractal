@@ -2018,8 +2018,11 @@ pub fn session_message_body(state: &AppState, claim: &ClaimRecord, participants:
 }
 
 fn timeline_order(a: &Value, b: &Value) -> std::cmp::Ordering {
-    a["timestamp"].as_str().cmp(&b["timestamp"].as_str())
-        .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
+    crate::external_sessions::compare_timeline_positions(
+        (a["timestamp"].as_str().unwrap_or_default(), a["sequence"].as_u64().unwrap_or(0), 0, a["id"].as_str().unwrap_or_default()),
+        (b["timestamp"].as_str().unwrap_or_default(), b["sequence"].as_u64().unwrap_or(0), 0, b["id"].as_str().unwrap_or_default()),
+        crate::external_sessions::TimelineOrder::TimestampSequence,
+    )
 }
 
 /// The conversation header (client contract `conversation-blocks.v1` §3): derived from a
@@ -2512,7 +2515,7 @@ pub fn native_head_fence(
 /// on with a fresh budget), and refuses (`page-cursor-expired`) only when that many consecutive
 /// entries are all hidden.
 #[allow(clippy::too_many_arguments)]
-fn canonical_native_slice(
+pub fn canonical_native_slice(
     state: &AppState,
     snapshot: &ClientSnapshot,
     source: &crate::external_sessions::ExternalSession,
@@ -2573,10 +2576,6 @@ pub const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
 /// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
 /// that keeps its identity and place, so the page it is on still opens and continues past it.
-/// A stored page's position for one entry; the stored projection sorts by it alone.
-pub fn stored_timeline_position(item: &Value) -> u64 {
-    item["sequence"].as_u64().unwrap_or(u64::MAX)
-}
 
 pub fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
     item["type"] = json!("error");
@@ -3182,6 +3181,12 @@ pub fn timeline_value(
     })
 }
 
+/// Stable identity shared by stored projection and conversation replay selection.
+pub fn timeline_claim_entry_id(session_id: &str, claim: &ClaimRecord, suffix: &str) -> String {
+    let digest = hex::encode(Sha256::digest(format!("{}:{suffix}", claim.id).as_bytes()));
+    format!("timeline-entry/{}/{}", session_id.trim_start_matches("session/"), &digest[..24])
+}
+
 pub fn timeline_first_page(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -3190,6 +3195,21 @@ pub fn timeline_first_page(
     query: &ClientListQuery,
     native_read_error: Option<ApiError>,
     managed: Option<&super::ManagedSessionOwner>,
+) -> Result<Json<Value>, ApiError> {
+    timeline_first_page_with_extent(state, snapshot, session, session_id, query, native_read_error, managed, None)
+}
+
+/// Capture the complete bounded stored projection beside its display window for replay loss checks.
+#[allow(clippy::too_many_arguments)]
+pub fn timeline_first_page_with_extent(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    session_id: String,
+    query: &ClientListQuery,
+    native_read_error: Option<ApiError>,
+    managed: Option<&super::ManagedSessionOwner>,
+    extent: Option<&mut dyn FnMut(&[Value])>,
 ) -> Result<Json<Value>, ApiError> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
@@ -3363,10 +3383,7 @@ pub fn timeline_first_page(
     let mut items = Vec::<Value>::new();
     let mut explicit = BTreeMap::<String, usize>::new();
     let mut tool_calls = BTreeSet::<String>::new();
-    let entry_id = |claim: &ClaimRecord, suffix: &str| {
-        let digest = hex::encode(Sha256::digest(format!("{}:{suffix}", claim.id).as_bytes()));
-        format!("timeline-entry/{session_leaf}/{}", &digest[..24])
-    };
+    let entry_id = |claim: &ClaimRecord, suffix: &str| timeline_claim_entry_id(&session_id, claim, suffix);
     let applies_to_incarnation = |fields: &Value| {
         let observed = fields.get("incarnation_id").and_then(Value::as_str);
         observed.is_none() || incarnation.is_none() || observed == incarnation
@@ -3605,7 +3622,7 @@ pub fn timeline_first_page(
         let notice_timestamp = items
             .iter()
             .filter_map(|item| item["timestamp"].as_str())
-            .max()
+            .max_by_key(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
             .unwrap_or(&snapshot.created_at);
         let mut notice = |code: &str, message: &str, details: Value| {
             notice_sequence = notice_sequence.saturating_add(1);
@@ -3633,7 +3650,10 @@ pub fn timeline_first_page(
         });
         items.extend([query_notice, prefix_notice].into_iter().flatten());
     }
-    items.sort_by_key(stored_timeline_position);
+    items.sort_by(timeline_order);
+    if let Some(extent) = extent {
+        extent(&items);
+    }
     let header = conversation_page_header(state, session, &session_id, &items, false);
     // A conversation opens at its newest bounded window. The cursor walks toward older
     // windows, while each individual page remains chronological for straightforward rendering.
