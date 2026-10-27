@@ -4,6 +4,7 @@ and when it refuses."""
 import importlib.machinery
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -112,7 +113,7 @@ class Review(unittest.TestCase):
         out.unlink(missing_ok=True)
         done = subprocess.run([sys.executable, str(HERE / "review"), "--repo", str(self.repo), "--base", base, "--config", str(self.config),
                                "--out", str(out), *args],
-                              text=True, capture_output=True, env={"PATH": "/usr/bin:/bin", "FAKE_DIR": str(self.fake)})
+                              text=True, capture_output=True, env={"PATH": os.environ["PATH"], "FAKE_DIR": str(self.fake)})
         verdict = json.loads(out.read_text()) if out.exists() else None
         return done, verdict
 
