@@ -109,7 +109,7 @@ test('the conversation follows the system appearance live instead of a fixed Moc
 
   const app = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
   assert.match(app, /name="Conversation" component=\{ConversationScreen\} options=\{\{ \.\.\.schemeOptions,/, 'the native header follows too');
-  assert.match(app, /schemeSurface \? stuiNavigation\[scheme\]/);
+  assert.match(app, /schemeSurface \? fractalNavigation\[scheme\]/);
 });
 
 test('one subscription reads the system appearance, and every scope derives from it', () => {
