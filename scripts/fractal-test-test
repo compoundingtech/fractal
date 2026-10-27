@@ -469,7 +469,8 @@ class StTest(unittest.TestCase):
         self.assertEqual(statement['subject'][0]['name'], git(self.work, 'rev-parse', 'HEAD'))
         self.assertIn('1 commit(s) behind origin/main', out)
         self.assertIn('covered by wrapper', out)
-        self.assertNotIn('st-test-', git(self.work, 'worktree', 'list'))  # the throwaway worktree is gone
+        self.assertNotRegex(git(self.work, 'worktree', 'list', '--porcelain'),
+                            r'(?m)^worktree .*/st-test-[^/]+/tree$')  # no throwaway worktree, regardless of checkout parent names
         self.assertEqual(git(self.work, 'rev-parse', 'HEAD^{tree}'), git(self.work, 'rev-parse', 'feature^{tree}'))
 
     def test_a_failing_run_is_recorded_and_the_exit_code_says_so(self):
@@ -1372,7 +1373,8 @@ class StTest(unittest.TestCase):
         git(self.work, 'worktree', 'add', '--detach', '-q', str(stale / 'tree'), 'HEAD')
         self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
         self.assertFalse(stale.exists())
-        self.assertNotIn('st-test-', git(self.work, 'worktree', 'list'))
+        self.assertNotRegex(git(self.work, 'worktree', 'list', '--porcelain'),
+                            r'(?m)^worktree .*/st-test-[^/]+/tree$')
 
     def test_a_worktree_whose_pid_belongs_to_another_user_is_treated_as_alive(self):
         self.commit('b.txt', 'two')
