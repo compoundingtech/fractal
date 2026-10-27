@@ -408,6 +408,50 @@ fn retracted_and_restored_token_cannot_admit_a_different_prepared_declaration() 
 }
 
     #[tokio::test]
+async fn a_pass_that_read_a_start_before_its_worker_finished_keeps_the_launch() {
+    let (_directory, store, _runtime, reconciler, release, mut entered) = fixture(false, true);
+    apply_source(
+        &store,
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+        "stale-start-read",
+    );
+    let subject = "agent/example/worker";
+    assert!(launch(&reconciler, subject));
+    tokio::time::timeout(Duration::from_secs(30), entered.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    // A pass reads the pending starts while this launch is still under way.
+    let stale = store
+        .pending_runtime_starts()
+        .unwrap()
+        .into_iter()
+        .find(|operation| operation.subject == subject)
+        .unwrap();
+    assert!(stale.dispatched && !stale.finished);
+    let id = stale.id.clone();
+    // The worker finishes before the pass reaches that start.
+    release.0.send(()).unwrap();
+    workers_done(&reconciler).await;
+    reconciler
+        .reconcile_start_operation(stale, &PassPtySnapshot::new())
+        .unwrap();
+    assert!(
+        !store.runtime_start_revoked(&id).unwrap(),
+        "a start that finished after the pass read it lost its owner"
+    );
+    reconciler.reconcile_start_jobs().unwrap();
+    let completed = store
+        .latest_claim(subject, Some("runtime.observed"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        completed.body["fields"]["incarnation_id"],
+        "blocked-start-incarnation"
+    );
+}
+
+    #[tokio::test]
 async fn an_old_snapshot_cannot_replace_the_incarnation_completed_by_a_worker() {
     let (_directory, store, runtime, reconciler, release, mut entered) = fixture(false, true);
     apply_source(

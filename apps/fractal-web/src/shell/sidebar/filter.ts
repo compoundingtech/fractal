@@ -33,7 +33,7 @@ export interface SidebarMatchRow {
   readonly agent: Agent | undefined
   readonly status: AgentStatus
   readonly needsMe: boolean
-  /** st reports an ask-tool question or open attention for this agent; see data/asking.ts. */
+  /** Fractal reports an ask-tool question or open attention for this agent; see data/asking.ts. */
   readonly asking: boolean
 }
 /** Legacy sidebar additionally owns unread working state; matching does not require it. */
@@ -45,7 +45,7 @@ export interface SidebarRow extends SidebarMatchRow {
 export type SidebarFacetField = 'repo' | 'state' | 'tool'
 /**
  * Parsed sidebar search. Free text and its lowercase tokens drive matching and highlights; facets
- * never reach highlights. `is:asking` keeps agents st reports as waiting for an answer. Machine
+ * never reach highlights. `is:asking` keeps agents Fractal reports as waiting for an answer. Machine
  * groups AND together while prefixes within a group OR together.
  */
 export interface SidebarQuery {

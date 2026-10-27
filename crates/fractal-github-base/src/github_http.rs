@@ -462,18 +462,34 @@ pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> R
     }
 }
 
-/// Send exactly once, including mutations. A 401 invalidates only the credential used here;
-/// another poll can acquire again after backoff. Never retry the original HTTP request.
+/// Send reads with separately admitted same-origin redirect hops. App reads retain
+/// their bounded credential replay; mutations are sent exactly once using the PAT.
 pub async fn send(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
-    let copy = request.try_clone().and_then(|copy| copy.build().ok());
-    if let Some(copy) = copy.filter(|copy| copy.method() == reqwest::Method::GET) {
-        let selected = read_auth_for_url(copy.url().as_str(), auth);
-        return send_read(request, &selected).await;
+    let (client, request) = request.build_split();
+    let request = request?;
+    if request.method() != reqwest::Method::GET && request.method() != reqwest::Method::HEAD {
+        return send_once(reqwest::RequestBuilder::from_parts(client, request), auth.pat()).await;
     }
-    send_once(request, auth.pat()).await
+    let mut template = request;
+    let mut redirects = 0;
+    loop {
+        let selected = read_auth_for_url(template.url().as_str(), auth);
+        let request = template.try_clone().context("GitHub read body cannot be replayed for a redirect")?;
+        let response = send_read(reqwest::RequestBuilder::from_parts(client.clone(), request), &selected).await?;
+        if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let location = response.headers().get(reqwest::header::LOCATION)
+            .context("GitHub redirect has no Location")?.to_str()?;
+        let target = template.url().join(location)?;
+        anyhow::ensure!(target.origin() == template.url().origin(), "GitHub redirect changed API origin");
+        anyhow::ensure!(redirects < 10, "GitHub redirect limit exceeded");
+        redirects += 1;
+        *template.url_mut() = target;
+    }
 }
 
 async fn send_once(
@@ -482,15 +498,21 @@ async fn send_once(
 ) -> Result<reqwest::Response> {
     // Admission precedes both the credential-bearing local send and the
     // authorized RPC. A failed send remains spent; there is no HTTP retry.
-    if let Some(config) = SOURCE.get() {
-        let resource = request.try_clone().and_then(|copy| copy.build().ok())
-            .map(|copy| request_resource(copy.url().path())).unwrap_or("core");
+    let reservation = if let Some(config) = SOURCE.get() {
+        let (resource, endpoint) = request.try_clone().and_then(|copy| copy.build().ok())
+            .map(|copy| (
+                request_resource(copy.url().path()),
+                crate::github_admission::EndpointClass::from_path(copy.url().path()),
+            )).unwrap_or(("core", crate::github_admission::EndpointClass::Unknown));
         crate::github_admission::before_send(
             config.state_dir.join("github-admission.json"),
-            github_spender(), resource.into(), config.github.observer_requests_per_hour.map(|cap| cap as usize),
-        ).await?;
-    }
-    let response = match auth {
+            github_spender(), resource.into(), endpoint,
+            config.github.observer_requests_per_hour.map(|cap| cap as usize),
+        ).await?
+    } else {
+        None
+    };
+    let result = async { match auth {
         GithubAuth::Read { .. } => bail!("installation credentials require the read-only send boundary"),
         GithubAuth::Authorized { config, profile } => {
             send_authorized_with(
@@ -510,9 +532,29 @@ async fn send_once(
             }
             Ok(response)
         }
-    }?;
-    crate::resource::record_github_response(response.status(), response.headers());
-    Ok(response)
+    }}.await;
+    if let Ok(response) = &result {
+        crate::resource::record_github_response(response.status(), response.headers());
+    }
+    if let Some(reservation) = reservation {
+        crate::github_admission::after_send(
+            reservation, result.as_ref().ok().map(|response| response.status().as_u16()),
+            result.as_ref().ok().and_then(|response| budget_sample(response.headers())),
+        ).await;
+    }
+    result
+}
+
+fn budget_sample(headers: &reqwest::header::HeaderMap) -> Option<crate::github_admission::BudgetSample> {
+    let number = |name: &str| headers.get(name)?.to_str().ok()?.parse::<u64>().ok();
+    Some(crate::github_admission::BudgetSample {
+        at_unix_ms: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).ok()?.as_millis(),
+        resource: headers.get("x-ratelimit-resource")?.to_str().ok()?.to_owned(),
+        limit: number("x-ratelimit-limit")?,
+        used: number("x-ratelimit-used")?,
+        remaining: number("x-ratelimit-remaining")?,
+        reset_at_unix_ms: u128::from(number("x-ratelimit-reset")?).saturating_mul(1_000),
+    })
 }
 
 async fn send_authorized_with<F>(
@@ -607,6 +649,24 @@ where
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn budget_header_samples_preserve_graphql_point_units() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-ratelimit-resource", "graphql"), ("x-ratelimit-limit", "5000"),
+            ("x-ratelimit-used", "37"), ("x-ratelimit-remaining", "4963"),
+            ("x-ratelimit-reset", "1793053049"),
+        ] {
+            headers.insert(reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(), value.parse().unwrap());
+        }
+        let sample = budget_sample(&headers).unwrap();
+        assert_eq!(sample.resource, "graphql");
+        assert_eq!(sample.used, 37);
+        assert_eq!(sample.reset_at_unix_ms, 1_793_053_049_000);
+        headers.remove("x-ratelimit-used");
+        assert!(budget_sample(&headers).is_none(), "never invent provider usage");
+    }
 
     #[tokio::test]
     async fn authorized_destination_body_and_header_validation_refuses_before_the_rpc() {

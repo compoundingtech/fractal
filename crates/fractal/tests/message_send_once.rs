@@ -24,21 +24,19 @@ const LEAD: &str = "agent/example/lead";
 /// An in-process daemon on its own socket, and the store behind it.
 async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("message-send-once").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "message-send-once".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("message-send-once").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "message-send-once".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let store = state.store.clone();
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -360,7 +358,7 @@ async fn a_send_whose_answer_was_lost_is_found_and_never_sent_twice() {
     let error = stderr(&lost);
     let key = rerun["idempotency_key"].as_str().unwrap();
     assert!(
-        error.contains(&format!("st conversations status --idempotency-key {key}")),
+        error.contains(&format!("fractal conversations status --idempotency-key {key}")),
         "{error}"
     );
     assert!(error.contains("safe"), "{error}");

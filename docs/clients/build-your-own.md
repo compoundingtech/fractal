@@ -6,7 +6,7 @@ parse CLI output or copy the terminal UI or the phone's transcript parser.
 
 The working [example TUI](../../examples/client-tui/) lists agents, follows the selected agent's
 conversation and sends a message. It is a workspace member, built and tested by Linux/macOS
-workspace CI. Its application code is about 400 lines, with no dependency on the `stui` library or the daemon.
+workspace CI. Its application code is about 400 lines, with no dependency on the `fractal-tui` library or the daemon.
 
 ## Run the example first
 

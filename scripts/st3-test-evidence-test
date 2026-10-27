@@ -61,7 +61,7 @@ guardian.select.poll = LongOwnerWait
 raise SystemExit(guardian.run_supervised([sys.executable, sys.argv[2]]))
 """)
             env = dict(os.environ)
-            for key in ('ST_AGENT', 'ST3_SUBJECT', 'SMALLTALK_TEST_SUPERVISOR'):
+            for key in ('ST_AGENT', 'ST3_SUBJECT', 'FRACTAL_TEST_SUPERVISOR'):
                 env.pop(key, None)
             result = subprocess.run([sys.executable, str(launcher),
                 str(Path(__file__).resolve().parent), str(fixture)],
@@ -182,7 +182,7 @@ if sys.argv[2] == "kill":
             env = dict(os.environ)
             env.pop("ST_AGENT", None)
             env.pop("ST3_SUBJECT", None)
-            env.pop("SMALLTALK_TEST_SUPERVISOR", None)
+            env.pop("FRACTAL_TEST_SUPERVISOR", None)
             env["PYTHONPATH"] = str(Path(__file__).resolve().parent)
             guardian = Path(__file__).resolve().parent / "st3_test_process.py"
             process = subprocess.Popen([sys.executable, str(guardian), "--", sys.executable,

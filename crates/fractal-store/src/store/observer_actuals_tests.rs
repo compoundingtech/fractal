@@ -18,7 +18,7 @@ fn read(store: &Store) -> (Option<Value>, u64) {
     let fence = resource_preparation::Fence::new(store);
     let prepared = fence.prepare_with_actuals(store, |connection, serial| {
         let work = smallclaims::sqlite::work::SqliteWorkScope::start();
-        let value = store.smalltalk.observer_actuals.read(connection, SUBJECT, serial.unwrap()).unwrap();
+        let value = store.fractal.observer_actuals.read(connection, SUBJECT, serial.unwrap()).unwrap();
         let statements = work.finish().statements;
         assert_eq!(value, latest_actual(connection, SUBJECT).unwrap());
         (value, statements)
@@ -60,7 +60,7 @@ fn observer_actuals_does_not_publish_a_reduction_from_an_invalidated_snapshot() 
             scope.spawn(|| append(&store, SUBJECT, 20, json!({"facts":{"state":"closed"}})))
                 .join().unwrap();
         });
-        store.smalltalk.observer_actuals.read(connection, SUBJECT, serial.unwrap()).unwrap()
+        store.fractal.observer_actuals.read(connection, SUBJECT, serial.unwrap()).unwrap()
     });
     assert!(!fence.current(&store, &store.connection.write(), &stale));
     assert_eq!(read(&store).0.unwrap()["facts"]["state"], "closed");

@@ -915,7 +915,7 @@ fn exposed_timeline_variants_media_and_unknown_payloads_are_visible() {
         "attachment/safe",
         "image/png",
         "transcript unavailable until the harness writes its first line",
-        "Earlier history is not shown: st reads only the newest part",
+        "Earlier history is not shown: Fractal reads only the newest part",
     ] {
         assert!(display.contains(visible), "missing {visible}: {display}");
     }
@@ -1083,7 +1083,7 @@ fn a_long_message_shows_its_start_and_says_where_the_rest_is_read() {
     let rendered = adapt::conversation(&[long, start.clone()], &Default::default());
     let Body::Mail { body, .. } = &rendered[0].body else { panic!("{rendered:?}") };
     assert!(body.starts_with("Harbor notes: the tide table…"), "{body}");
-    assert!(body.contains("12.5 KiB") && body.contains("st conversations read message/harbor"), "{body}");
+    assert!(body.contains("12.5 KiB") && body.contains("fractal conversations read message/harbor"), "{body}");
     // A message with no body size reads exactly as before.
     let short: fractal_client::TimelineEntry = serde_json::from_value(serde_json::json!({
         "id":"mail","sequence":1,"revision":1,"timestamp":"2026-10-05T10:00:00Z",

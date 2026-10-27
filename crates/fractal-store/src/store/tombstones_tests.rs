@@ -1,4 +1,4 @@
-//! Tests of `smallclaims::store::checkpoint::tombstones` through smalltalk's store.
+//! Tests of `smallclaims::store::checkpoint::tombstones` through Fractal's store.
 use super::checkpoint::*;
 use super::*;
 

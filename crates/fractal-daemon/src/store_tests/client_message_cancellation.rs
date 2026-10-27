@@ -1,4 +1,4 @@
-//! Client-message selector tests that need the missions and attention stores; they live in st3-daemon because
+//! Client-message selector tests that need the missions and attention stores; they live in fractal-daemon because
 //! those stores do.
 
 #![allow(unused_imports)]
@@ -12,7 +12,7 @@ use crate::store::client_messages::*;
 use serde_json::{Value, json};
 
 fn commit_budget(store: &Store) -> FoldBudget {
-    *store.smalltalk.client_message_commit_budget.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    *store.fractal.client_message_commit_budget.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 fn assert_commit_budget(store: &Store) -> FoldBudget {

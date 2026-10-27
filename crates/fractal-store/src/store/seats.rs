@@ -3,13 +3,13 @@ use super::*;
 impl Store {
     #[cfg(any(test, feature = "test-support"))]
     pub fn agent_resources_builds_for_test(&self) -> usize {
-        self.smalltalk.agent_resources_builds.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.agent_resources_builds.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The most cards one projection call folded since the store opened.
     #[cfg(any(test, feature = "test-support"))]
     pub fn agent_resources_largest_fold_for_test(&self) -> usize {
-        self.smalltalk.agent_resources_largest_fold.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.agent_resources_largest_fold.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn desired_harness_login_candidates(&self) -> Result<Vec<DesiredSubject>> {
@@ -280,6 +280,7 @@ impl Store {
         agent_person_walk(
             agent,
             |subject| self.desired_subject_with_writer(subject),
+            |subject| self.helper_launcher_binding(subject),
             |run| {
                 self.mission_run(run)
                     .map(|view| view.map(|view| view.requester))

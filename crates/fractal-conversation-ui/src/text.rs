@@ -2,7 +2,7 @@
 //!
 //! Every string from the graph passes through `sanitize` before it is measured. A control
 //! character or an escape sequence that reaches the terminal moves its cursor, and the frame
-//! is then drawn in the wrong cells: the stray digits on the old stui's borders.
+//! is then drawn in the wrong cells: the stray digits on the old Fractal TUI's borders.
 
 pub use crate::pane::truncate;
 use crate::theme::{self, Theme};

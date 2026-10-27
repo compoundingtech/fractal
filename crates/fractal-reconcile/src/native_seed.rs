@@ -202,8 +202,10 @@ pub async fn first_launch(
         }
         deliberately_fresh |= page.claims.iter().any(|claim| {
             claim.kind == "runtime.action.requested"
-                && claim.body.pointer("/fields/action").and_then(Value::as_str)
-                    == Some("fresh-context")
+                && matches!(
+                    claim.body.pointer("/fields/action").and_then(Value::as_str),
+                    Some("fresh-context" | crate::suspension::FRESH_SESSION_ACTION)
+                )
         });
         let Some(last) = page.claims.last() else {
             break;

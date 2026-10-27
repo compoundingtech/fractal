@@ -1,7 +1,7 @@
-//! the seat leaf modules: native session resume, remote terminal attach and node identity, which name no store code. st3-daemon re-exports each module at its old path; everything below is re-exported at
+//! the seat leaf modules: native session resume, remote terminal attach and node identity, which name no store code. fractal-daemon re-exports each module at its old path; everything below is re-exported at
 //! this crate's root so the moved modules keep their `crate::X` paths.
 
-// Test helpers widened for st3-daemon's tests are unused when only the feature is on.
+// Test helpers widened for fractal-daemon's tests are unused when only the feature is on.
 #![cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]
 
 #[cfg(any(test, feature = "test-support"))]

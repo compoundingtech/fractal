@@ -23,6 +23,7 @@ import { mergeConflictStandoff } from './mergeConflictStandoff.ts'
 import { offlineReconnectStorm } from './offlineReconnectStorm.ts'
 import { releaseCandidatePolish } from './releaseCandidatePolish.ts'
 import { replicationDiverged } from './replicationDiverged.ts'
+import { transcriptFamilies } from './transcriptFamilies.ts'
 import { unicode } from './unicode.ts'
 import { unknownFields } from './unknownFields.ts'
 
@@ -35,6 +36,7 @@ export const worldDefinitions: readonly WorldDefinition[] = [
   mergeConflictStandoff,
   offlineReconnectStorm,
   releaseCandidatePolish,
+  transcriptFamilies,
   empty,
   loading,
   unknownFields,

@@ -601,6 +601,19 @@ class Hook(unittest.TestCase):
                                   'uncovered': ['linux-gate', 'mail-redelivery-canaries']})
         self.assertEqual({c['argv'][0] for c in self.calls()}, {'--status'})  # the hook never signs for an agent
 
+    def test_an_agents_push_of_a_lane_edit_left_to_ci_is_refused(self):
+        tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        status = ('  typescript-client        covered                covered by wrapper abc\n'
+                  '  genie-freshness          lane edit: CI runs it  this tree edits its lane (scripts/ci-genie-freshness)\n'
+                  '  fractal-web              CI runs it             no local command')
+        done = self.push(STUB_STATUS='0', STUB_STATUS_OUT=status, ST_AGENT='agent/some/seat')
+        self.assertNotEqual(done.returncode, 0)
+        self.assertFalse(self.remote_has('refs/heads/feature'))
+        self.assertIn(f'refused: this tree ({tree[:12]}) is not covered for: genie-freshness', done.stderr)
+        self.assertEqual({k: v for k, v in self.receipts()[-1].items() if k != 'time'},
+                         {'tree': tree, 'branch': 'feature', 'agent': 'agent/some/seat', 'outcome': 'refused', 'uncovered': ['genie-freshness']})
+        self.assertEqual({c['argv'][0] for c in self.calls()}, {'--status'})  # nothing is signed for an agent
+
     def test_an_agents_push_is_refused_when_the_status_cannot_be_read(self):
         for name, env in (('error', {'STUB_STATUS': '7'}), ('timeout', {'STUB_STATUS_SLEEP': '3', 'ST_EVIDENCE_STATUS_TIMEOUT': '1'})):
             with self.subTest(name):

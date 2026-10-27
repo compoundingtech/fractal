@@ -8,7 +8,7 @@ The graph assigns three distinct drafts in parallel.
 It then assigns six peer critiques, three revisions, and one synthesis stage.
 The graph stores each proposal revision and the final message receipt.
 
-The held-out gates check ownership, distinct designs, privacy analysis, Small Talk debate, graph products, and the final recommendation.
+The held-out gates check ownership, distinct designs, privacy analysis, Fractal debate, graph products, and the final recommendation.
 
 Validate its graph contract with `cargo test -p fractal --test integration examples::`; paid live orchestration uses
 the repository's internal eval controller, not the public CLI.

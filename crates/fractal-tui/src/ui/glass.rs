@@ -211,7 +211,7 @@ pub(crate) struct Glasses {
     home: bool,
     /// The floating Usage surface; retained separately from its visibility.
     usage: bool,
-    /// The Ctrl+S sidebar: the old stui list beside the splits, to browse and open from.
+    /// The Ctrl+S sidebar: the old Fractal TUI list beside the splits, to browse and open from.
     pub(crate) sidebar: Sidebar,
     /// A tab being dragged with the mouse, from its press until the button is let go.
     drag: Option<TabDrag>,
@@ -1387,7 +1387,7 @@ impl Ui {
             })
             .collect::<Vec<_>>();
         self.frame.borrow_mut().glass_leaves = contents.clone();
-        // The focused group draws first, through stui's own tab and selection, so it is the
+        // The focused group draws first, through Fractal TUI's own tab and selection, so it is the
         // pane scrolling keys reach; the others draw from their keys.
         let order = std::iter::once(glass.focus)
             .chain((0..rects.len()).filter(|index| *index != glass.focus));
@@ -2139,7 +2139,7 @@ impl Ui {
                 buf.set_stringn(
                     content.x + 1,
                     content.y + 1,
-                    format!("This stui does not know {key}. Ctrl+W closes it."),
+                    format!("This Fractal TUI does not know {key}. Ctrl+W closes it."),
                     content.width.saturating_sub(2) as usize,
                     theme::dim(),
                 );
@@ -2161,13 +2161,13 @@ impl Ui {
                 self.draw_pane(buf, content, &Pane::Agent(Some(id)))
             }
             // A terminal tab that is not the attached one says so, rather than drawing whatever
-            // stui's own tab has selected.
+            // Fractal TUI's own tab has selected.
             Some(Pane::Terminal(id))
                 if self.terminal.as_ref().is_none_or(|view| view.agent != id) =>
             {
                 self.draw_pane(buf, content, &Pane::Terminal(id))
             }
-            // While Home floats over the glass, stui's own tab is Home: the focused group draws
+            // While Home floats over the glass, Fractal TUI's own tab is Home: the focused group draws
             // its pane like the others, not Home's selection (Nathan, 2026-10-02).
             Some(_) if focused && !self.home_open() => self.draw_main(buf, content),
             Some(pane) => self.draw_pane(buf, content, &pane),
@@ -3086,6 +3086,20 @@ impl Ui {
         self.glasses.palette.is_some()
     }
 
+    /// Confirmation-like states never accept a held key as a fresh press.
+    pub(super) fn confirmation_open(&self) -> bool {
+        use resource_sidebar::PaletteMode as Mode;
+
+        self.confirm.is_some()
+            || self.answering.is_some()
+            || match self.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()) {
+                Some(Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. }) => true,
+                // Deliberately exhaustive: every new mode must choose its repeat policy.
+                None | Some(Mode::New { .. } | Mode::Rename { .. } | Mode::Manage { .. }
+                    | Mode::Move { .. } | Mode::Add { .. }) => false,
+            }
+    }
+
     /// The wheel scrolls the palette's list as content, three rows a step; the selection
     /// stays where it is until a key moves it.
     pub(crate) fn scroll_palette(&mut self, up: bool) {
@@ -3520,7 +3534,7 @@ impl Ui {
                 glasses.save();
             }
             Err(error) if current => self.flash(format!(
-                "st did not keep a space yet ({error}); stui will try again"
+                "Fractal did not keep a space yet ({error}); the Fractal terminal UI will try again"
             )),
             Err(_) => {}
         }
@@ -4024,7 +4038,7 @@ impl Ui {
         ("h", "Home"),
         ("k", "the palette"),
         ("?", "help"),
-        ("q", "quit stui"),
+        ("q", "quit Fractal TUI"),
         ("esc", "put this away"),
     ];
 
@@ -4257,9 +4271,9 @@ pub(crate) fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
 
 /// The glasses capability version st grants this stui. From version 2 (#958) a split carries its
 /// ratio; an older st is never sent one.
-static GLASSES_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static GLASSES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub fn set_glasses_version(version: u32) {
+pub fn set_glasses_version(version: u64) {
     GLASSES_VERSION.store(version, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -4267,7 +4281,7 @@ fn ratios_on_the_wire() -> bool {
     GLASSES_VERSION.load(std::sync::atomic::Ordering::Relaxed) >= 2
 }
 
-/// A layout as st's client types spell it. stui splits two at a time; a longer split nests, and
+/// A layout as st's client types spell it. Fractal TUI splits two at a time; a longer split nests, and
 /// only a two-way split's own ratio travels.
 fn to_wire(layout: &Layout) -> GlassLayout {
     match layout {
@@ -5012,7 +5026,7 @@ mod tests {
     }
 
     #[test]
-    fn a_glass_opens_on_home_with_the_status_line_and_plain_stui_has_neither() {
+    fn a_glass_opens_on_home_with_the_status_line_and_plain_tui_has_neither() {
         let ui = glass();
         let shown = screen(&ui);
         let first = shown.lines().next().unwrap();
@@ -5251,7 +5265,7 @@ mod tests {
         typed(&mut ui, "atlas builder");
         press(&mut ui, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(tabs(&ui), (0, 0, vec![vec![ATLAS.to_owned()]]));
-        // The tab points stui's own selection at the agent, so its keys act on it.
+        // The tab points Fractal TUI's own selection at the agent, so its keys act on it.
         assert_eq!(
             (ui.tab(), ui.selected_id().as_deref()),
             (1, Some("agent/example/atlas/builder"))
@@ -5849,7 +5863,7 @@ mod tests {
         ctrl(&mut ui, '\\');
         assert!(ui.leader);
         let shown = screen(&ui);
-        for wanted in ["Ctrl+\\ then", "close this tab", "the conversation", "a new tab", "quit stui"] {
+        for wanted in ["Ctrl+\\ then", "close this tab", "the conversation", "a new tab", "quit Fractal TUI"] {
             assert!(shown.contains(wanted), "{wanted}: {shown}");
         }
         assert!(ui.terminal_focused());
@@ -6801,7 +6815,7 @@ mod tests {
                 },
             });
         }
-        assert!(screen(&ui).contains("unconfirmed, st did not answer"));
+        assert!(screen(&ui).contains("unconfirmed, Fractal did not answer"));
         // Letters type in a conversation: Ctrl+R sends it again, and Backspace takes it back
         // into the box to change or delete there.
         ctrl(&mut ui, 'r');
@@ -7286,6 +7300,108 @@ mod tests {
         press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
         let palette = ui.glasses.palette.as_ref().unwrap();
         assert_eq!((palette.selected, palette.top), (1, None));
+    }
+
+    #[test]
+    fn held_down_moves_every_row_in_the_palette_and_sidebar_over_an_attached_terminal() {
+        use crossterm::event::{Event, KeyEventKind};
+
+        for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            let mut ui = glass();
+            ui.live = true;
+            let shell = "terminal/example-shell".to_owned();
+            ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
+            ui.terminal = Some(crate::ui::TerminalView {
+                agent: shell.clone(),
+                title: "shell".into(),
+                name: "shell".into(),
+                lines: Vec::new(),
+                cursor: None,
+                stale: None,
+                ended: None,
+                native: None,
+            });
+            ctrl(&mut ui, 'k');
+            assert!(ui.terminal_focused(), "the terminal stays focused under the palette");
+            let count = ui.matches(ui.glasses.palette.as_ref().unwrap()).len();
+            assert!(count > 6);
+            ui.effects.clear();
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.glasses.palette.as_ref().unwrap().selected,
+                    n.min(count - 1),
+                    "{kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            let release = KeyEvent::new_with_kind(
+                KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Release,
+            );
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.glasses.palette.as_ref().unwrap().selected, count - 1);
+            let enter = KeyEvent::new_with_kind(
+                KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat,
+            );
+            ui.input_event(Event::Key(enter));
+            assert!(ui.palette_open(), "held Enter must not open the selection");
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell.clone())));
+            assert!(ui.effects.is_empty(), "navigation must not request daemon work");
+
+            // Every confirmation mode needs a fresh press, even over a terminal.
+            use resource_sidebar::PaletteMode as Mode;
+            ui.resource_sidebar.writable = true;
+            for (mode, commit) in [
+                (Mode::ConfirmPlace {
+                    subject: "agent/example/atlas/builder".into(), folder: None,
+                }, 'm'),
+                (Mode::ConfirmCreate {
+                    subject: "agent/example/atlas/builder".into(), name: "Review".into(),
+                }, 'm'),
+                (Mode::Delete { id: "folder-demo".into() }, 'y'),
+            ] {
+                ui.open_sidebar_palette(mode.clone());
+                assert!(ui.confirmation_open());
+                for code in [KeyCode::Char('m'), KeyCode::Char('y'), KeyCode::Enter, KeyCode::Down] {
+                    for event_kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                        let key = KeyEvent::new_with_kind(code, KeyModifiers::NONE, event_kind);
+                        ui.input_event(Event::Key(key));
+                        assert_eq!(
+                            ui.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()),
+                            Some(&mode),
+                            "{event_kind:?} {code:?} must leave the confirmation open"
+                        );
+                        assert!(ui.effects.is_empty(), "{event_kind:?} must never commit {mode:?}");
+                    }
+                }
+                press(&mut ui, KeyCode::Char(commit), KeyModifiers::NONE);
+                assert!(!ui.palette_open(), "a fresh press commits {mode:?}");
+                assert!(matches!(&ui.effects[..], [Effect::EditArrangement(_)]));
+                ui.effects.clear();
+                ui.resource_sidebar.writing = false;
+            }
+
+            // Normal sidebar navigation must own repeats just as it owns presses.
+            ui.glasses.palette = None;
+            ui.toggle_sidebar();
+            ui.resource_sidebar.observe(&ui.world);
+            ui.resource_sidebar.filter = "agent".into();
+            let count = ui.resource_sidebar.rows().len();
+            assert!(count > 1, "the fixture has multiple ordinary list rows");
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.resource_sidebar.selected,
+                    n.min(count - 1),
+                    "sidebar {kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.resource_sidebar.selected, count - 1);
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell)));
+            assert!(ui.effects.is_empty(), "sidebar navigation must stay local");
+        }
     }
 
     #[test]
@@ -7881,7 +7997,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell,
             title: "shell".into(),
@@ -7891,7 +8007,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,
@@ -7974,7 +8090,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell.clone(),
             title: "shell".into(),
@@ -7984,7 +8100,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,
@@ -8253,7 +8369,7 @@ mod tests {
         .unwrap()
     }
 
-    /// The glass writes stui asked to send, leaving other effects.
+    /// The glass writes Fractal TUI asked to send, leaving other effects.
     fn writes(ui: &mut Ui) -> Vec<GlassWrite> {
         std::mem::take(&mut ui.effects)
             .into_iter()

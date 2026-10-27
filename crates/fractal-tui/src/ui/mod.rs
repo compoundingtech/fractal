@@ -1,8 +1,8 @@
-//! The new stui rendering layer: a shell that draws a `view::World`.
+//! The new Fractal TUI rendering layer: a shell that draws a `view::World`.
 //!
 //! The shell owns layout, the click map, scrolling, selection and keys. Screens only build
 //! documents (`screens`), and the conversation renderer (`conversation`) turns entries into
-//! cached lines. `stui --demo` runs it on an invented world; the live client will feed it the
+//! cached lines. `fractal tui --demo` runs it on an invented world; the live client will feed it the
 //! same `World`.
 
 pub mod adapt;
@@ -509,7 +509,7 @@ pub struct Ui {
     /// the alert and its exact question call (`alerts::question_key`).
     question_choices: HashMap<String, std::collections::BTreeMap<usize, BTreeSet<usize>>>,
     /// The spaces: named layouts of tabs and split panes, the Ctrl+S sidebar, the palette, and
-    /// Now and Usage floating over them. stui has no other layout.
+    /// Now and Usage floating over them. Fractal TUI has no other layout.
     pub(crate) glasses: glass::Glasses,
     /// The footer names this build (version, revision, age); off in tests, whose screens must
     /// not change with every commit.
@@ -555,7 +555,7 @@ pub struct Ui {
 }
 
 /// What clicking a link says it did: an address is pasted in a browser; a path names a file on the
-/// machine the writer works on, which stui cannot open.
+/// machine the writer works on, which Fractal TUI cannot open.
 fn link_note(target: &str) -> String {
     let shown = text::truncate(target, 60);
     if target.starts_with('/') || target.starts_with("~/") {
@@ -570,7 +570,7 @@ fn link_opened_note(target: &str) -> String {
     format!("Opened {} in your browser · also copied", text::truncate(target, 60))
 }
 
-/// The program that opens a web address in the browser of the machine stui runs on, when that is
+/// The program that opens a web address in the browser of the machine Fractal TUI runs on, when that is
 /// where the person sits: not over SSH, and with a desktop (always on macOS). Anything but an
 /// http(s) address is only copied.
 fn browser_opener(url: &str, set: impl Fn(&str) -> bool, macos: bool) -> Option<&'static str> {
@@ -971,7 +971,7 @@ impl Ui {
         targets
     }
 
-    /// This device's remembered choices, read once when stui starts.
+    /// This device's remembered choices, read once when Fractal TUI starts.
     pub(crate) fn load_prefs(&mut self) {
         if let Some(path) = prefs::path() {
             // Simplified is the default, as on the phone (Nathan, 2026-10-04); a device that
@@ -983,7 +983,7 @@ impl Ui {
         }
     }
 
-    /// Bring back what was typed and not sent when the last stui ended, read once at start. A box
+    /// Bring back what was typed and not sent when the last Fractal TUI ended, read once at start. A box
     /// already holding text keeps it.
     pub(crate) fn load_drafts(&mut self) {
         if let Some(path) = &self.drafts_path {
@@ -1130,7 +1130,7 @@ impl Ui {
     }
 
     /// A terminal's tab is never left dead (Nathan, 2026-10-10): once the agents are known, each
-    /// terminal tab in front attaches (stui reopened with the tab saved, or a terminal that was
+    /// terminal tab in front attaches (Fractal TUI reopened with the tab saved, or a terminal that was
     /// let go), or turns back into the agent's conversation when the agent has no terminal.
     pub(crate) fn step_terminal_tabs(&mut self) {
         if self.home_open() {
@@ -1429,7 +1429,7 @@ impl Ui {
         }
         let (text, color) = match (live, age) {
             (true, Some(age)) => (format!(" ● live · updated {age} "), theme::OVERLAY1),
-            (true, None) => (" ● live · waiting for st ".to_owned(), theme::OVERLAY1),
+            (true, None) => (" ● live · waiting for Fractal ".to_owned(), theme::OVERLAY1),
             (false, Some(age)) => (
                 format!(" ○ paused · updated {age} · focus to follow "),
                 theme::YELLOW,
@@ -1525,7 +1525,7 @@ impl Ui {
                 }
                 if !self.world.stale.is_empty() {
                     self.flash(format!(
-                        "Out of date: st stopped serving {}",
+                        "Out of date: Fractal stopped serving {}",
                         self.world.stale.join("; ")
                     ));
                 }
@@ -1548,7 +1548,7 @@ impl Ui {
                 }
             }
             Link::Connecting => self.flash(format!(
-                "Connecting to {}: st has not answered yet",
+                "Connecting to {}: Fractal has not answered yet",
                 self.world.host
             )),
             Link::Offline(reason) => self.flash(reason),
@@ -1557,7 +1557,7 @@ impl Ui {
 
     fn attach_clipboard(&mut self) {
         let Some(key) = self.draft_key() else { return };
-        // kitty hands over the person's own clipboard through the terminal, wherever stui
+        // kitty hands over the person's own clipboard through the terminal, wherever Fractal TUI
         // runs; elsewhere this machine's clipboard is the person's.
         let attached = if attach::terminal_clipboard() {
             attach::from_terminal().or_else(|error| attach::from_clipboard().map_err(|_| error))
@@ -1777,7 +1777,7 @@ impl Ui {
             buf.set_stringn(
                 area.x,
                 area.y,
-                "stui needs a bigger window",
+                "Fractal TUI needs a bigger window",
                 area.width as usize,
                 theme::text(),
             );
@@ -1912,7 +1912,7 @@ impl Ui {
                 ]
             } else {
                 vec![
-                    ("ctrl+\\", "back to stui"),
+                    ("ctrl+\\", "back to Fractal TUI"),
                     ("drag", "copy"),
                     ("ctrl+alt+r", "reset modes"),
                 ]
@@ -2388,7 +2388,7 @@ impl Ui {
         self.draw_pane(buf, area, &self.main_pane());
     }
 
-    /// Draw any pane into any rectangle: every screen stui has goes through here. A pane that
+    /// Draw any pane into any rectangle: every screen Fractal TUI has goes through here. A pane that
     /// scrolls as one document keeps its scroll under the pane's own key.
     fn draw_pane(&self, buf: &mut Buffer, area: Rect, pane: &Pane) {
         let width = area.width.saturating_sub(1) as usize;
@@ -2613,7 +2613,7 @@ impl Ui {
         let doc = match self.world.conversations.get(&agent.id) {
             None | Some(Load::Loading) => {
                 let mut doc = Doc::new();
-                // A first page st keeps refusing says why while stui tries again, rather than
+                // A first page st keeps refusing says why while Fractal TUI tries again, rather than
                 // loading forever.
                 match self.stalled.get(&agent.id) {
                     Some(error) => doc.wrap(
@@ -2896,7 +2896,7 @@ impl Ui {
                 },
                 Hit::Composer,
             );
-            // Where this stui can listen, the box offers it: a click or Ctrl+Y.
+            // Where this Fractal TUI can listen, the box offers it: a click or Ctrl+Y.
             if crate::voice::available()
                 && y + 1 + strip < bottom
                 && self.composing(&agent.id)
@@ -3528,12 +3528,12 @@ impl Ui {
         let over = size > limit;
         let note = if over {
             format!(
-                "  {} is over the {} st takes: shorten it before sending",
+                "  {} is over the {} Fractal takes: shorten it before sending",
                 size_text(size),
                 size_text(limit)
             )
         } else {
-            format!("  {} of the {} st takes", size_text(size), size_text(limit))
+            format!("  {} of the {} Fractal takes", size_text(size), size_text(limit))
         };
         Some(Line::from(Span::styled(
             text::truncate(&note, width),
@@ -3644,7 +3644,7 @@ impl Ui {
             (
                 "?",
                 theme::QUIET,
-                "not started by st, so st cannot see inside it",
+                "not started by Fractal, so Fractal cannot see inside it",
             ),
             ("✉", theme::SAPPHIRE, "a Fractal message"),
         ] {
@@ -3704,7 +3704,7 @@ impl Ui {
                     "the selected subject's actions; ↑↓ and Enter choose",
                 ),
                 ("t", "Agents, Missions: the path tree or the groups"),
-                ("x", "Missions: show st's own missions"),
+                ("x", "Missions: show Fractal's own missions"),
                 ("n", "Agents: a new agent; Missions: a new mission"),
                 ("y", "confirm what a card asks; Enter never does"),
                 ("x", "Inbox: dismiss a request, update or message"),
@@ -3778,7 +3778,7 @@ impl Ui {
                 ("ctrl+v", "attach the clipboard's image"),
                 (
                     "ctrl+y",
-                    "speak instead of typing, with the box open or not (a Mac with SmallTalk.app's speech helper)",
+                    "speak instead of typing, with the box open or not (a Mac with the Fractal speech helper)",
                 ),
                 ("esc", "stop writing; the keys above work again"),
             ],
@@ -4089,11 +4089,17 @@ impl Ui {
     }
 
     /// Whether a held key may act again as a press. While text is being typed (a message box,
-    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may; outside
-    /// it only the keys that move. Never a pending confirmation or answer: Enter, y and the
+    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may;
+    /// the palette and focused sidebar own input even over a focused terminal.
+    /// Outside it only the keys that move.
+    /// Never a pending confirmation or answer: Enter, y and the
     /// commands that change things act once per press, so holding one can never repeat them.
     fn repeat_is_safe(&self, key: &KeyEvent) -> bool {
-        if self.confirm.is_some() || self.answering.is_some() || self.terminal_focused() {
+        if self.confirmation_open()
+            || (self.terminal_focused()
+                && !self.palette_open()
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused))
+        {
             return false;
         }
         let typing = self.editing
@@ -4140,10 +4146,11 @@ impl Ui {
             return;
         }
         if key.kind != KeyEventKind::Press {
-            // Repeats and releases belong to the child, never to stui shortcuts or confirmations.
+            // Repeats and releases belong to the child, never to Fractal TUI shortcuts or confirmations.
             if self.terminal_focused()
                 && !self.palette_open()
                 && !self.help
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
                 && self.popover.is_none()
                 && self.voice.is_none()
                 && self.context.is_none()
@@ -4804,6 +4811,19 @@ impl Ui {
                         "review" | "feedback" | "launch" | "message" | "revision" | "request",
                         'c',
                     ) => self.editing = true,
+                    // An unplaced row answers only as st lists for it.
+                    ("unplaced", 'c') => {
+                        if self
+                            .current_item()
+                            .is_some_and(|item| screens::unplaced_answer(&item.actions).is_some())
+                        {
+                            self.editing = true;
+                        } else {
+                            self.flash(
+                                "Fractal does not say how to answer this here: answer it with fractal alerts",
+                            );
+                        }
+                    }
                     ("review" | "feedback" | "launch" | "revision", 'a') => {
                         self.confirm = Some('a')
                     }
@@ -4864,11 +4884,11 @@ impl Ui {
         if self.live {
             // st's client API lets a person neither retry a step nor restart an agent yet.
             let hint = match key {
-                'r' => "st work retry STEP",
-                _ => "st agents start AGENT",
+                'r' => "fractal work retry STEP",
+                _ => "fractal agents start AGENT",
             };
             self.flash(format!(
-                "{what}: st does not let stui do this yet · use {hint}"
+                "{what}: Fractal does not let the Fractal terminal UI do this yet · use {hint}"
             ));
         } else {
             self.flash(format!("{what} · demo: nothing was sent"));
@@ -5286,7 +5306,7 @@ impl Ui {
         {
             self.flash_for(
                 format!(
-                    "Too long to send: {} where st takes {}. Shorten it or send it in parts; the text is still here",
+                    "Too long to send: {} where Fractal takes {}. Shorten it or send it in parts; the text is still here",
                     size_text(draft.len()),
                     size_text(limit)
                 ),
@@ -5364,6 +5384,16 @@ impl Ui {
                         to: from,
                         text: draft,
                     }),
+                    // An unplaced card answers only as st lists for the row.
+                    Some(AttentionKind::Unplaced { .. }) => self
+                        .current_item()
+                        .and_then(|item| screens::unplaced_answer(&item.actions))
+                        .map(|answer| Effect::Attention {
+                            id: id.clone(),
+                            action: answer.into(),
+                            reason: Some(draft),
+                            answer: None,
+                        }),
                     Some(AttentionKind::Revision { .. }) => self
                         .current_item()
                         .and_then(|item| {
@@ -5390,7 +5420,7 @@ impl Ui {
                     }
                     self.flash("Sending…");
                 }
-                None => self.flash("This needs the st CLI for now"),
+                None => self.flash("This needs the fractal CLI for now"),
             }
             return;
         }
@@ -5630,7 +5660,7 @@ impl Ui {
                 });
                 self.flash("Sending…");
             } else {
-                self.flash(format!("st does not offer {name} here"));
+                self.flash(format!("Fractal does not offer {name} here"));
             }
             return;
         }
@@ -6092,7 +6122,7 @@ impl Ui {
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
             Hit::PaletteSection(section) => self.open_palette(Some(section), glass::Open::Here),
             Hit::Home => self.open_home(),
-            // The terminal may be on another machine than stui (over SSH or fabric): the
+            // The terminal may be on another machine than Fractal TUI (over SSH or fabric): the
             // clipboard is the person's, so the link lands where their browser is. Run locally,
             // the browser opens too.
             Hit::Link(url) => {
@@ -6234,7 +6264,7 @@ impl Ui {
             Hit::Pane(PaneIntent::Open(id)) => self.open(&id),
             Hit::Pane(PaneIntent::Image(image)) => {
                 self.flash(format!(
-                    "Reading {} from st…",
+                    "Reading {} from Fractal…",
                     image.name.as_deref().unwrap_or("the image")
                 ));
                 self.effects.push(Effect::OpenImage { image });
@@ -6356,6 +6386,7 @@ impl Ui {
                 self.world.machines = full.machines.clone();
                 self.world.usage = full.usage.clone();
                 self.world.usage_limits = full.usage_limits.clone();
+                self.world.usage_accounts = full.usage_accounts.clone();
                 self.world.agent_messages = full.agent_messages.clone();
                 self.world.worktrees = full.worktrees.clone();
                 self.world.conversations = full.conversations;
@@ -6615,7 +6646,7 @@ fn stop_flag() -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>> {
 }
 
 impl Guard {
-    /// Take over the terminal, and start the watch that ends stui once its terminal is gone so
+    /// Take over the terminal, and start the watch that ends Fractal TUI once its terminal is gone so
     /// a stuck read can never outlive it. `keys`: ask the terminal to report modifiers it
     /// usually keeps, such as Cmd on macOS, where it can (kitty's keyboard protocol). The
     /// spaces ask, for Cmd+K; the setup checklist does not.
@@ -6665,7 +6696,7 @@ impl Drop for Guard {
     }
 }
 
-/// Which space to open: `stui --space NAME` names one; otherwise (`None`) the last one used on
+/// Which space to open: `fractal tui --space NAME` names one; otherwise (`None`) the last one used on
 /// this device. The older `--glass` still works.
 pub fn space_request(args: &[String]) -> Option<String> {
     arg(args, "--space").or_else(|| arg(args, "--glass"))
@@ -6678,7 +6709,7 @@ fn arg(args: &[String], name: &str) -> Option<String> {
         .cloned()
 }
 
-/// `stui --demo`: the new interface on invented data. `--dump` prints one frame as text.
+/// `fractal tui --demo`: the new interface on invented data. `--dump` prints one frame as text.
 pub fn run_demo(args: &[String]) -> Result<()> {
     if args.iter().any(|arg| arg == "--dump") {
         return dump(args);
@@ -7371,6 +7402,8 @@ mod tests {
                 "review_mode": mode, "title": "Review the draft", "detail": "Ready to ship?",
                 "priority": "normal", "state": "open", "requested_at": "2026-10-03T08:00:00Z",
                 "actions": ["review.approve", back],
+                "presentation": {"tier": "stopped", "kind": if mode == "feedback" { "feedback" } else { "review" },
+                    "agent": null, "raised_by": null, "waiting": null},
             }))
             .unwrap()
         };
@@ -7422,6 +7455,68 @@ mod tests {
             );
             ui.effects.clear();
         }
+    }
+
+    /// On an st that presents nothing, an ask still answers from its card with the answer st
+    /// lists for it, and a gate offers none of a request's: it is answered with st.
+    #[test]
+    fn an_unplaced_row_answers_only_as_st_lists_for_it() {
+        let row = |id: &str, kind: &str, actions: serde_json::Value| {
+            serde_json::from_value(serde_json::json!({
+                "kind": "attention", "id": id, "revision": "one",
+                "updated_at": "2026-10-16T08:00:00Z", "attention_kind": kind,
+                "source_id": format!("step-run/example/{kind}"), "person_id": "person/avery",
+                "title": "Online proof", "detail": "Reply when done.", "priority": "normal",
+                "state": "open", "requested_at": "2026-10-16T08:00:00Z", "actions": actions,
+                "alert": true,
+            }))
+            .unwrap()
+        };
+        let mut model = crate::model::Model::default();
+        model.actor = "person/avery".into();
+        model.now = crate::model::Collection {
+            items: vec![
+                row("attention/ask", "person-step", serde_json::json!(["work.done"])),
+                row(
+                    "attention/gate",
+                    "human-gate",
+                    serde_json::json!(["review.approve", "review.reject"]),
+                ),
+            ],
+            snapshot: Some(fractal_client::Snapshot {
+                id: "snapshot/example-host/1/0".into(),
+                host_id: "host/example-host".into(),
+                store_index: 1,
+                projection_version: "1".into(),
+                created_at: "2026-10-16T08:00:00Z".into(),
+            }),
+            truncated: false,
+            sync: None,
+        };
+        let mut ui = Ui::new(adapt::world(&model, "person/avery", &adapt::Extras::default()));
+        ui.live = true;
+        let select = |ui: &mut Ui, id: &str| {
+            let at = ui.listing(60).ids.iter().position(|listed| listed == id).expect("listed");
+            ui.selected[0] = at;
+        };
+        select(&mut ui, "attention/ask");
+        ui.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        for letter in "Done.".chars() {
+            ui.key(KeyEvent::new(KeyCode::Char(letter), KeyModifiers::NONE));
+        }
+        ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(
+            matches!(&ui.effects[..], [Effect::Attention { id, action, reason: Some(reason), .. }]
+                if id == "attention/ask" && action == "work.done" && reason == "Done."),
+            "{:?}",
+            ui.effects
+        );
+        ui.effects.clear();
+        ui.editing = false;
+        select(&mut ui, "attention/gate");
+        ui.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(!ui.editing, "a gate offers no request's answer");
+        assert!(ui.effects.is_empty());
     }
 
     #[test]
@@ -8794,7 +8889,7 @@ mod tests {
     }
 
     #[test]
-    fn a_first_page_st_keeps_refusing_says_why_while_stui_tries_again() {
+    fn a_first_page_fractal_keeps_refusing_says_why_while_tui_tries_again() {
         let mut ui = Ui::new(demo::world());
         show(&mut ui, 1);
         let agent = ui.selected_id().unwrap();
@@ -9476,7 +9571,7 @@ mod tests {
                 .map(|row| Line::from(format!("row {row}")))
                 .collect(),
             cursor: Some((5, 2)),
-            stale: Some("st closed the connection".into()),
+            stale: Some("Fractal closed the connection".into()),
             ended: None,
             native: None,
         });
@@ -9484,7 +9579,7 @@ mod tests {
         assert!(screen.contains("row 5"), "{screen}");
         assert!(!screen.contains("row 39"), "{screen}");
         assert!(
-            screen.contains("not current, reconnecting: st closed the connection"),
+            screen.contains("not current, reconnecting: Fractal closed the connection"),
             "{screen}"
         );
 

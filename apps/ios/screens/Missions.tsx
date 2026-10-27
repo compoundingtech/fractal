@@ -18,13 +18,13 @@ import { Button, Field, Legend, ListRow, Markdown, Note, Screen, SectionHeader, 
 const legend = MISSION_LEGEND.map(word => ({ ...wordStyle(word), word: wordName(word) }));
 
 function Meter({ done, total, color }: { done: number; total: number; color: string }) {
-  // st reports only current steps for many runs, so a 0/1 meter would claim too much.
+  // Fractal reports only current steps for many runs, so a 0/1 meter would claim too much.
   if (!done) return <T dim>{total} step{total === 1 ? '' : 's'}</T>;
   const filled = Math.round((done / Math.max(total, 1)) * 5);
   return <T><T color={color}>{'▰'.repeat(filled)}</T><T color={theme.surface2}>{'▱'.repeat(5 - filled)}</T><T dim> {done}/{total}</T></T>;
 }
 
-// Missions: one word per mission for who has to move, in stui's order.
+// Missions: one word per mission for who has to move, in the Fractal terminal UI's order.
 export function MissionsScreen() {
   const { data, truncated, hasSynced, missionsLoaded, loadErrors } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
@@ -75,7 +75,7 @@ export function MissionsScreen() {
       ListEmptyComponent={<Empty text={filter ? `No mission matches “${filter}”.` : loadErrors.missions ? `Missions could not be loaded: ${loadErrors.missions}` : hasSynced && missionsLoaded ? 'No missions yet.' : 'Loading missions…'} />}
       ListFooterComponent={<View style={{ paddingBottom: 24 }}>
         {truncated.missions ? <Note tone="warning">More missions exist beyond these 200.</Note> : null}
-        {hidden ? <Pressable onPress={() => setShowSystem(true)}><Note>{hidden} hidden (st's own, and failures before today) · tap to show</Note></Pressable> : null}
+        {hidden ? <Pressable onPress={() => setShowSystem(true)}><Note>{hidden} hidden (Fractal's own, and failures before today) · tap to show</Note></Pressable> : null}
         <SectionHeader title="launches" count={open.length} />
         {open.map(launch => <ListRow key={launch.id} glyph="◇" glyphColor={theme.waiting} title={launch.title} right={<T dim>{launch.phase}</T>} second={`${launch.planner_config.provider} · ${launch.id}`} onPress={() => navigation.navigate('Launch', { id: launch.id })} />)}
         {truncated.launches ? <Note tone="warning">More launches exist; the CLI lists them all.</Note> : null}
@@ -105,7 +105,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   useLayoutEffect(() => { navigation.setOptions({ title: route.params.title ?? (mission ? missionTitle(mission) : 'Mission') }); }, [navigation, route.params.title, mission]);
   if (!mission) return <Screen><Banners /><Empty text={status === 'online' ? 'Loading this mission…' : 'This mission is not in the last loaded data.'} /></Screen>;
   const word = missionWord(mission);
-  // The steps st presents, in its order; steps st serves no presentation for read unknown.
+  // The steps Fractal presents, in its order; steps Fractal serves no presentation for read unknown.
   const raw = new Map(missionSteps(mission).map(step => [step.id, step]));
   const steps = mission.presentation
     ? mission.presentation.steps.map(shown => ({ shown, step: raw.get(shown.id) }))

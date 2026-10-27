@@ -151,9 +151,16 @@ impl Node {
         fs::set_permissions(&pty, fs::Permissions::from_mode(0o755)).unwrap();
         // A release without --pty-binary finds pty through the login shell's PATH.
         let profile = format!("export PATH=\"{}:$PATH\"\n", root.join("bin").display());
-        for file in [".profile", ".bash_profile", ".zprofile"] {
+        for file in [".profile", ".bash_profile", ".zprofile", ".zshrc"] {
             fs::write(root.join("home").join(file), &profile).unwrap();
         }
+        // Fish uses XDG_CONFIG_HOME rather than the POSIX login profiles above.
+        fs::create_dir_all(root.join("config/fish")).unwrap();
+        fs::write(
+            root.join("config/fish/config.fish"),
+            format!("set -gx PATH '{}' $PATH\n", root.join("bin").display()),
+        )
+        .unwrap();
         Self {
             name: name.into(),
             binary: PathBuf::from(st3()),
@@ -203,7 +210,7 @@ impl Node {
         if let Some(shell) = std::env::var_os("SHELL") {
             command.env("SHELL", shell);
         }
-        if let Some(root) = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS") {
+        if let Some(root) = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS") {
             command.env("RUST_LOG", "st3=trace,smallclaims=trace");
             fs::write(Path::new(&root).join("command.json"), serde_json::to_vec(&json!({
                 "node": self.name, "operation": arguments.iter().take(2).collect::<Vec<_>>()
@@ -263,10 +270,13 @@ impl Node {
     pub(super) async fn start(&mut self) {
         let pty = self.root.join("bin/pty");
         let log = |name: &str| fs::File::create(self.root.join(name)).unwrap();
+        // No browser UI: its default address (127.0.0.1:7410) is a fixed port, and a host that already
+        // listens there (a developer's web server) made the previous release exit at once with
+        // "Address already in use". Both releases accept `--web-listen off`.
         let up: Vec<&str> = if self.binary == Path::new(st3()) {
-            vec!["up", "--pty-binary", pty.to_str().unwrap()]
+            vec!["up", "--pty-binary", pty.to_str().unwrap(), "--web-listen", "off"]
         } else {
-            vec!["up"]
+            vec!["up", "--web-listen", "off"]
         };
         let daemon = self
             .command(&up)
@@ -1765,7 +1775,7 @@ async fn a_leaked_code_is_visible_and_can_be_revoked() {
     let rightful = Node::new(root.path(), "laptop");
     let refused = rightful.join(&code, &[]);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("st fleet invites"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("fractal fleet invites"));
 
     for node in [&a, &m] {
         wait_until(
@@ -2440,7 +2450,7 @@ async fn leave_drains_everything_before_it_leaves() {
         return;
     }
     let temporary_root = tempfile::tempdir().unwrap();
-    let root = std::env::var_os("SMALLTALK_FLEET_LEAVE_DIAGNOSTICS")
+    let root = std::env::var_os("FRACTAL_FLEET_LEAVE_DIAGNOSTICS")
         .map(PathBuf::from).unwrap_or_else(|| temporary_root.path().to_owned());
     let phase = |stage: &str| fs::write(root.join("phase.txt"), stage).unwrap();
     phase("create and start anchor a");
@@ -2503,7 +2513,7 @@ fn supervise_leave_with_diagnostics() -> bool {
     {
         use std::io::Write as _;
         let name = "fleet::leave_drains_everything_before_it_leaves";
-        if std::env::var("SMALLTALK_TEST_SUPERVISED").as_deref() == Ok(name) {
+        if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
             return false;
         }
         let scripts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts");
@@ -2517,7 +2527,7 @@ fn supervise_leave_with_diagnostics() -> bool {
             .arg("--")
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture", "--include-ignored"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_SUBJECT").env_remove("FRACTAL_SUBJECT")
-            .env("SMALLTALK_TEST_SUPERVISED", name)
+            .env("FRACTAL_TEST_SUPERVISED", name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .output().expect("launch bounded fleet leave guardian");
         std::io::stdout().write_all(&output.stdout).unwrap();
@@ -2762,7 +2772,7 @@ async fn uninstall_leaves_nothing_behind() {
     ]);
     assert!(!first.status.success());
     assert!(
-        String::from_utf8_lossy(&first.stderr).contains("stop st3 up"),
+        String::from_utf8_lossy(&first.stderr).contains("stop fractal up"),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
@@ -2776,8 +2786,8 @@ async fn uninstall_leaves_nothing_behind() {
         PERSON,
     ]);
 
-    // Only what the test itself created remains: empty XDG roots, the stub pty, and the login
-    // profiles that put it on PATH.
+    // Only what the test itself created remains: empty XDG roots, the stub pty, and the shell
+    // profiles (fish's config.fish among them) that put it on PATH.
     let mut remaining = Vec::new();
     for entry in walkdir::WalkDir::new(&b.root) {
         let entry = entry.unwrap();
@@ -2788,7 +2798,10 @@ async fn uninstall_leaves_nothing_behind() {
                 "home/.profile",
                 "home/.bash_profile",
                 "home/.zprofile",
+                "home/.zshrc",
                 "config",
+                "config/fish",
+                "config/fish/config.fish",
                 "state",
                 "data",
                 "run",
@@ -3661,7 +3674,7 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             args.push("--prefer");
         }
         let output = node.st_ok(&args);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(
             configured_file(&node).transports,
             if prefer_on_add {
@@ -3692,14 +3705,14 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             "--no-service",
         ]);
         if !prefer_on_add {
-            assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+            assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         }
         let preferred = configured_file(&node);
         assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
         assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
         assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
         let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(configured_file(&node).transports, ["loopback", "tailscale"]);
     }
 }
@@ -3761,7 +3774,7 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     );
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("Restart st3 daemon and st3 replication-worker")
+            .contains("Restart fractal daemon and fractal replication-worker")
     );
     let preferred = configured_file(&node);
     assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
@@ -4152,17 +4165,33 @@ async fn the_fabric_transport_works_through_the_worker_alone() {
     a.wait_listening().await;
     a.note("over-fabric-a").await;
 
-    // The code travels as a Fabric file and never appears in an argument list.
-    a.st_ok(&[
-        "fleet",
-        "invite",
-        "b",
-        "--via",
-        "fabric",
-        "--send-fabric",
-        "--as",
-        PERSON,
-    ]);
+    // This fixture isolates already-trusted worker tunnels and inbox delivery.
+    // Issue the legacy transport invitation through the daemon authority, not
+    // the CLI's separate restricted-pairing bootstrap (covered by pairing tests).
+    let invitation: fractal_daemon::api::FleetInviteCreated = a.client().post(
+        "/v1/internal/fleet/invites",
+        &fractal_daemon::api::FleetInviteRequest {
+            name: Some("b".into()),
+            expires_seconds: 600,
+            via: Some("fabric".into()),
+            migrate: false,
+            person: PERSON.into(),
+        },
+    ).await.unwrap();
+    let code_file = root.path().join("worker-transport.code");
+    fractal_daemon::fleet::join::write_private(&code_file, invitation.code.as_bytes()).unwrap();
+    let delivered_name = format!(
+        "st-fleet-join-{}.code",
+        invitation.invite.trim_start_matches("fleet-invite/")
+    );
+    assert!(Command::new(&shim_a)
+        .args(["send-file", "b"])
+        .arg(&code_file)
+        .args(["--as", &delivered_name])
+        .status()
+        .unwrap()
+        .success());
+    fs::remove_file(code_file).unwrap();
     let mut b = Node::new(root.path(), "b");
     b.env.push((
         "FABRIC_HOME".into(),

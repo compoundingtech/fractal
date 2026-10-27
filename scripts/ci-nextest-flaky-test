@@ -49,11 +49,13 @@ with tempfile.TemporaryDirectory() as scratch:
     scratch = Path(scratch)
     output, artifact = scratch / 'output', scratch / 'nextest-flaky.txt'
 
-    def run(lines, github_output=True):
+    def run(lines, github_output=True, names=None):
         (scratch / 'tests.log').write_text('\n'.join(lines) + '\n')
-        env = {key: value for key, value in os.environ.items() if key != 'GITHUB_OUTPUT'}
+        env = {key: value for key, value in os.environ.items() if key not in ('GITHUB_OUTPUT', 'CI_TEST_FLAKY')}
         if github_output:
             env['GITHUB_OUTPUT'] = str(output)
+        if names:
+            env['CI_TEST_FLAKY'] = str(names)
         return subprocess.run([sys.executable, str(SCRIPT), str(scratch / 'tests.log'), str(artifact)],
                               env=env, capture_output=True, text=True, check=True).stdout
 
@@ -67,7 +69,13 @@ with tempfile.TemporaryDirectory() as scratch:
     output.unlink()
     assert run(one, github_output=False) == 'nextest flaky: 1\n'
     assert not output.exists() and artifact.exists()
-print('passed: step output, local runs and the artifact file')
+    # st-test's linux-gate (CI_TEST_FLAKY): the tests' names for the note's flaky_tests, one per line, an empty file for none.
+    names = scratch / 'flaky-names.txt'
+    run(several + ['   FLAKY 2/3 [  11.707s] (2139/9040) fractal::integration ui_open::a_seat'], names=names)
+    assert names.read_text().splitlines() == ['fractal::integration ui_open::a_seat', 'garden a', 'garden b', 'garden c'], names.read_text()
+    run(log('2 tests run: 2 passed, 0 skipped'), names=names)
+    assert names.read_text() == '', 'none: an empty file'
+print('passed: step output, local runs, the artifact file and the names for st-test')
 
 # Workspace CI uploads the count from the four test lanes only, named per lane, kept a day.
 workflow = (ROOT / '.github/workflows/fleet.yml').read_text()

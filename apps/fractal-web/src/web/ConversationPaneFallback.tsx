@@ -10,7 +10,7 @@ const waiting = { _tag: 'Requested', since: 0 } as const
 const noItems: readonly { readonly id: string }[] = []
 
 /** The import boundary has no conversation demand or runtime of its own. Keep the same
- * Waiting frame as the kit so loading code cannot move the header or history lane. */
+ * Waiting frame as the kit, including horizontal safe-area gutters, so loading code cannot move the header or history lane. */
 export const ConversationPaneFallback = ({ agentName, visible = true }: {
   readonly agentName: string
   readonly visible?: boolean
@@ -36,7 +36,7 @@ export const ConversationPaneFallback = ({ agentName, visible = true }: {
 
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
-  header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInlineStart: `max(${s.lg}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${s.lg}, env(safe-area-inset-right, 0px))`, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   title: { flex: '1 1 0', minWidth: 0, fontWeight: t.weightMedium, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   lane: { flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
   content: { paddingBlock: s.lg },

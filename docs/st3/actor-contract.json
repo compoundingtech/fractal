@@ -633,6 +633,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st deploy verify-go": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": true,
+        "as_role": "none",
+        "alternate_actor_option": "actor",
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st devices": {
         "actor": "optional",
         "accepts_person": true,
@@ -650,6 +659,33 @@
         "alternate_actor_option": null,
         "actor_environment": null,
         "ignores_actor": true
+      },
+      "st devices fabric disable": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st devices fabric enable": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st devices fabric status": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
       },
       "st devices grant inspect": {
         "actor": "optional",
@@ -1380,6 +1416,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st missions waiting-on": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st note": {
         "actor": "none",
         "accepts_person": false,
@@ -1408,6 +1453,15 @@
         "ignores_actor": false
       },
       "st now": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st persons rename": {
         "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,
@@ -2253,6 +2307,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st web": {
+        "actor": "none",
+        "accepts_person": false,
+        "can_carry_person": false,
+        "as_role": "none",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st work acknowledge": {
         "actor": "required",
         "accepts_person": true,
@@ -2512,6 +2575,9 @@
       ],
       "st changes list": [
         "ls"
+      ],
+      "st ui": [
+        "tui"
       ]
     }
   }

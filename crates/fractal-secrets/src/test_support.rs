@@ -22,6 +22,64 @@ pub fn canonical_tempdir() -> tempfile::TempDir {
         .expect("temporary directory")
 }
 
+/// A temporary directory on a memory filesystem where there is one, for a test that checks what
+/// its stores hold rather than what reaches a disk: on a disk, most of such a test's time goes to
+/// fsync. Elsewhere it is [`canonical_tempdir`]. A test about durability or disk cost keeps a disk.
+/// A `/dev/shm` mounted `noexec`, as on CI runners, is not used: these tests run programs from
+/// their directory. Nor is one with less than 2 GiB free.
+pub fn memory_tempdir() -> tempfile::TempDir {
+    const ROOM: u64 = 2 << 30;
+    match Path::new("/dev/shm") {
+        shm if shm.is_dir() && !mounted_noexec(shm) && available_bytes(shm).is_some_and(|free| free >= ROOM) => {
+            tempfile::Builder::new()
+                .tempdir_in(shm)
+                .expect("temporary directory")
+        }
+        _ => canonical_tempdir(),
+    }
+}
+
+/// The bytes an unprivileged writer may still use on the filesystem holding `path`.
+fn available_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is valid for one `statvfs` write.
+    if unsafe { libc::statvfs(path.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: `statvfs` returned 0, so it initialized `stat`.
+    let stat = unsafe { stat.assume_init() };
+    #[allow(clippy::unnecessary_cast)]
+    Some(stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+/// Whether the mount at exactly `point` has the `noexec` option, read from `/proc/mounts`.
+fn mounted_noexec(point: &Path) -> bool {
+    std::fs::read_to_string("/proc/mounts").is_ok_and(|mounts| noexec_in(&mounts, point))
+}
+
+/// [`mounted_noexec`] over the text of a `/proc/mounts`.
+fn noexec_in(mounts: &str, point: &Path) -> bool {
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.nth(1).is_some_and(|mounted| Path::new(mounted) == point)
+            && fields.nth(1).is_some_and(|options| options.split(',').any(|option| option == "noexec"))
+    })
+}
+
+/// A temporary directory on a disk, for a test about durability or disk cost: below
+/// `CI_TEST_DISK_TMPDIR` when the test lane moved `TMPDIR` onto a memory filesystem
+/// (`scripts/ci-linux`, `scripts/ci-local`), else in the ordinary temporary directory.
+pub fn disk_tempdir() -> tempfile::TempDir {
+    match std::env::var_os("CI_TEST_DISK_TMPDIR").filter(|value| !value.is_empty()) {
+        Some(disk) => tempfile::Builder::new()
+            .tempdir_in(disk)
+            .expect("temporary directory on disk"),
+        None => canonical_tempdir(),
+    }
+}
+
 fn canonical_temp_base() -> PathBuf {
     let base = if cfg!(target_os = "macos") {
         PathBuf::from("/tmp")
@@ -126,7 +184,7 @@ pub fn supervise_test() -> bool {
 
         let thread = std::thread::current();
         let name = thread.name().expect("libtest names each test thread");
-        if std::env::var("SMALLTALK_TEST_SUPERVISED").as_deref() == Ok(name) {
+        if std::env::var("FRACTAL_TEST_SUPERVISED").as_deref() == Ok(name) {
             return false;
         }
         let script =
@@ -140,7 +198,7 @@ pub fn supervise_test() -> bool {
             .env_remove("ST3_SUBJECT")
             .env_remove("FRACTAL_AGENT")
             .env_remove("FRACTAL_SUBJECT")
-            .env("SMALLTALK_TEST_SUPERVISED", name)
+            .env("FRACTAL_TEST_SUPERVISED", name)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .output()
             .expect("launch isolated test guardian");
@@ -166,7 +224,7 @@ pub fn evidence_tempdir() -> tempfile::TempDir {
         .prefix("restart-")
         .tempdir_in(canonical_temp_base())
         .unwrap();
-    let Some(manifest) = std::env::var_os("SMALLTALK_TEST_EVIDENCE_MANIFEST") else {
+    let Some(manifest) = std::env::var_os("FRACTAL_TEST_EVIDENCE_MANIFEST") else {
         return root;
     };
     let artifacts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../target/boot-canaries");
@@ -259,5 +317,21 @@ mod optimized_build_tests {
         ] {
             assert_eq!(built_in_release(Path::new(path)), release, "{path}");
         }
+    }
+}
+
+#[cfg(test)]
+mod memory_tempdir_tests {
+    use super::noexec_in;
+    use std::path::Path;
+
+    #[test]
+    fn a_noexec_dev_shm_is_recognised_and_an_exec_one_is_not() {
+        let shm = Path::new("/dev/shm");
+        // A CI runner's, and a build host's.
+        assert!(noexec_in("tmpfs /dev/shm tmpfs rw,nosuid,nodev,noexec,relatime,size=8388608k 0 0\n", shm));
+        assert!(!noexec_in("tmpfs /dev/shm tmpfs rw,nosuid,nodev,size=32465040k 0 0\n", shm));
+        // Only the mount at exactly that point counts.
+        assert!(!noexec_in("tmpfs /dev/shm/other tmpfs rw,noexec 0 0\ntmpfs /dev/shm tmpfs rw 0 0\n", shm));
     }
 }

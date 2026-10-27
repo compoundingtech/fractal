@@ -5,7 +5,26 @@
 //! a local table that no shared projection reads.
 
 use super::*;
+use crate::accounts::{AccountDecl, parse_account};
 
+pub fn declared_accounts_at(connection: &Connection) -> Result<Vec<AccountDecl>> {
+    let mut statement = connection
+        .prepare_cached("SELECT subject, body FROM desired WHERE kind='account' ORDER BY subject")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut accounts = Vec::new();
+    for row in rows {
+        let (subject, body) = row?;
+        if let Some(account) = serde_json::from_str(&body)
+            .ok()
+            .and_then(|desired: Value| parse_account(&subject, &desired))
+        {
+            accounts.push(account);
+        }
+    }
+    Ok(accounts)
+}
 
 impl Store {
     /// The account a pooled seat on this node was last placed on.

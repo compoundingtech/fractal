@@ -6,11 +6,12 @@ import * as Aria from 'react-aria-components'
 
 import { alertConversations, alertsHeading, homeKind, openAlerts, TIERS } from '../../../../clients/typescript/fractal-views/homeView.ts'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
-import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { useAttention } from '../data/react.tsx'
 import type { Feed } from '../data/source.ts'
 
-// Every open alert across conversations, behind a count, as stui's top bar shows it: nothing at
+// Every open alert across conversations, behind a count, as the Fractal terminal UI's top bar shows it: nothing at
 // zero, `N alerts` otherwise. It reads the attention collection the conversation strips read, so
 // the count, the list and each conversation agree. A row opens the conversation that answers it.
 
@@ -29,11 +30,11 @@ export type AlertsListRow = {
   readonly kind: string
   readonly from: string
   readonly age: string
-  /** The agent conversation that answers it, when st names one. */
+  /** The agent conversation that answers it, when Fractal names one. */
   readonly conversation?: string
 }
 
-/** The open alerts in Home's order (who is stopped first), st's order within each tier. */
+/** The open alerts in Home's order (who is stopped first), Fractal's order within each tier. */
 export const alertsList = (items: readonly Native.Attention[], now: number): readonly AlertsListRow[] =>
   openAlerts(items, undefined)
     .map((item, index) => ({ item, index, place: homeKind(item)! }))
@@ -65,13 +66,15 @@ export const AlertsPopover = ({
   const feed = useAttention()
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsList(feed.value, now) : []), [feed, now])
   const [open, setOpen] = React.useState(false)
+  // The drawer provides a touch layout only for a coarse pointer; the count then gets a full touch target.
+  const touch = React.useContext(NarrowLayoutContext)
   const count = alertsCount(feed, rows)
   if (count === '') return null
   return (
     <Aria.DialogTrigger isOpen={open} onOpenChange={setOpen}>
       <Aria.Button
         aria-label={feed._tag === 'Unavailable' ? 'Alerts could not be loaded' : count}
-        {...stylex.props(styles.count, feed._tag === 'Unavailable' && styles.unknown)}
+        {...stylex.props(styles.count, touch && styles.touch, feed._tag === 'Unavailable' && styles.unknown)}
       >
         {feed._tag === 'Unavailable' ? count : `◆ ${count}`}
       </Aria.Button>
@@ -123,6 +126,7 @@ const styles = stylex.create({
     ':hover': { backgroundColor: c.rowHover },
     ':focus-visible': { outline: `2px solid ${c.primary}` },
   },
+  touch: { minHeight: g.touchTarget, minWidth: g.touchTarget },
   unknown: { color: c.fgMuted, fontWeight: 400 },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100, maxWidth: 'min(420px, calc(100vw - 32px))' },
   dialog: { outline: 'none', maxHeight: '60vh', overflowY: 'auto', padding: s.xs },

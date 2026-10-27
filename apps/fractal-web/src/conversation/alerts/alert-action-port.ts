@@ -10,7 +10,7 @@ export type AlertActionResult =
 export type AlertAnswered = Pick<Native.Attention, 'id' | 'revision' | 'source_id' | 'episode'>
 
 /**
- * An answer to an alert, as stui and the phone send it:
+ * An answer to an alert, as the Fractal terminal UI and the phone send it:
  * `work.done` completes the waiting person step with a summary and, for a structured request,
  * the named answer; `review.*` decides a human gate, with the person's words as its reason;
  * `launch.*` approves the planner's current preview, sends it back with the person's words,
@@ -71,7 +71,7 @@ const shownVariant = (items: readonly unknown[], item: AttentionRead): VariantRe
 }
 
 /**
- * Reads the alert again, then submits once, fenced on the revision the person read. An alert st
+ * Reads the alert again, then submits once, fenced on the revision the person read. An alert Fractal
  * no longer holds open, or that no longer offers this answer, is not answered; neither is one
  * that changed since it was read. A failure is never retried: the person sees why.
  */
@@ -89,9 +89,9 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
       }
       const item = current.value as AttentionRead
       if (item.kind !== 'attention' || item.state !== 'open') return refused('This was already answered or closed.')
-      // A launch is sent back to its planner while st offers to approve it.
+      // A launch is sent back to its planner while Fractal offers to approve it.
       const offers = action.type === 'launch.revise' ? 'launch.approve' : action.type
-      if (!(item.actions ?? []).includes(offers)) return refused('st no longer offers this answer here.')
+      if (!(item.actions ?? []).includes(offers)) return refused('Fractal no longer offers this answer here.')
       if (item.revision !== alert.revision) return refused('This changed since you read it. Read it again before answering.')
       const id = `action/${crypto.randomUUID()}`
       const seen = { [alert.id]: alert.revision }
@@ -121,7 +121,7 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
           case 'launch.approve':
           case 'launch.cancel':
           case 'launch.revise': {
-            // A launch is fenced on the launch as st holds it now, as stui fences it.
+            // A launch is fenced on the launch as Fractal holds it now, as the Fractal terminal UI fences it.
             const launchId = launchOf(item)
             const launch = await client.launchesGet(launchId)
             const read = launch.value as Read
@@ -156,10 +156,10 @@ export const gatewayAlertActions = (client: FractalClient): AlertActionPort => (
         }
       })()
       if (response === 'gone') return refused('This launch is gone.')
-      if (response === 'unnamed') return refused('This alert does not say which preview it shows, so it cannot be approved here. Review it in st.')
+      if (response === 'unnamed') return refused('This alert does not say which preview it shows, so it cannot be approved here. Review it in Fractal.')
       if (response === 'changed') return refused('The preview this alert shows has changed. Read it again before approving.')
       return (response.value as { status?: unknown }).status === 'rejected'
-        ? refused('st did not take this answer.')
+        ? refused('Fractal did not take this answer.')
         : { _tag: 'Sent' }
     } catch (error) {
       return refused(

@@ -1,18 +1,18 @@
 import { defineCatalog, packageJson } from '../../repos/effect-utils/genie/external.ts'
 
 const catalog = defineCatalog({
-  effect: '4.0.0',
-  '@effect/vitest': '4.0.0',
+  effect: '4.0.3',
+  '@effect/vitest': '4.0.3',
   '@types/node': '24.10.0',
   typescript: '6.0.3',
   vitest: '4.1.9',
 })
 const client = {
   data: { name: '@fractal/client' },
-  meta: { workspace: { repoName: 'smalltalk', memberPath: 'clients/typescript/fractal-client', deps: [] } },
+  meta: { workspace: { repoName: 'fractal', memberPath: 'clients/typescript/fractal-client', deps: [] } },
 }
 const deps = catalog.compose({
-  workspace: { repoName: 'smalltalk', memberPath: 'packages/fractal-sdk' },
+  workspace: { repoName: 'fractal', memberPath: 'packages/fractal-sdk' },
   dependencies: { workspace: [client], external: catalog.pick('effect') },
   devDependencies: { external: catalog.pick('@effect/vitest', '@types/node', 'typescript', 'vitest') },
 })

@@ -1,4 +1,4 @@
-//! Tests of st3-store modules that need daemon code (the API, the reconciler, seat snapshots);
+//! Tests of fractal-store modules that need daemon code (the API, the reconciler, seat snapshots);
 //! they reach the modules through the re-exports.
 
 mod attention_ivm;

@@ -706,6 +706,20 @@ test('phone observation schema keeps histogram pairs and live-share as separate 
     ]) assert.throws(()=>decode({...report,samples}));
 });
 
+test('native delivery links are optional message references and round trip', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const items = require('../../../docs/st3/client-v0/fixtures/timeline-delivery-links.json').value.items;
+    for (const entry of items) {
+        const typed = Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict')(entry);
+        assert.deepEqual(Schema.encodeSync(Rich.TimelineEntry)(typed), {
+            ...entry, timestamp: new Date(entry.timestamp).toISOString(),
+        });
+    }
+    for (const delivers of [null, 'native-user-1', 'agent/fixture', 'message/with space']) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict')({ ...items[0], delivers }));
+    }
+});
+
 test('producer conformance fixtures decode strictly without losing tool results', async () => {
     const [{ Schema }, Rich] = await modules;
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -720,7 +734,7 @@ test('producer conformance fixtures decode strictly without losing tool results'
 });
 
 test('known daemon sender schema gap remains an explicit rejection (issue #1957)', async () => {
-    // https://github.com/compoundingtech/smalltalk/issues/1957 — pending sender amendment.
+    // https://github.com/compoundingtech/fractal/issues/1957 — pending sender amendment.
     const [, Rich] = await modules;
     const entry = {
         id: 'timeline-entry/ada', sequence: 0, revision: 1, final: true,
@@ -769,4 +783,17 @@ test('schedule schema tolerates future state strings and retains raw declaration
     const decoded = Rich.decodeUnknownSync(Rich.SchedulesPage, 'tolerant')(wire);
     // PageInfo.omitted_items is optional on the wire and encodes as null when the daemon leaves it out.
     assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), { ...wire, page: { omitted_items: null, ...wire.page } });
+});
+
+test('optional author and recipients retain closed legacy scalar types', async () => {
+    const [{Schema},Rich] = await modules;
+    const items = require('../../../docs/st3/client-v0/fixtures/timeline-message-participants.json').value.items;
+    const decode = Rich.decodeUnknownSync(Rich.TimelineEntry,'strict');
+    for (const entry of items) assert.deepEqual(Schema.encodeSync(Rich.TimelineEntry)(decode(entry)), {
+        ...entry,timestamp:new Date(entry.timestamp).toISOString(),
+    });
+    for (const patch of [ {from:'daemon/runtime'}, {to:['agent/worker']}, {author:'step/fixture'},
+        {recipients:['daemon/runtime']}, {author:null}, {recipients:null} ]) {
+        assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
+    }
 });

@@ -8,7 +8,7 @@ const nativeStubs = {
     export default { get expoConfig() { return globalThis.testPushExpoConfig; } };
   `,
   'expo-application': `
-    export const applicationId = 'com.example.smalltalk';
+    export const applicationId = 'com.example.fractal';
     export const nativeApplicationVersion = '1.0';
     export const getIosPushNotificationServiceEnvironmentAsync = () => globalThis.testPushApplicationNative.environment();
   `,

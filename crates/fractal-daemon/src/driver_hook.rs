@@ -55,7 +55,7 @@ fn hook_var(env: &dyn HookEnv, name: &str) -> Option<String> {
     fractal_drivers::contracts::env_with(name, &|key| env.raw_var(key))
 }
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 pub(crate) fn identity_conflict(env: &dyn HookEnv) -> bool {
     fractal_drivers::contracts::identity_conflict_with(&|name| env.raw_var(name))
 }
@@ -196,7 +196,7 @@ pub fn run(
 
 fn live_claude_label(env: &dyn HookEnv, identity: &str) -> Result<String> {
     let endpoint = match env.var("ST3_ENDPOINT") {
-        Some(endpoint) => crate::client::Endpoint::parse(endpoint),
+        Some(endpoint) => crate::client::Endpoint::parse(endpoint)?,
         None => {
             crate::client::Endpoint::Unix(crate::config::Config::load_client_unvalidated(None)?.0.socket)
         }
@@ -399,7 +399,10 @@ fn answer_permission_from_st(env: &dyn HookEnv, identity: &str, agent_dir: &Path
         return;
     }
     let endpoint = match env.var("ST3_ENDPOINT") {
-        Some(endpoint) => crate::client::Endpoint::parse(endpoint),
+        Some(endpoint) => match crate::client::Endpoint::parse(endpoint) {
+            Ok(endpoint) => endpoint,
+            Err(_) => return,
+        },
         None => match crate::config::Config::load_client_unvalidated(None).map(|(config, _)| config) {
             Ok(config) => crate::client::Endpoint::Unix(config.socket),
             Err(_) => return,
@@ -466,7 +469,7 @@ fn hook_client(
     identity: &str,
 ) -> Option<(tokio::runtime::Runtime, crate::client::Client, String)> {
     let endpoint = match env.var("ST3_ENDPOINT") {
-        Some(endpoint) => crate::client::Endpoint::parse(endpoint),
+        Some(endpoint) => crate::client::Endpoint::parse(endpoint).ok()?,
         None => crate::client::Endpoint::Unix(crate::config::Config::load_client_unvalidated(None).ok()?.0.socket),
     };
     let subject = env
@@ -774,7 +777,7 @@ fn unbound(env: &dyn HookEnv, report: &mut dyn FnMut(Diagnostic), reason: &str) 
 /// socket), within [`crate::telemetry::HOOK_SUBMIT_TIMEOUT`].
 pub fn submit_telemetry(env: &dyn HookEnv, claim: &crate::model::ClaimInput) -> Result<()> {
     let endpoint = match env.var("ST3_ENDPOINT") {
-        Some(endpoint) => crate::client::Endpoint::parse(endpoint),
+        Some(endpoint) => crate::client::Endpoint::parse(endpoint)?,
         None => {
             crate::client::Endpoint::Unix(crate::config::Config::load_client_unvalidated(None)?.0.socket)
         }
@@ -796,7 +799,7 @@ pub fn submit_telemetry(env: &dyn HookEnv, claim: &crate::model::ClaimInput) -> 
 /// Record `diagnostic` with the daemon at `ST3_ENDPOINT` (else this user's configured socket).
 pub fn post_diagnostic(env: &dyn HookEnv, diagnostic: &Diagnostic) -> Result<()> {
     let endpoint = match env.var("ST3_ENDPOINT") {
-        Some(endpoint) => crate::client::Endpoint::parse(endpoint),
+        Some(endpoint) => crate::client::Endpoint::parse(endpoint)?,
         None => {
             crate::client::Endpoint::Unix(crate::config::Config::load_client_unvalidated(None)?.0.socket)
         }
@@ -1321,7 +1324,7 @@ mod tests {
             std::time::Duration::from_millis(1),
         ), None);
         // The polling hook has returned without a decision. An answer can still
-        // arrive in Smalltalk, but there is no hook left to apply it to Claude.
+        // arrive in Fractal, but there is no hook left to apply it to Claude.
         append("harness.diagnostic", serde_json::json!({
             "code":"native-prompt-answered", "status":"allow",
             "driver":"claude", "incarnation_id":"current"

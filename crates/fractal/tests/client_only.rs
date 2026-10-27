@@ -1,4 +1,4 @@
-//! The actual stui binary on a daemon-less device, talking only to isolated members.
+//! The actual Fractal TUI binary on a daemon-less device, talking only to isolated members.
 use fractal_daemon::PersonWorkStore;
 use fractal_daemon::SeatsStoreCore;
 use alacritty_terminal::{
@@ -74,6 +74,9 @@ impl Tui {
         command.env("TERM", "xterm-256color");
         // A real restart of st reads "connecting" for a minute; this test only waits 25 s for "offline".
         command.env("STUI_OFFLINE_GRACE_MS", "0");
+        // A silent link is dropped after the quiet check, the ping and the pong wait: 20 s by
+        // default. Capped at 2 s each, the blackhole phase takes a few seconds.
+        command.env("STUI_FEED_TIMER_CAP_MS", "2000");
         // These deliberately unusable local settings must never select local authority.
         command.env("ST3_ENDPOINT", root.join("absent.sock"));
         command.env("ST3_PERSON", "person/wrong-local-actor");
@@ -140,21 +143,19 @@ fn state(root: &Path, node: &str) -> AppState {
             smallclaims::fleet::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
-    AppState {
-        owning_person: None,
-        store: Arc::new(store),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(store),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: node.into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: root.join("unused-pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let intent = fractal_daemon::graph::parse_intent(
@@ -237,7 +238,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
     device_name: "Demo laptop".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -278,7 +279,7 @@ async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
+async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
     use fractal_client::{Fence, MessageSendParameters, device::Profile};
     use std::os::unix::fs::PermissionsExt as _;
     let member = tempfile::tempdir().unwrap();
@@ -342,7 +343,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
             },
             MessageSendParameters {
                 to: "agent/alder".into(),
-                content: "Signed after stui pairing".into(),
+                content: "Signed after Fractal TUI pairing".into(),
                 title: None,
                 in_reply_to: None,
                 session_id: None,
@@ -378,7 +379,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: Some(vec!["read.projections".into()]), })
+    scopes: Some(vec!["read.projections".into()]), fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -405,7 +406,7 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member() {
+async fn daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member() {
     let member = tempfile::tempdir().unwrap();
     let device = tempfile::tempdir().unwrap();
     let state = state(member.path(), "member-cedar");
@@ -478,7 +479,7 @@ async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member(
         "offline keys must queue no mutation"
     );
     assert!(!device.path().join("absent.sock").exists());
-    // stui keeps this device's spaces and preferences under state/st3/stui; nothing else.
+    // Fractal TUI keeps this device's spaces and preferences under state/st3/stui; nothing else.
     let kept = device.path().join("state/st3/stui");
     let others = files_under(&device.path().join("state"))
         .into_iter()
@@ -654,7 +655,7 @@ async fn the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_
     .await;
 }
 
-/// One screen of the real stui client. The two screens run as two tests, so they idle their
+/// One screen of the real Fractal TUI client. The two screens run as two tests, so they idle their
 /// minute side by side instead of one after the other.
 async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute(
     key: &str,

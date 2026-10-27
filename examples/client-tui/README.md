@@ -1,7 +1,7 @@
 # Small client TUI
 
 A minimal Rust client assembled from `fractal-client`, `fractal-feed` and
-`fractal-conversation-ui` with its optional ratatui drawing. It imports no stui or daemon code.
+`fractal-conversation-ui` with its optional ratatui drawing. It imports no Fractal TUI or daemon code.
 
 Read [Build your own client](../../docs/clients/build-your-own.md) for setup, the package map,
 transport/authentication choices and extension points.

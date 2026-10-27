@@ -24,6 +24,7 @@ const SHARED_TABLES: &[(&str, &[&str])] = &[
     ("identity_names", &[]),
     ("arrangements", &["changed_index"]),
     ("arrangement_registers", &[]),
+    ("declared_resource_edges", &[]),
     ("message_index", &["created_index"]),
     ("resource_observations", &[]),
     ("glass_heads", &[]),
@@ -85,6 +86,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_mailbox_bindings",
         "local_mailbox_argv_bindings",
         "local_mailbox_leases",
+        "local_native_delivery_receipts_v2",
         "unread_mail",
         "unread_mail_prefixes",
         "unread_mail_pending",
@@ -131,6 +133,11 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_resource_preparation_claims",
         "local_resource_preparation_pending",
         "local_resource_preparation_dirty",
+        // Member-local completion-health candidates and hydration progress, rebuilt from claims.
+        "local_completion_health_v1_claims",
+        "local_completion_health_v1_fields",
+        "local_completion_health_v1_pending",
+        "local_completion_health_v1_backfill",
         "local_glass_head_pending",
         "local_glass_head_dirty",
         "local_directive_note_pending",
@@ -522,7 +529,7 @@ fn write_audit_history(source: &Store) {
     publish_takeover(
         source,
         &format!(
-            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
+            "{TAKEOVER_SOURCE}\nagent \"alder.worker\" {{ workspace \"/tmp/audit\"; command \"true\"; resource \"change\" subject=\"resource/audit/pull-request/1\" reason=\"Review the change.\" }}\nagent \"example-audit-identity/worker\" {{ host {:?}; workspace \"/tmp/audit-identity\"; command \"true\" }}", source.origin()
         ),
         "audit-desired",
     );

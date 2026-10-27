@@ -1,4 +1,4 @@
-//! The part of `store::harness_questions` that moved up from st3-store.
+//! The part of `store::harness_questions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use smallclaims::store::checkpoint::claims_of_kind_in_order;

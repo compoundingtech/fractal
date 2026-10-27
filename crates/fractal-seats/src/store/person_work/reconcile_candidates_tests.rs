@@ -13,7 +13,14 @@ fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
         .unwrap()
         .unwrap();
     let mut costs = Vec::new();
-    for n in 1..=10_000 {
+    // Pull requests settle a quarter of the history; the daily run (ST_TEST_SCALE=full, docs/ci.md)
+    // settles all of it. A scan of settled asks breaks the 500-step reader budget at either size.
+    let settled = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+        10_000
+    } else {
+        2_500
+    };
+    for n in 1..=settled {
         {
             let connection = store.connection.write();
             let subject = format!("step-run/history-{n}/ask");
@@ -32,7 +39,7 @@ fn person_ask_candidate_cost_does_not_grow_with_settled_history() {
                 1,
             );
         }
-        if n == 100 || n == 10_000 {
+        if n == 100 || n == settled {
             let connection = store.readers.get();
             let query = canonical_sql(PERSON_ASKS_FOR_RECONCILE);
             let plan = connection

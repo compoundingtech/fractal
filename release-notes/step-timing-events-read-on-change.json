@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A step's execution clock reads the step's claim bodies again only when the newest index or the count of its timing claims changed",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change; the key is read from claims_subject_kind_index."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged; a trim lowers the count, so the next read folds the claims that remain."},
+  "compatibility": {"status": "none", "detail": "The same events in the same order; kept events are used only for a committed read of a database file, never inside a transaction."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores the full read; the kept events are in memory only."}
+}

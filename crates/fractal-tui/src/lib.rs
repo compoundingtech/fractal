@@ -175,7 +175,7 @@ fn hangup_confirmed(run: &mut u32, closed: bool, definite: bool) -> bool {
 }
 fn watch_terminal_hangup() {
     // crossterm can loop inside event::poll (Darwin) or event::read (Linux) on PTY EOF and
-    // never return to the main loop's terminal check; a stui left like that spins at full CPU
+    // never return to the main loop's terminal check; a Fractal TUI left like that spins at full CPU
     // and keeps polling the daemon for hours. A separate poller observes the hangup without
     // consuming input. Once the PTY is gone there is no terminal left to restore, so end the
     // process even if crossterm is stuck.
@@ -399,7 +399,7 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
             format!("This review is no longer asked: the step is {state}")
         }
         Some(state) => format!(
-            "This review is no longer asked: the step is {state}; a new card appears if st asks again"
+            "This review is no longer asked: the step is {state}; a new card appears if Fractal asks again"
         ),
         None => {
             "This review is no longer asked: it was answered, or what it reviewed moved on".into()
@@ -712,7 +712,7 @@ pub struct Args {
     /// Use the local daemon even when a paired-device profile exists.
     #[arg(long, conflicts_with = "client")]
     pub local: bool,
-    /// Require a paired device; pair with `st devices complete` first.
+    /// Require a paired device; pair with `fractal devices complete` first.
     #[arg(long)]
     pub client: bool,
     /// Print this device's recent quality summaries and exit.
@@ -740,14 +740,14 @@ pub struct Args {
 #[derive(clap::Subcommand, Debug)]
 pub enum Action {
     /// Show an agent, a mission or a machine in the person's open terminal interface, in a tab
-    /// or a split. For a seat to use; it opens nothing when no terminal interface is running.
+    /// or a split. For an agent to use; it opens nothing when no terminal interface is running.
     ///
     /// `agent/NAME` opens the conversation. `mission/NAME` and `mission-run/NAME/RUN` open the
     /// mission view, which stays open and follows the mission from step to step.
-    /// `doc/NAME@HASH`, as `st documents put` prints it, shows that document's text. An item that
+    /// `doc/NAME@HASH`, as `fractal documents put` prints it, shows that document's text. An item that
     /// is already open is shown again, never opened twice. The pane takes the person's focus,
     /// unless they are typing a message or `--keep-focus` says to leave it. The request waits
-    /// for st to know the subject, so an agent made a moment ago can be opened.
+    /// for fractal to know the subject, so an agent made a moment ago can be opened.
     Open(OpenArgs),
 }
 
@@ -791,7 +791,7 @@ impl Args {
 
     // Keep the renderer's option handling together; the CLI owns validation and help.
     fn render_args(&self) -> Vec<String> {
-        let mut args = vec!["st ui".to_owned()];
+        let mut args = vec!["fractal ui".to_owned()];
         for (enabled, flag) in [
             (self.demo, "--demo"),
             (self.local, "--local"),
@@ -820,9 +820,9 @@ impl Args {
     }
 }
 
-/// What `st ui --classic` says now that spaces are stui's only layout.
+/// What `st ui --classic` says now that spaces are Fractal TUI's only layout.
 const CLASSIC_GONE: &str =
-    "The classic layout is gone: run plain `st ui`, or `st ui --space NAME` to open a named space";
+    "The classic layout is gone: run plain `fractal tui`, or `fractal tui --space NAME` to open a named space";
 
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
@@ -831,8 +831,8 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
     let pane = ui::requests::pane_for(&open.subject).map_err(anyhow::Error::msg)?;
     let person = configured_person()?
         .filter(|person| person.starts_with("person/") && person.len() > 7)
-        .context("st ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config")?;
-    let dir = ui::requests::dir(&person).context("st ui open needs a state directory: set HOME")?;
+        .context("fractal ui open needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config")?;
+    let dir = ui::requests::dir(&person).context("fractal ui open needs a state directory: set HOME")?;
     let place = match (open.split, open.below) {
         (false, _) => Place::Tab,
         (true, false) => Place::Right,
@@ -871,7 +871,7 @@ fn open_in_terminal_ui(open: &OpenArgs) -> Result<()> {
             open.subject
         ),
         Some(Answer::NotFound) => anyhow::bail!(
-            "st has no {}: nothing was opened. Check the name with st agents ls or st missions ls",
+            "Fractal has no {}: nothing was opened. Check the name with fractal agents ls or fractal missions ls",
             open.subject
         ),
         None => anyhow::bail!(
@@ -906,7 +906,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return ui::run_demo(&args);
     }
     if !io::stdout().is_terminal() {
-        anyhow::bail!("st ui needs an interactive terminal");
+        anyhow::bail!("fractal tui needs an interactive terminal");
     }
     let _quality_session = ui::slo::Session::start();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -929,7 +929,7 @@ pub fn run(mut options: Args) -> Result<()> {
     };
     anyhow::ensure!(
         !client_only || profile.is_some(),
-        "Run st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256 first"
+        "Run fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256 first"
     );
     let person = match &profile {
         Some(profile) => Some(profile.person()?.to_owned()),
@@ -939,7 +939,7 @@ pub fn run(mut options: Args) -> Result<()> {
         person
             .as_deref()
             .is_some_and(|person| person.starts_with("person/") && person.len() > 7),
-        "st ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the st config"
+        "fractal ui needs ST3_PERSON=person/NAME or person = \"person/NAME\" in the Fractal config"
     );
     let (clients, cache_path) = match &profile {
         Some(profile) => {
@@ -1027,13 +1027,13 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("plain `st ui`") && error.contains("`st ui --space NAME`"),
+            error.contains("plain `fractal tui`") && error.contains("`fractal tui --space NAME`"),
             "{error}"
         );
     }
 
     #[test]
-    fn a_closed_look_that_does_not_hold_never_ends_stui_and_a_hangup_does() {
+    fn a_closed_look_that_does_not_hold_never_ends_tui_and_a_hangup_does() {
         let mut run = 0;
         // Looks that find the terminal closed now and then, with keys arriving between them,
         // never add up.
@@ -1357,21 +1357,19 @@ mission "release" state="ready" {
                     idempotency_key: "release-run".into(),
                 })
                 .unwrap();
-            let state = fractal_daemon::api::AppState {
-                owning_person: None,
-                store: store.clone(),
-                notify: Arc::new(tokio::sync::Notify::new()),
-                event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: node.into(),
-                state_dir: root.path().into(),
-                pty_root: root.path().join("pty"),
-                pty_binary: root.path().join("unused-pty"),
-                fleet_id: None,
-                configured_peers: vec![],
-                client_relay: None,
-                native_session_home: None,
-                planner_default: fractal_daemon::model::PlannerSpec::default(),
-            };
+            let state = fractal_daemon::api::AppState { owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: root.path().join("unused-pty"),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
             let socket = root.path().join("st3.sock");
             let server_socket = socket.clone();
             let served_state = state.clone();
@@ -1433,7 +1431,7 @@ mission "release" state="ready" {
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            panic!("restarted stui fixture did not listen");
+            panic!("restarted Fractal TUI fixture did not listen");
         }
 
         fn reconcile_until(&self, what: &str, done: impl Fn(&Self) -> bool) {
@@ -1457,7 +1455,7 @@ mission "release" state="ready" {
             self.store.step_run(&self.step).unwrap().unwrap().status
         }
 
-        /// The person's card for the gate, as stui lists it.
+        /// The person's card for the gate, as Fractal TUI lists it.
         async fn card(&self) -> Option<fractal_client::Attention> {
             self.client
                 .attention_list(None, Some(50), false)
@@ -1664,7 +1662,7 @@ mission "release" state="ready" {
         assert!(error.to_string().contains("no longer asked"), "{error}");
     }
 
-    /// A feedback gate's card offers request-changes, and sending it back from stui gives the
+    /// A feedback gate's card offers request-changes, and sending it back from Fractal TUI gives the
     /// worker a new attempt with the person's notes in its goals.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sending_back_a_feedback_gate_requests_changes() {

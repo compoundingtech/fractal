@@ -10,7 +10,7 @@ pub(super) enum SchedulesCommand {
 }
 #[derive(Args)]
 pub(super) struct SchedulesListArgs {
-    /// Existing declaration-read authority: this seat, or the configured local person.
+    /// Existing declaration-read authority: this agent, or the configured local person.
     #[arg(long = "as", env = "ST_AGENT", value_parser = parse_publication_actor)]
     actor: Option<String>,
     /// One page, 1 through 200 rows. Follow the printed cursor explicitly.
@@ -32,7 +32,7 @@ pub(super) async fn run(endpoint: &Endpoint, configured_person: Option<&str>, co
     let SchedulesCommand::Ls(args)=command;
     if let Some(limit)=args.limit { anyhow::ensure!((1..=200).contains(&limit),"the schedule limit must be 1 through 200"); }
     let unheard=args.unheard_after.as_deref().map(threshold).transpose()?;
-    let actor=args.actor.as_deref().or(configured_person).context("st schedules ls needs --as person/NAME or agent/NAME, ST_AGENT, or a configured person for the existing read.declarations scope")?;
+    let actor=args.actor.as_deref().or(configured_person).context("fractal schedules ls needs --as person/NAME or agent/NAME, ST_AGENT, or a configured person for the existing read.declarations scope")?;
     let response=generated_client(endpoint,Some(actor))?.schedules_list(args.cursor.as_deref(),args.limit,unheard).await
         .map_err(describe_error)?;
     if json_output { return print_value(&response,true); }
@@ -42,7 +42,7 @@ pub(super) async fn run(endpoint: &Endpoint, configured_person: Option<&str>, co
 fn describe_error(error: fractal_client::ClientError) -> anyhow::Error {
     match error {
         fractal_client::ClientError::Api(fractal_client::ErrorCode::Forbidden,message,_) if message.contains("read.declarations") =>
-            anyhow::anyhow!("st schedules ls requires the read.declarations scope; the authenticated session does not have it"),
+            anyhow::anyhow!("fractal schedules ls requires the read.declarations scope; the authenticated session does not have it"),
         fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound | fractal_client::ErrorCode::UnsupportedCapability,_,_) =>
             anyhow::anyhow!("this server does not support schedules.list; upgrade the server to list replicated schedule declarations"),
         error=>anyhow::Error::new(error),
@@ -80,7 +80,7 @@ fn render(page: &Value, actor: &str) -> Result<String> {
     writeln!(out,"This is local knowledge; it does not say they are down or that the list is complete. Standby is a raw declared node, without takeover interpretation.")?;
     if page["page"]["has_more"]==true {
         let cursor=page["page"]["next_cursor"].as_str().context("continuation cursor missing")?;
-        writeln!(out,"More declarations: st schedules ls --cursor {} --as {}",presentation::shell_argument(cursor),presentation::shell_argument(actor))?;
+        writeln!(out,"More declarations: fractal schedules ls --cursor {} --as {}",presentation::shell_argument(cursor),presentation::shell_argument(actor))?;
     }
     Ok(out)
 }
@@ -102,7 +102,7 @@ mod tests {
             "retryable":false,"details":{}
         })).unwrap();
         let message=describe_error(fractal_client::ClientError::Api(envelope.code.clone(),envelope.message.clone(),Box::new(envelope))).to_string();
-        assert_eq!(message,"st schedules ls requires the read.declarations scope; the authenticated session does not have it");
+        assert_eq!(message,"fractal schedules ls requires the read.declarations scope; the authenticated session does not have it");
     }
     #[test]
     fn positive_display_threshold_and_explicit_paging_are_cli_contracts() {

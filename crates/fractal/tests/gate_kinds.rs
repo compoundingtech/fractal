@@ -39,7 +39,7 @@ fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
             "cargo-test",
             "log_diet",
             "--package",
-            "st3",
+            "fractal",
             "--repository",
         ])
         .arg(repository)
@@ -85,7 +85,7 @@ mode=$(cat "$CARGO_MODE_FILE")
 case "$*" in
   *--no-run*)
     case "$mode" in
-      missing) echo 'error: no test target named `log_diet` in `st3` package' >&2; exit 101 ;;
+      missing) echo 'error: no test target named `log_diet` in `fractal` package' >&2; exit 101 ;;
       linker) echo 'error: linker `mold` not found' >&2; exit 101 ;;
     esac
     echo 'Finished `test` profile' >&2; exit 0 ;;
@@ -103,7 +103,7 @@ echo 'test result: ok. 2 passed'
     assert_eq!(code, Some(1), "{output}");
     assert!(output.contains("not yet: origin/main"), "{output}");
     assert!(
-        output.contains("has no test target `log_diet` in package `st3` yet"),
+        output.contains("has no test target `log_diet` in package `fractal` yet"),
         "{output}"
     );
 

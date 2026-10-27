@@ -2,7 +2,7 @@
 name = "fractal-ui-model"
 version = "0.1.0"
 edition = "2024"
-description = "Renderer-independent Smalltalk UI models and mission semantics"
+description = "Renderer-independent Fractal UI models and mission semantics"
 license = "MIT"
 
 [dependencies]

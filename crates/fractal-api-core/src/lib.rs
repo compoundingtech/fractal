@@ -1,7 +1,7 @@
-//! the HTTP API: the daemon's routes, the client-v0 contract and the request-latency windows. st3-daemon re-exports each module at its old path; everything below is re-exported at
+//! the HTTP API: the daemon's routes, the client-v0 contract and the request-latency windows. fractal-daemon re-exports each module at its old path; everything below is re-exported at
 //! this crate's root so the moved modules keep their `crate::X` paths.
 
-// Test helpers widened for st3-daemon's tests are unused when only the feature is on.
+// Test helpers widened for fractal-daemon's tests are unused when only the feature is on.
 #![cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]
 
 #[cfg(any(test, feature = "test-support"))]

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Drive stui's actual terminal tab and a byte-logging program through two real PTYs.
+"""Drive Fractal TUI's actual terminal tab and a byte-logging program through two real PTYs.
 
-Requires Python 3, the packaged `pty` daemon (CI provides both), and the stui unit-test
+Requires Python 3, the packaged `pty` daemon (CI provides both), and the Fractal TUI unit-test
 executable. `--check` compares the byte matrix with the committed baseline. `--record FILE`
 records a new matrix for review. `--program NAME=PATH` additionally checks a real app against
 an invented local document; no downloads, display server, real graph, or user's config.
@@ -151,7 +151,7 @@ class Tab:
 
     def relay(self):
         # A transparent transport tap, not a substitute terminal/daemon: all packets go
-        # unchanged to the real session socket. It observes what stui sends to real apps.
+        # unchanged to the real session socket. It observes what Fractal TUI sends to real apps.
         try:
             client, _ = self.listener.accept()
             upstream = socket.socket(socket.AF_UNIX)
@@ -250,7 +250,7 @@ class Tab:
 
 def no_answer_client(tab):
     # A connected, unattached client cannot answer paste requests. Query the real
-    # daemon before starting stui's writable attachment; no transport is rewritten.
+    # daemon before starting Fractal TUI's writable attachment; no transport is rewritten.
     with socket.socket(socket.AF_UNIX) as client:
         client.connect(str(tab.registry / "copper.sock"))
         raw = b"\x1b[?5522$p"
@@ -572,7 +572,7 @@ def controls_and_images(worker):
             tab.emit(b"\x1b_Ga=d,d=I,i=24,q=2\x1b\\")
             wait_for(tab.status, lambda s: s and not s["image_cells"], "direct image delete")
             rows.append({"case": "images/direct-placement", "clipped": True, "delete": True})
-            # The palette stays stui's, and detach is available through its overlay.
+            # The palette stays Fractal TUI's, and detach is available through its overlay.
             tab.emit(RESET + b"\x1b[>27u")
             before = len(tab.input())
             tab.send(b"\x0b")

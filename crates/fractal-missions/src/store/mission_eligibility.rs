@@ -1,4 +1,4 @@
-//! The part of `store::mission_eligibility` that moved up from st3-store.
+//! The part of `store::mission_eligibility` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_delivery::store::mission_eligibility::*;

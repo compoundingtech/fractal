@@ -27,11 +27,11 @@ Twenty packages carry what used to be the single `st3` package and its end-to-en
 | `st3` | `crates/fractal` | the `st3` binary (`main.rs` and the modules only the binary uses: `cli_help`, `completion`, `directive_note`, `doctor_cli`, `change_cli`, `presentation`, `setup`, `onboarding`), the `st3-fixture` binary, `build.rs`, `tests/`, `examples/`, and an empty library target (`src/package_marker.rs`, see below) |
 | `fractal-e2e` | `crates/fractal-e2e` | tests only: the tests that start a real daemon and drive a client or the feed against it (fractal-client's `device_signing` and `transports`, the fractal-feed tests). `fractal-client` and `fractal-feed` no longer have a dev-dependency on `fractal-daemon`; `fractal-client` had one, which closed a cycle with the daemon. |
 
-The binary and the tests depend on the library under the name `st3`
-(`st3 = { package = "fractal-daemon", path = "../fractal-daemon" }`), so `use fractal_daemon::...` reads the same in
+The binary and the tests depend on the library under the name `fractal-daemon`
+(`fractal-daemon = { path = "../fractal-daemon" }`), so `use fractal_daemon::...` reads the same in
 the binary, the tests and every crate that already used it. The reason for the split is Cargo's: a
 package has one dependency set for its library and its binary, so a library that sat next to the
-binary was rebuilt whenever `stui`, `fractal-conversation-ui` or `fractal-feed` changed, although it uses
+binary was rebuilt whenever `fractal-tui`, `fractal-conversation-ui` or `fractal-feed` changed, although it uses
 none of them.
 
 ## Domain crates, cut at function level
@@ -52,7 +52,7 @@ the domain crates < `fractal-github` < `fractal-peer` < `fractal-reconcile` < `f
   has a module of the same name that re-exports the lower one's items (`pub use
   fractal_store::store::evidence::*;`) and defines its own, so `crate::store::evidence::X` finds `X` in
   whichever crate it is. The lower crate's items the upper code uses are `pub`.
-- **The core stays in st3-store.** If code in the fold, the schema or the open path starts to name a
+- **The core stays in fractal-store.** If code in the fold, the schema or the open path starts to name a
   domain item, the build fails in fractal-store (the item is not there); move the item back down, or invert
   the call. `scripts/crate_cut.py plan` lists what is core and why (`--show core`).
 - **Tests go with what they use.** A test moves to the highest crate among the items it uses; the
@@ -73,31 +73,31 @@ macros. Other crates use a part of it:
 | consumer | uses |
 |---|---|
 | the `st3` binary and its tests | everything it needs |
-| `stui` (dev) | `api`, `store`, `model`, `reconcile`, `client`, `graph`, `parse_intent` |
+| `fractal-tui` (dev) | `api`, `store`, `model`, `reconcile`, `client`, `graph`, `parse_intent` |
 | `fractal-client` (dev) | `api`, `model`, `graph`, `store`, `test_support` |
 | `fractal-feed` (dev) | `api`, `model`, `store`, `graph` |
 | `fractal-migrate` | `parse_intent`, `validate_mission_runtimes`, `model` |
 
 ## What stays true, and what pins it
 
-- **The library does not depend on `stui` or `fractal-conversation-ui`.** Both are binary-side. If the
+- **The library does not depend on `fractal-tui` or `fractal-conversation-ui`.** Both are binary-side. If the
   library needs something from them, move it to the binary or into a crate both can use.
-- **`st3` and `fractal-daemon` have the same version.** The library reports `CARGO_PKG_VERSION` in the
+- **`fractal` and `fractal-daemon` have the same version.** The library reports `CARGO_PKG_VERSION` in the
   health endpoint, the published fleet endpoints and the MCP `serverInfo`; a different version
   would change what the binary prints.
 - **`crates/fractal/build.rs` and `crates/fractal-daemon/build.rs` are the same.** Both read the same
   `ST3_FIXTURE_*` variables for the same `test-support` feature: the library reads them in
   `test_support.rs`, the tests read them with `env!`.
 - **`cargo test -p fractal --features test-support` still works**: the feature forwards to the library.
-- **The `st3` package switches on its own `test-support` in tests.** Before the split a dev-dependency
+- **The `fractal` package switches on its own `test-support` in tests.** Before the split a dev-dependency
   of the package on itself did it, and `build.rs` (the `ST3_FIXTURE_*` variables), the `st3-fixture`
   binary and the `required-features` targets depend on it. Cargo allows that only for a package with
   a library target, so `crates/fractal/src/package_marker.rs` is an empty library (named
-  `st3_package_marker`, in a file other than `lib.rs` so that other pull requests' edits to
-  `lib.rs` follow the moved library) and `st3_package_self` is the dev-dependency.
+  `fractal_package_marker`, in a file other than `lib.rs` so that other pull requests' edits to
+  `lib.rs` follow the moved library) and `fractal_package_self` is the dev-dependency.
 - **The fixtures only the library's unit tests read moved with it**
   (`crates/fractal-daemon/tests/fixtures/`). The binary's tests keep `crates/fractal/tests/fixtures/`.
-- The nextest overrides select a library unit test by `package(st3)` or `package(fractal-daemon)`.
+- The nextest overrides select a library unit test by `package(fractal)` or `package(fractal-daemon)`.
 - **fractal-kernel names nothing above it.** Its modules have no path to `store`, `api`, `reconcile` or
   `test_support`; a kernel unit test that needs daemon code (intent parsing, a store constant) lives
   in fractal-daemon's `kernel_tests` and reaches the kernel through the re-exports. A module joins the

@@ -1,7 +1,7 @@
-//! st3-delivery: the delivery domain of the store, cut out of st3-store at function level. Everything of st3-store is re-exported at the root;
+//! fractal-delivery: the delivery domain of the store, cut out of fractal-store at function level. Everything of fractal-store is re-exported at the root;
 //! the modules below shadow the lower crate's modules of the same name and re-export them, so every old path still resolves.
 
-// Test helpers widened for st3-daemon's tests are unused when only the feature is on.
+// Test helpers widened for fractal-daemon's tests are unused when only the feature is on.
 #![cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]
 
 #[cfg(any(test, feature = "test-support"))]
