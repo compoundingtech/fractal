@@ -306,7 +306,16 @@ The daemon records that deadline as a one-shot wake. It does not run a periodic 
 
 Conditional requests use provider cursors such as an ETag. Cursors are local progress state, not resource facts.
 
-The daemon keeps each next-check deadline and cursor in local scheduler memory. A daemon restart performs one immediate observation.
+The daemon keeps each next-check deadline in local scheduler memory. A daemon restart performs one immediate observation.
+
+Each observer's cursor stays on the member that polls it, in the GitHub plugin's own database,
+`<state>/plugins/github/github.sqlite3`. That database never syncs and is not in a backup: it is a
+cache that GitHub rebuilds. No claim carries a cursor; `observer.observed` records status,
+revision, `changed` and attempt. Builds before this one wrote the cursor into `observer.observed`,
+and a member upgraded from one adopts the cursor in its newest such claim once. A member without a
+cursor, such as one that takes over polling or lost its database, reads every open item once, as
+a first poll does. Each item it already recorded is compared with its recorded facts, so that poll
+delivers nothing twice; it costs one full read of the repository within the hourly GitHub budget.
 
 The provider applies bounded retries and backoff. It records authentication, rate-limit, and transport failures on the observer subject.
 
@@ -429,7 +438,8 @@ only once nothing uses it. To move an intake from an observer of its own onto th
 revise its run so its subscriptions keep their names and name the standing observer instead, and
 drop its own observer. The revision declares the standing observer before the old observer stops,
 so the standing observer takes the old one's resource; an observer that never recorded anything
-starts from the cursor of the observer that last recorded into its resource. Item facts, delivery
+starts from the cursor of the observer that last recorded into its resource, when that observer
+polled on the same member. Item facts, delivery
 keys and pending requests stay where they were, so the move delivers nothing twice and misses
 nothing.
 
