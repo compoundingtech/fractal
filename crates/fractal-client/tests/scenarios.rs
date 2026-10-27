@@ -1,10 +1,14 @@
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
 use fractal_client::scenarios::{self, DecodeMode, TimePointer, WireValue};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{fs, path::PathBuf};
 
 fn fixtures() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/scenarios")
+    PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/scenarios")
 }
 
 #[derive(Deserialize)]
@@ -139,7 +143,7 @@ fn scenarios_rebase_accepts_lowercase_rfc3339_separators() {
 #[test]
 fn scenarios_wire_definition_registry_matches_the_kit() {
     let source = fs::read_to_string(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
             .join("../../clients/typescript/fractal-scenarios/src/kit/wire.ts"),
     ).unwrap();
     let declaration = source.split_once("export type WireDefinition =").unwrap().1
@@ -169,7 +173,7 @@ fn scenarios_strict_rejects_unknown_error_codes() {
 
 fn client_fixture(name: &str) -> Value {
     serde_json::from_slice(&fs::read(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
             .join("../../docs/st3/client-v0/fixtures").join(name),
     ).unwrap()).unwrap()
 }
