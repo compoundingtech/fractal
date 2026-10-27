@@ -92,6 +92,10 @@ cargo build -p fractal --locked
 ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
 ```
 
+After an intended mission-rendering change, regenerate its text, style and target golden with
+`STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --locked mission_golden`, review the fixture diff,
+then run the same test without `STUI_UPDATE_GOLDEN`.
+
 The PTY smoke test runs with or without a local daemon or st config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release

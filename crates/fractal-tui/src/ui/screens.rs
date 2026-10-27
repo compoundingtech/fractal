@@ -3686,6 +3686,8 @@ mod mission_golden {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    // Regenerate after intended rendering changes with:
+    // STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui mission_golden
     #[test]
     fn mission_stories_golden() {
         let world = super::super::demo::world();
@@ -3716,6 +3718,15 @@ mod mission_golden {
                     }
                 }
             }
+        }
+        if std::env::var_os("STUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/fixtures/mission-stories.golden"),
+                &actual,
+            )
+            .unwrap();
+            return;
         }
         assert_eq!(
             actual,
