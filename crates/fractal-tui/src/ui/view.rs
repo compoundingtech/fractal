@@ -99,6 +99,9 @@ pub struct World {
     /// Each account's freshest limits reading, from the same read.
     #[serde(skip)]
     pub usage_limits: Vec<fractal_client::UsageLimit>,
+    /// Every declared account, so the Usage tab lists the same accounts on every screen.
+    #[serde(skip)]
+    pub usage_accounts: Vec<fractal_client::UsageAccount>,
     #[serde(skip)]
     pub agent_messages: Option<fractal_client::AgentMessageEstimate>,
     /// Objectives and budgets, from st's `slo.list` read: the same rows the phone and the web
@@ -415,6 +418,9 @@ pub struct Agent {
     /// The graph path, a stable id.
     pub id: String,
     pub name: String,
+    /// Declared seat intent; absence is unknown, never inferred from activity or ownership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<fractal_client::AgentLifecycle>,
     pub harness: Harness,
     pub state: AgentState,
     pub host: String,
@@ -517,7 +523,7 @@ impl Reach {
             Reach::Direct => "connected",
             Reach::Indirect => "online via others",
             Reach::Offline => "offline",
-            Reach::Unknown => "st cannot tell",
+            Reach::Unknown => "Fractal cannot tell",
         }
     }
 }

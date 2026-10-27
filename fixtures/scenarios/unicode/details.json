@@ -9,6 +9,111 @@
     "seed": 1
   },
   "state": {
+    "launch_variants": [
+      {
+        "candidate_revision": 1,
+        "diagnostics": [],
+        "id": "launch-variant/scenario-unicode-api-rename-0",
+        "kind": "launch-variant",
+        "launch_id": "launch/scenario-unicode-api-rename",
+        "normalized_mission": {
+          "goal": "Rename the API and preserve every session argument",
+          "steps": [
+            {
+              "path": "step-1",
+              "title": "واجهة العربية — 日本語の表示 — Café — 👩🏽‍💻 🚀 — 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界 — ~/src/atlas/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/fixtures"
+            },
+            {
+              "path": "step-2",
+              "title": "日本語の折り返し"
+            },
+            {
+              "path": "step-3",
+              "title": "مراجعة اتجاه النص"
+            },
+            {
+              "path": "step-4",
+              "title": "Café remains decomposed"
+            },
+            {
+              "path": "step-5",
+              "title": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+            }
+          ],
+          "title": "واجهة العربية — 日本語の表示 — Café — 👩🏽‍💻 🚀 — 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界 — ~/src/atlas/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/fixtures"
+        },
+        "ordinal": 0,
+        "revision": "lv-1",
+        "status": "previewable",
+        "target_generation": "run-generation/example/atlas/display-review/1/g1",
+        "updated_at": "2030-01-01T11:48:00.000Z"
+      },
+      {
+        "candidate_revision": 1,
+        "diagnostics": [],
+        "id": "launch-variant/scenario-unicode-api-rename-1",
+        "kind": "launch-variant",
+        "launch_id": "launch/scenario-unicode-api-rename",
+        "normalized_mission": {
+          "goal": "Compare a staged compatibility rename",
+          "steps": [
+            {
+              "path": "step-1",
+              "title": "واجهة العربية — 日本語の表示 — Café — 👩🏽‍💻 🚀 — 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界 — ~/src/atlas/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/fixtures"
+            },
+            {
+              "path": "step-2",
+              "title": "日本語の折り返し"
+            },
+            {
+              "path": "step-3",
+              "title": "مراجعة اتجاه النص"
+            },
+            {
+              "path": "step-4",
+              "title": "Café remains decomposed"
+            },
+            {
+              "path": "step-5",
+              "title": "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界"
+            }
+          ],
+          "title": "واجهة العربية — 日本語の表示 — Café — 👩🏽‍💻 🚀 — 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界 — ~/src/atlas/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/fixtures"
+        },
+        "ordinal": 1,
+        "revision": "lv-1",
+        "status": "rejected",
+        "target_generation": "run-generation/example/atlas/display-review/1/g1",
+        "updated_at": "2030-01-01T11:48:00.000Z"
+      }
+    ],
+    "launches": [
+      {
+        "approvals": [],
+        "decisions": [],
+        "id": "launch/scenario-unicode-api-rename",
+        "kind": "launch",
+        "phase": "review",
+        "planner": "agent/example/atlas/reviewer",
+        "planner_config": {
+          "provider": "codex"
+        },
+        "request": "Rename fetchUser to loadUser while preserving session propagation.",
+        "revision": "l-1",
+        "target": {
+          "generation_id": "run-generation/example/atlas/display-review/1/g1",
+          "mission_id": "mission/example/atlas/display-review",
+          "mission_run_id": "mission-run/example/atlas/display-review/1",
+          "type": "mission-run"
+        },
+        "title": "واجهة العربية — 日本語の表示 — Café — 👩🏽‍💻 🚀 — 界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界 — ~/src/atlas/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/display-width/fixtures",
+        "updated_at": "2030-01-01T11:48:00.000Z",
+        "variants": [
+          "launch-variant/scenario-unicode-api-rename-0",
+          "launch-variant/scenario-unicode-api-rename-1"
+        ]
+      }
+    ],
     "missions": [
       {
         "active_runs": 1,
@@ -181,6 +286,18 @@
     {
       "codec": "timestamp",
       "pointer": "/state/work/4/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/launches/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/launch_variants/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/launch_variants/1/updated_at"
     }
   ],
   "variant": "default",

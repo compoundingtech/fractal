@@ -77,7 +77,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
   const busyStarted = busyMilliseconds(), loadStarted = loadavg()
   const rows = []
   const workers = playWorkers(process.env, availableParallelism())
-  let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError
+  let ids = [], fullIds = [], expectedCases = 0, omitted = { stories: [], cases: 0 }, browser, fatalError, storyFiles = {}
   await mkdir(outputDirectory, { recursive: true })
   const writeReceipt = async () => {
     const elapsedSeconds = (performance.now() - started) / 1000
@@ -118,6 +118,7 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     const index = await response.json()
     fullIds = storyIdsFromIndex(index, set === 'all' ? {} : { tag: 'critical' }).toSorted()
     validateCaseOverrides(index.entries, overrides)
+    storyFiles = Object.fromEntries(Object.values(index.entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry.importPath]))
     ids = set === 'all' ? shardStories(fullIds, shardIndex, shardCount) : fullIds
     let cases
     if (set === 'commit') {
@@ -132,24 +133,25 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
     const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
     browser = await chromium.launch(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {})
     let nextCase = 0
-    const runCase = async (worker, { id, scheme, width }) => {
+    const runCase = async (worker, workerId, previousCase, { id, scheme, width }) => {
       const caseStarted = performance.now()
-      const { resetMilliseconds } = await worker.reset()
-      const createStarted = performance.now()
-      const page = await worker.newPage({ viewport: { width, height: 900 }, colorScheme: scheme })
-      const pageCreated = performance.now()
-      const guard = await strictStoryGuard(page, base)
-      const guardReady = performance.now()
       const row = {
-        id, scheme, width, height: 900, pass: false,
-        timings: {
-          resetMilliseconds, pageCreateMilliseconds: pageCreated - createStarted,
-          guardMilliseconds: guardReady - pageCreated,
-        },
+        id, storyFile: storyFiles[id], scheme, width, height: 900, workerId, previousCase, pass: false, timings: {},
       }
-      let domLoaded
-      page.once('domcontentloaded', () => { domLoaded = performance.now() })
+      let page, guard, domLoaded
       try {
+        const { resetMilliseconds } = await worker.reset()
+        row.timings.resetMilliseconds = resetMilliseconds
+        const createStarted = performance.now()
+        page = await worker.newPage({ viewport: { width, height: 900 }, colorScheme: scheme })
+        const pageCreated = performance.now()
+        guard = await strictStoryGuard(page, base)
+        const guardReady = performance.now()
+        Object.assign(row.timings, {
+          pageCreateMilliseconds: pageCreated - createStarted,
+          guardMilliseconds: guardReady - pageCreated,
+        })
+        page.once('domcontentloaded', () => { domLoaded = performance.now() })
         // The guard awaits strict storyFinished; unrelated network idleness is not play readiness.
         // a11y.manual is addon-a11y's own switch for its afterEach axe run.
         await page.goto(`${base}/iframe.html?id=${encodeURIComponent(id)}&viewMode=story&args=${encodeURIComponent(`scheme:${scheme}`)}${a11y === 'off' ? `&globals=${encodeURIComponent('a11y.manual:!true')}` : ''}`, { waitUntil: 'domcontentloaded' })
@@ -172,16 +174,18 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         row.pass = true
       } catch (error) {
         row.error = String(error)
-        row.events = await page.evaluate(() => window.__dt10StrictEvents ?? []).catch(() => [])
+        if (error.isolation) row.isolation = error.isolation
+        row.events = await page?.evaluate(() => window.__dt10StrictEvents ?? []).catch(() => []) ?? []
+        if (!page) throw error
       } finally {
-        row.strict = guard.records
-        const probes = await page.evaluate(() => window.__kitFilterBenchmark ?? []).catch(() => [])
+        row.strict = guard?.records ?? []
+        const probes = await page?.evaluate(() => window.__kitFilterBenchmark ?? []).catch(() => []) ?? []
         if (probes.length) row.filterBenchmark = probes
         // Keep the original elapsed definition (before page.close) for comparison.
         row.elapsedSeconds = (performance.now() - caseStarted) / 1000
         const closeStarted = performance.now()
         try {
-          await page.close()
+          await page?.close()
         } catch (error) {
           row.pass = false
           row.error = `${row.error ?? ''} page cleanup: ${error}`
@@ -193,10 +197,16 @@ export async function runKitPlayGate({ buildDirectory, outputDirectory, override
         }
       }
     }
-    const results = await Promise.allSettled(Array.from({ length: workers }, async () => {
-      const worker = await createIsolatedKitWorker(browser, base)
+    const results = await Promise.allSettled(Array.from({ length: workers }, async (_, workerId) => {
+      const worker = await createIsolatedKitWorker(browser, base, { workerId })
+      let previousCase = null
       try {
-        while (nextCase < cases.length) await runCase(worker, cases[nextCase++])
+        while (nextCase < cases.length) {
+          const currentCase = cases[nextCase++]
+          await runCase(worker, workerId, previousCase, currentCase)
+          previousCase = currentCase
+          worker.setPreviousCase(previousCase)
+        }
       } finally {
         await worker.close()
       }
