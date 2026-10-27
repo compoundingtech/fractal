@@ -129,8 +129,8 @@ impl Step {
     /// The rendered owner with its agent id beside it, when the owner is an agent.
     pub fn owner_identity(&self) -> Option<String> {
         self.human_owner().map(|name| match &self.owner_id {
-            Some(id) => format!("{name} · {id}"),
-            None => name.to_owned(),
+            Some(id) if name != id => format!("{name} · {id}"),
+            _ => name.to_owned(),
         })
     }
 
