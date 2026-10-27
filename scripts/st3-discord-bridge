@@ -224,7 +224,7 @@ class UnixConnection(http.client.HTTPConnection):
 
 
 class St:
-    """Same trusted-local message endpoints used by st conversations; never an HTTP listener."""
+    """Same trusted-local message endpoints used by Fractal conversations; never an HTTP listener."""
     def __init__(self, path, actor=None):
         self.path = path
         self.actor = actor or os.environ.get('ST_AGENT')
@@ -234,7 +234,7 @@ class St:
         try:
             info = self.path.lstat()
             if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o007:
-                raise Stop('Use your own st Unix socket; it must not be accessible to other users.')
+                raise Stop('Use your own Fractal Unix socket; it must not be accessible to other users.')
             headers = {'Content-Type': media or 'application/json'}
             if actor:
                 headers['X-St3-Person'] = actor
@@ -243,11 +243,11 @@ class St:
             bound = IMAGE_LIMIT if binary else LIMIT
             raw = response.read(bound + 1)
             if response.status >= 500:
-                raise Later('st is temporarily unavailable; messages remain queued.')
+                raise Later('Fractal is temporarily unavailable; messages remain queued.')
             if response.status != 200:
-                raise Stop('st refused the operation (HTTP ' + str(response.status) + '). No response body was logged.')
+                raise Stop('Fractal refused the operation (HTTP ' + str(response.status) + '). No response body was logged.')
             if len(raw) > bound:
-                raise Stop('st response exceeded the bridge size limit.')
+                raise Stop('Fractal response exceeded the bridge size limit.')
             if binary:
                 return raw
             value = json.loads(raw)
@@ -259,7 +259,7 @@ class St:
             return value
             # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both
         except (OSError, http.client.HTTPException, ValueError):
-            raise Later('st did not answer; the same delivery key will be retried.') from None
+            raise Later('Fractal did not answer; the same delivery key will be retried.') from None
         finally:
             connection.close()
 
@@ -267,23 +267,23 @@ class St:
         imported = body['from'].startswith('external/')
         receipt = self.request('POST', '/v1/client/adapter/import' if imported else '/v1/messages', body, actor=self.actor if imported else None)
         if not isinstance(receipt, dict) or receipt.get('from') != body['from'] or receipt.get('to') != body['to'] or receipt.get('content') != body['content'] or receipt.get('in_reply_to') != body['in_reply_to'] or not SUBJECT.fullmatch(receipt.get('subject', '')):
-            raise Stop('st send receipt did not match its sender, route, text and reply.')
+            raise Stop('Fractal send receipt did not match its sender, route, text and reply.')
         return receipt['subject']
 
     def upload(self, data, media, sender):
         value = self.request('POST', '/v1/client/blobs', data, actor=sender, media=media)
         digest = hashlib.sha256(data).hexdigest()
         if not isinstance(value, dict) or value.get('blob') != 'blob/' + digest or value.get('size') != len(data) or value.get('media_type') != media:
-            raise Stop('st image upload receipt did not match the bytes.')
+            raise Stop('Fractal image upload receipt did not match the bytes.')
         return {'blob': value['blob'], 'media_type': media, 'name': 'image-' + digest[:16] + '.' + IMAGE_TYPES[media]}
 
     def image(self, attachment, message, actor):
         digest = attachment.get('sha256', '')
         if not re.fullmatch('[a-f0-9]{64}', digest) or attachment.get('media_type') not in IMAGE_TYPES or not isinstance(attachment.get('size'), int) or not 0 < attachment['size'] <= IMAGE_LIMIT:
-            raise Stop('st returned an invalid image reference.')
+            raise Stop('Fractal returned an invalid image reference.')
         data = self.request('GET', '/v1/client/blobs/' + digest + '?' + urllib.parse.urlencode({'message': message}), actor=actor, binary=True)
         if hashlib.sha256(data).hexdigest() != digest or len(data) != attachment['size'] or image_type(data) != attachment['media_type']:
-            raise Stop('st image bytes did not match the attachment reference.')
+            raise Stop('Fractal image bytes did not match the attachment reference.')
         return ('image-' + digest[:16] + '.' + IMAGE_TYPES[attachment['media_type']], attachment['media_type'], data)
 
     def replies(self, sender):
@@ -294,13 +294,13 @@ class St:
             query = path if cursor is None else path + '&cursor=' + urllib.parse.quote(cursor, safe='')
             page = self.request('GET', query)
             if not isinstance(page, dict) or not isinstance(page.get('items'), list):
-                raise Stop('st returned an invalid mailbox page.')
+                raise Stop('Fractal returned an invalid mailbox page.')
             yield from page['items']
             cursor = page.get('next_cursor')
             if cursor is None:
                 return
             if not isinstance(cursor, str) or cursor in seen:
-                raise Stop('st returned an invalid mailbox cursor.')
+                raise Stop('Fractal returned an invalid mailbox cursor.')
             seen.add(cursor)
         raise Stop('The bridge mailbox exceeded its retained history limit.')
 
@@ -553,7 +553,7 @@ class Bridge:
                 or not isinstance(page.get('items'), list) or len(page['items']) > 200
                 or type(page.get('cursor')) is not int or page['cursor'] < after
                 or not isinstance(page.get('host'), str) or not page['host']):
-            raise Stop('st returned an invalid delivery watch response; the cursor was retained.')
+            raise Stop('Fractal returned an invalid delivery watch response; the cursor was retained.')
         host = self.state.get('outbound_host')
         if host is not None and host != page['host']:
             raise Stop('The delivery watch moved to another host; reconcile retained delivery state before resuming.')
@@ -682,21 +682,21 @@ def default_socket():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('run', 'status', 'resolve'))
-    parser.add_argument('--agent', required=True, help='The one allowlisted st agent subject.')
+    parser.add_argument('--agent', required=True, help='The one allowlisted Fractal agent subject.')
     parser.add_argument('--route', type=Path, default=ROOT / 'discord-probe/trial.json')
     parser.add_argument('--state', type=Path)
     parser.add_argument('--socket', type=Path, default=default_socket())
     parser.add_argument('--token-file', type=Path, help='Private dotenv file with one DISCORD_BOT_TOKEN entry; never evaluated as shell code.')
     parser.add_argument('--legacy-text', action='store_true', help='Keep provisional sender identities and text-only delivery on the current native daemon.')
     parser.add_argument('--allow-user', action='append', default=[], help='Enroll another numeric Discord account; native mode also requires matching program-seat source enrollment.')
-    parser.add_argument('--st-message')
+    parser.add_argument('--fractal-message', '--st-message', dest='fractal_message')
     parser.add_argument('--discord-message')
     parser.add_argument('--part', type=int, default=0)
     args = parser.parse_args()
     state = None
     try:
         if not re.fullmatch(r'agent/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*', args.agent):
-            raise Stop('Name one explicit st agent subject.')
+            raise Stop('Name one explicit Fractal agent subject.')
         route = route_file(args.route)
         if any(not ID.fullmatch(user) for user in args.allow_user) or len({route['user_id'], *args.allow_user}) > 16:
             raise Stop('Enrollment needs numeric IDs and at most sixteen distinct accounts.')
@@ -720,9 +720,9 @@ def main():
         discord.validate(route)
         bridge = Bridge(route, args.agent, state, discord, St(args.socket), allowed_users=args.allow_user, legacy_text=args.legacy_text)
         if args.action == 'resolve':
-            if not args.st_message or not SUBJECT.fullmatch(args.st_message) or not args.discord_message or not ID.fullmatch(args.discord_message):
-                raise Stop('resolve needs --st-message message/ID and --discord-message ID.')
-            row = state.db.execute("SELECT * FROM outbox WHERE st_id=? AND part=? AND status='uncertain'", (args.st_message, args.part)).fetchone()
+            if not args.fractal_message or not SUBJECT.fullmatch(args.fractal_message) or not args.discord_message or not ID.fullmatch(args.discord_message):
+                raise Stop('resolve needs --fractal-message message/ID and --discord-message ID.')
+            row = state.db.execute("SELECT * FROM outbox WHERE st_id=? AND part=? AND status='uncertain'", (args.fractal_message, args.part)).fetchone()
             if row is None:
                 raise Stop('No matching unconfirmed send was found.')
             message = discord.request('GET', bridge.path + '/' + args.discord_message)

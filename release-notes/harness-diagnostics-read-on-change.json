@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The reconciler reads a seat's harness diagnostics again only when one was added or trimmed, and keeps them without the Claude channel's attachment reports, instead of reading every diagnostic body of the seat at six places in each member pass",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change; the key is read from claims_subject_kind_index."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged; a trim lowers the count, so the next read takes the diagnostics that remain."},
+  "compatibility": {"status": "none", "detail": "The same diagnostics, in the same canonical order, reach every reconciler check; none of them reads the channel attachment codes."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores the whole-history reads; the diagnostics are kept in memory only."}
+}

@@ -6026,16 +6026,16 @@ fn run_skill(args: SkillArgs) -> Result<()> {
 fn run_claude_channel(command: ClaudeChannelCommand) -> Result<()> {
     match command {
         ClaudeChannelCommand::Install { no_policy } => {
-            fractal_drivers::claude_channel::install_st3(no_policy).map(|_| ())
+            fractal_drivers::claude_channel::install_fractal(no_policy).map(|_| ())
         }
-        ClaudeChannelCommand::Status => fractal_drivers::claude_channel::status_st3(),
+        ClaudeChannelCommand::Status => fractal_drivers::claude_channel::status_fractal(),
         ClaudeChannelCommand::Uninstall { keep_policy } => {
-            fractal_drivers::claude_channel::uninstall_st3(keep_policy)
+            fractal_drivers::claude_channel::uninstall_fractal(keep_policy)
         }
         ClaudeChannelCommand::InstallPolicy => {
-            fractal_drivers::claude_channel::install_st3_policy().map(|_| ())
+            fractal_drivers::claude_channel::install_fractal_policy().map(|_| ())
         }
-        ClaudeChannelCommand::UninstallPolicy => fractal_drivers::claude_channel::uninstall_st3_policy(),
+        ClaudeChannelCommand::UninstallPolicy => fractal_drivers::claude_channel::uninstall_fractal_policy(),
     }
 }
 
@@ -6488,6 +6488,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
         assistant_receipts: Default::default(),
+        private_notes: Arc::new(fractal_daemon::private_notes::Authority {
+            catalogs: config.private_notes_catalogs.clone(),
+        }),
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));
@@ -16022,13 +16025,13 @@ fn pi_family_message_frame(
     json!({
         "type": "message",
         "deliverAs": "steer",
-        "content": fractal_drivers::ding::with_tag_notices(fractal_drivers::ding::st3_notification_with_metadata(
+        "content": fractal_drivers::ding::with_tag_notices(fractal_drivers::ding::fractal_notification_with_metadata(
             &message.subject,
             &message.from,
             &message.to,
             message.title.as_deref(),
             body,
-            &fractal_drivers::ding::st3_body_sha256(body),
+            &fractal_drivers::ding::fractal_body_sha256(body),
             fractal_drivers::ding::NotificationMetadata {
                 attachments,
                 assistant: message.assistant_metadata().as_ref(),
@@ -18167,11 +18170,11 @@ fn native_queued_message(
 ) -> fractal_drivers::message::Message {
     let mut tags = vec![
         format!("st3-message:{}", view.subject),
-        format!("{}{}", fractal_drivers::ding::ST3_TO_TAG, view.to),
+        format!("{}{}", fractal_drivers::ding::FRACTAL_TO_TAG, view.to),
         format!(
             "{}{}",
-            fractal_drivers::ding::ST3_SHA256_TAG,
-            fractal_drivers::ding::st3_body_sha256(&body)
+            fractal_drivers::ding::FRACTAL_SHA256_TAG,
+            fractal_drivers::ding::fractal_body_sha256(&body)
         ),
     ];
     tags.extend(
@@ -18473,11 +18476,11 @@ async fn forward_projected_messages_reporting(
                     };
                     let mut tags = message.tags.clone();
                     tags.push(format!("{TAG_PREFIX}{}", message.subject));
-                    tags.push(format!("{}{}", fractal_drivers::ding::ST3_TO_TAG, message.to));
+                    tags.push(format!("{}{}", fractal_drivers::ding::FRACTAL_TO_TAG, message.to));
                     tags.push(format!(
                         "{}{}",
-                        fractal_drivers::ding::ST3_SHA256_TAG,
-                        fractal_drivers::ding::st3_body_sha256(&content)
+                        fractal_drivers::ding::FRACTAL_SHA256_TAG,
+                        fractal_drivers::ding::fractal_body_sha256(&content)
                     ));
                     let filename = fractal_drivers::message::send_to_inbox(
                         inbox,

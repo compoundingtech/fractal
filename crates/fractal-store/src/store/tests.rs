@@ -2499,6 +2499,76 @@ fn current_runtime_views_reduce_what_they_show_not_every_runtime_ever_held() {
 }
 
 #[test]
+fn cold_runtime_fields_match_sparse_null_and_transition_history() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/field-fold";
+    let observations = [
+        ("runtime.observed", json!({"fields": {
+            "status": "running", "runtime_id": "one", "incarnation_id": "first",
+            "terminal": true, "reachability": "reachable", "reason": "initial"
+        }})),
+        ("runtime.observed", json!({"fields": {"status": "idle", "terminal": null}})),
+        ("resource.observed", json!({"fields": {
+            "kind": "vcs.issue", "attribution_only": true, "status": "ignored",
+            "facts": {"opened_by": "person/test"}
+        }})),
+        ("mission-run.state", json!({"fields": {"mode": "eval"}})),
+        ("runtime.observed", json!({"fields": {"status": "running", "reason": null}})),
+        ("resource.observed", json!({"status": "up", "runtime_id": "two"})),
+    ];
+    let mut snapshots = vec![0];
+    for (step, (kind, body)) in observations.into_iter().enumerate() {
+        store.set_write_clock_at(1_800_000_000_000 + step as u128).unwrap();
+        observe_runtime(&store, subject, "running", "fixture");
+        let index = store.index().unwrap();
+        // Sparse legacy records are reducer inputs, not current admission examples.
+        store.connection.lock().expect("fixture writer connection").execute(
+            /* sqlite-large-value: allow-for-now lv-hf8af949bb730 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=?1, body=?2 WHERE store_index=?3",
+            params![kind, body.to_string(), index],
+        ).unwrap();
+        snapshots.push(index);
+    }
+    let connection = store.readers.get();
+    for index in snapshots {
+        for fields in [RUNTIME_PROJECTION_FIELDS, &["status"][..], &["status", "mode"][..]] {
+            let mut expected = latest_actual_at(&connection, subject, Some(index)).unwrap();
+            if let Some(Value::Object(actual)) = &mut expected {
+                actual.retain(|field, _| fields.contains(&field.as_str()));
+            }
+            assert_eq!(
+                latest_actual_fields_at(&connection, subject, Some(index), fields).unwrap(),
+                expected, "snapshot {index}, fields {fields:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn cold_runtime_fields_stop_decoding_after_a_complete_observation() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/bounded-runtime-fold";
+    for step in 0..240 {
+        store.set_write_clock_at(1_800_000_000_000 + step).unwrap();
+        observe_runtime(&store, subject, "running", &format!("epoch-{step}"));
+        let index = store.index().unwrap();
+        store.connection.lock().expect("fixture writer connection").execute(
+            /* sqlite-large-value: allow-for-now lv-h13b02e7126c4 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE store_index=?2",
+            params![json!({"fields": {
+                "status": "running", "runtime_id": "one", "incarnation_id": format!("epoch-{step}"),
+                "terminal": true, "reachability": "reachable", "reason": null
+            }}).to_string(), index],
+        ).unwrap();
+    }
+    let connection = store.readers.get();
+    ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+    let actual = latest_actual_fields_at(
+        &connection, subject, None, RUNTIME_PROJECTION_FIELDS,
+    ).unwrap().unwrap();
+    assert_eq!(actual["incarnation_id"], "epoch-239");
+    assert_eq!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get), 1);
+}
+
+#[test]
 fn kept_statuses_match_a_fresh_reduction_as_claims_arrive() {
     let store = Store::open_memory("node").unwrap();
     let mut seed = 0x5eed_u64;
@@ -11255,4 +11325,57 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
     assert!(check(2));
     runtime("exited", None);
     assert!(!check(2));
+}
+
+#[test]
+fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let diagnose = |code: &str, n: usize| {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"code": code, "incarnation_id": "one"}))
+                    .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("{code}:{n}")),
+            })
+            .unwrap()
+    };
+    let reads = || HARNESS_DIAGNOSTIC_READS.with(std::cell::Cell::get);
+    let prompt = diagnose("provider-trust-prompt", 0);
+    for n in 0..20 {
+        diagnose(if n % 2 == 0 { "claude-channel-attached" } else { "claude-channel-unattached" }, n);
+    }
+    let before = reads();
+    let codes = |diagnostics: &[ClaimRecord]| {
+        diagnostics.iter().map(|claim| claim.body["fields"]["code"].clone()).collect::<Vec<_>>()
+    };
+    // The channel's attachment reports are left out; the other diagnostics stay in order.
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-trust-prompt")]);
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-trust-prompt")]);
+    assert_eq!(reads(), before + 1, "an unchanged seat's diagnostics were read again");
+    let later = diagnose("provider-capacity", 0);
+    assert_eq!(
+        codes(&store.harness_diagnostics(subject).unwrap()),
+        [json!("provider-trust-prompt"), json!("provider-capacity")]
+    );
+    assert_eq!(reads(), before + 2, "an added diagnostic was not read");
+    // A checkpoint trim lowers the count, so the claims that remain are read again.
+    {
+        let mut connection = store.connection.write();
+        // Only the claim goes, as a trim would delete it; its signature and record stay.
+        connection.pragma_update(None, "foreign_keys", false).unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hedf22a898ad6 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_positions WHERE claim_id=?1", [&prompt.id]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h88bcdc72f0ea owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&prompt.id]).unwrap();
+        tx.commit().unwrap();
+        connection.pragma_update(None, "foreign_keys", true).unwrap();
+    }
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-capacity")]);
+    assert_eq!(reads(), before + 3, "a trimmed diagnostic stayed");
+    assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
 }
