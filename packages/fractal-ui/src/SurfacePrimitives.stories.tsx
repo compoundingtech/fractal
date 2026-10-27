@@ -20,7 +20,7 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
     </Menu></Popover></MenuTrigger>
     <MenuTrigger><Button variant="outline">Thread actions</Button><Popover><Menu aria-label="Thread actions">
       <MenuItem id="rename">Rename</MenuItem>
-      <MenuItem id="archive" shortcut="⌘E">Archive</MenuItem>
+      <MenuItem id="archive" textValue="File away" shortcut="⌘E">Archive</MenuItem>
     </Menu></Popover></MenuTrigger>
     <Checkbox>Wrap long lines</Checkbox>
     <Checkbox defaultSelected>Follow new events</Checkbox>
@@ -36,8 +36,18 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
     {/* LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback */}
   </main>
 }
-const meta = { title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises selection, focus, shortcuts and surface tokens without domain state." }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:primitive',
+  'Dark1440:primitive',
+  'Dark440:primitive',
+  'Light1440:primitive',
+  'Light440:primitive',
+  'RadioSelection:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 /** The probe exercises the real entry keyframes and also proves a resting surface does not animate. */
@@ -66,6 +76,16 @@ async function assertMotion(element: HTMLElement) {
     element.removeAttribute('data-entering')
   }
 }
+/** TooltipSurface deliberately has no entry animation, even when RAC marks it entering. */
+async function assertNoMotion(element: HTMLElement) {
+  await expect(getComputedStyle(element).animationName).toBe('none')
+  element.setAttribute('data-entering', '')
+  try {
+    await expect(getComputedStyle(element).animationName).toBe('none')
+  } finally {
+    element.removeAttribute('data-entering')
+  }
+}
 type Rgba = readonly [number, number, number, number]
 const parseColor = (value: string): Rgba => {
   const [r = 0, g = 0, b = 0, a = 1] = value.match(/[\d.]+/g)!.map(Number)
@@ -82,9 +102,14 @@ function contrast(ink: string, ...layers: [string, ...string[]]) {
   const [high, low] = [luminance(composite(parseColor(ink), background)), luminance(background)].sort((a, b) => b - a) as [number, number]
   return (high + 0.05) / (low + 0.05)
 }
-/** A label is one line when its box is exactly one line box tall. */
+/** Ellipsis can expose multiple fragments on one line; distinct vertical positions measure wrapping. */
+function labelLineCount(label: HTMLElement) {
+  const range = label.ownerDocument.createRange()
+  range.selectNodeContents(label)
+  return new Set([...range.getClientRects()].map(rect => rect.top)).size
+}
 async function assertOneLine(label: HTMLElement) {
-  await expect(label.offsetHeight).toBe(parseFloat(getComputedStyle(label).lineHeight))
+  await expect(labelLineCount(label)).toBe(1)
 }
 const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
   const canvas = within(canvasElement)
@@ -120,6 +145,17 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(rename).toHaveFocus()
   await expect(rename.querySelector('span[aria-hidden="true"]')).toBeNull()
   await expect(getComputedStyle(rename).backgroundColor).toBe(reference.backgroundColor)
+  // String children retain typeahead despite the shared item's render-function wrapper.
+  await userEvent.keyboard('{End}')
+  await expect(canvas.getByRole('menuitem', { name: /Archive/ })).toHaveFocus()
+  await userEvent.keyboard('r')
+  await expect(rename).toHaveFocus()
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
+  await userEvent.keyboard('{ArrowDown}')
+  // An explicit textValue takes precedence over the visible string label.
+  await userEvent.keyboard('f')
+  await expect(canvas.getByRole('menuitem', { name: /Archive/ })).toHaveFocus()
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
   await waitFor(() => expect(actions).toHaveFocus())
@@ -220,7 +256,7 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await waitFor(() => expect(trigger).toHaveFocus())
   await expect(checkbox).toBeChecked()
 
-  // Hover runs before any other tooltip opens, so React Aria's warm-up cannot skip the 500ms delay.
+  // Hover runs before any other tooltip opens, so React Aria's warm-up cannot skip the 350ms delay.
   // The menu steps leave React Aria in keyboard modality, where hover never opens a tooltip; a pointer press restores pointer modality.
   await userEvent.click(canvas.getByRole('heading', { name: 'Surface primitives' }))
   const copy = canvas.getByRole('button', { name: 'Copy link' })
@@ -228,20 +264,23 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await userEvent.hover(copy)
   await expect(canvas.queryByRole('tooltip')).toBeNull()
   const plain = await canvas.findByRole('tooltip', {}, { timeout: 2000 })
-  await expect(performance.now() - hoverStart).toBeGreaterThanOrEqual(450)
+  await expect(performance.now() - hoverStart).toBeGreaterThanOrEqual(350)
   await expect(plain).toHaveTextContent('Copy thread link')
   await expect(plain.querySelector('kbd')).toBeNull()
-  await assertMotion(plain)
+  await assertNoMotion(plain)
   const plainLabel = plain.querySelector('span')!
   await assertOneLine(plainLabel)
+  const plainHeight = plain.offsetHeight
   // Negative control: a bound narrower than the label wraps it, so the one-line check can fail.
   plain.style.maxWidth = '48px'
   try {
-    await expect(plainLabel.offsetHeight).toBeGreaterThan(parseFloat(getComputedStyle(plainLabel).lineHeight))
+    await expect(labelLineCount(plainLabel)).toBeGreaterThan(1)
+    await expect(plain.offsetHeight).toBeGreaterThan(plainHeight)
   } finally {
     plain.style.maxWidth = ''
   }
   await assertOneLine(plainLabel)
+  await expect(plain.offsetHeight).toBe(plainHeight)
   await userEvent.unhover(copy)
   await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())
 
@@ -253,20 +292,30 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(tooltip).toHaveTextContent('Search this thread')
   await expect(tooltip).not.toHaveTextContent('Search messages')
   await expect(search).toHaveAccessibleDescription(`Search this thread ${args.shortcut}`)
-  // The tooltip enters from opacity 0; visibility settles once the entry animation ends.
-  await waitFor(() => expect(within(tooltip).getByText(args.shortcut!)).toBeVisible())
+  await expect(within(tooltip).getByText(args.shortcut!)).toBeVisible()
   await expect(tooltip.closest('[data-scheme]')).toBe(root)
-  await assertMotion(tooltip)
-  await assertOneLine(tooltip.querySelector('span')!)
-  await expect(tooltip.offsetHeight).toBe(26)
+  await assertNoMotion(tooltip)
+  const tooltipLabel = tooltip.querySelector('span')!
+  await assertOneLine(tooltipLabel)
+  await expect(tooltip.scrollHeight).toBe(tooltip.clientHeight)
   await expect(tooltip.offsetWidth).toBeLessThanOrEqual(320)
   const tooltipStyle = getComputedStyle(tooltip)
-  await expect(parseFloat(tooltipStyle.fontSize)).toBe(12)
-  await expect(parseFloat(tooltipStyle.lineHeight)).toBe(16)
-  await expect(tooltipStyle.borderTopLeftRadius).toBe('6px')
-  await expect(tooltipStyle.paddingTop).toBe('4px')
-  await expect(tooltipStyle.paddingLeft).toBe('8px')
-  await expect(tooltipStyle.borderTopWidth).toBe('1px')
+  await expect(parseFloat(tooltipStyle.fontSize)).toBe(11)
+  await expect(tooltipStyle.borderTopLeftRadius).toBe('8px')
+  await expect(tooltipStyle.paddingTop).toBe('6px')
+  await expect(tooltipStyle.paddingLeft).toBe('10px')
+  await expect(tooltipStyle.borderTopWidth).toBe('0px')
+  // Height follows inherited leading and the shortcut, not the discarded fixed 26px surface.
+  const tooltipHeight = tooltip.offsetHeight
+  tooltip.style.maxWidth = '48px'
+  try {
+    await expect(labelLineCount(tooltipLabel)).toBeGreaterThan(1)
+    await expect(tooltip.offsetHeight).toBeGreaterThan(tooltipHeight)
+  } finally {
+    tooltip.style.maxWidth = ''
+  }
+  await assertOneLine(tooltipLabel)
+  await expect(tooltip.offsetHeight).toBe(tooltipHeight)
   await expect(Math.round(tooltip.getBoundingClientRect().top - search.getBoundingClientRect().bottom)).toBe(4)
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(canvas.queryByRole('tooltip')).toBeNull())

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Two slow tests run fewer redundant cases: the envelope-delivery test checks its 30 distinct cases exactly once instead of 256 random draws, and the SLO prefix matrix skips cases that admit a claim sequence it already tested.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to restore the random cases and the full matrix."}
+}

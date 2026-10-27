@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Select one known canonical agent in existing assistant metadata reads without fleet output pagination",
+  "replay": {"status": "none", "detail": "No claim replay or recovery changes."},
+  "schema": {"status": "none", "detail": "No stored schema, index, or data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or digest rule changes."},
+  "compatibility": {"status": "none", "detail": "Existing agents and agents-rich reads and st_agents_list accept an optional exact canonical agent_id selector. Unfiltered requests retain existing pagination. Filtering precedes page construction and byte packing; cursors bind the exact selector. No aliases, priorities, conversation content, scopes, or authority are added."},
+  "downtime": {"status": "none", "detail": "No added startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator action required; clients may refresh tool discovery to use the optional selector."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new rollback restrictions."}
+}

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 exec >controller.log 2>&1
 
-readonly PLANNER="agent/${ST_MISSION_RUN}/planner"
-readonly PRODUCE="step-run/${ST_RUN_GENERATION}/produce"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+readonly PLANNER="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}/planner"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+readonly PRODUCE="step-run/${FRACTAL_RUN_GENERATION-${ST_RUN_GENERATION}}/produce"
 runs=()
 
 cleanup() {
@@ -24,8 +27,9 @@ st3 work complete "$PRODUCE" --as "$PLANNER" --summary "the mission was publishe
 # Free mode: generic publication by an ungranted agent succeeds too.
 st3 apply produced.kdl --as "$PLANNER" > direct.out
 
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start eval/free-mode/produced \
-  --id "eval/free-mode/produced/${ST_MISSION_RUN}" \
+  --id "eval/free-mode/produced/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$PWD" \
   --as "$PLANNER" > started.json
 produced_run=$(jq -er '.mission_run.subject' started.json)
@@ -45,8 +49,9 @@ jq -e '
 ' revised.json >/dev/null
 st3 trace wait "$produced_run" --for standing --timeout 1m >/dev/null
 
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start eval/free-mode/produced \
-  --id "eval/free-mode/second/${ST_MISSION_RUN}" \
+  --id "eval/free-mode/second/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$PWD" \
   --as "$REVISER" > second.json
 runs+=("$(jq -er '.mission_run.subject' second.json)")

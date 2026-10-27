@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Expose authenticated local runtime-start diagnostics and recover exact stored nonlaunch closure witnesses",
+  "replay": {"status": "none", "detail": "No replay or rebuild. Reconciliation recognizes already-retained operation-bound before-backend, native-rejection and never-dispatched closure witnesses."},
+  "schema": {"status": "none", "detail": "No persisted schema change. Diagnostic creation timestamps come from UUIDv7 operation identifiers; unavailable dispatch and finish timestamps remain null."},
+  "rules": {"status": "none", "detail": "No desired-state or physical retirement rule change. Missing, mismatched or producer-open evidence cannot authorize closure."},
+  "compatibility": {"status": "none", "detail": "Adds an authenticated read-only client diagnostic endpoint. Existing endpoints are unchanged."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual cleanup is required when a valid exact stored nonlaunch witness exists."},
+  "recovery": {"status": "none", "detail": "Recovered closure is validated against the original operation and retained request provenance inside the writer fence before taking the lazy pass-shared PTY snapshot. A generic launch error, elapsed time or unrelated PTY tag never supplies a witness."}
+}

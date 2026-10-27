@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { observeSyncStatus, syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
+import { observeSyncStatus, syncLine, syncLineNextChange, type SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
 describe('portable sync presentation', () => {
  it('retains same-stage transition time and advances only on status or stage changes', () => {
   const first=observeSyncStatus(undefined,{_tag:'Requested',since:100},100)
@@ -28,5 +28,30 @@ describe('portable sync presentation', () => {
  it('presents a reported failure with user-facing copy rather than exposing its raw detail', () => {
   expect(syncLine({status:{_tag:'Failed',cause:{_tag:'Server',code:'forbidden',message:'Denied'}},label:'conversation',now:6000,observedAt:5000})).toMatchObject({text:'No access to conversation · ask an administrator',tone:'error',animate:false})
   expect(syncLine({status:{_tag:'Failed',cause:{_tag:'Server',code:'reported-code',message:'Actual reported detail'}},label:'conversation',now:6000,observedAt:5000})).toMatchObject({text:"Couldn't load conversation: the request did not complete",tone:'error'})
+ })
+ it.each([
+  [{_tag:'Connecting',attempt:0,since:0}, 'Connecting · 2m'],
+  [{_tag:'Requested',since:0}, 'Loading conversation is taking longer than expected · 2m'],
+  [{_tag:'Progress',stage:'queued',elapsedMs:120000,stageSince:120000,reportedAt:120000}, 'Waiting to load conversation · 2m'],
+  [{_tag:'Progress',stage:'resolving',elapsedMs:120000,stageSince:120000,reportedAt:120000}, 'Finding conversation · 2m'],
+  [{_tag:'Progress',stage:'routing',elapsedMs:120000,stageSince:120000,reportedAt:120000}, 'Connecting to conversation · 2m'],
+  [{_tag:'Progress',stage:'reading',elapsedMs:120000,stageSince:120000,reportedAt:120000}, 'Loading conversation… · 2m'],
+  [{_tag:'Progress',stage:'reading',elapsedMs:0,stageSince:0,reportedAt:0}, 'Loading conversation · no update for 2m'],
+  [{_tag:'Stale',reason:{_tag:'Unknown'}}, 'Waiting for an update · 2m'],
+  [{_tag:'Stale',lastLiveAt:0,reason:{_tag:'Unknown'}}, 'Last updated 2m ago'],
+  [{_tag:'Stale',reason:{_tag:'Quiet',lastFrameAt:0}}, 'No update for 2m'],
+ ] satisfies readonly (readonly [SyncStatus, string])[])('formats long waits for %j', (status, text) => {
+  expect(syncLine({status,label:'conversation',now:120000,observedAt:status._tag === 'Progress' ? 120000 : 0,socket:status._tag === 'Connecting'})?.text).toBe(text)
+ })
+ it.each([[120001,'2m 1s'],[120000,'2m'],[119999,'2m'],[1,'1s'],[0,'0s'],[-1,'0s']] as const)('rounds the reconnect countdown up at %i ms', (remaining, text) => {
+  expect(syncLine({status:{_tag:'Stale',reason:{_tag:'Reconnecting',nextAt:120000+remaining,attempt:2,issue:'Connection closed.'}},label:'connection',now:120000,observedAt:0,socket:true})?.text).toBe(`Reconnecting in ${text} · attempt 2`)
+ })
+ it('keeps short waits and mixed units consistent with the canonical formatter', () => {
+  for (const [now, text] of [[59999,'59s'],[60000,'1m'],[65000,'1m 5s'],[3600000,'1h'],[86400000,'1d']] as const) {
+   expect(syncLine({status:{_tag:'Stale',reason:{_tag:'Quiet',lastFrameAt:0}},label:'conversation',now,observedAt:0})?.text).toBe(`No update for ${text}`)
+  }
+ })
+ it('schedules long elapsed labels at their displayed minute boundary', () => {
+  expect(syncLineNextChange({status:{_tag:'Stale',reason:{_tag:'Quiet',lastFrameAt:0}},label:'conversation',now:3600500,observedAt:0})).toBe(3660000)
  })
 })

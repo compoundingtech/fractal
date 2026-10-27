@@ -9,7 +9,7 @@ import {
   type UsageSummaryEncoded,
   type VisualizationEncoded,
   type WorkState,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 import { Option } from 'effect'
 
 /**
@@ -90,7 +90,7 @@ const usageOf = ({
   const input = sum((t) => t.input)
   const output = sum((t) => t.output)
   return {
-    aggregation: 'cumulative-per-incarnation-else-response-deltas',
+    aggregation: 'rollup-per-slot-else-cumulative-per-incarnation-else-response-deltas',
     input_tokens: input,
     output_tokens: output,
     cached_tokens: sum((t) => t.cached),
@@ -138,7 +138,7 @@ interface RunSpec {
   readonly outcome?: MissionRunSummaryEncoded['outcome']
 }
 
-/** Builds one run summary the way st joins it: progress and current steps derive from the steps. */
+/** Builds one run summary the way Fractal joins it: progress and current steps derive from the steps. */
 const run = ({
   missionPath,
   spec,
@@ -299,7 +299,7 @@ export const webfractalFoundation = mission({
         ],
         ['terminal', 'TerminalPane on the bake-off winner, wired to agent PTYs'],
         ['missions-collection', 'Missions collection and detail on st3.client.v0 resources'],
-        ['integrate', 'Integrate sessions, missions and resources against the st gateway'],
+        ['integrate', 'Integrate sessions, missions and resources against the Fractal gateway'],
       ],
       edges: [
         ['skeleton', 'workbench-shell'],
@@ -1447,7 +1447,7 @@ if (fixtureMissions.map((m) => m.id).join() !== worldMissions.map((m) => m.ref).
 
 /**
  * The `missions` collection window serves `run_details` with steps only for open runs and the
- * latest run; a detail read adds every run's steps (collections.md "Rows are joined in st").
+ * latest run; a detail read adds every run's steps (collections.md "Rows are joined in Fractal").
  */
 export const windowRow = (detail: Mission): Mission => {
   const runs = detail.run_details ?? []

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Align the strict gate receipt fixture's expected and omitted case pins with the partitioned footer stories",
+  "replay": {"status": "none", "detail": "Test assertion correction only."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "No runtime policy changes."},
+  "compatibility": {"status": "none", "detail": "Receipt fixture counts now include all three footer widths and their Light aliases."},
+  "downtime": {"status": "none", "detail": "No deployment impact."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "No persisted state changes."}
+}

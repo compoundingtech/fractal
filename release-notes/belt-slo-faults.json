@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A missed CI objective opens one operational fault for the fleet fault agent, which ends when the objective is met again",
+  "replay": {"status": "none", "detail": "No replay or rebuild."},
+  "schema": {"status": "none", "detail": "No tables, columns, indexes or triggers and no wire format. The faults are existing operational.failure and operational.recovered claims with only their existing fields."},
+  "rules": {"status": "none", "detail": "Claim kinds, fields, rules, permissions and digests are unchanged. The failure's reviewer is the fleet fault agent, an agent, never a person."},
+  "compatibility": {"status": "changed", "detail": "On the member whose repository observer reads Workspace CI, each minute's SLO sample opens an operational.failure (condition slo-objective-missed, severity warning) on daemon/NODE for each missed CI objective (merge-latency/p50, merge-latency/p95, ci-critical-path/p95, flakes) that has no open fault, in the episode slo-objective/NODE/ID, and ends it with operational.recovered when the objective's row is met again. The fleet fault agent receives each as a normal-priority fault. With no fault agent, nothing opens. Rows with no data neither open nor end one; other objectives open none."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Binary rollback stops opening and ending these faults; any fault left open stays visible to the fault agent until it is resolved by hand."}
+}

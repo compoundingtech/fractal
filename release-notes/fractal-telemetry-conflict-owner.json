@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep telemetry identity-conflict validation in the shared driver contracts after the telemetry crate move.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persisted schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "Telemetry calls the existing shared conflict check directly with raw environment lookup, retaining fail-closed identity selection and value-redacted warnings without depending on the daemon hook module." },
+  "downtime": { "status": "none", "detail": "No service changes." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "No runtime state changes." }
+}
