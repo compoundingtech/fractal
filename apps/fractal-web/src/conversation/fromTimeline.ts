@@ -295,7 +295,7 @@ const baseItemOf = ({
         id: entry.id,
         kind: 'error',
         text: entry.body.message,
-        code: entry.body.code,
+        detail: entry.body.code === undefined ? undefined : `Code: ${entry.body.code}`,
         retryable: entry.body.retryable,
         at: entryTimestamp(entry),
       }
