@@ -55,6 +55,10 @@ export function ConversationScreen(props: RootScreen<'Conversation'>) {
 function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
   const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
+  // Native alert callbacks outlive the render that opened them. A new send must
+  // use the selection at confirmation time, not the alert's captured client.
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
   // A running session st manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
@@ -320,7 +324,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
       { text: 'Send as new', style: 'destructive', onPress: async () => {
         setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
         const parameters = bound.request.parameters;
-        const sent = await actions.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages);
+        const sent = await actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages);
         if (sent.how === 'failed') {
           setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: false } : candidate));
           setSendIssue(`Not sent: ${sent.error}`);
