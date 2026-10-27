@@ -90,13 +90,18 @@ for mode in default custom ancestor relative; do
   if [[ $mode == default ]]; then state="$HOME/.local/state"; fi
   profile="$state/nix/profiles/home-manager"
   if [[ $mode == ancestor ]]; then profile="$work/arbitrary-generation"; fi
-  if [[ $mode == relative ]]; then profile="$work/relative-generation"; fi
+  if [[ $mode == relative ]]; then
+    # Different logical/physical depths mirror /var -> /private/var on macOS.
+    mkdir -p "$work/relative-physical/extra"
+    ln -s "$work/relative-physical/extra" "$work/relative-parent"
+    profile="$work/relative-parent/generation"
+  fi
   bin="$work/dangling-$mode/bin"
   mkdir -p "$(dirname "$profile")" "$bin"
   target=/nix/store/gc-collected-fractal
   if [[ $mode == relative ]]; then
     target=
-    prefix=$(dirname "$profile")
+    prefix=$(cd "$(dirname "$profile")" && pwd -P)
     while [[ $prefix != / ]]; do target="../$target"; prefix=$(dirname "$prefix"); done
     target="${target}nix/./store/missing/../gc-collected-fractal"
   fi

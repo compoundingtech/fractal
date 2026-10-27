@@ -165,11 +165,15 @@ exec "{real}" "$@"
         if mode == 'ancestor':
             profile = root / 'arbitrary-generation'
         if mode == 'relative':
-            profile = root / 'relative-generation'
+            physical_parent = root / 'relative-physical/extra'
+            physical_parent.mkdir(parents=True)
+            logical_parent = root / 'relative-parent'
+            logical_parent.symlink_to(physical_parent, target_is_directory=True)
+            profile = logical_parent / 'generation'
         profile.parent.mkdir(parents=True, exist_ok=True)
         target = '/nix/store/gc-collected-fractal'
         if mode == 'relative':
-            target = os.path.relpath('/nix/store', profile.parent) + '/./missing/../gc-collected-fractal'
+            target = os.path.relpath('/nix/store', profile.parent.resolve()) + '/./missing/../gc-collected-fractal'
         profile.symlink_to(target)
         destination = root / ('dangling-' + mode) / 'bin'
         destination.mkdir(parents=True)
