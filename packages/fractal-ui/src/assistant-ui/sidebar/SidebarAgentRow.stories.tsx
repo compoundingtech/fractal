@@ -25,35 +25,38 @@ const knownRow: Row = {
   subagentCount: 0, subagentObservation: { _tag: 'Reported' },
   children: [],
 }
-/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted, and an older daemon omitted the subagent field. */
-const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } }
+/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted, and without a known driver the missing subagent roster is conservatively not reported by the harness. */
+const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } }
+/** Child rows never carry their own subagent report on the wire, so each is explicitly not reported by its harness. */
+const childObservation = { subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } } as const satisfies Partial<Row>
 /**
  * Synthetic cohort: every second row carries no last-turn fact, so its time slot renders empty while the shared metric
- * track keeps every title aligned. The cohort also carries each subagent cause: Claude and Codex report (zero), an
- * OpenCode session is not reported by its harness, an older daemon omits the field, and one session awaits its first report.
+ * track keeps every title aligned. The cohort also carries each subagent cause: Claude reports (zero), a running Codex
+ * session on an older daemon omits the field, an OpenCode session is not reported by its harness, a starting OMP
+ * session awaits its first report, and a child row is not reported by its harness.
  */
 const cohortRows: readonly Row[] = [
   { ...knownRow, ref: 'agent/first', id: 'first', title: 'First session' },
-  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', harness: 'codex', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0 },
+  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', harness: 'codex', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } },
   { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Needs you' },
   { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', harness: 'opencode', subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
-  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session', subagentObservation: { _tag: 'Unavailable' } },
-  { ...knownRow, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
+  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session', harness: 'omp', status: 'pending', statusLabel: 'Pending', subagentObservation: { _tag: 'Unavailable' } },
+  { ...knownRow, ...childObservation, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
 ]
 /** Synthetic parent with two subagents, for collapsed and expanded child rows. */
 const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, subagentCount: 2, children: [
-  { ...knownRow, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
-  { ...unreportedRow, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
+  { ...knownRow, ...childObservation, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
+  { ...unreportedRow, ...childObservation, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
 ] }
 /** Phone fixtures: a title too long for the narrowed title track, and a desktop copy of the parent for the dense control. */
 const longRow: Row = { ...cohortRows[2]!, ref: 'agent/long', id: 'long', title: 'Long session title that has to truncate before the touch columns' }
 const desktopParentRow: Row = { ...parentRow, ref: 'agent/parent/desktop' }
 /** The exact subagent sentence each fixture's description carries just before its ID, by title: every cause appears. */
 const subagentFacts: Readonly<Record<string, string>> = {
-  'Sample session': 'Subagents: 0', 'Unreported session': 'Not reported by this daemon version',
-  'First session': 'Subagents: 0', 'Second session': 'Subagents: 0', 'Third session': 'Subagents: 0',
-  'Fourth session': 'Not reported by this harness', 'Fifth session': 'Not reported yet', 'Check output': 'Subagents: 0',
-  'Parent session': 'Subagents: 2', 'Subagent one': 'Subagents: 0', 'Subagent two': 'Not reported by this daemon version',
+  'Sample session': 'Subagents: 0', 'Unreported session': 'Not reported by this harness',
+  'First session': 'Subagents: 0', 'Second session': 'Not reported by this daemon version', 'Third session': 'Subagents: 0',
+  'Fourth session': 'Not reported by this harness', 'Fifth session': 'Not reported yet', 'Check output': 'Not reported by this harness',
+  'Parent session': 'Subagents: 2', 'Subagent one': 'Not reported by this harness', 'Subagent two': 'Not reported by this harness',
   [longRow.title]: 'Subagents: 0',
 }
 

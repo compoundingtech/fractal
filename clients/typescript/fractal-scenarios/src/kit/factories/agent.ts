@@ -1,4 +1,5 @@
 import type { Agent, Runtime, WorkLabel, WorkState } from '@fractal/client'
+import { SUBAGENT_OBSERVING_DRIVERS } from '@fractal/client'
 
 import type { CastAgent, CastMission } from '../cast.ts'
 import type { FactoryContext } from '../context.ts'
@@ -28,8 +29,6 @@ export interface AgentFactoryResult {
   /** Present while a runtime exists for the agent. */
   readonly runtime: Runtime | null
 }
-
-const SUBAGENT_OBSERVING_DRIVERS: Readonly<Partial<Record<CastAgent['driver'], true>>> = { claude: true, codex: true, omp: true }
 
 const revision = (ctx: FactoryContext, prefix: string) => `${prefix}${int(ctx.rng, 1, 40)}`
 
