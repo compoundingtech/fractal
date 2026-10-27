@@ -41,12 +41,12 @@ Use these documents for implementation details:
 - [Shell completion](cli-completion/spec.md) defines live entity candidates, their descriptions,
   and short-name resolution; [requirements](cli-completion/requirements.md).
 - [Lanes](lanes.md) defines the ordered lanes a mission run works through, such as the merge
-  train, and `fractal lanes`.
+  train, and `st lanes`.
 - [Attachments](attachments.md) defines the images a message carries between machines: where the
   bytes live (never in sync), the limits, upload and read, and delivery to a seat.
 - [Resource subscriptions](resource-subscriptions.md) defines observers and automatic intake.
 - [Terminal agent retirement](agent-retirement.md) explains the owner-local writer fence, cross-peer policy and coordinated upgrade gate.
-- [Suspending a seat](suspend.md) explains `fractal agents suspend` and `resume`: when a seat is quiet
+- [Suspending a seat](suspend.md) explains `st agents suspend` and `resume`: when a seat is quiet
   enough to stop, and how each harness comes back on its own native session.
 - [Seat handoff](seat-continuity.md) explains the one document a seat leaves for the session after it, and the first
   message a restarted seat is sent with that handoff and the live state of its work.
@@ -54,7 +54,7 @@ Use these documents for implementation details:
   a replaced Fractal binary without ending the provider session, and how Fractal reports a stale message path.
 - [Silent messages](silent-messages.md) explains the silent and wake message kinds, capped held batches, and where status and run events go.
 - [Delivery probes](delivery-probes.md) describes token-free native-channel probes, per-direction
-  read latency, overdue attention, and the replicated results in `fractal doctor`.
+  read latency, overdue attention, and the replicated results in `st doctor`.
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
   and tests their harnesses run, on Linux and macOS, and what needs root. It also explains how
   stopping a seat ends every process the seat started, and what a host without systemd misses.
@@ -64,7 +64,7 @@ Use these documents for implementation details:
   asks natively, as ids and option positions without text, retaining compact ended records forever.
 - [Model accounts](accounts.md) explains how a person declares several Claude and Codex accounts, how a
   seat binds one or a pool, and how a pooled seat at its limit restarts on another account.
-- [Demos](demos.md) explains `fractal demo play`: a seeded, scripted demo in the terminal interface,
+- [Demos](demos.md) explains `st demo play`: a seeded, scripted demo in the terminal interface,
   in its own instance, with timed and key-paced beats and no model tokens.
 - [Instances](instances.md) explains `--instance NAME`: a second, fully separate Fractal on one machine
   with its own state, sockets, service names and harness accounts, and the uninstall that removes it.
@@ -76,10 +76,10 @@ Use these documents for implementation details:
   recorded, the log format, and what the recorder cannot see.
 - [Profiling the daemon](profiling.md) explains how the daemon accounts for its own time: waits
   for the writer and read connections, SQLite statements, CPU, and callers.
-- [What a run waits on](waiting-on.md) explains `fractal missions waiting-on RUN`: each open step's
+- [What a run waits on](waiting-on.md) explains `st missions waiting-on RUN`: each open step's
   wait and a run's stalled verdict, read in milliseconds from published state.
 - [Operational queries](operational-queries.md) explains bounded mission lists, outcome history,
-  mission run summaries, and the five-minute performance report in `fractal doctor`.
+  mission run summaries, and the five-minute performance report in `st doctor`.
 - [Agent migration](agent-migration.md) defines isolated rehearsal, cutover, and rollback.
 - [Eval audit](eval-audit.md) records the test intent and prompt boundary for each Fractal eval.
 - [Running Fractal with omp](omp.md) covers omp seat setup, behavior, and known limits.
@@ -104,5 +104,5 @@ idle with no prompt and takes no turn until a person types or a message is poste
 as a message that names a ready step, and the step's goals and constraints say what the work is.
 A seat that sits idle holding a claimed step, with nothing set to wake it, gets one message naming
 the step and what it waits on ([idle holders](mission-graph-runtime.md#idle-holders)).
-Fractal's only other text for agents is the skill that `fractal skill` prints, which describes how to use Fractal
+Fractal's only other text for agents is the skill that `st skill` prints, which describes how to use Fractal
 and sets no rules of conduct. Keep this rule when changing drivers, messages, or the skill.

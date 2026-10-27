@@ -43,9 +43,9 @@ rebuild duration includes failed attempts. The background rebuild still reduces 
 runtime collection; publication removes that work from ordinary list requests.
 
 ```sh
-fractal missions ls --all
-fractal missions ls --all --cursor 'CURSOR'
-fractal missions show mission/example/build
+st missions ls --all
+st missions ls --all --cursor 'CURSOR'
+st missions show mission/example/build
 ```
 
 Showing a mission with multiple runs prints counts by state, the ten newest runs, and the ten
@@ -55,9 +55,9 @@ requires choosing an exact run when the mission has multiple runs.
 To investigate outcomes in a time window:
 
 ```sh
-fractal missions ls --since 6h --status failed
-fractal work ls --since 6h --status timed-out
-fractal work ls --since 2026-10-01T00:00:00Z --until 2026-10-01T06:00:00Z --status cancelled
+st missions ls --since 6h --status failed
+st work ls --since 6h --status timed-out
+st work ls --since 2026-10-01T00:00:00Z --until 2026-10-01T06:00:00Z --status cancelled
 ```
 
 `--since` and `--until` accept RFC3339 timestamps or durations in milliseconds, seconds,
@@ -96,9 +96,9 @@ of ranking the complete transport history. Original success timestamps, clock-sk
 expiry, and dial-out membership exclusions still decide whether that evidence is usable.
 
 ```sh
-fractal doctor
-fractal doctor --performance
-fractal doctor --performance --json
+st doctor
+st doctor --performance
+st doctor --performance --json
 ```
 
 The daemon always keeps bounded request, background task, and SQL timing aggregates for the

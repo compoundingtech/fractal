@@ -25,7 +25,7 @@ A person's claim of any kind is durable, whatever its class: the planner never d
 
 ## Where writes go
 
-`log` says where a kind's writes go. `fractal schema show KIND` prints it as `RETENTION` for every
+`log` says where a kind's writes go. `st schema show KIND` prints it as `RETENTION` for every
 kind whose `log` is not `claims`; a kind with no `RETENTION` line is replicated and durable in
 the registry.
 

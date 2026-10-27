@@ -36,7 +36,7 @@ For a corrupt pin, stop its daemon and worker and restore the exact pin from a k
 for this state and its keys. Without that backup, use the same operator recovery branch; do not
 guess a new pin or delete the file to select a writer.
 
-Explicit `fractal fleet create --name`, `fractal fleet migrate` and `fractal fleet join` establish membership,
+Explicit `st fleet create --name`, `st fleet migrate` and `st fleet join` establish membership,
 independently of computer renames. They stop installed services, hold the same exclusive state
 lock, and record the successfully founded/admitted name before services start. A foreground
 daemon must be stopped first when using `--no-service`; refusal happens before membership writes.
@@ -68,19 +68,19 @@ the launcher configuration without rewriting graph history. Historical rows for 
 used name can remain visible; this recovery does not fabricate their terminal state or erase
 their signed history.
 
-`fractal doctor` compares local live PTY/exec evidence with selected host placement. A local process
+`st doctor` compares local live PTY/exec evidence with selected host placement. A local process
 placed on a different host fails `runtime-ownership` and appears in `runtime-drift`, even when
 replication is healthy. A remote seat with no corresponding local process is valid. Replication
 status is an inspection command and cannot repair placement.
 
-`fractal agents start EXACT_SEAT --host DESTINATION --as ACTOR` is a deliberate fenced placement
+`st agents start EXACT_SEAT --host DESTINATION --as ACTOR` is a deliberate fenced placement
 handoff, not a computer rename. The former host stops its process and acknowledges departure
 before the destination starts. Do not use `--source-offline` while that process is still live.
 Mission seats change through their mission declaration. See [seat suspension](suspend.md) for
 planned native-session moves and [claim backups](backups.md) before configuration changes.
 
 For macOS service installations, both LaunchAgent plists bake `--node`. Editing config.toml
-and running `fractal service restart` alone does not regenerate those arguments. The app installer
+and running `st service restart` alone does not regenerate those arguments. The app installer
 changes the executable path while preserving other arguments. See [macOS installation](macos-installation.md).
 The stable identity resolves this discrepancy on the updated daemon, worker and service installer;
 older binaries still require the source-verified launcher restoration procedure.

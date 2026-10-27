@@ -4,7 +4,7 @@ The install's `config.toml` selects `access_mode = "auto"` or `"bypass"`.
 Service installation writes `auto` when creating a new config. An existing config
 without this key means `bypass`; installing again preserves its bytes. Home Manager
 keeps its existing default and accepts `services.smalltalk.accessMode = "auto"`
-for a new installation. Restart the daemon after changing the mode; `fractal doctor`
+for a new installation. Restart the daemon after changing the mode; `st doctor`
 shows the mode that daemon actually started with.
 
 Auto is not a security boundary. It reduces accidents; it does not isolate seats.
@@ -13,7 +13,7 @@ Codex hook trust is bypassed in both modes.
 ## Choosing and changing the mode
 
 This section is written for a person's own agent to read and act on at their request. The
-`st` skill (`fractal skill`) carries the same steps.
+`st` skill (`st skill`) carries the same steps.
 
 - **What the modes mean.** Auto keeps the provider's permission checks on. Codex runs in the
   `st-managed` profile described below: it writes the seat's workspace and temporary
@@ -41,11 +41,11 @@ This section is written for a person's own agent to read and act on at their req
   bypass; running seats keep their permissions until restarted) and wait for the person's yes
   before editing `config.toml`.
 - **How to change it.** Set `access_mode = "auto"` or `access_mode = "bypass"` in that file
-  (add the line when it is missing, leave the other keys alone), run `fractal service restart`
+  (add the line when it is missing, leave the other keys alone), run `st service restart`
   (the daemon adopts live seats; see [upgrading Fractal](../site/guides/upgrading.md#install-and-restart-deliberately)),
-  and run `fractal doctor`: its `harness-access-mode` check names the mode the daemon started with.
+  and run `st doctor`: its `harness-access-mode` check names the mode the daemon started with.
   Seats already running keep the permissions they started with until
-  `fractal agents restart AGENT --as PERSON` restarts them.
+  `st agents restart AGENT --as PERSON` restarts them.
 - **What to tell the person.** Auto is not a security boundary: it reduces accidents and does
   not isolate seats. Bypass is not one either. Say so, then let the person choose.
 
@@ -58,7 +58,7 @@ These are driver defaults for st-launched seats. They do not modify the provider
 account settings or change a manually launched provider. Authored permission options
 and Codex config profiles remain authoritative, including old bypass arguments.
 The daemon supplies the resolved mode through `ST_ACCESS_MODE`, including `bypass`
-for an existing config without the key. Hand-run `fractal driver` commands without this
+for an existing config without the key. Hand-run `st driver` commands without this
 environment value preserve their provider arguments; they can set it explicitly
 to use the install policy.
 New seat and planner declarations omit permission arguments. An automatically resumed

@@ -23,7 +23,7 @@ A seat passes when all of these hold:
   the same PID;
 - no channel process (Claude's `claude-mcp`, or the pi-family channel) still executes the deleted
   binary;
-- `fractal agents show` reports the seat's delivery path as `current`.
+- `st agents show` reports the seat's delivery path as `current`.
 
 The runner must run outside any st seat. The isolated daemon binds a caller to the nearest `ST_AGENT`
 among its ancestors, and the runner sends as `person/eval`. From a seat, start it detached, for

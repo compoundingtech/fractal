@@ -5,7 +5,7 @@ Status: cause named, fix in the same change. Names below are invented: `alder`, 
 
 ## What was seen
 
-On a fleet of four members running one build, `fractal replication status` read
+On a fleet of four members running one build, `st replication status` read
 `projection_comparison_waiting: true` for every pair of one member (`alder`) in both directions,
 for hours, while the other three pairs among `birch`, `cedar` and `dune` read `false`.
 
@@ -15,7 +15,7 @@ for hours, while the other three pairs among `birch`, `cedar` and `dune` read `f
   that record was not the cause.
 - `graph_digest` differed between members whenever it was sampled. That is expected for nodes
   whose envelope sets differ at that instant, and it is not evidence of an impure projection:
-  `fractal replication diff` against a peer, which compares the last signed response, reported
+  `st replication diff` against a peer, which compares the last signed response, reported
   `graph.equal: true` with `coverage: all-shared-projections`, and the `sync` block of the same
   status showed `peer_only_envelopes: 0`, `local_only_envelopes: 0` and a recent
   `graph_compared_at_unix_ms` with `diverged: false`.
@@ -75,11 +75,11 @@ same digests on both sides every time the comparison was made.
 - Local conditions that make a comparison premature still apply immediately: unsealed local
   batches, claims waiting for their kinds, a deferred projection, a different registry.
 - The status exports what the reported comparison found (`projection_graphs_equal`) and when it was
-  made (`projection_compared_at_unix_ms`). `fractal replication diff` and the peer lines of
-  `fractal replication status` read those, not the equality of the peer's last digests with this node's
+  made (`projection_compared_at_unix_ms`). `st replication diff` and the peer lines of
+  `st replication status` read those, not the equality of the peer's last digests with this node's
   live ones, and show the comparison's age ("graphs compared 3m ago").
 - Every waiting pair now says why in `projection_comparison_waiting_reason`, and
-  `fractal replication status` and `fractal replication diff` print it:
+  `st replication status` and `st replication diff` print it:
   - claims wait for a build that knows their kinds,
   - this node has unsealed local batches,
   - the projection is deferred,

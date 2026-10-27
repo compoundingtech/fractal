@@ -21,7 +21,7 @@ Write stable facts that an agent on the host needs. Do not put current work in t
 Store the bytes first:
 
 ```sh
-fractal documents put hosts/local.md --as doc/hosts/local
+st documents put hosts/local.md --as doc/hosts/local
 ```
 
 The command returns the exact SHA-256 reference. Put that reference in a host declaration:
@@ -35,7 +35,7 @@ host "local" {
 ```
 
 Include the host declaration in the mission candidate. Approval fails when the exact document is
-absent. Fractal writes no file for it: `fractal work claim` on that host prints each host document after the
+absent. Fractal writes no file for it: `st work claim` on that host prints each host document after the
 claimed step.
 
 ## Prepare a durable seat
@@ -65,13 +65,13 @@ names it.
 Publish exact authored seat KDL without creating a planner session:
 
 ```sh
-fractal apply agents/example.kdl --as person/operator
+st apply agents/example.kdl --as person/operator
 ```
 
-The convenience form is `Fractal agents start agents/example --harness codex --workspace
+The convenience form is `st agents start agents/example --harness codex --workspace
 /work/example --as person/operator`. Add `--print-kdl` to review its exact KDL first.
 
-`Fractal agents start agent/agents/example --harness codex --workspace /work/example --as
+`st agents start agent/agents/example --harness codex --workspace /work/example --as
 person/operator` names the same seat: pass either the identity or its complete `agent/` subject.
 Slash-qualified and dotted identities are exact; a simple name is prefixed with its placement
 host, as in `agent/HOST.NAME`. A doubled `agent/agent/` prefix is rejected.
@@ -81,11 +81,11 @@ host, as in `agent/HOST.NAME`. A doubled `agent/agent/` prefix is rejected.
 Create and review a launch before any cutover:
 
 ```sh
-fractal launch start --id agents/example migration-request.md \
+st launch start --id agents/example migration-request.md \
   --workspace /work/example \
   --as person/operator
-fractal launch show launch/agents/example/SESSION
-fractal launch preview launch/agents/example/SESSION
+st launch show launch/agents/example/SESSION
+st launch preview launch/agents/example/SESSION
 ```
 
 Inspect the candidate KDL, subject diff, and document hashes. Approve the exact preview separately;
@@ -111,8 +111,8 @@ Stop the authorized st2 agent first. Remove only the st2-generated files that co
 Apply the seat, then use a readable run ID for the first finite work trial:
 
 ```sh
-fractal apply agents/example.kdl --as person/operator
-fractal missions start work/example \
+st apply agents/example.kdl --as person/operator
+st missions start work/example \
   --id agents/example/pilot \
   --workspace /work/st3-runs/example \
   --as person/operator \

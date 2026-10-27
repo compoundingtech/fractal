@@ -29,7 +29,7 @@ The prefix changes priority only. It does not change a seat's parent or lifetime
 is its PTY server, not the daemon, so restarting the daemon leaves every seat and its children
 running, exactly as before. Nothing needs root, a new user or
 a delegated cgroup controller, so it works on a fresh user install. On Linux, `nice` is added to
-the daemon's own value, which is 0 under `fractal service install`. A harness that lowers its own
+the daemon's own value, which is 0 under `st service install`. A harness that lowers its own
 priority further stays lower. The scope weights below divide the machine between cgroups; `nice`
 orders processes inside one, and a harness's work runs in a scope of its own.
 
@@ -39,8 +39,8 @@ orders processes inside one, and a harness's work runs in a scope of its own.
 seat_priority = "normal"   # or "background", which is also what a missing key means
 ```
 
-Run `fractal service restart`, then `fractal agents restart AGENT --as PERSON` for each running seat: a
-seat keeps the priority it started with. `fractal doctor` names the value the daemon started with.
+Run `st service restart`, then `st agents restart AGENT --as PERSON` for each running seat: a
+seat keeps the priority it started with. `st doctor` names the value the daemon started with.
 
 **One seat.** Declare `ST_SEAT_PRIORITY` in the seat's environment. It replaces the install's
 value for that seat, in either direction:
@@ -82,7 +82,7 @@ The daemon moves a PTY server that an older release started, the first time its 
 observes it. It moves only a process that is still in the exact scope Fractal recorded for that
 session, and never itself.
 
-`fractal service install` renders `CPUWeight=1000` and `IOWeight=1000` into `st3.service`. The
+`st service install` renders `CPUWeight=1000` and `IOWeight=1000` into `st3.service`. The
 replication worker keeps the default weight. An existing install keeps its unit until it is
 reinstalled; `systemctl --user set-property st3.service CPUWeight=1000 IOWeight=1000` applies the
 same weights in place.
@@ -175,10 +175,10 @@ leftovers end when it is stopped while it runs, or while its own record still na
 
 ## Checking a host
 
-`fractal doctor` reports a `priority` check. On Linux it warns when the daemon's own weights are below
+`st doctor` reports a `priority` check. On Linux it warns when the daemon's own weights are below
 1000, when the user manager does not delegate io (with the root command above), and when any PTY
 server still shares its harness's scope. On macOS it warns when `taskpolicy` is missing.
-`fractal doctor --strict` fails on those warnings.
+`st doctor --strict` fails on those warnings.
 
 To look by hand:
 
@@ -191,7 +191,7 @@ done
 
 ## What this does not cover
 
-- The Fractal CLI runs in its caller's cgroup. An agent that runs `fractal` from its own seat shares that
+- The Fractal CLI runs in its caller's cgroup. An agent that runs `st` from its own seat shares that
   seat's weight with its own build.
 - A process that a harness moves out of its work scope itself, such as one it starts with
   `systemd-run --user`, is no longer in that scope and outlives a stop of the seat.

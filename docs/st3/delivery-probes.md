@@ -20,7 +20,7 @@ Boots and channel reconnects hold earlier mail, including old probe messages.
 Those messages stay in the mailbox and contribute to the aged unread count
 in doctor and the terminal UI. Preview and close that backlog with the commands in
 [seat deploys](seat-deploys.md), including
-`fractal conversations cleanup --all --older-than 1h`. Cleanup does not count as a
+`st conversations cleanup --all --older-than 1h`. Cleanup does not count as a
 successful native probe; recovery still requires a fresh recipient read.
 
 Sender state, received envelopes awaiting acknowledgement, and send idempotency
@@ -48,7 +48,7 @@ in flight once its deadline passes or it raises an alert, even while it keeps re
 and that publishes at once. A heartbeat waits, for at most one deadline, until no send
 is in flight, and a report that showed a send in flight is replaced as soon as it
 resolves, so doctor never sees a stale wait as overdue.
-`fractal doctor`
+`st doctor`
 shows each direction's latest message, measured latency or pending age, overdue
 results, missing configured source nodes, and heartbeats older than 15 minutes.
 A reported success must match the actual sender, recipient and accepted read
@@ -117,8 +117,8 @@ agent "probe/delivery/amber" {
 ```
 
 ```sh
-fractal apply probe.kdl --as person/operator
-fractal doctor --json
+st apply probe.kdl --as person/operator
+st doctor --json
 ```
 
 `apply` previews the intent and refuses unresolved references before
@@ -127,7 +127,7 @@ two nodes as peers. Host and agent identities must agree across configurations.
 An offline node remains configured so its missing source heartbeat and unread
 inbound messages stay visible. No shared daemon or existing model seat needs to
 restart to install these separate probe seats. Remove a probe explicitly with
-`fractal agents stop AGENT --as person/operator`; deleting its declaration alone does
+`st agents stop AGENT --as person/operator`; deleting its declaration alone does
 not stop it. Retained probe documents keep that stopped node visible to doctor.
 
 The probe exercises graph sends, fleet replication, native-channel polling,

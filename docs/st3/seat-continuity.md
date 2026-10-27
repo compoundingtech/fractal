@@ -20,7 +20,7 @@ Reviewing the widget change (branch agent/widget, PR 12). Waiting on CI.
 Next: address the review comment about retries, then ask the curator to queue it.
 A watch on PR 12 is mine; nothing else is running.
 TEXT
-fractal agents handoff show
+st agents handoff show
 ```
 
 `write` replaces the handoff from standard input or a file. `show` prints the latest, for this seat
@@ -40,12 +40,12 @@ leaves only what it wrote before, so it keeps the handoff current as it works.
 ## Before a planned restart
 
 A planned restart is one Fractal chooses to make while the seat is up: an operator's or agent's
-`fractal agents restart`, a pool switch to another account at a limit, or a declaration change (an
+`st agents restart`, a pool switch to another account at a limit, or a declaration change (an
 account, model, workspace or launch change) applied to a running seat. Before Fractal stops the seat it
 sends it a "Prepare for restart" message from `daemon/runtime` with a deadline (two minutes), and
 waits. The message carries the reserved tag `st3-restart-prepare:REQUEST`, so it wakes the seat.
 
-The seat writes its handoff, which acknowledges the request, or runs `fractal agents handoff ready` when
+The seat writes its handoff, which acknowledges the request, or runs `st agents handoff ready` when
 the handoff it has is already current. St stops the seat at the acknowledgement or at the deadline,
 whichever comes first, and records which: `runtime.reconcile-decision` claims with key
 `restart-prepare` say `prepare`, then `ready` or `deadline-passed`. A handoff written before the
@@ -54,9 +54,9 @@ with other claims the actor is what the caller asserted, so this keeps out accid
 not a determined local caller. The handoff document is the stronger acknowledgement: the daemon
 lets only the seat itself write it.
 
-`fractal agents restart AGENT --now` skips the wait, for a seat that cannot answer (it records `operation: restart-now` on the request). Scripts that restart stub seats use it.
+`st agents restart AGENT --now` skips the wait, for a seat that cannot answer (it records `operation: restart-now` on the request). Scripts that restart stub seats use it.
 
-`fractal agents restart AGENT --fresh-session` starts a new native session instead of continuing the last one. It is refused unless the seat has a handoff that it wrote or marked ready (`fractal agents handoff ready`) since its last turn began, so the new session always starts from a handoff the seat vouched for; the restart does not ask for one again. The daemon records the request as `fresh_session: true` and, before it launches the replacement, a `runtime.action.requested` claim with `action: fresh-session` newer than the last session binding, so every relaunch before the new session binds also starts a new one. The seat keeps its declaration, watches and work; only its conversation ends. Without the flag a restart continues the last session, as before.
+`st agents restart AGENT --fresh-session` starts a new native session instead of continuing the last one. It is refused unless the seat has a handoff that it wrote or marked ready (`st agents handoff ready`) since its last turn began, so the new session always starts from a handoff the seat vouched for; the restart does not ask for one again. The daemon records the request as `fresh_session: true` and, before it launches the replacement, a `runtime.action.requested` claim with `action: fresh-session` newer than the last session binding, so every relaunch before the new session binds also starts a new one. The seat keeps its declaration, watches and work; only its conversation ends. Without the flag a restart continues the last session, as before.
 
 A seat that is not up and ready, such as one that has exited, is blocked at a prompt or is logged
 out, has nobody to ask, so its restart goes ahead at once. A seat that stops answering (a pool seat

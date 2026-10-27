@@ -46,10 +46,10 @@ The judge is pure: it scores one evidence bundle, so it is tested without a harn
   calls. The 2026-10-09 paid runs wrote these; the fixtures `silent-bad-narration-2026-10-09.json` and
   `silent-bad-third-person-2026-10-09.json` hold that text, scrubbed, and the judge must flag both.
 - **Second person**: at least five uses of "you", no mention of Home, attention items, steps,
-  gates, verifying, the graph, `fractal conversations`, `fractal tui`, `person/`, "the person" or a sample name.
+  gates, verifying, the graph, `st conversations`, `st ui`, `person/`, "the person" or a sample name.
 - **The 30 second default fires**: the person stayed silent, and the Assistant spoke again between
   25 and 150 s after its interview question.
-- **Skip cancels** (skip variant): the Assistant answers within 60 s and names `fractal setup --onboarding`,
+- **Skip cancels** (skip variant): the Assistant answers within 60 s and names `st setup --onboarding`,
   the demo mission is not left running, nothing is sent to the demo agent afterwards, and the
   onboarding run is cancelled.
 
@@ -58,7 +58,7 @@ Budgets can be changed with `FIRST_MESSAGE_BUDGET_S`, `DEFAULT_MIN_S`, `DEFAULT_
 
 ## What is not yet proven
 
-The alert evidence (`alert_raised`) reads `fractal alerts ls --all --json` and looks for an item whose title or
+The alert evidence (`alert_raised`) reads `st alerts ls --all --json` and looks for an item whose title or
 question says the demo folder is "ready"; that field name and shape were written from the command's help, not
 from a live alert.
 

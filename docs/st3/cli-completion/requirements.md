@@ -30,8 +30,8 @@
   lane, fleet host, launch, device, subscription, session, person) completes to every current
   entity of that kind.
 - **R02 Command-relevant candidates:** Each argument offers only entities its command accepts. For
-  example, `fractal terminals attach` offers running terminals, `fractal agents stop` offers running agents,
-  and `fractal work retry` offers failed steps.
+  example, `st terminals attach` offers running terminals, `st agents stop` offers running agents,
+  and `st work retry` offers failed steps.
 - **R03 Rich descriptions:** Each candidate carries one line with the facts a person uses to choose
   it, such as state, host, harness, current work, and age.
 - **R04 Static surface:** Subcommands, flags, and closed value sets complete as before.
@@ -50,7 +50,7 @@
 - **R08 Prefix matching:** Completion matches typed text against the start of the full subject in
   every shell.
 - **R09 Short-name resolution:** A command that takes a terminal, agent, mission run, or attention
-  item accepts a unique short name (for example `fractal terminals attach steward`). Resolution sees
+  item accepts a unique short name (for example `st terminals attach steward`). Resolution sees
   all subjects of the kind. Destructive verbs accept only exact namespace or last-segment names.
   A short name that matches several subjects fails with status 2 and lists them.
 - **R10 Literal compatibility:** A word that resolves to nothing, or any word while the daemon does
@@ -61,4 +61,4 @@
 
 - **R11 Installed stubs:** An installed Fractal package ships zsh, fish, and bash completion that call
   back into the PATH-resolved `st` executable.
-- **R12 Printable stub:** `fractal completions <shell>` prints the same PATH-based stub for manual installation.
+- **R12 Printable stub:** `st completions <shell>` prints the same PATH-based stub for manual installation.

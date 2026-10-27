@@ -1,6 +1,6 @@
 # Claim backups
 
-`fractal backup create FILE` saves one live daemon snapshot as a private file. It reads signed sync
+`st backup create FILE` saves one live daemon snapshot as a private file. It reads signed sync
 envelopes on a pooled read worker in pages of 512, then downloads the completed archive. Writes
 and other requests continue while it reads. The server returns headers after a bounded health
 check; archive preparation follows the response stream lifetime, rather than the ordinary
@@ -22,8 +22,8 @@ such an incomplete export but may show a generic format error. Successful archiv
 the restore format are unchanged.
 
 ```sh
-fractal backup create before-upgrade.jsonl
-fractal backup restore before-upgrade.jsonl --database /var/lib/example/recovery/claims.sqlite3
+st backup create before-upgrade.jsonl
+st backup restore before-upgrade.jsonl --database /var/lib/example/recovery/claims.sqlite3
 ```
 
 Restore runs offline, builds a temporary database at the current schema, and publishes it only
@@ -39,8 +39,8 @@ and how many long messages the claims name in all, since another member owns the
 For rehearsals, make a consistent SQLite copy first, then export that copy:
 
 ```sh
-fractal backup create rehearsal.jsonl --database /var/lib/example/copy/claims.sqlite3
-fractal backup restore rehearsal.jsonl --database /var/lib/example/restored/claims.sqlite3 --json
+st backup create rehearsal.jsonl --database /var/lib/example/copy/claims.sqlite3
+st backup restore rehearsal.jsonl --database /var/lib/example/restored/claims.sqlite3 --json
 ```
 
 The offline exporter migrates and finishes upgrade recovery on its input, so use a copy. Its header identifies the exporting

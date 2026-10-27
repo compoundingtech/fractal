@@ -6,7 +6,7 @@
 > Change-Id convention is approved. Do not enable the `[changes]` configuration. The read-only code stays
 > in place unused until the work is explicitly resumed.
 
-`fractal changes list`, `show` and explicit `sync` use configured Git transport and the
+`st changes list`, `show` and explicit `sync` use configured Git transport and the
 node-local graph index. They use no GitHub API. The existing PR workflow remains
 available when Git or its designated reader is unavailable.
 
@@ -40,10 +40,10 @@ successful inventory. A configuration owned by a different node reports the name
 owner and the PR fallback instead of starting a second Git reader.
 
 ```text
-fractal changes list --repository fixture/garden
-fractal changes show I0123456789abcdef0123456789abcdef01234567 --repository fixture/garden
-fractal changes sync --repository fixture/garden
-fractal changes list --repository fixture/garden --offline
+st changes list --repository fixture/garden
+st changes show I0123456789abcdef0123456789abcdef01234567 --repository fixture/garden
+st changes sync --repository fixture/garden
+st changes list --repository fixture/garden --offline
 ```
 
 A new shared observation performs one patterned `ls-remote`. Concurrent requests

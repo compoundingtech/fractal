@@ -60,7 +60,7 @@ Local invite tokens do not replicate; see [Data authority](st3/data-authority.md
 
 ## Creating your first fleet
 
-`fractal fleet create` creates local membership while retaining the store's history. `--name studio`
+`st fleet create` creates local membership while retaining the store's history. `--name studio`
 selects its name; `--port`, `--transports`, `--advertise-loopback` and `--no-service` choose local
 listener setup. Start the daemon and replication worker as the command directs before issuing
 invites. A dial-out member cannot sponsor because a joiner must reach the sponsor.
@@ -68,10 +68,10 @@ invites. A dial-out member cannot sponsor because a joiner must reach the sponso
 ## Invite
 
 ```text
-fractal fleet invite [NAME] [--expires DURATION] [--via auto|tailscale|fabric|loopback] [--migrate]
+st fleet invite [NAME] [--expires DURATION] [--via auto|tailscale|fabric|loopback] [--migrate]
                 [--send-fabric | --code-only | --code-file PATH] [--as PERSON]
-fractal fleet invites [--all]
-fractal fleet invites revoke fleet-invite/ID --reason TEXT
+st fleet invites [--all]
+st fleet invites revoke fleet-invite/ID --reason TEXT
 ```
 
 The optional name pins the joiner's name. Expiry defaults to 10 minutes and accepts
@@ -83,14 +83,14 @@ command permits it.
 
 Prefer the no-echo prompt, a pipe, `--code-file` or `--send-fabric` to a code in argv or a transcript.
 The Fabric form creates a private temporary code file, sends it and deletes the local copy;
-`fractal fleet join --fabric-inbox` reads and removes the matching inbox file.
+`st fleet join --fabric-inbox` reads and removes the matching inbox file.
 
 ### Expiry and single use
 
 The sponsor's clock decides expiry. First redemption binds the token to one member key and name;
 that same key/name can redeem again until expiry to recover a lost response, without another
 admission claim. Another key is refused. Five failed proofs revoke the invite. Explicit revocation
-on another member takes effect when it reaches the sponsor. `fractal fleet invites` shows redemption,
+on another member takes effect when it reaches the sponsor. `st fleet invites` shows redemption,
 member identity and sponsor acknowledgement; `--all` includes ended invites.
 
 Join refusals use generic `invite-invalid`. If an admitted joiner's response is lost and the code
@@ -100,7 +100,7 @@ an unexpired invite exists and admits a body of at most 4 KiB.
 ## Join
 
 ```text
-fractal fleet join [CODE | - | --code-file PATH | --fabric-inbox] [--name NAME] [--dial-out]
+st fleet join [CODE | - | --code-file PATH | --fabric-inbox] [--name NAME] [--dial-out]
               [--via ROUTE] [--port PORT] [--transports LIST] [--advertise-loopback]
               [--no-service] [--no-wait] [--as PERSON]
 ```
@@ -158,8 +158,8 @@ fenced records remain visible as admission state, not silently accepted graph au
 
 ## Listener capability and absence
 
-Listening members advertise endpoints; dial-out members advertise none. `fractal fleet mode listening`
-and `fractal fleet mode dial-out` change that capability, endpoints and Fabric exposure. Either mode
+Listening members advertise endpoints; dial-out members advertise none. `st fleet mode listening`
+and `st fleet mode dial-out` change that capability, endpoints and Fabric exposure. Either mode
 uses the same sync and network-recovery policy. A dial-out member can replicate while its live
 terminal is unavailable remotely because no route reaches the owning machine.
 
@@ -177,21 +177,21 @@ broken local work. A connection pushes and pulls history while its backlog drain
 ### Changing an existing member's transports
 
 ```text
-fractal fleet transports add fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
-fractal fleet transports remove fabric [--no-service]
-fractal fleet transports prefer <tailscale|fabric> [--no-service]
+st fleet transports add fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
+st fleet transports remove fabric [--no-service]
+st fleet transports prefer <tailscale|fabric> [--no-service]
 ```
 
 Run these commands on the member whose transports should change. They update the existing
 `fleet.toml`, publish `fleet.member-endpoints` immediately, and refresh the service using the
-same path as `fractal fleet mode`. Run them with the local daemon running. The member's name,
+same path as `st fleet mode`. Run them with the local daemon running. The member's name,
 identity, secret, signing key and graph history stay intact.
 Add and remove support Fabric. Prefer reorders either enabled Tailscale or Fabric
 without changing enablement or exposure; it rejects disabled carriers and is a
 no-op when already first. It preserves the remaining carriers' relative order.
 
 Adding Fabric requires a listening member with a configured replication port and a working
-local `fabric` command. Use `fractal fleet mode listening` first for a dial-out member. Add exposes
+local `fabric` command. Use `st fleet mode listening` first for a dial-out member. Add exposes
 `127.0.0.1:PORT` before saving or announcing the Fabric endpoint; if exposure fails, settings
 and endpoints are unchanged. The protocol defaults to the saved `fabric_protocol`, or
 `st3/fleet/FLEET_ID`. Re-adding an enabled transport changes nothing unless `--prefer`
@@ -212,10 +212,10 @@ result and keeps the exposure reachable: a lost response can follow a committed 
 Restart the worker to publish the saved settings; after a failed remove publication, then
 run `fabric unexpose PROTOCOL` to finish cleanup.
 
-With `--no-service`, or when no service is installed, restart `fractal replication-worker` yourself
+With `--no-service`, or when no service is installed, restart `st replication-worker` yourself
 to apply its new transport selection. Until that restart, the old worker cannot re-expose
 Fabric or republish its previous endpoint list after a settings change. The worker restores
-the configured exposure from `fleet.toml` when it starts. `fractal fleet status` shows the local
+the configured exposure from `fleet.toml` when it starts. `st fleet status` shows the local
 configured transports and enabled Fabric protocol, including before the worker restart.
 A local settings read or lock failure stops the worker with an error. Repair that settings
 problem and restart the worker to restore publication and exposure.
@@ -242,9 +242,9 @@ needed:
 
 ```sh
 # On a member:
-fractal fleet invite beacon
+st fleet invite beacon
 # On beacon:
-fractal fleet join CODE
+st fleet join CODE
 ```
 
 The code includes a pinned sponsor Fabric NodeID and a one-use pairing permit.
@@ -271,7 +271,7 @@ The default replication protocol is `st3/fleet/FLEET_ID`.
 The worker exposes its loopback listener with
 `fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and obtains an outbound tunnel with
 `fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`.
-`fractal fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
+`st fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
 the exposure. The adapter maintains trust and grants; Fractal does not edit
 `peers.toml`.
 
@@ -320,14 +320,14 @@ policy reconciliation.
 Loopback advertisements are explicit for tests and operator tunnels. Peer HTTP listeners normally
 bind loopback or Tailscale addresses; `peer_listen_allow_plain_http = true` (or
 `--peer-listen-allow-plain-http`) permits unencrypted network HTTP. Use actual routes from
-`fractal fleet status --json`, rather than inventing a tunnel address.
+`st fleet status --json`, rather than inventing a tunnel address.
 
 ## Remove, leave and uninstall
 
-`fractal fleet remove NAME --reason TEXT [--as PERSON]` ends membership. It does not inspect or stop
-agents: stop them first with `fractal agents stop` if needed. Their declarations remain on host NAME.
+`st fleet remove NAME --reason TEXT [--as PERSON]` ends membership. It does not inspect or stop
+agents: stop them first with `st agents stop` if needed. Their declarations remain on host NAME.
 
-`fractal fleet leave [--offline] [--force] [--cancel] [--wait DURATION] [--no-service] [--as PERSON]`
+`st fleet leave [--offline] [--force] [--cancel] [--wait DURATION] [--no-service] [--as PERSON]`
 refuses running local agents unless forced. It records leaving mode in the store, stops local
 mutations, drains history to a listener, writes the leave claim, and confirms the same authority
 digest before and after that claim or a signed `member-left` naming its key. Interrupted leaving
@@ -335,7 +335,7 @@ resumes; `--cancel` restores normal mode before the claim is written. Offline le
 proof and prints the removal command for another member. The local history remains fleet-bound;
 joining a different fleet needs a separately authorized reset.
 
-`fractal uninstall [--dry-run] [--yes] [--offline] [--keep-binaries] [--erase-local-graph] [--no-service] [--as PERSON]`
+`st uninstall [--dry-run] [--yes] [--offline] [--keep-binaries] [--erase-local-graph] [--no-service] [--as PERSON]`
 leaves the fleet, stops owned runtimes, removes services/exposure and fractal's Claude plugin/marketplace,
 and deletes configured local state and manifest-owned binaries. It does not remove workspace Git
 exclude lines. Nix/source installations without a manifest print their removal instructions.
@@ -343,9 +343,9 @@ A sole local graph copy also requires `--erase-local-graph`. Inspect `--dry-run`
 
 ## Status and diagnostics
 
-`fractal fleet status` lists membership, listener mode and local configured transports. `--json` also
-gives addresses, local `transports`, the enabled `fabric_protocol`, and Fabric node/protocol fields. `current` means admitted, not online. Use `fractal replication status`
-for exchange age, backlog and divergence, and `fractal doctor` for authentication/admission problems.
+`st fleet status` lists membership, listener mode and local configured transports. `--json` also
+gives addresses, local `transports`, the enabled `fabric_protocol`, and Fabric node/protocol fields. `current` means admitted, not online. Use `st replication status`
+for exchange age, backlog and divergence, and `st doctor` for authentication/admission problems.
 For a leaked code, revoke it before use or remove an unexpected admitted member, then issue a new
 invite. For a wrong-fleet refusal, inspect the binding before considering any reset.
 
@@ -354,12 +354,12 @@ invite. For a wrong-fleet refusal, inspect the binding before considering any re
 Retain names, fleet ID, member keys and history. Use the same current build on all members. Keep
 original config, secrets and helper definitions until native signed exchanges have been verified.
 
-1. On the chosen anchor, run `fractal fleet migrate --anchor --transports tailscale,fabric` with the
+1. On the chosen anchor, run `st fleet migrate --anchor --transports tailscale,fabric` with the
    already granted `--fabric-protocol` when needed.
-2. Invite each existing member with `fractal fleet invite NAME --migrate` over its reachable transport.
-   Redeem with `fractal fleet migrate --fabric-inbox` or `--via ROUTE`; the worker obtains its own tunnel.
+2. Invite each existing member with `st fleet invite NAME --migrate` over its reachable transport.
+   Redeem with `st fleet migrate --fabric-inbox` or `--via ROUTE`; the worker obtains its own tunnel.
 3. Inspect status and require current membership plus successful signed exchanges over native
-   routes. On every member, run `fractal fleet migrate --finish`, delete exactly the config lines it
+   routes. On every member, run `st fleet migrate --finish`, delete exactly the config lines it
    prints, and refresh services to use membership settings.
 4. Disable the old helper and verify exchanges in both directions and after a Fabric restart.
    Only then remove its unit/executable and unneeded grants; retain the advertised member protocol.
@@ -367,7 +367,7 @@ original config, secrets and helper definitions until native signed exchanges ha
 ### Rollback
 
 Before finish, restore the saved config/helpers. After finish, every member that must accept an old
-build needs its saved legacy peer entries and `fractal fleet migrate --unfinish`, followed by a worker
+build needs its saved legacy peer entries and `st fleet migrate --unfinish`, followed by a worker
 restart, before restoring that old build. An old build's unsigned envelopes remain held once the
 writer is known to be keyed. Preserve the current store, keys and history throughout; do not reset
 them to make rollback or diagnostics appear successful.

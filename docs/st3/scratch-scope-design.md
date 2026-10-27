@@ -336,7 +336,7 @@ capabilities from the current person guards. This note changes neither those gua
 actor authority. Any implementation, replicated vocabulary, storage/rules change or public
 contract requires its own reviewed assignment and applicable Nathan decision.
 
-A future design may discuss two separate `fractal --instance NAME` instances, and existing
+A future design may discuss two separate `st --instance NAME` instances, and existing
 tiles/namespaces where isolation is needed. Separate instance state, sockets and service
 names do not supply a security boundary against a same-UID process. No Docker/container
 backend, root-owned helper, launcher installation, disposable transport credential or

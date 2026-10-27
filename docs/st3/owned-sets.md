@@ -5,8 +5,8 @@ definitions and schedules. A successful publication retires previously live memb
 absent from that list. Membership lives in the ordinary graph, on `owned-set/NAME` subjects with
 immutable `owned-set.revised` claims. There is no inventory database alongside the graph.
 
-Ordinary `fractal apply FILE...` publication remains an upsert: omission has no effect. Owned sets are
-an explicit choice, made with `fractal apply --set NAME`. A file disappearing from a checkout does
+Ordinary `st apply FILE...` publication remains an upsert: omission has no effect. Owned sets are
+an explicit choice, made with `st apply --set NAME`. A file disappearing from a checkout does
 nothing by itself. The publisher must submit a complete, valid bundle. An unreadable input,
 invalid declaration, stale fence or unconfirmed mass retirement rejects the entire transaction.
 
@@ -15,7 +15,7 @@ invalid declaration, stale fence or unconfirmed mass retirement rejects the enti
 Each file starts with `version 2`. The files together declare the complete live membership:
 
 ```sh
-fractal apply --set garden seats.kdl missions.kdl schedules.kdl \
+st apply --set garden seats.kdl missions.kdl schedules.kdl \
   --repository acme/garden --ref refs/heads/main \
   --sha 0123456789abcdef0123456789abcdef01234567 \
   --source-sequence 42 --expect-set absent \
@@ -30,10 +30,10 @@ are listed as "not checked, they run after each round", including in dry-run che
 Per-round step scripts still preflight; runtime `until` evaluation remains at each round boundary.
 
 All source flags are required together with `--set`. Without `--set`, publish plain files
-with `fractal apply seats.kdl missions.kdl schedules.kdl --as person/operator`.
+with `st apply seats.kdl missions.kdl schedules.kdl --as person/operator`.
 
 Initial creation requires `--expect-set absent`; subsequent
-publications require the exact selected revision printed by `fractal sets show garden`. The CLI
+publications require the exact selected revision printed by `st sets show garden`. The CLI
 previews first, then submits captured member heads with the apply. The daemon checks the set
 revision, source sequence and every captured member head within the publication transaction.
 
@@ -48,7 +48,7 @@ run-owned declarations; changing its definition preserves active runs and their 
 
 ## Declaration diffs and readback
 
-`fractal apply --set NAME ... --dry-run` includes an additive `declaration_diffs` map keyed by
+`st apply --set NAME ... --dry-run` includes an additive `declaration_diffs` map keyed by
 subject for added, changed and retiring members. Each entry has `before`, `after` and `fields`.
 `before` is null when the subject has never been published; adoption includes its existing
 unmanaged definition. `after` includes the proposed retirement declaration when retiring.
@@ -63,7 +63,7 @@ and missions use the compiled `MissionSpec`. The mission compiler supplies concu
 revision cutover, completion, retry and duration defaults. These values come from the same
 compiler and selected graph definitions as publication; publishers need not reproduce defaults
 or render KDL themselves. Derived revision and step definition hashes remain visible.
-`fractal apply FILE --dry-run` and the intent preview reuse this same `declaration_diffs`
+`st apply FILE --dry-run` and the intent preview reuse this same `declaration_diffs`
 format. These JSON values are inspection data, not an alternative JSON publication input.
 
 Read an applied definition with the client operation `publication.definition`:
@@ -135,9 +135,9 @@ not be introduced into a fleet after set activation.
 ## Inspect publication and rollout
 
 ```sh
-fractal sets ls
-fractal sets show garden
-fractal sets status garden --sha 0123456789abcdef0123456789abcdef01234567
+st sets ls
+st sets show garden
+st sets status garden --sha 0123456789abcdef0123456789abcdef01234567
 ```
 
 The selected resource reports source, immutable live and retired references, blockers, and each
@@ -147,8 +147,8 @@ prove a seat is running. Label-only updates share their existing launch lineage,
 seat stays current while its reported launched token retains the original label revision. A commit
 query distinguishes a recorded receipt, local visibility,
 supersession and current rollout. Remote replica visibility remains unknown in this response.
-`fractal sets status <set> --sha <sha>` returns 404 until that SHA has a receipt; this is intended.
-Read `fractal sets show <set>` to obtain the current revision for publication fencing.
+`st sets status <set> --sha <sha>` returns 404 until that SHA has a receipt; this is intended.
+Read `st sets show <set>` to obtain the current revision for publication fencing.
 
 For native-session continuity, manual rollout and cutover refusals, see
 [owned-seat cutover](owned-seat-cutover.md). Use the set publisher to change a managed

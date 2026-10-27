@@ -131,18 +131,18 @@ Authorization and capability refusals retain their distinct explanations.
 ## Local daemon web app
 
 The daemon serves the web app by default at `http://127.0.0.1:7410`.
-Disable it with `fractal up --web-listen off`. `--web-dist /path/to/dist/web`
+Disable it with `st up --web-listen off`. `--web-dist /path/to/dist/web`
 overrides the default installed assets at `../share/fractal-web` relative to the
 daemon executable: an installation with `bin/fractal` uses `share/fractal-web/`.
 The assets stay separate from the daemon binary so a UI change does not require
 recompiling or relinking Rust.
 
 Missing assets or a missing configured concrete `person` degrade web availability
-without taking down the daemon's API listeners. `fractal doctor` reports the web
+without taking down the daemon's API listeners. `st doctor` reports the web
 finding and the configuration or installation to repair. An occupied listener port
 is still a startup error; use another loopback port or `--web-listen off`.
 
-Run `fractal web [--state-dir DIR]` or `fractal web [--state-dir DIR]` to open the app.
+Run `st web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
 The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
 the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
 to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
@@ -512,7 +512,7 @@ Both commands skip all live activity when the one-minute `/proc/loadavg` value i
 
 `node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]` proves the conversation
 alert strip against a real daemon without touching your own st. `up` makes a throwaway instance
-(`webproof`, under its own HOME in `/var/tmp/fractal-webproof`) with person/avery, a program seat
+(`webproof`, under its own HOME in `/var/tmp/st-webproof`) with person/avery, a program seat
 agent/example/atlas and a paired full-control device whose bearer it keeps in a mode-0600 file.
 `run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
 headless Chromium, checks with Fractal that each step finished with that answer, and prints the

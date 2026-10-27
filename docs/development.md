@@ -12,7 +12,7 @@ read and preserve the proofs in [st2 invariants](st2/invariants.md).
 
 ## CLI actor contract
 
-`fractal actor-contract --json` prints the actor syntax of the binary that runs it. It
+`st actor-contract --json` prints the actor syntax of the binary that runs it. It
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
 commands. `aliases` lists other names under each canonical command. `contract_sha256` is
@@ -55,7 +55,7 @@ After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
 
 ```sh
-fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
 cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
@@ -67,7 +67,7 @@ if an alias changes. Supplement coverage also compares the reviewed setup/UI,
 note and changes paths, including every descendant, against the real clap
 inventory. Additions or removals require reviewing the identity handlers named
 beside `implicit_person`; mutation tests exercise added setup/UI descendants and
-a removed UI descendant. `fractal tui open` resolves the configured person before
+a removed UI descendant. `st ui open` resolves the configured person before
 queueing a request in that person's terminal UI request directory.
 This is freshness coverage, not proof of live runtime fallback or authority.
 Host, account, repository and harness policy remains in the
@@ -448,7 +448,7 @@ wording consistent when both describe the same change.
 | `examples/st3`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `fractal-tui` package is a library embedded in `fractal`; it has no standalone executable. Its existing
+The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
 Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

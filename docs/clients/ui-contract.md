@@ -330,7 +330,7 @@ under test is release `ed31cfe`; main at `4f763ce` has no change to any path bel
 
 | Case | Terminal UI | iOS | Cause of each miss |
 |---|---|---|---|
-| Message with images (`fractal conversations send --attach`) | One line per image, `▣ garden.png · 71 KB  open`. Never drawn inline, in any terminal. | 200×150 box loaded at once; `🖼 name · size…` until then. | stui: the mail renderer draws no pictures (`fractal-conversation-ui/src/conversation.rs`, "a terminal draws no pictures here"), so no inline load exists for mail. iOS: `MailImageView` loads on mount, not when visible (FlatList overscan reads too), unlike transcript images. |
+| Message with images (`st conversations send --attach`) | One line per image, `▣ garden.png · 71 KB  open`. Never drawn inline, in any terminal. | 200×150 box loaded at once; `🖼 name · size…` until then. | stui: the mail renderer draws no pictures (`fractal-conversation-ui/src/conversation.rs`, "a terminal draws no pictures here"), so no inline load exists for mail. iOS: `MailImageView` loads on mount, not when visible (FlatList overscan reads too), unlike transcript images. |
 | Open a message image | Saves to `$XDG_STATE_HOME/st3/stui/attachments/received/<sha>.png` and flashes the path. It runs `xdg-open` only when `DISPLAY` or `WAYLAND_DISPLAY` is set. | No open or save action. | stui: `attach::show` opens only on a local display; the person cannot choose where it is saved. iOS: `MailImageView` has no press or share action. |
 | Agent sends a person an image | Refused: `people do not have inboxes`, for `send` and `reply` alike. | Same. | By design, mail goes to agents. An agent shows a person an image only through its transcript (see the tool-result rows). |
 | Discord-bridge import (`external/discord/user/…` → agent) | Text only, no image line, until the person clicks the mail open. | Image shown, as for any message. | stui: mail between two others folds to two lines (`conversation.rs:124`, `mail_lines`), which drop its images with no marker. |
@@ -360,7 +360,7 @@ iTerm2, WezTerm or Ghostty, or `KITTY_WINDOW_ID` is set). A sixel terminal is ne
 neither is iTerm2 inside tmux, where `TERM_PROGRAM` is `tmux`. No kitty, iTerm2 or sixel terminal
 was installed on the audit host, so each was checked by its answer to the query.
 
-Typing and key-to-redraw were not measured here. `fractal tui --slo` printed no samples for the
+Typing and key-to-redraw were not measured here. `st ui --slo` printed no samples for the
 isolated instance after a clean quit, because the counters are written hourly. The terminal-UI
 change measures them before and after with an image on screen.
 
@@ -414,7 +414,7 @@ publication more than 10,000 claims after the previous one (a catch-up) is none 
 `st.slo.projection_fresh.skipped` counter counts each, by collection), and
 attention's first publication after no window read it (attention folds only while one does)
 is none either. Both targets appear on
-`GET /v1/client/request-latency` and in `fractal doctor`. `daemon_load` keeps its 300 ms
+`GET /v1/client/request-latency` and in `st doctor`. `daemon_load` keeps its 300 ms
 first-snapshot budget for every window, now with projections on its rows, and stays under
 twice main's baseline. Bounds per row: a mission projection stays within 4 KiB, an agent
 projection within 2 KiB, and an attention projection within 16 KiB including its launch preview.
@@ -707,7 +707,7 @@ document. The shared model is `fractal_ui_model::documents` (Rust) and `@fractal
   refers to, so a message, mission or step view can link to them.
 - Nothing here edits or publishes a document.
 - **Who may read:** every session with `read.projections` may list every document and read
-  any version, as the CLI already does (`fractal documents ls`, `fractal documents get doc/NAME`). Only a
+  any version, as the CLI already does (`st documents ls`, `st documents get doc/NAME`). Only a
   message subject in `document-references.get` is gated by who may read that message.
   Per-agent document privacy, if it comes, belongs to the agent isolation work and would gate
   these routes and the CLI together.

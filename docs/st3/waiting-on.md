@@ -1,11 +1,11 @@
 # What a run waits on
 
-`fractal missions waiting-on RUN` answers why one run is not moving. It answers in milliseconds, so you
+`st missions waiting-on RUN` answers why one run is not moving. It answers in milliseconds, so you
 can ask it as often as you like.
 
 ```sh
-fractal missions waiting-on mission-run/example/build/1
-fractal missions waiting-on mission-run/example/build/1 --quiet 45m --json
+st missions waiting-on mission-run/example/build/1
+st missions waiting-on mission-run/example/build/1 --quiet 45m --json
 ```
 
 The HTTP read is `GET /v1/mission-runs/{run}/waiting-on`, which takes `quiet_after_ms`.
@@ -22,7 +22,7 @@ It folds no claims and replays no history. It reads state Fractal already keeps 
 - One primary-key read of the run and a range of its own `step_runs` rows. This names the steps
   that are finished or not yet ready. Its cost is the run's own steps.
 
-`fractal missions show RUN` builds a presentation from each step's whole history. On a large store that
+`st missions show RUN` builds a presentation from each step's whole history. On a large store that
 costs minutes of daemon CPU, so it is the wrong tool for "why is this stuck".
 
 When a daemon publishes no lists (`ST3_PUBLISHED_LISTS=off`), the read refuses with HTTP 503
@@ -66,4 +66,4 @@ The run's cause is its first open step's kind in the order of the cause table. T
 that step, whom it waits on, and for how long.
 
 A run with no open step, only steps not yet ready (such as one waiting on `--after` before its
-first step opens), is not in the work list: `fractal missions waiting-on` says it has no open step.
+first step opens), is not in the work list: `st missions waiting-on` says it has no open step.

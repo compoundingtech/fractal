@@ -1,9 +1,9 @@
 # Conversation search
 
 ```sh
-fractal conversations search "release date"
-fractal conversations search "release date" --agent agent/example/worker --since 2026-10-01T00:00:00Z
-fractal conversations search "release date" --cursor CURSOR --json
+st conversations search "release date"
+st conversations search "release date" --agent agent/example/worker --since 2026-10-01T00:00:00Z
+st conversations search "release date" --cursor CURSOR --json
 ```
 
 The client must identify a concrete person (`--as person/ada` or the configured person).

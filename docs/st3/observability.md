@@ -79,7 +79,7 @@ unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 
 | Process unit | `service.name` | Shutdown budget |
 | --- | --- | --- |
-| `fractal up` daemon | `st-daemon` | 5 s |
+| `st up` daemon | `st-daemon` | 5 s |
 | `peer::run_worker` replication worker | `st-replication-worker` | 5 s |
 | One-shot CLI | `st-cli` | 50 ms when export is enabled |
 | Driver hook | `st-hook` via daemon observations exporter; no direct SDK export | No collector flush in the hook |

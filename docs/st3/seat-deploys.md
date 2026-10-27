@@ -7,7 +7,7 @@ provider session, and how Fractal reports a seat whose message path did not.
 
 ## Self-restarts at a turn boundary
 
-`fractal agents restart agent/example/worker --as agent/example/worker` returns
+`st agents restart agent/example/worker --as agent/example/worker` returns
 `Restart pending` immediately when that seat's fresh harness report shows a turn in flight.
 The daemon preserves the request across its own restarts and waits for a fresh report from the
 same incarnation saying both idle and quiescent. It then uses the ordinary restart path, keeping
@@ -39,7 +39,7 @@ Before starting an unseen installed omp or OpenCode build, Fractal measures its 
 contract in a disposable session. Existing running providers and driver adoption across deploys
 are unaffected. On a new launch (including restart or residency resume), a failed omp measurement
 refuses to start the provider; OpenCode starts with native delivery disabled and mail stays queued.
-There is no rollback to a last-admitted executable. `fractal doctor` and the affected agent's state
+There is no rollback to a last-admitted executable. `st doctor` and the affected agent's state
 name the failed boundary and the remedy.
 
 The fixture uses loopback endpoints and dummy keys, without real credentials. It needs writable
@@ -57,7 +57,7 @@ its normal installation works. A person can explicitly allow the exact installed
 host and as the operating-system user owning the seats, outside an agent seat:
 
 ```sh
-fractal admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
+st admission override omp --binary /path/to/omp --reason 'The isolated probe cannot run in this offline installation'
 ```
 
 Use `opencode` for OpenCode; `--binary` must name the executable used by the affected seat.
@@ -68,7 +68,7 @@ measurements and expires when executable, interpreter, package manifest, lockfil
 identity changes. Build identity hashes executable and runtime contents plus package metadata; it
 does not traverse package assets or refuse installations for their size. A dependency upgrade
 recorded in a manifest or lockfile changes identity; an arbitrary asset edit does not.
-The driver logs the active exception. `fractal admission revoke omp --binary /path/to/omp` (with the
+The driver logs the active exception. `st admission revoke omp --binary /path/to/omp` (with the
 same state directory, if customized) restores normal admission on the next launch. An override
 cannot supply a runtime missing from the real harness installation or repair incompatible APIs.
 
@@ -90,15 +90,15 @@ as `vanished` from PTY liveness, without an exit code. If only the driver was si
 
 ## What runs in a seat
 
-Each seat runs in its own PTY. The daemon starts `fractal driver HARNESS` there, and the driver starts
+Each seat runs in its own PTY. The daemon starts `st3 driver HARNESS` there, and the driver starts
 the provider. Several Fractal processes carry the seat's messages for the whole provider session:
 
 | Harness | Driver | Channel |
 | --- | --- | --- |
-| Claude | publishes harness state and subscribes to the seat record for PTY titles | `fractal driver claude-mcp`, started by the owned `st-channel@st` plugin, subscribes to the durable mailbox and proves native consumption from the bound user transcript |
+| Claude | publishes harness state and subscribes to the seat record for PTY titles | `st driver claude-mcp`, started by the owned `st-channel@st` plugin, subscribes to the durable mailbox and proves native consumption from the bound user transcript |
 | Codex | subscribes to the mailbox and submits messages over its control connection to the app-server that the TUI also uses | none |
 | OpenCode | subscribes to the mailbox and posts messages to the loopback server in the OpenCode TUI | none |
-| pi, omp | keeps presence, the terminal record, and live PTY titles | `fractal driver pi-channel` or `omp-channel` subscribes to the mailbox; the managed extension preserves first-idle gating and reports native acceptance separately from turn-context consumption |
+| pi, omp | keeps presence, the terminal record, and live PTY titles | `st driver pi-channel` or `omp-channel` subscribes to the mailbox; the managed extension preserves first-idle gating and reports native acceptance separately from turn-context consumption |
 
 New seats receive `ST3_MAILBOX_TRANSPORT=push`. Each delivery component connects to `/v1/mailbox`
 over the local daemon Unix socket. The stream sends the full seat record and pushes new mail.
@@ -136,9 +136,9 @@ lookup, and receipt publication failures have separate diagnostics and retry wit
 at 30 seconds. Retained handoffs are inspected only to recover missing receipts from exact native
 proof. Boot and reconnect never authorize a fresh offer of delivered-but-unread mail.
 
-`fractal doctor` and the terminal UI count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
+`st doctor` and the terminal UI count unread (`sent`, `staged`, or `delivered`) messages older than one hour, including
 retained mail for retired seats. Boot never clears that backlog. To deliberately archive it across
-all mailboxes, run `fractal conversations cleanup --all --older-than 1h`. Add `--dry-run` to list matching
+all mailboxes, run `st conversations cleanup --all --older-than 1h`. Add `--dry-run` to list matching
 message IDs first, or replace `--all` with `--as AGENT` to clean one mailbox. Cleanup archives as each
 recipient, records manual archival through stable keys and linked claims, and can be repeated,
 including after an interrupted archival. Delivered mail without a read claim is included. Fresh
@@ -164,9 +164,9 @@ daemon's first eight seconds. It added about seven seconds of writer time to tho
 and write-acks queued behind it. A launched driver does not wait.
 
 Only a binary replacement starts this wait, and a replacement only arrives with a deploy, when
-every seat's driver re-executes at once. `fractal agents resume`, a restart and Claude channel recovery
+every seat's driver re-executes at once. `st agents resume`, a restart and Claude channel recovery
 launch a fresh driver, which does not wait. A re-executed driver keeps its seat's incarnation, and
-`fractal agents suspend` reads the newest quiet report for that incarnation with no age limit, so a seat
+`st agents suspend` reads the newest quiet report for that incarnation with no age limit, so a seat
 that was quiet before the deploy can be suspended at once. A seat whose harness changed state
 during the deploy, such as a turn that finished while the daemon was down, reports its new state
 only when its wait ends. A suspend sent before then is refused for up to 30 seconds.
@@ -247,7 +247,7 @@ behind that link therefore changes both when a deploy replaces the daemon's exec
 when the daemon restarts from a new path. Once a second the process compares that file's device,
 inode, size, and modification time with its own running image. A different file is a replacement.
 The process acts on it only after the file stays unchanged for a second and answers
-`fractal resume-probe` with the resume format the process writes. A replacement that cannot read that
+`st3 resume-probe` with the resume format the process writes. A replacement that cannot read that
 format, such as a rollback to a build from before reexec, is refused, and the process keeps its
 current code and tries again 30 seconds later.
 
@@ -294,7 +294,7 @@ channel's PID, image, and the age of its last presence write. The daemon keeps t
 each recipient in memory. It is not graph state; a restarted daemon learns every live path again
 within a second.
 
-`fractal agents ls` and `fractal agents show` add a `delivery` object to each local native seat that is running
+`st agents ls` and `st agents show` add a `delivery` object to each local native seat that is running
 or waiting. Waiting on a human, login, or trust prompt does not hide its transport assessment;
 delivery presence is independent of whether the harness can start another turn:
 
@@ -313,7 +313,7 @@ delivery presence is independent of whether the harness can start another turn:
 - `stale`, with the reason: no report since then, a report from an unidentified binary, a pi-family
   channel without idle proof or with a rejected handoff, or a silent Claude channel.
 
-A stale seat shows as `waiting` instead of `running`, and `fractal agents show` prints the reason on its
+A stale seat shows as `waiting` instead of `running`, and `st agents show` prints the reason on its
 `DELIVERY` line. Remote seats carry no `delivery` object; only their own daemon can see their reports.
 
 ## Deploys
@@ -335,10 +335,10 @@ and diagnostics. They are not durable `message.attempt` claims and reset on a ne
 Recording failure history and per-attempt tokens in the shared graph is a follow-up to the fenced
 receipt transport; the current lifecycle idempotency keys identify acknowledgements, not attempts.
 
-`fractal conversations status MESSAGE` shows delivery/read progress without changing its lifecycle.
+`st conversations status MESSAGE` shows delivery/read progress without changing its lifecycle.
 The client message view carries the same `delivery` assessment, including the local recipient
 path when one is known. A remote path stays unverified. A message waiting more than ten seconds
-for read is visible as `waiting`; it stays durable. `fractal doctor` warns about stale local paths and
+for read is visible as `waiting`; it stays durable. `st doctor` warns about stale local paths and
 overdue graph read receipts for current agents. It excludes obsolete seat recipients and people,
 and distinguishes accepted native handoffs. A missing graph read receipt on a legacy channel
 does not prove that its provider failed to consume the envelope. Reading the message clears its

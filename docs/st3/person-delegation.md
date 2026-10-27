@@ -7,12 +7,12 @@ to decide for the person, perform external actions as them, or delete anything.
 From the person's terminal, replace the whole allowed list:
 
 ```sh
-fractal work delegation --for person/avery --as person/avery \
+st work delegation --for person/avery --as person/avery \
   --action answer-ask --action close-item --action record-go-stop \
   --evidence POLICY_DECISION_CLAIM_ID
 ```
 
-The response's `id` is the policy reference. Read its history with `fractal subject show person/avery`.
+The response's `id` is the policy reference. Read its history with `st subject show person/avery`.
 Omitting every `--action` records an empty list and revokes delegation. Only the person can
 establish or replace their policy; an agent cannot name that person as its actor. There is no
 default policy, and old policy references cannot authorize new actions after replacement.
@@ -24,7 +24,7 @@ default policy, and old policy references cannot authorize new actions after rep
 | `record-go-stop` | Approve or reject an approve-mode human gate for the exact episode and revision the person decided on. |
 
 An unanswered ask cannot be dismissed as an informational update. Attention is derived from
-its source: `fractal alerts resolve --for ... --outcome resolved` reads an informational update. With
+its source: `st alerts resolve --for ... --outcome resolved` reads an informational update. With
 `--outcome dismissed`, the same proof flags can close an exact auto-denial episode. Other attention
 requires answering or remedying its source. Authored person steps, feedback changes, launch
 approvals, mission revision approvals, and other operations are outside this initial list.
@@ -33,16 +33,16 @@ Existing free-mode actions remain recorded as the agent itself.
 For an ask, the agent uses the original `work.person-asked` claim ID as the episode:
 
 ```sh
-fractal work done step-run/example/ask --as agent/example/helper \
+st work done step-run/example/ask --as agent/example/helper \
   --for person/avery --policy POLICY_CLAIM_ID \
   --instruction message/date-answer --quote 'Friday' \
   --episode ASK_CLAIM_ID --summary Friday
 ```
 
-The same proof flags work on `fractal conversations archive` (one message at a time),
-`fractal alerts resolve`, `fractal alerts approve`, and `fractal alerts reject`. Use the original
+The same proof flags work on `st conversations archive` (one message at a time),
+`st alerts resolve`, `st alerts approve`, and `st alerts reject`. Use the original
 `message.sent` claim ID for an archive, the update's `work.person-asked` ID for a closure,
-or the exact `gate.requested` ID for a review. `fractal work done --answer ID --text TEXT` retains
+or the exact `gate.requested` ID for a review. `st work done --answer ID --text TEXT` retains
 structured answer validation. A delegated cancellation is refused.
 
 The daemon's store checks the current policy, operation, assigned person, episode and revision,
@@ -113,11 +113,11 @@ to nil and TypeScript's property is optional. Rust callers using a struct litera
 `delegation: None` or use the existing default; this is a source adjustment for those callers.
 
 An agent can withdraw an informational update it sent without acting for the recipient:
-`fractal alerts withdraw STEP_RUN --as AGENT --reason REASON --idempotency-key KEY`. To use the
+`st alerts withdraw STEP_RUN --as AGENT --reason REASON --idempotency-key KEY`. To use the
 attention card ID instead, also supply the update's original `work.person-asked` claim as
 `--episode`. This cancels that update source, preserves its history and leaves unrelated
 claimed work alone. It cannot withdraw another sender's update or use this route to cancel
-a question; an explicit ask keeps `fractal work cancel-ask` semantics.
+a question; an explicit ask keeps `st work cancel-ask` semantics.
 Source-kind validation currently precedes requester authorization: an ask receives
 `invalid-update-withdrawal` even from a stranger, while a stranger's actual update
 receives `forbidden`. The error can distinguish those source kinds; neither refusal

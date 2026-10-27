@@ -8,7 +8,7 @@ The held-out gates require a feature commit and reject changes to `main` or its 
 
 Validate its graph contract with `cargo test -p fractal --test integration examples::`; paid live orchestration uses
 the repository's internal eval controller, not the public CLI. During a development run, inspect the
-exact run with `fractal missions show MISSION_RUN --follow`.
+exact run with `st missions show MISSION_RUN --follow`.
 
 The `receipts/` directory contains the 2026-08-30 live graph proof.
 

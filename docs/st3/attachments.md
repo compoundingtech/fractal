@@ -36,8 +36,8 @@ a fetched copy. After that a read answers `blob-expired` (HTTP 410) and the mess
 
 `POST /v1/client/blobs` with the image as the raw body and its type as `Content-Type`. The session
 needs the `control.messages` scope. The answer is `{blob, sha256, size, media_type}`, where `blob`
-is `blob/<sha256>`. The same bytes answer the same reference. `fractal blobs put FILE` does it from the
-CLI, and `fractal conversations send --attach FILE` does it as part of a send.
+is `blob/<sha256>`. The same bytes answer the same reference. `st blobs put FILE` does it from the
+CLI, and `st conversations send --attach FILE` does it as part of a send.
 
 Before it uploads, the CLI prepares the file (`crates/fractal-daemon/src/attach_image.rs`): an SVG is
 rendered to a PNG on white at twice its size (at most 4096 pixels on a side), and an `<image href>`
@@ -48,7 +48,7 @@ the font it names or else in any font the machine has, and with no font at all t
 refused rather than sent without its text; a BMP becomes a PNG; and a still image
 over 10 MiB (up to 256 MiB) is scaled down until it fits, as a PNG for a PNG and as a JPEG
 otherwise. It prints what it changed. A GIF over the limit, HEIC, AVIF, TIFF and PDF are refused
-with a way to convert them. `fractal blobs put --media-type TYPE` uploads the bytes exactly. The daemon
+with a way to convert them. `st blobs put --media-type TYPE` uploads the bytes exactly. The daemon
 takes only the four types in [Limits](#limits) either way.
 
 Errors: `blob-too-large` (413), `unsupported-media-type` (415), `blob-content-mismatch` (422),
@@ -64,7 +64,7 @@ the claim. A message with an attachment may have empty text.
 ## Asks
 
 An ask may carry up to four images for the person to look at, as a message does:
-`fractal work ask --request FILE --attach IMAGE` uploads each image and names it in the request's
+`st work ask --request FILE --attach IMAGE` uploads each image and names it in the request's
 `attachments` as `{blob, media_type, name}`. The daemon completes each with its size and origin
 before it writes the ask, so the claim holds only references. An update carries none.
 

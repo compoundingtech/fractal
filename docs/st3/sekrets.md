@@ -5,7 +5,7 @@ Sekrets runs any command line tool with a credential the caller never reads. A s
 command with that profile, runs it with the profile's home and environment, and hands back only
 the command's output and exit status.
 
-Sekrets is opt-in and Linux-first. On a host without a gateway, `fractal sekrets profiles` reports
+Sekrets is opt-in and Linux-first. On a host without a gateway, `st sekrets profiles` reports
 that sekrets is not set up. This document describes the installed gateway and its commands.
 
 Root-enrolled Linux system services can use an exact command grant without a daemon or a
@@ -14,7 +14,7 @@ checkout mounts and signer key isolation; enrollment and installation require op
 
 ## Model
 
-- **Gateway.** `fractal sekrets serve`, run by systemd as the Unix user `sekrets`. It owns the store
+- **Gateway.** `st sekrets serve`, run by systemd as the Unix user `sekrets`. It owns the store
   (`/var/lib/st-sekrets`, mode 0700) and listens on `/run/st-sekrets/gateway.sock`. Anyone on the
   host may connect; the kernel says who connected.
 - **Profile.** One identity's credentials and a command policy, owned by a person:
@@ -27,14 +27,14 @@ checkout mounts and signer key isolation; enrollment and installation require op
   prefix, optionally with options it refuses after the prefix (`gh pr create --body-file,-F`). A
   command is allowed when some allow rule matches and no deny rule does. `*` matches exactly one
   argument. Options before a subcommand (`gh -R other/repo pr create`) match no allow prefix
-  unless one names them. Presets make a policy one word; `fractal sekrets presets` lists them.
+  unless one names them. Presets make a policy one word; `st sekrets presets` lists them.
   `gh-agent` covers what agents use gh for (pull requests, issues, runs, workflows, releases,
   search, labels, variables and `gh api`) and never `gh auth token`, `auth status -t`, `secret`,
   `alias`, `extension` or `config`.
 - **Passed files.** A deny rule can name file options, which read the file their value names
   (`--body-file`, `--input`), and field options, which read one after `@` (`-F key=@file`).
   Those are allowed only with the caller's standard input (`-`) or a file the caller passed. For
-  gh, `fractal sekrets` opens each such file itself, as the caller, passes it as a descriptor and
+  gh, `st sekrets` opens each such file itself, as the caller, passes it as a descriptor and
   rewrites the argument to `/dev/fd/N`, so `gh pr edit 7 --body-file /tmp/notes.md` works as
   written while no argument can make the command read a file of the sekrets user's, such as the
   profile's own login.
@@ -49,7 +49,7 @@ checkout mounts and signer key isolation; enrollment and installation require op
   and person as claims on `sekret/HOST/PROFILE` (`sekret.called`, `sekret.exited`,
   `sekret.refused`, `sekret.changed`). Entries and claims carry who called, which profile, the
   arguments and the exit status. They never carry a credential or a command's output. Arguments
-  are recorded, so pass a secret with `fractal sekrets put`, never as an argument.
+  are recorded, so pass a secret with `st sekrets put`, never as an argument.
 - **Retention.** Nothing is kept forever. The claims are local observations of the gateway's
   host: they age out with the local observation log (`observations.retention`, seven days by
   default) and, when `[observations.otlp]` is set, go to OpenTelemetry for longer history. The
@@ -64,13 +64,13 @@ The gateway checks the caller three ways, and the caller's own word counts for n
    (`/user.slice/user-UID.slice/session-N.scope`, made by logind for a terminal or ssh login) is
    the person: an unprivileged process cannot move itself into a session scope.
 2. **The daemon.** A process in the user's service manager (`user@UID.service`) may be a seat.
-   `fractal sekrets` asks the seat's daemon to vouch for it: the daemon reads the process's cgroup,
+   `st sekrets` asks the seat's daemon to vouch for it: the daemon reads the process's cgroup,
    finds the seat whose terminal it started in that scope (the terminal registry's
    `st3.scope-unit` tag beside its `st3.subject`), checks the process's ancestry names the same
    agent, and signs a statement with its node key. The statement names the agent, its person, its
    declaration revision, the cgroup, the process and its start time, and a nonce the gateway
    issued for this connection, and it counts for one minute.
-3. **The chain.** The person registered that node key from a login session (`Fractal sekrets
+3. **The chain.** The person registered that node key from a login session (`st sekrets
    enable`), and the statement's person must be the person the Unix user maps to.
 
 A process that is neither is refused as unidentified. A person's own terminal inside Fractal (a seat's
@@ -78,7 +78,7 @@ terminal, or a terminal Fractal started) is in the service manager, so the perso
 session.
 
 `st sekrets` finds the daemon as other st commands do: `--endpoint`, then `ST3_ENDPOINT`, then the
-configured socket, and only over a Unix socket. `fractal sekrets enable` registers the key of the
+configured socket, and only over a Unix socket. `st sekrets enable` registers the key of the
 daemon found that way, so a person enables from a login environment whose `ST3_ENDPOINT`, if set,
 names their own daemon.
 
@@ -93,7 +93,7 @@ such as a login session or a user manager, the same Unix user is unidentified. A
 from a tile changes nothing: no daemon speaks for a tile. A Unix user that is both a person in the
 gateway configuration and a tile in the registry is refused, because a tile is never a person.
 The registry is read for each connection, so a change applies to the next call, and grants work
-as for any agent (`fractal sekrets grant ada/agent-gh --to agent/web/atlas ...`). The tile's person
+as for any agent (`st sekrets grant ada/agent-gh --to agent/web/atlas ...`). The tile's person
 comes from the registry, which does not make anyone a sekrets person: profiles and grants
 belong to people in the gateway configuration, so a tile whose person is not there has nothing
 to use. The caller is classified once, when it connects, from the process `SO_PEERCRED` names.
@@ -125,10 +125,10 @@ the profile's token and returns the response. It is one request and one response
 gateway socket, not a proxy.
 
 - The caller is `host/NODE`: the process signs a statement with the node key its person
-  registered (`fractal sekrets enable`), bound to its pid, cgroup and the gateway's nonce, as a seat's
+  registered (`st sekrets enable`), bound to its pid, cgroup and the gateway's nonce, as a seat's
   daemon does for a seat. A person in a login session can also call with their own profiles.
 - The profile and the grant must allow `http METHOD github`; the `github-api` preset allows any
-  method. Grant it to the node: `fractal sekrets grant ada/daemon-gh --to host/alder --preset github-api`.
+  method. Grant it to the node: `st sekrets grant ada/daemon-gh --to host/alder --preset github-api`.
 - Only URLs under the gateway's `github_api` base (`https://api.github.com` unless root's
   configuration says otherwise) are reachable. A request that carries its own `Authorization` or
   `Cookie` header is refused; host and hop-by-hop headers are dropped; the gateway adds
@@ -189,20 +189,20 @@ not; a policy that allows more takes that risk on purpose.
 ## Commands
 
 ```sh
-fractal sekrets setup --person person/ada > sekrets-setup.sh   # review, then: sudo sh sekrets-setup.sh
-fractal sekrets enable                                          # from a login session
-fractal sekrets profile create ada/gh --preset everything --preset no-credential-printing --default
-fractal sekrets login gh --profile ada/gh                       # gh's own device-code login, as sekrets
-fractal sekrets profile create ada/agent-gh --preset gh-pr --preset git-push
-printf %s "$TOKEN" | fractal sekrets put GH_TOKEN --profile ada/agent-gh
-fractal sekrets grant ada/agent-gh --to 'agent/web/**' --preset gh-pr --preset git-push --until 2026-11-01
-fractal sekrets -- gh pr list                                   # a person: their default profile
-fractal sekrets -- gh pr create --draft --title "..."           # a seat: the one granted profile that allows it
-fractal sekrets lock --reason "token leaked"                    # stop all use; fractal sekrets unlock lifts it
-fractal sekrets log --follow
+st sekrets setup --person person/ada > sekrets-setup.sh   # review, then: sudo sh sekrets-setup.sh
+st sekrets enable                                          # from a login session
+st sekrets profile create ada/gh --preset everything --preset no-credential-printing --default
+st sekrets login gh --profile ada/gh                       # gh's own device-code login, as sekrets
+st sekrets profile create ada/agent-gh --preset gh-pr --preset git-push
+printf %s "$TOKEN" | st sekrets put GH_TOKEN --profile ada/agent-gh
+st sekrets grant ada/agent-gh --to 'agent/web/**' --preset gh-pr --preset git-push --until 2026-11-01
+st sekrets -- gh pr list                                   # a person: their default profile
+st sekrets -- gh pr create --draft --title "..."           # a seat: the one granted profile that allows it
+st sekrets lock --reason "token leaked"                    # stop all use; st sekrets unlock lifts it
+st sekrets log --follow
 ```
 
-`fractal sekrets setup` prints the root script: it creates the `sekrets` user and its store, copies
+`st sekrets setup` prints the root script: it creates the `sekrets` user and its store, copies
 this Fractal binary to `/usr/local/libexec/st-sekrets` owned by root, writes
 `/etc/st-sekrets/gateway.toml` (Unix user to person, the tool path, the checkout roots) and
 installs and starts `st-sekrets.service`. Run it again after updating Fractal to give the gateway the
@@ -215,8 +215,8 @@ can run, list what it may use, read its person's log and lock; it changes nothin
 
 - Profiles, policies and grants live in the gateway's store and are mirrored to the graph as
   `sekret.changed` claims; the gateway does not yet read grants from the graph. The smallclaims
-  rules (`fractal rules`) restrict writes and have no grants to read from; when signed grants land,
+  rules (`st rules`) restrict writes and have no grants to read from; when signed grants land,
   the gateway will take its grants from them.
-- `fractal sekrets adopt`, which moves existing logins out of the person's home, is the next step.
+- `st sekrets adopt`, which moves existing logins out of the person's home, is the next step.
 - A model API proxy and macOS are later phases. Seats run as tiles once a harness runs in a
   tile (tiles design step 2).

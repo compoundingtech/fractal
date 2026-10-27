@@ -1,15 +1,15 @@
 # Suspending a seat
 
-`fractal agents suspend` stops a quiet seat and keeps its harness's own session. `fractal agents resume`
+`st agents suspend` stops a quiet seat and keeps its harness's own session. `st agents resume`
 relaunches the harness on that same session and confirms it is the same one. This works on one
 host for Claude, Codex, pi, omp, and OpenCode. pi and omp can also resume on another fleet host
 with `--host`, keeping the same seat identity and native conversation.
 
 ```sh
-fractal agents suspend agent/example/worker --as person/ada --reason "idle overnight"
-fractal agents show agent/example/worker
-fractal agents resume agent/example/worker --as person/ada
-fractal agents resume agent/example/worker --host jade --as person/ada
+st agents suspend agent/example/worker --as person/ada --reason "idle overnight"
+st agents show agent/example/worker
+st agents resume agent/example/worker --as person/ada
+st agents resume agent/example/worker --host jade --as person/ada
 ```
 
 Both commands wait until the operation finishes or fails, and `--timeout` sets how long they
@@ -40,7 +40,7 @@ reasons:
 | `native-session-unbound` | the driver has reported no native session it can resume; Claude and pi write a transcript only with their first turn |
 
 The owner checks the same reasons again before it stops anything. A refused suspend leaves the
-seat running, and `fractal agents show` prints the refusal.
+seat running, and `st agents show` prints the refusal.
 
 ## What suspend and resume do
 
@@ -48,7 +48,7 @@ The seat's driver reports the native session its harness is running as a `harnes
 claim for that incarnation, through `POST /v1/agents/native-session`, once the harness has
 written what a resume reads. Suspend captures a Git snapshot commit, records the native session,
 stops the runtime, and freezes portable transcript files after the process ends. It leaves the seat `suspended`. A suspended seat
-stays declared. Its restart policy does not restart it, `fractal agents restart` refuses it, and mail
+stays declared. Its restart policy does not restart it, `st agents restart` refuses it, and mail
 sent to it waits until it resumes.
 
 Resume launches the driver with the session in `ST3_NATIVE_RESUME_SESSION`. Each driver
@@ -87,8 +87,8 @@ before the harness starts, as `authored-session-selection`, `resume-path-relativ
 If resume reports `authored-session-selection`, the exit is to stop the seat and then start it:
 
 ```sh
-fractal agents stop agent/example/worker --as person/ada
-fractal agents start agent/example/worker --as person/ada
+st agents stop agent/example/worker --as person/ada
+st agents start agent/example/worker --as person/ada
 ```
 
 Stop ends the suspension. Start launches the declaration with its authored selector, such as
@@ -165,7 +165,7 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
 - Every other relaunch continues the seat's last native session when its harness can, and
   otherwise starts a new one: it names the session in `ST3_NATIVE_CONTINUE_SESSION`, which a
   driver may refuse without ending the launch. Only a resume must come back on its exact session.
-- Mail does not wake a suspended seat. Only `fractal agents resume` does.
+- Mail does not wake a suspended seat. Only `st agents resume` does.
 - OpenCode delivery follows the session the server reports most recently. A seat whose OpenCode
   session ran a subagent session last may record that session.
 

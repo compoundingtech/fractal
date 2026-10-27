@@ -155,8 +155,8 @@ subject. Consultation gets only the remaining budget and either attaches a local
 session or fails when no such session exists. Full subjects retain offline attach behavior.
 
 ```
-$ fractal terminals attach ci-w         → agent/host-a.ci-watcher
-$ fractal terminals attach interactive
+$ st terminals attach ci-w         → agent/host-a.ci-watcher
+$ st terminals attach interactive
 st: `interactive` matches 9 subjects; name one exactly:
   agent/interactive/host-a/43b16cd2-ec69-44  running · host-a · omp · idle · up 2h
   …
@@ -183,7 +183,7 @@ st: `interactive` matches 9 subjects; name one exactly:
 
 ## Installation
 
-`fractal completions <shell>` writes clap_complete's registration stub for the PATH-resolved `st`.
+`st completions <shell>` writes clap_complete's registration stub for the PATH-resolved `st`.
 It never embeds the generating executable's store path, so manual installations survive package
 upgrades and garbage collection. The Nix package runs it at build time for bash, zsh, and fish
 (`flake.nix` `postInstall`) and installs the results with `installShellCompletion`.
@@ -196,7 +196,7 @@ upgrades and garbage collection. The Nix package runs it at build time for bash,
 - `crates/fractal/tests/completion_shells.rs` serves an in-process daemon with 205 running terminals
   and one stopped terminal. It checks that completion offers every running terminal across pages
   with descriptions; that a missing or silent daemon yields no entity candidates, nothing on
-  stderr, and an answer within seconds; and that the stubs from `fractal completions` complete a live
+  stderr, and an answer within seconds; and that the stubs from `st completions` complete a live
   terminal in real fish (`complete -C`), bash (the stub's completion function), and zsh (TAB in an
   interactive zsh under `zpty`). The shells come from `nativeCheckInputs` and the dev shell; a
   missing shell fails the test. The interactive zsh phase is temporarily skipped on the

@@ -2,7 +2,7 @@
 
 One place in Fractal decides what a seat's status is: the agent card that `overlay_agent_resources`
 (`crates/fractal-api-core/src/api.rs`) finishes on every read, with the read's own clock. Fractal TUI, the phone app,
-the web app and `fractal agents show` render that card. None of them re-derives a state from the raw
+the web app and `st agents show` render that card. None of them re-derives a state from the raw
 fields, so they cannot disagree.
 
 ## States that need a clock
@@ -21,17 +21,17 @@ fields, so they cannot disagree.
 `down` is a statement about Fractal's session for the seat: a declaration exists, the runtime row is not
 running, and no harness has reported lately. It is not proof that no process exists. A pty daemon
 and its driver can outlive a runtime row stuck at `pending`; while such a seat reports, the card
-says `running`; when it stops reporting, the card says `down` and `fractal terminals screen` finds no
+says `running`; when it stops reporting, the card says `down` and `st terminals screen` finds no
 session for it too. Finding the process and relaunching a seat that declares `restart always` belong to
 the launch and reconcile path, not to the label.
 
 ## A seat Fractal cannot place on a host
 
-When two hosts both claim a seat's runtime, Fractal cannot say which one runs it, and `fractal terminals`
+When two hosts both claim a seat's runtime, Fractal cannot say which one runs it, and `st terminals`
 refuses with `runtime-authority-indeterminate`. The card keeps `state: waiting` and
 `reachability: indeterminate`, and its `reason` reads "Fractal cannot tell which host runs this agent; its
 processes may be running" unless the harness gave a reason of its own. The card does not call the
-seat running, stopped or down, and the conflicting claims stay as they are. `fractal agents show` prints
+seat running, stopped or down, and the conflicting claims stay as they are. `st agents show` prints
 the same sentence in place of "Still starting". The apps keep their present word for the state until
 they learn to print the reason.
 

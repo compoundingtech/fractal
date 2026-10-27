@@ -3,7 +3,7 @@
 For your own fleet, install the **same verified release source on every member** and read the
 release's **Upgrade impact** before restart. A patch tag is a publication label, not a promise
 of compatible databases, mixed builds or safe rollback. Check exact sources using `BUILD.json`,
-`RELEASE.json`, `fractal --version --json` and the daemon's `machine_version` in `fractal doctor --json`.
+`RELEASE.json`, `st --version --json` and the daemon's `machine_version` in `st doctor --json`.
 Downloading or installing an archive does not replace a running daemon.
 
 ## Upgrade starting points and limits

@@ -1,9 +1,9 @@
 # Fractal fleet replication
 
 Fleet replication is optional. A node outside a fleet is a complete local-only Fractal system.
-`fractal doctor` reports this default as `pass` with “no fleet is configured” and points to
-`fractal fleet create` or `fractal fleet join`. It reports “intentionally local-only after leaving its
-fleet” only when `fractal fleet leave` has recorded that explicit decision in `left-fleet.json`.
+`st doctor` reports this default as `pass` with “no fleet is configured” and points to
+`st fleet create` or `st fleet join`. It reports “intentionally local-only after leaving its
+fleet” only when `st fleet leave` has recorded that explicit decision in `left-fleet.json`.
 
 A laptop running only the terminal UI can instead be a [paired client device](client-only.md), with no daemon
 or replica. Devices read and act through a member's client gateway and are not sync peers.
@@ -26,12 +26,12 @@ routes for backward compatibility. To let fleet preference select the carrier,
 remove the explicit override. Legacy operation without `fleet.toml` retains
 Tailscale-first automatic routing among locally available carriers.
 
-Use `fractal fleet transports add fabric --prefer` to enable Fabric and move it to the
+Use `st fleet transports add fabric --prefer` to enable Fabric and move it to the
 front, or to prefer an already enabled Fabric route without changing its saved
 protocol or exposure. An add without `--prefer` appends a new carrier and leaves
-an existing list unchanged. `fractal fleet transports remove fabric` keeps the relative
+an existing list unchanged. `st fleet transports remove fabric` keeps the relative
 order of remaining carriers and refuses to remove the last usable transport.
-Use `fractal fleet transports prefer tailscale` or `fractal fleet transports prefer fabric`
+Use `st fleet transports prefer tailscale` or `st fleet transports prefer fabric`
 to move an already enabled carrier first while preserving the remaining order.
 Preference only reorders: it never exposes, unexposes, enables, or removes a
 transport, and rejects a carrier absent from the list. An already-first carrier
@@ -39,7 +39,7 @@ is a no-op, including no service restart. Changes are locked, saved atomically,
 and publish the existing enabled endpoints before refreshing services.
 These are local settings: choose the preference on each member independently.
 Installed services restart automatically; otherwise restart both `st3 daemon` and
-`fractal replication-worker` as instructed, including when using `--no-service`.
+`st3 replication-worker` as instructed, including when using `--no-service`.
 The daemon reloads peer-relay transport settings; the worker reloads replication
 transport settings. Restarting only the worker leaves the running daemon's relay
 preference and enabled transports unchanged.
@@ -216,9 +216,9 @@ bidirectional owner routes, even while fresh. Dial-out owners return `remote-una
 with `details.reason = "dial-out-owner"` and an explicit no-inbound-route message across
 conversation, terminal, raw attach, workspace and attachment reads, without trying listening
 peers as relays. The member's published mode overrides a configured direct URL. Correct an
-incorrect mode on the owning member with `fractal fleet mode listening`. This restarts installed
+incorrect mode on the owning member with `st fleet mode listening`. This restarts installed
 services; without installed services (or with `--no-service`), restart both `st3 daemon`
-and `fractal replication-worker` as the command instructs. The restarted daemon reloads
+and `st3 replication-worker` as the command instructs. The restarted daemon reloads
 relay settings; the restarted worker enables its listener and publishes the new
 mode/endpoints. Other nodes see it after replication and at most five seconds of membership
 caching. Reverse owner-RPC and PTY transport over a dial-out connection
@@ -307,7 +307,7 @@ Malformed known operations and references remain invalid. Local client edits do 
 leniency: they refuse unknown tags with `invalid-arrangement-operations` and unknown placement
 families with `invalid-subject-reference`.
 
-`fractal replication status` reports `waiting` claims; JSON exposes `waiting_claims` and retains
+`st replication status` reports `waiting` claims; JSON exposes `waiting_claims` and retains
 `unknown_records` for existing readers. Doctor reports the waiting count without treating it
 as a fault. At daemon startup, admission retries those original records using the upgraded
 registry, then the canonical projector rebuilds their shared rows. An earlier claim learned
@@ -413,7 +413,7 @@ An idempotency key names an operation. A member that holds a claim for a key ans
 that claim and refuses the key for a different request. Two members apart, as during a partition,
 can each accept the same key for different requests: once they meet, both claims stand, the
 operation is a `conflict`, a retry with the key is refused as `idempotency-conflict`, and
-`fractal doctor`'s `idempotency-keys` check names the subjects and writers.
+`st doctor`'s `idempotency-keys` check names the subjects and writers.
 
 SQLite triggers update per-table row counts and 512-bit modular sums of domain-separated
 SHA-512 row hashes in the row's own transaction. Insert, update, delete, replacement, savepoint
@@ -435,8 +435,8 @@ updates, replacement and rollback. The shuffle/restart/checkpoint regression com
 cached table digest with that oracle in every phase. The table classification guard requires
 the test inventory and production registry to agree, and the fixture exercises every table.
 
-`fractal replication status` prints `table-digest` entries and names differing tables under each
-peer. `fractal replication diff PEER` and `fractal doctor` also name them. Table differences are meaningful
+`st replication status` prints `table-digest` entries and names differing tables under each
+peer. `st replication diff PEER` and `st doctor` also name them. Table differences are meaningful
 only when inventories and claim registries agree, no claims wait for a newer build, projection
 is current and local committed batches are sealed. Old peers omit `projection_digests`;
 exchanges then compare their unchanged six-table compatibility hash. Old peers cannot
@@ -459,15 +459,15 @@ Install Fractal on the new machine and configure the person who operates it, as 
 [README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
 
 ```sh
-fractal fleet invite beacon
+st fleet invite beacon
 ```
 
 On the new machine:
 
 ```sh
-fractal fleet join
-fractal fleet status
-fractal replication status
+st fleet join
+st fleet status
+st replication status
 ```
 
 Paste the invitation when asked. These are the same steps for a laptop or server. Join receives
@@ -480,17 +480,17 @@ To choose the sponsor route explicitly, use its actual tailnet address/port or c
 NodeID/protocol. Each command prompts for the same invitation:
 
 ```sh
-fractal fleet join --via http://100.64.0.10:31313
-fractal fleet join --via fabric://NODE_ID/PROTOCOL
+st fleet join --via http://100.64.0.10:31313
+st fleet join --via fabric://NODE_ID/PROTOCOL
 ```
 
 When the machines are already Fabric peers, the invitation can travel as a file instead:
 
 ```sh
 # On the sponsor:
-fractal fleet invite beacon --via fabric --send-fabric
+st fleet invite beacon --via fabric --send-fabric
 # On beacon:
-fractal fleet join --fabric-inbox
+st fleet join --fabric-inbox
 ```
 
 No helper needs to maintain a loopback dial port. The worker obtains Fabric tunnels itself and
@@ -552,7 +552,7 @@ After a successful exchange on a fallback route, the worker keeps using it for a
 Successful fallback exchanges do not extend that cooldown. If the preferred route
 still has a transport failure, normal route failover resumes. Application failures
 do not select fallback or discard a working HTTP connection pool.
-Per-peer worker status reports `route_is_preferred` and `preferred_retry_at_unix_ms`; `fractal replication status` shows the preferred/fallback selection and pending preferred-route retry deadline.
+Per-peer worker status reports `route_is_preferred` and `preferred_retry_at_unix_ms`; `st replication status` shows the preferred/fallback selection and pending preferred-route retry deadline.
 
 The peer HTTP listener is not the privileged local Unix API: it exposes only fleet replication,
 join, and owner-forwarded client operations. Replication and forwarded client requests require
@@ -584,7 +584,7 @@ and pulls the full graph.
 ### Fleet members
 
 A node that joined or migrated keeps its fleet settings in `STATE/fleet/fleet.toml`, written by
-`fractal fleet` commands, and needs no `[[peers]]`. Its peers come from membership claims in the graph:
+`st fleet` commands, and needs no `[[peers]]`. Its peers come from membership claims in the graph:
 it dials every current listening member and accepts exchanges from current members that sign with
 their member keys. The existing dial-out mode controls whether the worker opens a listener; it needs no separate
 presence policy. Every current member appears in replication status and machine views with its
@@ -646,7 +646,7 @@ close before the response head; a control fails if that changes. Graph wakes
 still leave intentionally absent peers alone. Transport life only schedules an exchange;
 the exchange still authenticates every claim and peer.
 
-`fractal replication status` shows each outbound worker's `exchange`, `overload`, `backoff`
+`st replication status` shows each outbound worker's `exchange`, `overload`, `backoff`
 or `idle` phase, the last attempt time, and the next retry time during a wait. JSON carries
 these additive fields under each peer's `worker`. They are host-local memory and create no
 replicated claims; after a daemon restart they are absent until the worker reports again.
@@ -790,7 +790,7 @@ An unknown or invalid record stays in `replica_records`. It does not block a val
 
 Admission commits once per pass over the pending envelopes, so one disk flush covers an exchange. Each envelope is admitted in its own savepoint, so an invalid one is rolled back and recorded alone.
 
-A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `fractal now`, `fractal missions ls` and the terminal UI say the node is syncing.
+A node catching up with a peer, one more than one exchange behind it, projects at most every 30 seconds and again as soon as it has caught up. History arrives older than the node's own claims, so the node cannot extend its projection incrementally; projecting after every exchange would replay the whole graph each time. Meanwhile `st now`, `st missions ls` and the terminal UI say the node is syncing.
 
 A claim that reaches a mission run tree out of the replay's order rebuilds that tree from its own
 claims. Runs in one tree affect each other only from the root down: a run that ends cancels the
@@ -818,8 +818,8 @@ A projection fault keeps the last good projection. The daemon continues to serve
 
 A valid claim can still fail to project, for example a body written by another build. That claim
 is quarantined on its own: its projection is rolled back, and every other claim, from every peer,
-still reaches the graph. `fractal replication status` lists it as an `unhealthy` projection named
-`projection:base:CLAIM` or `projection:runs:CLAIM`, and `fractal doctor` names it. Each full replay
+still reaches the graph. `st replication status` lists it as an `unhealthy` projection named
+`projection:base:CLAIM` or `projection:runs:CLAIM`, and `st doctor` names it. Each full replay
 decides the claim again.
 
 A repair that cannot be applied is listed the same way, as `repair:CLAIM`. The other repairs still
@@ -925,11 +925,11 @@ nodes created are theirs to settle.
 Use these commands:
 
 ```sh
-fractal replication status
-fractal replication diff node-b
-fractal replication invalid
-fractal replication inspect record/HASH
-fractal doctor
+st replication status
+st replication diff node-b
+st replication invalid
+st replication inspect record/HASH
+st doctor
 ```
 
 The status view reports the authority digest, graph digest, record counts, projection health, and last peer results.
@@ -939,8 +939,8 @@ refuse that direct route, `peer_not_in_allow_list` when it does not trust this m
 that route will not work until the member changes its trust. `fabric dial` never connects, so
 the worker learns of it when the tunnel closes, and then asks `fabric probe --json` for the code.
 A typed `fault` can select another route; a grant/trust refusal cannot.
-It shows as `refused`, with the Fabric node and service, in `fractal replication status`,
-`fractal fleet status` and `fractal doctor`. It is neither an absent member nor a replication error;
+It shows as `refused`, with the Fabric node and service, in `st replication status`,
+`st fleet status` and `st doctor`. It is neither an absent member nor a replication error;
 `last_error` is empty and the JSON status carries `refusal_reason`. Doctor's replication check
 passes when the refusal is the only issue.
 
@@ -1003,7 +1003,7 @@ a disk flush. `/v1/replication/status` carries the same numbers as `timings`.
 A node is catching up while a peer measured in the last five minutes holds more envelopes than one
 exchange carries. During that time its projections can show early history as current: a request
 that a later envelope resolves still looks open. Every client page then carries a `sync` notice,
-`fractal now` and the other product commands print a `SYNCING` line before their items, and the terminal UI shows
+`st now` and the other product commands print a `SYNCING` line before their items, and the terminal UI shows
 `⟳ Syncing` with the same line.
 
 Two nodes are in sync when they hold the same envelopes and each has admitted and projected
@@ -1026,8 +1026,8 @@ peer	node-b	up
   exchanges cannot fix this; one node projects the same claims wrongly, and its views are wrong until that is fixed
 ```
 
-While any peer has diverged, `fractal doctor` fails its replication check, every client page carries a
-`sync` notice in the `diverged` state, `fractal now` and the other product commands print a `DIVERGED`
+While any peer has diverged, `st doctor` fails its replication check, every client page carries a
+`sync` notice in the `diverged` state, `st now` and the other product commands print a `DIVERGED`
 line, and the terminal UI's header shows `⚠ diverged`. A shorter difference shows as `graphs differ` and fails
 nothing. A comparison stands until the next exchange at which both nodes hold the same envelopes;
 the first one that finds equal graphs clears it. Like the envelope difference, comparisons live in
@@ -1076,21 +1076,21 @@ open fault stays open until the next comparison that agrees.
 
 The `projection-divergence` objective in `slo/targets.toml` counts open divergence faults
 fleet-wide, with a target of none. A daemon that runs the check keeps the count its last check
-read, so `fractal doctor` (as `slo/projection-divergence`), `fractal slo` and the SLO history read no claims
+read, so `st doctor` (as `slo/projection-divergence`), `st slo` and the SLO history read no claims
 for it; a daemon that never checks shows neither the line nor the row. A miss is `info`, like any
 other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
-replication check fails `fractal doctor` as above.
+replication check fails `st doctor` as above.
 
 ### First sync
 
-A machine that joins with `fractal fleet join` records a first sync. It ends, `verified`, at the first
+A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first
 exchange at which the new machine holds the same envelopes as a peer and has admitted and
 projected them all. It settles on claims alone: it does not compare the two graphs. `join` waits
-for it by default; `fractal fleet wait` waits for it later. A first sync that an earlier build recorded
-as `failed` fails `fractal doctor`'s replication check until the next exchange at which both hold the
+for it by default; `st fleet wait` waits for it later. A first sync that an earlier build recorded
+as `failed` fails `st doctor`'s replication check until the next exchange at which both hold the
 same claims, which verifies it.
 
-A verified first sync says what was true then. `fractal fleet wait`, the gate after a restart or a
+A verified first sync says what was true then. `st fleet wait`, the gate after a restart or a
 deploy, also waits for an exchange since it began, with every peer that is up, at which this node
 held every envelope that peer held; peers that are not up are named as not checked. Doctor warns
 while a peer says this node is catching up, and while the daemon has not exchanged with any peer
@@ -1099,7 +1099,7 @@ since it started.
 Repair publishes a new claim. It does not delete or change the bad record.
 
 ```sh
-fractal replication repair record/HASH \
+st replication repair record/HASH \
   --with CLAIM_ID \
   --reason "replace the invalid observation" \
   --as person/operator
@@ -1133,7 +1133,7 @@ it keeps sets every field a reader takes from the dropped one:
   `runtime.action.*` claims;
 - `harness.usage` snapshots. A response rollup series keeps the last snapshot of each UTC hour,
   by the time its writer measured it, for seven days before the cut, and only its newest snapshot
-  before that. `fractal usage` stays exact to the hour for a period inside that window, a longer period
+  before that. `st usage` stays exact to the hour for a period inside that window, a longer period
   counts each series from its start, and a series' total never changes. A session's cumulative
   reading keeps its newest and its largest; a context reading keeps its newest. Per-response
   claims from older builds stay;
@@ -1177,12 +1177,12 @@ checkpoint dropped.
 
 A participant that does not seal holds up every checkpoint, whether it is away or runs a build
 without checkpoints. Three days after a checkpoint became due, a participant asks a person in
-`fractal now` to bring the machine back or excuse it:
+`st now` to bring the machine back or excuse it:
 
 ```sh
-fractal replication checkpoint status                  # the newest stable checkpoint, and who sealed the next
-fractal replication checkpoint plan --cut 2026-09-27    # what it would drop here, proved on a copy
-fractal replication checkpoint excuse node-c --reason "away for a week" --as person/operator
+st replication checkpoint status                  # the newest stable checkpoint, and who sealed the next
+st replication checkpoint plan --cut 2026-09-27    # what it would drop here, proved on a copy
+st replication checkpoint excuse node-c --reason "away for a week" --as person/operator
 ```
 
 `plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
@@ -1209,7 +1209,7 @@ participant runs the same rules.
 
 If a trim finds that a deletion would change the graph, it rolls that deletion back and stops. It
 records a `checkpoint-trim-graph-changed` diagnostic, and the node seals nothing more until a
-person runs `fractal replication checkpoint resume --reason ...`.
+person runs `st replication checkpoint resume --reason ...`.
 
 Checkpoints are on by default. `[checkpoint] enabled = false` in a node's config stops that node
 sealing. Every participant must seal, so this stops trimming for the whole fleet.

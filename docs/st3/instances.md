@@ -5,10 +5,10 @@ Fractal next to the default one. Use it to try a build without risking your work
 to see the first run again from a clean start.
 
 ```sh
-fractal --instance trial setup
-fractal --instance trial service install
-fractal --instance trial agents ls
-fractal --instance trial uninstall --yes --erase-local-graph
+st --instance trial setup
+st --instance trial service install
+st --instance trial agents ls
+st --instance trial uninstall --yes --erase-local-graph
 ```
 
 After instance startup, `agents ls` may report that its initial roster is still being
@@ -16,7 +16,7 @@ prepared. After changing an agent it can show the previous publication. A client
 its own write uses that instance daemon's receipt `store_index` as `min_cut` and checks the
 served snapshot; a receipt from the default install or another host is not interchangeable.
 
-`fractal --instance NAME setup` runs the first-run questions for the instance: it installs `st3`, `st` and
+`st --instance NAME setup` runs the first-run questions for the instance: it installs `st3`, `st` and
 `pty` into the instance's own `bin/` (nothing goes on your login PATH or into `~/.local/bin`), and
 the built-in Fractal Assistant works in the instance's work folder, `work/agents/`. Run the instance's commands from
 there, or with `--instance`.
@@ -107,18 +107,18 @@ scripts/install --instance trial            # from a source build
 
 ## Uninstalling
 
-`fractal --instance NAME uninstall` removes the instance's service definitions and the one directory, except
+`st --instance NAME uninstall` removes the instance's service definitions and the one directory, except
 the work folder (`work/`) when anything is in it: that holds what your agents made, so uninstall
 keeps it, says so, and removes everything else. An empty work folder goes with the
 instance. Then the empty `~/.st-instance` goes when it was the last. It refuses to run if anything it would remove lies
 outside that directory (for example a `state_dir` set elsewhere in the instance's `config.toml`).
 `--dry-run` lists what it would remove.
 
-`fractal uninstall` on the default install also removes: the copies of
+`st uninstall` on the default install also removes: the copies of
 the `st` skill that seats install into `~/.claude/skills` and `~/.agents/skills` (only when
 unchanged), Fractal's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
 still leaves the work folder (`~/st`, see below) and what is in it, the account-wide lingering
-setting, and the managed Claude Code policy, which needs root (`Fractal claude-channel
+setting, and the managed Claude Code policy, which needs root (`st3 claude-channel
 uninstall-policy`).
 
 ## Proof
@@ -143,8 +143,8 @@ that instance home.
 Every install has one work root, the folder agents work in unless you point one at another folder.
 It is `~/st` for the default install and `~/.st-instance/NAME/work` for an instance. New agents get
 a folder inside it, `agents/NAME`, never the home folder, so an agent that lists its working
-directory does not make macOS ask for access to Documents, Desktop or Downloads. `fractal setup` creates
+directory does not make macOS ask for access to Documents, Desktop or Downloads. `st setup` creates
 the work root and prints it once. Change it with `work_root = "/absolute/path"` in `config.toml`; it
 must be absolute and cannot be the home folder or inside Documents, Desktop or Downloads. Existing
-agents keep their folders, and an agent or mission can still name any folder. `fractal uninstall` never
+agents keep their folders, and an agent or mission can still name any folder. `st uninstall` never
 removes what is in the work root: it prints `kept` with the path (and `--dry-run` prints `keep`).

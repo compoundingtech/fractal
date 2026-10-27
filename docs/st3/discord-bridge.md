@@ -32,7 +32,7 @@ never a token. These example values are invented:
 
 To check the token and channel before running the bridge,
 `python3 -I scripts/st3-discord-probe test --route PATH` posts one labelled message
-and verifies your `fractal probe hello` reply; it never retries a post. It uses a hidden
+and verifies your `st probe hello` reply; it never retries a post. It uses a hidden
 local token prompt and does not route to an agent. The token's application,
 channel's server/type and bot account are checked before importing messages.
 
@@ -83,18 +83,18 @@ adapt the invented paths, placement and subjects in
 preview and apply that declaration:
 
 ```sh
-fractal apply /path/to/discord-bridge.kdl --dry-run --as agent/example/operator
-fractal apply /path/to/discord-bridge.kdl --as agent/example/operator
-fractal agents show agent/example/discord-bridge
-fractal terminals peek agent/example/discord-bridge
+st apply /path/to/discord-bridge.kdl --dry-run --as agent/example/operator
+st apply /path/to/discord-bridge.kdl --as agent/example/operator
+st agents show agent/example/discord-bridge
+st terminals peek agent/example/discord-bridge
 ```
 
 The top-level program seat uses `argv` to run Python directly in st's managed PTY,
 without a model harness. It remains independent of finite verification missions.
 `restart "always"` restarts an exit, subject to Fractal's crash-loop guard. To stop it
-durably, use `fractal agents stop agent/example/discord-bridge --as agent/example/operator`;
+durably, use `st agents stop agent/example/discord-bridge --as agent/example/operator`;
 Ctrl-C alone allows the supervisor to restart it. To resume, use the corresponding
-`fractal agents start` command. `fractal terminals attach agent/example/discord-bridge`
+`st agents start` command. `st terminals attach agent/example/discord-bridge`
 opens its terminal; Ctrl-\\ detaches. The runtime keeps running across SSH
 disconnects. Reboot startup depends on the existing Fractal daemon starting on that host.
 

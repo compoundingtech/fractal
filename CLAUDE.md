@@ -6,4 +6,4 @@ Read [docs/st2/invariants.md](docs/st2/invariants.md) before changing st2 lifecy
 Each st2 invariant names its proof. Preserve that proof while st2 remains in this repository.
 
 Read [docs/st3/README.md](docs/st3/README.md) before changing Fractal claims, missions, replication,
-runtime ownership, or recovery. `fractal skill` prints how an agent seat uses Fractal at runtime.
+runtime ownership, or recovery. `st skill` prints how an agent seat uses Fractal at runtime.

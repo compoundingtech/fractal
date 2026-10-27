@@ -1,10 +1,10 @@
 # Fractal terminal client
 
-`fractal` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
-a mission, a terminal, Inbox or usage. `fractal tui --space NAME` opens a named space. `fractal tui --demo`
+`st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
+a mission, a terminal, Inbox or usage. `st ui --space NAME` opens a named space. `st ui --demo`
 shows them on invented data and sends nothing. Spaces are the Fractal terminal UI's only layout: the layout from
 before them is gone ([#1166](https://github.com/compoundingtech/fractal/issues/1166)), and
-`fractal tui --classic` refuses with what to run instead.
+`st ui --classic` refuses with what to run instead.
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
 
@@ -21,8 +21,8 @@ with a running Fractal daemon. For source development, use
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Inbox and devices show the right data.
 
-For a laptop without a daemon, run `fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
-single-use code, then run `fractal`. The paired member supplies the person identity. See
+For a laptop without a daemon, run `st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
+single-use code, then run `st`. The paired member supplies the person identity. See
 [client-only setup](../../docs/st3/client-only.md) for gateway setup, multiple members, private
 credentials, offline cache, and automatic reconnect. `--client` requires a saved pairing;
 `--local` selects the local daemon even when a pairing exists. While offline, the terminal UI keeps its last
@@ -70,7 +70,7 @@ their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps
 selected card in a regular, closable tab. Opening it again focuses the existing tab in this
 space. Move it into a split with the tab menu or by dragging; Esc does not close it.
 
-A seat can ask the interface to show something with `fractal tui open agent/NAME` (also `mission/NAME`,
+A seat can ask the interface to show something with `st ui open agent/NAME` (also `mission/NAME`,
 `mission-run/NAME/RUN` and `machine/NAME`), `--split` and `--below` for a split, `--keep-focus` to leave
 the person where they are. The command writes a small file into the configured person's private state
 directory (`st3/stui/requests-KEY`) and waits for a terminal interface of that person on the same machine
@@ -112,7 +112,7 @@ both unset for ordinary use. The selector only observes the UI: it does not open
 change the actor/endpoint, attach a terminal or alter subscriptions. An existing file is
 never appended to or overwritten; a new file is mode 0600 on Unix.
 
-Start the installed `fractal` once, using the person's ordinary pairing/configuration and
+Start the installed `st` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
 Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
 attachment), `--demo`, or a headless test client as a conversation-render measurement.

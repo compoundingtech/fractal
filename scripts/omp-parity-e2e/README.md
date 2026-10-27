@@ -1,7 +1,7 @@
 # OMP conversation parity proof
 
 Runs an isolated, real Fractal daemon, its client HTTP API, the shared TypeScript
-conversation renderer, and the interactive terminal UI (`fractal tui`). Requires binaries containing the
+conversation renderer, and the interactive terminal UI (`st ui`). Requires binaries containing the
 incremental/keyset and OMP parity changes, including the live palette affordance
 for opening a saved `session/...` id. It never launches OMP, calls a model, modifies
 an original transcript, or simulates a live OMP process.

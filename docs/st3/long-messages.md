@@ -31,7 +31,7 @@ in, and an agent seat reads what it can name.
   body answers its content, so any message may be asked.
 - Message resources and timeline message bodies carry optional `body_ref` (`blob/<sha256>`) and
   `body_bytes` when `content` is a preview.
-- `fractal conversations read` prints the whole text, and `--json` adds it as `text`. A seat's
+- `st conversations read` prints the whole text, and `--json` adds it as `text`. A seat's
   delivery resolves the body before it is shown; a prompt shows the first 2,048 characters with
   the instruction to read the rest. When the owner cannot give the text, the seat is handed the
   preview and a note saying which machine has the rest (`complete` is false), instead of waiting.
@@ -43,7 +43,7 @@ in, and an agent seat reads what it can name.
 refuses with `message-too-large`, saying the limit and the size sent, and writes nothing, so a
 composer keeps the person's text. `GET /v1/client/capabilities` states `limits.max_message_bytes`
 (262144). A mission file's `message` node keeps its own 4 KiB limit.
-`fractal conversations export` writes the preview.
+`st conversations export` writes the preview.
 
 ### Quotas
 
@@ -82,10 +82,10 @@ message shortened.
   text of this message expired and was removed from HOST after its retention; only the preview
   remains") and the daemon's own readers are handed the preview and a note. A marker whose message
   no longer exists is removed. The text is never written to the graph database, expired or not.
-- `fractal backup create` writes each body the member owns, with its message, sender and hash, after the
+- `st backup create` writes each body the member owns, with its message, sender and hash, after the
   claims, and declares archive version 2 (an archive with no bodies uses version 1). A body no
   claim names with that hash is left out. The daemon spools the archive to temporary disk, so up to about 1.4 GiB of free space
-  is needed on a member that owns the most the quota allows. `fractal backup restore` checks every body
+  is needed on a member that owns the most the quota allows. `st backup restore` checks every body
   against its hash and against the restored claim, writes them beside the database, and reports
   `message_bodies_restored`, `message_bodies_unmatched` and `message_bodies_referenced` (the long
   messages the claims name, including those another member owns). A graph backup of a member

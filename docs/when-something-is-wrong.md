@@ -10,17 +10,17 @@ or is the work waiting on a dependency? These checks use the worker and README m
 [missions in practice](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md):
 
 ```sh
-fractal doctor
-fractal service status
-fractal missions show mission-run/garden/readme/one
-fractal agents show agent/garden/worker
-fractal agents queue agent/garden/worker
+st doctor
+st service status
+st missions show mission-run/garden/readme/one
+st agents show agent/garden/worker
+st agents queue agent/garden/worker
 ```
 
 | What you see | Next check |
 | --- | --- |
 | Daemon unavailable | `service status` and [startup replay](#startup-replay-and-an-unavailable-api); an active process may still be recovering. |
-| Missing `fractal` or `pty` | [PATH and PTY](#path-pty-and-harness-login); check the daemon user's login-shell PATH too. |
+| Missing `st` or `pty` | [PATH and PTY](#path-pty-and-harness-login); check the daemon user's login-shell PATH too. |
 | macOS launch or permission denied | [Signing and permissions](#macos-signing-and-permissions). |
 | Agent starting or waiting | Attach to its terminal and finish login, trust, or permission prompts. |
 | Agent stopped, failed, or missing from the list | Show its exact ID and history; read its stop reason before starting it. |
@@ -31,10 +31,10 @@ fractal agents queue agent/garden/worker
 To inspect a stopped agent and why it stopped:
 
 ```sh
-fractal agents ls --all
-fractal agents show agent/garden/worker --json
-fractal subject history agent/garden/worker --limit 20
-fractal terminals peek agent/garden/worker
+st agents ls --all
+st agents show agent/garden/worker --json
+st subject history agent/garden/worker --limit 20
+st terminals peek agent/garden/worker
 ```
 
 The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
@@ -81,8 +81,8 @@ Other platforms and non-glibc Linux builds do not start this worker.
 ## Check usage without starting another turn
 
 ```sh
-fractal usage --hours 24 --by agent
-fractal usage --hours 24 --by mission
+st usage --hours 24 --by agent
+st usage --hours 24 --by mission
 ```
 
 These are observed token totals. Cost is an API-equivalent estimate, and unpriced models are shown as unpriced. Account limits and stop policies can explain why an agent stopped; the agent's reason is more useful than repeatedly restarting it. See [model accounts](st3/accounts.md).
@@ -92,17 +92,17 @@ These are observed token totals. Cost is an API-equivalent estimate, and unprice
 Finish a first-run prompt by attaching, then detach with **Ctrl+\\**:
 
 ```sh
-fractal terminals attach agent/garden/worker
+st terminals attach agent/garden/worker
 ```
 
 After fixing its dependency, restart a stale running agent; explicitly start an intentionally stopped one. Resume a suspended one instead. [Agent lifecycle](seat-lifecycle.md) gives the commands and their different effects. Retry failed work through the graph after correcting its cause; preserve the failure evidence rather than completing a step just to make the display green.
 
-For a Claude agent with stale delivery, check `fractal claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that an agent's channel connected.
+For a Claude agent with stale delivery, check `st claude-channel status`, then attach and use Claude's `/mcp` menu. If `plugin:st-channel:fractal` says failed, select it and **Reconnect**. A ready installation does not by itself prove that an agent's channel connected.
 
 If doctor reports an operational contradiction, inspect the bounded repair plan:
 
 ```sh
-fractal repair dry-run
+st repair dry-run
 ```
 
 Apply only the exact reviewed token with the procedure in [operational repair](st3/operational-state/README.md#doctor-and-operational-repair). A changed plan needs a new review; repair appends transitions instead of deleting history.
@@ -117,7 +117,7 @@ See [CLI tour](https://github.com/compoundingtech/fractal/blob/main/docs/site/re
 
 ## Startup replay and an unavailable API
 
-During daemon startup, `fractal doctor` reads a local readiness file without waiting for SQLite or
+During daemon startup, `st doctor` reads a local readiness file without waiting for SQLite or
 an API listener. It reports `starting`, the current recovery phase, and committed frontier/target
 when projection has begun. Full replay also reports its stage and, during base claims, processed
 claims/total; those counts describe uncommitted work, not a newer committed frontier. Updates
@@ -125,8 +125,8 @@ occur at stage boundaries and every 1,000 base claims. The record changes to `se
 both local API and paired gateway sockets have bound. Serving means the APIs accept requests;
 projection health remains a separate doctor check.
 
-`fractal service status` adds this readiness to the daemon service line, so a service manager's
-`active` or `running` state is not mistaken for API readiness. `fractal doctor --json` includes the
+`st service status` adds this readiness to the daemon service line, so a service manager's
+`active` or `running` state is not mistaken for API readiness. `st doctor --json` includes the
 local record as `startup`; if the API is unreachable during recovery it reports a failed
 startup check and exits nonzero. Once the API answers, `starting` is informational and the
 API's health checks determine the result, even before the gateway has bound.
@@ -162,21 +162,21 @@ reset state, delete the database or downgrade across a migration to get a reacha
 
 ```sh
 command -v st st3 pty
-fractal --version --json
-fractal doctor
+st --version --json
+st doctor
 ```
 
 Use the bin directory from your chosen archive or Nix route in the daemon user's login-shell
 PATH. Open a new terminal after updating your shell profile. Avoid mixing an old archive's
-`fractal` with a new Nix profile or another PTY install. `doctor` checks the daemon's environment;
+`st` with a new Nix profile or another PTY install. `doctor` checks the daemon's environment;
 working commands in your current shell alone do not prove the service sees them. Refresh
-service definitions with `fractal service install` after a changed executable path when they are
+service definitions with `st service install` after a changed executable path when they are
 manually managed. If Home Manager owns the daemon, update its pinned input and activate that
 configuration instead; follow the [Home Manager upgrade](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/upgrading.md).
 
 Log in to the harness as that same OS user, attach to the affected agent and finish login/trust
 prompts. Check its declared workspace and [account](st3/accounts.md) rather than copying another
-user's credentials. A missing Claude channel needs `fractal claude-channel status` and the connection
+user's credentials. A missing Claude channel needs `st claude-channel status` and the connection
 check above. A failed omp/OpenCode admission has exact boundary diagnostics; use
 [admission guidance](st3/seat-deploys.md#harness-admission-at-the-next-launch). Attach and inspect
 before restarting repeatedly or overriding admission.
@@ -185,7 +185,7 @@ before restarting repeatedly or overriding admission.
 
 Verify Python 3 is installed, the configured app path is stable, and the selected signing
 identity exists. Release executables are ad-hoc signed, not notarized. Follow macOS's explicit
-approval flow for the verified download and run `fractal service permissions` for the service's
+approval flow for the verified download and run `st service permissions` for the service's
 Full Disk Access/Developer Tools guidance. Permissions can need renewed approval after ad-hoc
 updates. Do not globally disable Gatekeeper or remove quarantine from unrelated files.
 A configured missing or wrong-team signing identity fails instead of falling back; see
@@ -195,9 +195,9 @@ ordinary agent and mission use.
 ## Imported agents and saved sessions
 
 ```sh
-fractal import ls --all
-fractal import show SESSION
-fractal agents show agent/import/codex/ID
+st import ls --all
+st import show SESSION
+st agents show agent/import/codex/ID
 ```
 
 Use actual IDs from discovery; these are placeholders. Check the native session's owning home,
@@ -210,8 +210,8 @@ whether to resume, start or restart them.
 ## Replication and upgrade checks
 
 ```sh
-fractal replication status
-fractal doctor
+st replication status
+st doctor
 ```
 
 Compare sources on every member and follow [two-machine checks](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md)

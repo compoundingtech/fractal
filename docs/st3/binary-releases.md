@@ -78,8 +78,8 @@ An extracted archive can also be installed with `./install.sh --bin-dir
 command payload is `st3`, the relative `fractal` and `st` links, and `pty`. The source migration
 tool remains available as the separate `fractal-migrate` Cargo package.
 
-`fractal` opens the same terminal interface; `fractal tui` opens it explicitly, and
-`fractal web` opens the web interface. Other arguments behave like `st`. Release and
+The opt-in `fractal` alias opens the same terminal interface; `st ui` opens it explicitly, and
+`st web` opens the web interface. Other arguments behave like `st`. Release and
 source installers add `fractal -> st3` only when the destination is free or already
 links to this installation's `st3`. They leave foreign files, directories and links
 intact, and do not introduce the alias when a foreign `fractal` exists elsewhere on
@@ -89,7 +89,7 @@ own `~/.st-instance/NAME/bin`, not the default command directory. Default Nix an
 Home Manager installations do not expose `fractal`; those paths require explicit opt-in.
 
 Bare `fractal` follows bare `st`'s first-run setup and terminal/agent guards;
-`fractal tui` follows explicit `st ui`. Setup records an owned `fractal` symlink
+The alias also forwards explicit UI commands. Setup records an owned `fractal` symlink
 in its uninstall manifest. Uninstall also discovers that alias beside a recorded
 `st3` when upgrading an older manifest, and preserves a foreign replacement of
 `fractal`, including inside a named instance. The ownership check applies only to
@@ -116,11 +116,11 @@ unless the release explicitly documents a downgrade. Before upgrading a healthy 
 store, make a [claim backup](backups.md) and preserve excluded local data separately.
 
 First-run `st` offers to install the background service. For an upgrade or changed
-executable path, `fractal service install` refreshes
-service definitions and restarts daemon and replication services. `fractal service restart` suffices
+executable path, `st service install` refreshes
+service definitions and restarts daemon and replication services. `st service restart` suffices
 when those definitions already point at the intended binaries. Schedule that restart, compare
-`fractal --version --json` with the daemon's `machine_version` in `fractal doctor --json`, and verify peer
-health. `fractal doctor --strict` also treats warnings as failures: inspect each warning rather than
+`st --version --json` with the daemon's `machine_version` in `st doctor --json`, and verify peer
+health. `st doctor --strict` also treats warnings as failures: inspect each warning rather than
 assuming an optional-tool warning means that the API is unavailable. Restarting
 invalidates an ongoing continuous soak window, so coordinate that separately from downloading or
 installing files.
@@ -201,7 +201,7 @@ main builds continue. PRs above the documented [adoption boundary](release-impac
 also need a fresh valid fragment before merging. See [release impact authoring](release-impact.md) for
 committed fragments, measurements, historical backfills, and a notes-only preview.
 
-Archive builds carry a clean release stamp: `fractal --version` reports the package
+Archive builds carry a clean release stamp: `st --version` reports the package
 version and source revision with `(release)`, and JSON exposes the same machine
 version. A tag build uses its semantic tag version; untagged main builds use the
 Cargo package version and exact revision. Daily publication reuses those tested

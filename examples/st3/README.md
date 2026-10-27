@@ -12,8 +12,8 @@ All names, repositories, paths, and people are invented. Replace them before you
 ## How the pieces fit
 
 - **A durable agent is a seat.** Declare it as a top-level `agent` in its own file and apply it with
-  `fractal apply FILE --as person/NAME`. A seat has no mission owner, so no mission's end stops
-  it. Stop it with `fractal agents stop`. Do not model a durable agent as a mission with no steps: that
+  `st apply FILE --as person/NAME`. A seat has no mission owner, so no mission's end stops
+  it. Stop it with `st agents stop`. Do not model a durable agent as a mission with no steps: that
   run completes at once and stops the agent it owns.
 - **Work reaches a seat as mission steps.** A step `assigned-to` the seat's exact subject waits in
   the seat's queue. The seat holds one step at a time and takes the next ready step in queue order.
@@ -21,15 +21,15 @@ All names, repositories, paths, and people are invented. Replace them before you
 - **Agents react to graph events.** Steps, `depends-on`, gates, observers, subscriptions, and
   schedules move work forward. Nobody polls in a turn.
 - **Results live in the graph.** Complete the step with the result, or store a longer result with
-  `fractal documents put` and cite the reference. A report message is invisible to the graph.
-- **Missions are finite.** Publishing a mission stores an immutable definition; `fractal missions start`
+  `st documents put` and cite the reference. A report message is invisible to the graph.
+- **Missions are finite.** Publishing a mission stores an immutable definition; `st missions start`
   starts a run. A mission that owns an observer, subscription, or schedule needs a step that keeps
   its run open, such as the `retire` gate in [`github-intake.kdl`](github-intake.kdl).
 
-Publish exact hand-authored missions with `fractal apply FILE --as ACTOR`. For
-conversational planning, use `fractal launch start`, review the candidate with `fractal launch preview`,
-and approve it with `fractal launch approve-and-launch`. An authorized agent uses
-`fractal work publish-mission` while it owns the declared producing step.
+Publish exact hand-authored missions with `st apply FILE --as ACTOR`. For
+conversational planning, use `st launch start`, review the candidate with `st launch preview`,
+and approve it with `st launch approve-and-launch`. An authorized agent uses
+`st work publish-mission` while it owns the declared producing step.
 
 ## Find an example by task
 
@@ -104,7 +104,7 @@ and chief seat files declare other seats, named for their roles. omp seats run b
 
 Prefer a built-in gate to a command: `document`, `merged`, `ci-passed`, and `cargo-test` answer
 what gates shelled out for most; see [`land-and-verify.kdl`](land-and-verify.kdl). Check a
-mission's gates before you publish it with `fractal missions check FILE`.
+mission's gates before you publish it with `st missions check FILE`.
 
 Gates run through `sh -c` with the daemon's login environment and the command recorder first on `PATH`:
 
@@ -127,7 +127,7 @@ recurring bad pattern is to hit that wall, assume a capability disappeared, and 
 the exact subcommand. Keep this failure-first shape when editing them; turning them into
 field-by-field reference pages would erase their purpose.
 
-Mission goals and constraints describe the work. The skill that `fractal skill` prints describes how
+Mission goals and constraints describe the work. The skill that `st skill` prints describes how
 every agent uses Fractal; do not copy it into a mission constraint. A harness takes no prompt.
 
 Keep durable seat and mission KDL in a Git repository, even when a planner authored it.

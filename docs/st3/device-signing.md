@@ -20,14 +20,14 @@ Every client's tests check against that file.
 
 ## Enrollment
 
-1. On a trusted machine, the person runs `fractal devices pair` (or the equivalent client-API call).
+1. On a trusted machine, the person runs `st devices pair` (or the equivalent client-API call).
    It returns a pairing code and a separate person-root fingerprint. Copy the fingerprint from this trusted machine independently of the code.
 2. The device sends `POST /v1/client/pairings/{id}/complete` with three fields:
    - `device_public_key`: the device's public key.
    - `key_storage`: `secure-enclave` or `software`. Optional.
    - `code`: the pairing code.
 3. The daemon pairs the device as before. When `device_public_key` is a signing key and the
-   pairing grants `control.messages` (`fractal devices pair --full-control`), the daemon also enrolls
+   pairing grants `control.messages` (`st devices pair --full-control`), the daemon also enrolls
    it. A device paired only to read, such as a display, gets no key that speaks for the person.
    Enrolment:
    - The person's root key, which that node holds, writes a `principal.key-granted` claim with
@@ -54,14 +54,14 @@ Every client's tests check against that file.
 On the trusted machine, begin a pairing as the person:
 
 ```sh
-fractal devices pair cli-device --as person/avery --full-control
+st devices pair cli-device --as person/avery --full-control
 ```
 
 On the device, complete it using the member gateway's HTTP or HTTPS origin and the returned
 pairing ID. The command prompts privately for the single-use code, or reads it from stdin:
 
 ```sh
-fractal devices complete https://member.example pairing/PAIRING_ID --fingerprint sha256:FINGERPRINT
+st devices complete https://member.example pairing/PAIRING_ID --fingerprint sha256:FINGERPRINT
 ```
 
 HTTP is allowed by default for loopback, private addresses and tailnet addresses, including
@@ -69,7 +69,7 @@ Tailscale's `100.64.0.0/10` range. Hostnames must resolve entirely to those addr
 **An HTTP address must already be an encrypted path**, such as Tailscale/WireGuard or an SSH
 tunnel: the pairing code and bearer credentials cross it. Both commands print this notice when
 using HTTP. Other HTTP addresses are refused by default. On an already encrypted path, use
-`--allow-public-http` with `fractal devices complete` to override that restriction.
+`--allow-public-http` with `st devices complete` to override that restriction.
 The override is saved as `allow_public_http: true` on that device in the private profile;
 existing profiles can set that field explicitly. The override also permits ambient HTTP proxies;
 ensure that the proxy path is encrypted and trusted too. HTTPS requires no override.
@@ -89,8 +89,8 @@ One atomic rename replaces both credential and key together; concurrent updates 
 Wrong or reused codes, invalid keys and failures before that commit leave the existing profile
 unchanged. If response validation or saving fails after the member consumes the code, the error
 identifies the possible orphaned device and gives a revoke hint. On the trusted machine, inspect
-`fractal devices ls --as person/avery`, then revoke that device with
-`fractal devices revoke device/DEVICE_ID --as person/avery` before beginning another pairing.
+`st devices ls --as person/avery`, then revoke that device with
+`st devices revoke device/DEVICE_ID --as person/avery` before beginning another pairing.
 The new device may have a live bearer even though the client retained its previous profile.
 If a connection fails before an answer arrives, inspect the trusted device list because the
 client cannot know whether the member consumed the code.
@@ -114,7 +114,7 @@ its code; inspect signing history on the trusted member. Every refusal after enr
 that revocation. This withdraws signing authority without rewriting the original grant. Retry with
 a fresh signing key. A process crash or a storage failure can prevent cleanup and leave an unused
 signing grant; inspect principal grant and revocation history on the trusted member in that case.
-There is no completed device record for such a grant in `fractal devices ls`; pairing revocation only
+There is no completed device record for such a grant in `st devices ls`; pairing revocation only
 covers completed devices. The trusted begin response carries optional `person_root_fingerprint`.
 The anonymous advertisement never supplies a fingerprint or key.
 New completions require a full person-root fingerprint (`sha256:` plus the 43-character
@@ -226,7 +226,7 @@ the person's text.
 | `device-signature-invalid` | The signature does not match the message. |
 
 Only the daemon that first accepts the send checks the time. Every member checks the signature
-and its chain when the claim arrives, and records the verdict (`fractal doctor`, claim-signatures).
+and its chain when the claim arrives, and records the verdict (`st doctor`, claim-signatures).
 It never checks the time, so the verdict is the same everywhere, whatever order claims arrive
 in.
 

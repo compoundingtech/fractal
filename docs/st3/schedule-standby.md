@@ -79,13 +79,13 @@ records one typed `standby-work-unavailable` failure for that occurrence rather
 than retrying forever. Later occurrences may run after the underlying issue is
 fixed, subject to their normal catch-up policy.
 
-`fractal subject show schedule/NAME` shows the standby declaration, required age,
+`st subject show schedule/NAME` shows the standby declaration, required age,
 this member's observation and reason, and both warnings. The structured response
 adds optional `schedule_standby`; the underlying exact status read carries it in
 `actual.schedule_standby`. It is local observation, not a fleet-wide lease or an
 assurance that an occurrence will start.
 
-`fractal subject history schedule/NAME` prints the same warnings. Structured history
+`st subject history schedule/NAME` prints the same warnings. Structured history
 rows have the optional observation field. Takeovers add optional `standby` detail
 and a plain reason to existing occurrence scheduled/reached claims: host, primary,
 observed heartbeat age and known local view. Original claims remain visible;

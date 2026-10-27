@@ -1,7 +1,7 @@
 # Device-local client quality
 
 Fractal TUI records client experience in `$XDG_CACHE_HOME/st3/stui/slo` (otherwise
-`~/.cache/st3/stui/slo`). `fractal tui --slo` prints the retained hours and exits before
+`~/.cache/st3/stui/slo`). `st ui --slo` prints the retained hours and exits before
 configuration, connections or terminal setup. It creates no directory. These
 measurements never leave the device. The summary contains no person, conversation
 text, resource identifiers or paths. Its only identifying fields are host and build.

@@ -7,10 +7,10 @@ Both clients show the work in your fleet. Finish [getting started](getting-start
 In a terminal on that machine, run:
 
 ```sh
-fractal
+st
 ```
 
-The terminal UI opens a space with tabs and splits, the last one you used on this machine; `fractal tui --space NAME` opens a named one. Spaces are the terminal UI's only layout: `fractal tui --classic` no longer opens the layout from before them, and says to run `fractal tui` or `fractal tui --space NAME` instead. **Ctrl+S** shows or hides the sidebar; choose **Agents** or **Missions** there. **Ctrl+K** finds an agent, mission, machine, space, or text in conversations, and opens **Inbox**, **Usage** and the **Fleet** list; type a name and press **Enter** to open it.
+The terminal UI opens a space with tabs and splits, the last one you used on this machine; `st ui --space NAME` opens a named one. Spaces are the terminal UI's only layout: `st ui --classic` no longer opens the layout from before them, and says to run `st ui` or `st ui --space NAME` instead. **Ctrl+S** shows or hides the sidebar; choose **Agents** or **Missions** there. **Ctrl+K** finds an agent, mission, machine, space, or text in conversations, and opens **Inbox**, **Usage** and the **Fleet** list; type a name and press **Enter** to open it.
 
 - **Inbox** lists your alerts, then updates that ask nothing. An alert is anything waiting on your answer: an ask, a review gate, a launch or revision approval, a harness prompt or login. **Ctrl+H**, when you are not typing, or the alert count in the top bar opens or focuses its tab; the count is hidden when there are no alerts. It sits beside agent tabs: **Tab** switches tabs, **Ctrl+W** closes it, and its tab can move into a split with the tab menu or by dragging. **Esc** does not close Inbox. Each alert also shows in its agent's conversation, above the message box, with one-tap answers (a permission's allow and deny beside the call it would make, shown in full; a plan's approve; a Claude question's options, chosen and sent together; a screen prompt's own answers such as use, skip or trust; a request's named answers) and **open in Inbox** for the whole card. Opening again focuses the existing Inbox in this space, keeping the list and selected card. Follow each card's displayed actions; opening a card does not approve it.
 - **Agents** opens a seat's conversation, with messages, the harness transcript, and tool output. Scroll to read earlier entries; type in the message box and press **Enter** to reply.
@@ -27,7 +27,7 @@ Opening an agent attaches its live terminal; **Ctrl+\\** opens the leader list, 
 Install Fractal on the client machine. Publish the daemon's **paired-only gateway** with the [gateway setup](st3/client-v0/README.md#tailnet-carrier), using HTTPS or an encrypted tailnet route. On the daemon machine, make a pairing challenge:
 
 ```sh
-fractal devices --as person/ada pair --full-control 'Garden laptop'
+st devices --as person/ada pair --full-control 'Garden laptop'
 ```
 
 On the client machine, use your gateway URL and the returned pairing ID:
@@ -37,7 +37,7 @@ printf 'Gateway URL: '; read -r st_gateway_url
 printf 'Pairing ID: '; read -r st_pairing_id
 # Set st_member_fingerprint to the fingerprint obtained through a trusted channel.
 st devices complete "$st_gateway_url" "$st_pairing_id" --fingerprint "$st_member_fingerprint"
-fractal tui --client
+st ui --client
 ```
 
 Enter the single-use code privately when prompted. The saved pairing supplies your person identity and lets the terminal UI connect without a local daemon. See [client-only setup](st3/client-only.md) for multiple members and reconnecting.
@@ -70,7 +70,7 @@ Choose your iPhone when prompted. Release embeds the JavaScript so you can use t
 On your daemon machine, make a separate challenge for the phone:
 
 ```sh
-fractal devices --as person/ada pair --full-control 'Garden iPhone'
+st devices --as person/ada pair --full-control 'Garden iPhone'
 ```
 
 In the app, enter the reachable gateway URL, pairing ID, and code. Open **Agents**, select your worker, and send a message. To read a document, open **Resources**, then **Documents**: tap one in the list, or type `doc/NAME` and tap **Open**. A `doc/…` link in a message, a mission or a step opens that document; inside it, tap a link to follow it and use back to return. Documents are read-only. Images in a conversation and on an ask's card show as a box naming the image, its type and its size; each loads when it scrolls into view. Tap one to zoom (pinch, **Close**) or **Share** it to save it or open it in another app; see [what shows where](st3/attachments.md#what-shows-where). [Build and run the iOS app](site/guides/ios-app.md) has the Xcode prerequisites, simulator and Debug workflow, signing details, and pairing troubleshooting.

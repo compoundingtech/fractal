@@ -1,6 +1,6 @@
 # Gate evidence
 
-`fractal evidence put`, `show`, and `verify` run offline. They require Git with SSH
+`st evidence put`, `show`, and `verify` run offline. They require Git with SSH
 signing support, OpenSSH, repository objects, and an operator-supplied allowed
 signers file. They do not load daemon configuration or contact a Fractal instance.
 
@@ -93,7 +93,7 @@ verifier still reads it, with a pattern that matches only names exactly one obje
 lists a tree-prefixed ref, and `stale_tree` ("records exist, for other trees") is reported only for those
 refs: a tree-prefixed lookup cannot know about other trees' records without a scan, so it says `no_record`.
 Publishers write the tree-prefixed layouts only, the tag and the note (`scripts/evidence-publish`,
-`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `fractal evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
+`scripts/ci-evidence-observe`, `scripts/evidence-wrap`); `st evidence put` (the Rust module, `crates/fractal-kernel/src/evidence`) still writes
 the first layout for its own records and ignores tree-prefixed refs when it lists. The garbage collector
 removes or migrates the first layout; the gate and the signed-tree job fetch only the tree-prefixed refs.
 
@@ -234,12 +234,12 @@ next pull.
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
 one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
-through `fractal sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
+through `st sekrets` so no seat reads the key), configured on the host in `~/.config/evidence-log/signer.json`; the
 log key list is main's `.st/evidence-log-key` (`~/.config/evidence-log/log-keys` on a host whose main has none), and a
 pull never extends a head that list does not sign. The signer starts without the caller's loader variables.
 
 **The log key's custody (interim).** The pinned key (principal `log/evidence`) is a plain file on the log host, readable by
-any process running as the account that runs the timer, until a `fractal sekrets` profile holds it. The log is shadow only
+any process running as the account that runs the timer, until a `st sekrets` profile holds it. The log is shadow only
 until then: nothing skips or refuses on it. Moving the key behind sekrets changes `signer.json` alone, not this file;
 replacing the key is a change of `.st/evidence-log-key`, which the gate protects (a change to it never skips).
 
@@ -274,9 +274,9 @@ already-constructed observation: full/test must be signed; degraded must be
 explicitly unsigned with a null signer. Fetch its objects before importing:
 
 ```sh
-fractal evidence put --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
-fractal evidence show --repo . --record RECORD_ID
-fractal evidence verify --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
+st evidence put --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
+st evidence show --repo . --record RECORD_ID
+st evidence verify --repo . --record RECORD_ID --trusted-signers /tmp/allowed-signers
 ```
 
 `show` prints data and asserts no trust. `verify --record` checks the format,
@@ -317,7 +317,7 @@ version. The file affects this verifier only; it does not activate
 curator enforcement or alter the merge queue.
 
 ```sh
-fractal evidence verify --repo . --revision HEAD --base BASE_COMMIT \
+st evidence verify --repo . --revision HEAD --base BASE_COMMIT \
   --change-id CHANGE_ID --trusted-signers /tmp/allowed-signers
 ```
 
@@ -407,7 +407,7 @@ checkouts, object import, replacement-object resistance and provenance mismatche
 
 ## Protected CI observer
 
-The internal `fractal evidence observe-ci --run RUN --attempt ATTEMPT --artifact ID`
+The internal `st3 evidence observe-ci --run RUN --attempt ATTEMPT --artifact ID`
 command accepts numeric selectors only. It reads its operator-owned configuration
 from the profile's private HOME at `.config/st/evidence-ci.json`. A sekrets grant
 must allow only that installed command prefix, after review and binary pinning.
@@ -466,7 +466,7 @@ Test services emit test tier; production policy rejects those records even when
 their signatures verify. An expired test service refuses to produce records.
 
 The response contains record IDs, explicit tiers, and an object-only base64 pack
-with source and evidence objects. The caller imports it with `git index-pack --stdin`, then uses `fractal evidence put` with its external allowed-signers file.
+with source and evidence objects. The caller imports it with `git index-pack --stdin`, then uses `st evidence put` with its external allowed-signers file.
 No key, configuration, ref or executable is exported. The caller retains/fetches
 source parent history before pushing evidence refs to peers.
 
@@ -489,7 +489,7 @@ work; this does not certify the behavior of all target code or runtime identity.
 `Workspace CI` (or a manual replay from `main`) on runners labelled `evidence-ci`. It never runs
 for a pull request or a fork. `scripts/ci-evidence-observe` asks the protected observer
 (`$EVIDENCE_OBSERVER`, the operator's JSON argument vector; default
-`fractal sekrets -- st3 evidence observe-ci`) to record the run, imports the returned pack into a
+`st sekrets -- st3 evidence observe-ci`) to record the run, imports the returned pack into a
 persistent scratch repository, verifies every full-trust record with `scripts/evidence-verify`
 against the key list in `main`, creates `refs/notes/evidence/<tree>/<record>` and pushes it. It runs no
 check, never replaces an existing ref, and publishes degraded records labelled as unsigned and
@@ -787,7 +787,7 @@ a policy input, until deadlines and the production controller are decided.
 signed note exist for this exact tree and this check? It needs only `git`,
 `ssh-keygen` and Python 3, reads the same `refs/notes/evidence/<tree>/<record-id>` notes
 (one SSH-signed commit per record), and finishes in well under a second on a
-repository with hundreds of records. `fractal evidence verify` stays the reference
+repository with hundreds of records. `st evidence verify` stays the reference
 implementation; the script's tests use real Git repositories and real SSH
 signatures.
 
@@ -807,7 +807,7 @@ its principal before the first slash (`machine/ci1` is level `machine`); it is n
 read from the record. Removing a line revokes every note that key signed.
 
 `kind` comes from the record's `runner`: `nix`, `wrapper` (a command run once and signed by the wrapper) and `sekrets` name themselves, and a runner that starts with `github:` is kind
-`observed`, the central observer's record of a finished GitHub job (`fractal evidence observe-ci`).
+`observed`, the central observer's record of a finished GitHub job (`st evidence observe-ci`).
 Anything else is `unsupported_kind`. An unsigned record at tier `degraded` is never evidence
 and is reported as `degraded`, not as a signature fault, because it is what the observer writes
 when its signer is unreachable. The latest

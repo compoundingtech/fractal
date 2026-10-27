@@ -302,7 +302,7 @@ Nextest's final summary retains flaky outcomes. The four test lanes (`linux-test
 nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
 `genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
 not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
-lines, for `fractal slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 Fractal integration fixtures use the separate `st3-fixture` executable, built automatically by
@@ -1536,7 +1536,7 @@ pull request has merged through the queue.
 
 To roll back, restore the previous ruleset (the JSON is in the body of pull request #916) with
 `gh api --method PUT repos/compoundingtech/fractal/rulesets/20563764 --input old-main-ruleset.json`,
-then start the train again with `fractal missions start` on its mission.
+then start the train again with `st missions start` on its mission.
 
 ## Measured concurrency
 
@@ -1737,7 +1737,7 @@ it does not establish the cause of earlier digest mismatches or a measured speed
 ## Tests the sandboxed Fractal check does not run
 
 `checks.st3` (the Nix build of the Fractal workspace's tests) leaves out the tests named in
-`nix/fractal-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
 Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
 sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
 test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`
