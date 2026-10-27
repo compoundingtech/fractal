@@ -25,8 +25,8 @@ export function isSnapshotChurn(error: unknown): boolean {
     && 'code' in error.response && error.response.code === 'page-cursor-expired';
 }
 
-export function recentTimeline<T extends { sequence: number }>(entries: T[], limit = 100): T[] {
-  return [...entries].sort((a, b) => a.sequence - b.sequence).slice(-limit);
+export function recentTimeline<T extends Pick<Entry, 'id' | 'sequence' | 'timestamp'>>(entries: T[], limit = 100): T[] {
+  return [...entries].sort(before).slice(-limit);
 }
 
 export function timelineText(body: unknown): string | null {
@@ -100,10 +100,30 @@ export function isConversational(entry: Entry): boolean {
   return entry.type !== 'status' && entry.type !== 'usage';
 }
 
-/** st's order: by time, then by sequence. */
-function before(a: Entry, b: Entry): number {
-  const at = (a.timestamp ?? '').localeCompare(b.timestamp ?? '');
-  return at !== 0 ? at : a.sequence - b.sequence;
+type Position = Pick<Entry, 'id' | 'sequence' | 'timestamp'>;
+// Retained entries recur across deltas and page merges. Parse each timestamp once, keeping
+// sub-millisecond precision that Date.parse alone would discard.
+const instants = new WeakMap<Position, { timestamp: string | undefined; millis: number; nanos: number }>();
+const instant = (entry: Position) => {
+  const cached = instants.get(entry);
+  if (cached && cached.timestamp === entry.timestamp) return cached;
+  const parsed = Date.parse(entry.timestamp ?? '');
+  const fraction = entry.timestamp?.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/i)?.[1] ?? '';
+  const value = {
+    timestamp: entry.timestamp,
+    millis: Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY,
+    nanos: Number.isFinite(parsed) ? Number(fraction.padEnd(9, '0').slice(3, 9)) : 0,
+  };
+  instants.set(entry, value);
+  return value;
+};
+
+/** st's presentation order: numeric RFC3339 instant, original source sequence, stable ID. */
+function before(a: Position, b: Position): number {
+  const left = instant(a);
+  const right = instant(b);
+  if (left.millis !== right.millis) return left.millis < right.millis ? -1 : 1;
+  return left.nanos - right.nanos || a.sequence - b.sequence || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
 /** Whether st holds entries before the oldest one held. */
@@ -199,7 +219,7 @@ export async function readOlder<T extends Entry>(
   // Bounded: a session longer than this many pages stops loading with a reason.
   for (let hop = 0; hop < 50; hop++) {
     const page = await read(cursor);
-    const first = [...page.items].sort(before)[0];
+    const first = page.items.reduce<T | undefined>((oldest, item) => !oldest || before(item, oldest) < 0 ? item : oldest, undefined);
     if (!oldest || (first && before(first, oldest) < 0) || !page.hasMore || !page.cursor) return page;
     cursor = page.cursor;
   }

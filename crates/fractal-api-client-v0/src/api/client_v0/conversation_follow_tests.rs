@@ -427,7 +427,7 @@ fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
             }
             let (_, resolved) = resolve_conversation(&fixture.state, &fixture.session_id).unwrap();
             let source = conversation_blocks::source(&fixture.state, &fixture.session_id, resolved.managed.as_ref()).unwrap();
-            let (authoritative, _, native, _) = conversation_first_page_at_generation(
+            let (authoritative, _, native, _, _) = conversation_first_page_at_generation(
                 &fixture.state,
                 &new_client_snapshot(&fixture.state),
                 &session,
@@ -435,6 +435,7 @@ fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
                 resolved.managed.as_ref(),
                 Some(&source),
                 CLIENT_MAX_PAGE_ITEMS,
+                None,
             )
             .unwrap();
             assert!(native);
@@ -551,7 +552,7 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
     );
     let (_, resolved) = resolve_conversation(&fixture.state, &fixture.session_id).unwrap();
     let source = conversation_blocks::source(&fixture.state, &fixture.session_id, resolved.managed.as_ref()).unwrap();
-    let (after, _, native, _) = conversation_first_page_at_generation(
+    let (after, _, native, _, _) = conversation_first_page_at_generation(
         &fixture.state,
         &new_client_snapshot(&fixture.state),
         &session,
@@ -559,6 +560,7 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
         resolved.managed.as_ref(),
         Some(&source),
         CLIENT_MAX_PAGE_ITEMS,
+        None,
     )
     .unwrap();
     assert!(native);
@@ -587,4 +589,53 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
         gap.message,
         "the transcript was rewritten in place; refresh the newest conversation page"
     );
+}
+
+fn replay_native(sequence: u64) -> Value {
+    json!({"id":format!("timeline-entry/native-test-{sequence}"), "sequence":sequence})
+}
+
+#[test]
+fn replay_extent_detects_a_backdated_middle_change_despite_visible_high_water() {
+    let extent = ReplayExtent {
+        native: Some(vec![30, 20, 10]), native_complete: true, ..Default::default()
+    };
+    assert!(extent.native_window_gap(10, &[replay_native(30)]));
+    assert!(!extent.native_window_gap(10, &[replay_native(20), replay_native(30)]));
+}
+
+#[test]
+fn replay_extent_does_not_invent_missing_sequences_between_source_records() {
+    let extent = ReplayExtent {
+        native: Some(vec![90, 12]), native_complete: true, ..Default::default()
+    };
+    assert!(!extent.native_window_gap(12, &[replay_native(90)]));
+}
+
+#[test]
+fn replay_extent_requires_reaching_cursor_before_advancing_a_truncated_source() {
+    let extent = ReplayExtent {
+        native: Some(vec![90, 80]), native_complete: false, ..Default::default()
+    };
+    assert!(extent.native_window_gap(70, &[replay_native(80), replay_native(90)]));
+    assert!(!extent.native_window_gap(80, &[replay_native(90)]));
+}
+
+#[test]
+fn replay_extent_keeps_suppressed_echo_high_water_without_requiring_echo_delivery() {
+    let extent = ReplayExtent {
+        native: Some(vec![20]), native_complete: true, native_suppressed: 30,
+        ..Default::default()
+    };
+    assert_eq!(extent.native_latest(), 30);
+    assert!(!extent.native_window_gap(20, &[]));
+    assert!(!extent.native_window_gap(10, &[replay_native(20)]));
+}
+
+#[test]
+fn replay_extent_does_not_accept_a_graph_sequence_collision_as_native_delivery() {
+    let extent = ReplayExtent {
+        native: Some(vec![20]), native_complete: true, ..Default::default()
+    };
+    assert!(extent.native_window_gap(10, &[json!({"id":"timeline-entry/graph", "sequence":20})]));
 }

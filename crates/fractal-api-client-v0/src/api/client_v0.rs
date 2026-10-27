@@ -1527,9 +1527,9 @@ fn conversation_open_local_marked(
     BEFORE_CONVERSATION_PAGE.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
-    let (page, source_generation, suppressed_sequence) =
-        match conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok(), limit) {
-            Ok((page, generation, _, suppressed)) => (page, generation, suppressed),
+    let (page, source_generation, suppressed_sequence, extent) =
+        match conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok(), limit, None) {
+            Ok((page, generation, _, suppressed, extent)) => (page, generation, suppressed, extent),
             Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS || error.code == "cursor-gap" => return Err(error),
             // OPEN keeps the established managed-transcript availability notice and stored
             // fallback. Successful native reads still capture page and generation together;
@@ -1539,15 +1539,16 @@ fn conversation_open_local_marked(
                 (timeline_first_page(
                     state, &snapshot, session, session_id.to_owned(),
                     &ClientListQuery { limit: Some(limit), ..Default::default() },
-                    Some(error),
-                    managed.as_ref(),
-                )?.0, 0, 0)
+                    Some(error), managed.as_ref(),
+                )?.0, 0, 0, ReplayExtent::default())
             }
         };
+    // The source's native high-water, not the window's: graph-only windows must not rewind it.
     let cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position,
-        native_sequence: native_latest_sequence(&page).max(suppressed_sequence),
+        native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
+            .max(extent.native_latest()),
         source_generation,
     });
     remember_cursor(&cursor, mark.transcript_seen);
@@ -1773,8 +1774,8 @@ fn frame_bytes(frame: &Value) -> usize {
     serde_json::to_vec(frame).map_or(usize::MAX, |bytes| bytes.len())
 }
 
-/// The order a conversation page was built in: native pages by their timeline key, stored
-/// pages by sequence alone. A follower places later changes with the same comparison.
+/// The order a conversation page was built in. Followers use the same chronological key for
+/// stored projections and the source's selected key for native projections.
 #[derive(Clone, Copy)]
 enum WindowOrder {
     Native(crate::external_sessions::TimelineOrder),
@@ -1829,7 +1830,9 @@ fn delta_follows_window(order: WindowOrder, item: &Value, oldest: &Value) -> boo
             WindowOrder::Native(order) => native_entry_key(item)
                 .cmp_in(&native_entry_key(oldest), order)
                 .is_ge(),
-            WindowOrder::Stored => stored_timeline_position(item) >= stored_timeline_position(oldest),
+            WindowOrder::Stored => native_entry_key(item)
+                .cmp_in(&native_entry_key(oldest), crate::external_sessions::TimelineOrder::TimestampSequence)
+                .is_ge(),
         }
 }
 
@@ -4289,6 +4292,7 @@ pub async fn operation_detail(
     )
 }
 
+
 #[derive(Default, Deserialize)]
 pub struct ConversationQuery {
     after: Option<String>,
@@ -4363,9 +4367,126 @@ fn conversation_read_now(
     })
 }
 
+/// Match the IDs minted by the stored projection, never a source's sequence namespace.
+fn stored_timeline_claim_entry_ids(session_id: &str, claim: &ClaimRecord) -> Vec<String> {
+    let suffixes: &[&str] = match claim.kind.as_str() {
+        "harness.timeline" => &["invalid-transition"],
+        "runtime.observed" => &["runtime-status"],
+        "harness.observed" => &["harness-status", "transcript-not-bound"],
+        "harness.diagnostic" => &["diagnostic"],
+        "harness.usage" => &["usage"],
+        "message.sent" => &["message", "content"],
+        _ => &[],
+    };
+    suffixes.iter().map(|suffix| timeline_claim_entry_id(session_id, claim, suffix)).collect()
+}
+
+fn native_entry_sequence(item: &Value) -> Option<u64> {
+    item["id"].as_str()
+        .filter(|id| id.starts_with("timeline-entry/native-"))
+        .and_then(|_| item["sequence"].as_u64())
+}
+
+/// What a bounded conversation window can omit, read beside it. Source sequences are not a
+/// presentation order: graph rows can fill the newest chronological window, and a backdated
+/// change can fall below it, so neither the window's native high-water nor its oldest row
+/// proves that every change since a cursor was delivered.
+#[derive(Default)]
+struct ReplayExtent {
+    /// Native sequences, newest first by sequence and without delivery echoes; `None` when
+    /// nothing was read beside the window.
+    native: Option<Vec<u64>>,
+    /// Whether `native` reaches the source's oldest native entry.
+    native_complete: bool,
+    /// The highest delivery echo among the native entries read beside the window.
+    native_suppressed: u64,
+    /// Every projected entry ID of a stored timeline; native pages have none.
+    stored_ids: Option<Vec<String>>,
+}
+
+impl ReplayExtent {
+    fn from_projection(items: &[Value]) -> Self {
+        let mut native = items.iter().filter_map(native_entry_sequence).collect::<Vec<_>>();
+        native.sort_unstable_by(|left, right| right.cmp(left));
+        Self {
+            native: Some(native),
+            native_complete: true,
+            native_suppressed: 0,
+            stored_ids: Some(items.iter()
+                .filter_map(|item| item["id"].as_str().map(str::to_owned)).collect()),
+        }
+    }
+
+    fn native_latest(&self) -> u64 {
+        self.native.as_ref().and_then(|native| native.first().copied()).unwrap_or(0)
+            .max(self.native_suppressed)
+    }
+
+    fn native_window_gap(&self, mark: u64, items: &[Value]) -> bool {
+        self.native.as_ref().is_some_and(|sequences| {
+            let unread = !self.native_complete
+                && sequences.last().is_none_or(|sequence| *sequence > mark);
+            unread || sequences.iter().filter(|sequence| **sequence > mark).count()
+                != items.iter().filter_map(native_entry_sequence).filter(|sequence| *sequence > mark).count()
+        })
+    }
+}
+
+/// The native extent beside a keyset window. A window that holds the whole source, or one
+/// already newest by sequence, is its own extent. A truncated chronological window reads the
+/// newest native entries by sequence from the same source generation, echo-suppressed like the
+/// window: one entry for the cursor's high-water, or one window more than a replay can deliver.
+#[allow(clippy::too_many_arguments)]
+fn native_replay_extent(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    session_id: &str,
+    source: &crate::external_sessions::ExternalSession,
+    page: &Value,
+    generation: u64,
+    mark: Option<u64>,
+    managed: Option<&super::ManagedSessionOwner>,
+) -> Result<ReplayExtent, ApiError> {
+    let truncated = page["page"]["has_more"].as_bool().unwrap_or(false);
+    let order = native_timeline_order(managed);
+    if !truncated || order == crate::external_sessions::TimelineOrder::Sequence {
+        let mut native = page["items"].as_array().into_iter().flatten()
+            .filter_map(native_entry_sequence).collect::<Vec<_>>();
+        native.sort_unstable_by(|left, right| right.cmp(left));
+        return Ok(ReplayExtent {
+            native: Some(native),
+            native_complete: !truncated,
+            ..Default::default()
+        });
+    }
+    let _span = crate::profile::span("conversation/native-extent");
+    let messages = native_session_messages(state, snapshot, session, session_id, managed)?;
+    let limit = if mark.is_some() { CLIENT_MAX_PAGE_ITEMS + 1 } else { 1 };
+    let (tail, suppressed) = canonical_native_slice(
+        state, snapshot, source, session, session_id, &messages,
+        crate::external_sessions::TimelineOrder::Sequence, None, limit, managed,
+    )?;
+    if source.driver != crate::external_sessions::ExternalDriver::OpenCode
+        && tail.generation != generation
+    {
+        return Err(conversation_replay_gap(
+            session_id, "source-generation",
+            "the transcript was rewritten in place; refresh the newest conversation page",
+        ));
+    }
+    Ok(ReplayExtent {
+        native: Some(tail.items.iter().filter_map(native_entry_sequence).collect()),
+        native_complete: !tail.has_more,
+        native_suppressed: suppressed,
+        stored_ids: None,
+    })
+}
+
 /// Read OPEN and change-replay pages through the same bounded fold, retaining the generation
-/// and suppressed-native high-water without a second native read. The flag says whether the
-/// page came from the native projection rather than the stored timeline.
+/// and suppressed-native high-water. The flag says whether the page came from the native
+/// projection rather than the stored timeline; the extent is what the bounded window can omit.
+#[allow(clippy::too_many_arguments)]
 fn conversation_first_page_at_generation(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -4374,7 +4495,8 @@ fn conversation_first_page_at_generation(
     managed: Option<&super::ManagedSessionOwner>,
     source: Option<&crate::external_sessions::ExternalSession>,
     limit: usize,
-) -> Result<(Value, u64, bool, u64), ApiError> {
+    native_mark: Option<u64>,
+) -> Result<(Value, u64, bool, u64, ReplayExtent), ApiError> {
     let query = ClientListQuery { limit: Some(limit), ..Default::default() };
     match source {
         // Replay selects only its newest bounded projection, including for OpenCode.
@@ -4387,6 +4509,9 @@ fn conversation_first_page_at_generation(
             let (page, generation, suppressed_sequence) = native_slice_page_at_generation(
                 state, snapshot, session, session_id, &query, source, managed,
             )?;
+            let extent = native_replay_extent(
+                state, snapshot, session, session_id, source, &page.0, generation, native_mark, managed,
+            )?;
             // OpenCode's generation moves on every append, so it cannot fence rewrites
             // without turning each append into a full reload.
             let fence = if source.driver == crate::external_sessions::ExternalDriver::OpenCode {
@@ -4394,11 +4519,15 @@ fn conversation_first_page_at_generation(
             } else {
                 generation
             };
-            Ok((page.0, fence, true, suppressed_sequence))
+            Ok((page.0, fence, true, suppressed_sequence, extent))
         }
-        None => crate::performance::task("conversation/first-page", || {
-            Ok((timeline_first_page(state, snapshot, session, session_id.to_owned(), &query, None, managed)?.0, 0, false, 0))
-        }),
+        None => {
+            let mut projected = ReplayExtent::default();
+            let page = crate::performance::task("conversation/first-page", || {
+                timeline_first_page_with_extent(state, snapshot, session, session_id.to_owned(), &query, None, managed, Some(&mut |items| projected = ReplayExtent::from_projection(items)))
+            })?;
+            Ok((page.0, 0, false, 0, projected))
+        }
     }
 }
 
@@ -4412,25 +4541,24 @@ fn conversation_read_now_unbounded(
     let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
         .map_err(ApiError::internal)?;
     let source = conversation_blocks::source(state, session_id, managed.as_ref());
-    let (page, source_generation, native_replay, suppressed_sequence) =
-        conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok(), CLIENT_MAX_PAGE_ITEMS)?;
-    let all = page["items"]
-        .as_array()
-        .ok_or_else(|| ApiError::internal("the timeline has no items"))?;
-    let native_sequences = all
-        .iter()
-        .filter(|item| {
-            item["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("timeline-entry/native-"))
-        })
-        .filter_map(|item| item["sequence"].as_u64());
-    let native_latest = native_sequences.clone().max().unwrap_or(0).max(suppressed_sequence);
-    let native_oldest = native_sequences.min();
-    let local_latest = local_latest_position(state)?;
     let position = after
         .map(|cursor| conversation_position(state, session_id, cursor))
         .transpose()?;
+    let (page, source_generation, native_replay, suppressed_sequence, extent) =
+        conversation_first_page_at_generation(
+            state, &snapshot, session, session_id,
+            managed.as_ref(), source.as_ref().ok(), CLIENT_MAX_PAGE_ITEMS,
+            position.map(|position| position.native_sequence),
+        )?;
+    let all = page["items"]
+        .as_array()
+        .ok_or_else(|| ApiError::internal("the timeline has no items"))?;
+    let native_sequences = all.iter().filter_map(native_entry_sequence);
+    // Source watermarks must not go backward when graph events evict native rows from the
+    // newest display window: the extent reads the source's own high-water beside the window.
+    let native_latest = native_sequences.clone().max().unwrap_or(0).max(suppressed_sequence)
+        .max(extent.native_latest());
+    let local_latest = local_latest_position(state)?;
     if let Some(position) = position {
         if position.store_index > snapshot.store_index
             || position.local_position > local_latest
@@ -4451,6 +4579,9 @@ fn conversation_read_now_unbounded(
         }
     }
     let mut changed_indexes = BTreeSet::new();
+    // Changed graph rows are selected by the entry IDs their claims project to, never by
+    // comparing sequences: native and graph counters are separate namespaces.
+    let mut changed_ids = BTreeSet::new();
     let mut explicit_ids = BTreeSet::new();
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
@@ -4470,24 +4601,24 @@ fn conversation_read_now_unbounded(
         // mirrored harness.timeline entries. Requiring those IDs in a native page creates
         // a false gap on every observation, even when the native transcript is unchanged.
         if let Some(owner) = owner.as_deref().filter(|_| !native_replay) {
-            for claim in state
-                .store
-                .claims_page(Some(owner), None, store_index, None, false, 10_000)
-                .map_err(ApiError::internal)?
-                .claims
-            {
-                changed_indexes.insert(claim.store_index);
-                if claim.kind == "harness.timeline" {
-                    retention_changed |= claim.body.pointer("/fields/entry_type")
-                        .and_then(Value::as_str) == Some("truncation");
-                    if let Some(id) = claim
-                        .body
-                        .pointer("/fields/entry_id")
-                        .and_then(Value::as_str)
-                    {
-                        explicit_ids.insert(id.to_owned());
+            let mut after = store_index;
+            loop {
+                let page = state.store.claims_page(
+                    Some(owner), None, after, snapshot.store_index.checked_add(1), false, 10_000,
+                ).map_err(ApiError::internal)?;
+                for claim in page.claims {
+                    after = after.max(claim.store_index);
+                    changed_indexes.insert(claim.store_index);
+                    changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
+                    if claim.kind == "harness.timeline" {
+                        retention_changed |= claim.body.pointer("/fields/entry_type")
+                            .and_then(Value::as_str) == Some("truncation");
+                        if let Some(id) = claim.body.pointer("/fields/entry_id").and_then(Value::as_str) {
+                            explicit_ids.insert(id.to_owned());
+                        }
                     }
                 }
+                if page.next_cursor.is_none() { break; }
             }
         }
         for claim in owner.as_deref().map(|owner| {
@@ -4498,27 +4629,43 @@ fn conversation_read_now_unbounded(
                 .is_none_or(|message_session| message_session == session_id) {
                 changed_indexes.insert(claim.store_index);
                 message_indexes.insert(claim.store_index);
+                // A stored timeline names a message by its claim; a native page by its digest.
+                changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
+                let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
+                for suffix in ["message", "content"] {
+                    changed_ids.insert(format!(
+                        "timeline-entry/{}/{}-{suffix}",
+                        session_id.trim_start_matches("session/"), &digest[..16],
+                    ));
+                }
             }
         }
         if !native_replay {
-            for claim in state
-                .store
-                .local_observations_after(local_position, 10_000)
-                .map_err(ApiError::internal)?
-            {
-                if claim.subject == owner.as_deref().unwrap_or_default()
-                    && claim.kind == "harness.timeline"
-                {
-                    retention_changed |= claim.body.pointer("/fields/entry_type")
-                        .and_then(Value::as_str) == Some("truncation");
-                    if let Some(id) = claim
-                        .body
-                        .pointer("/fields/entry_id")
-                        .and_then(Value::as_str)
+            let mut after = local_position;
+            loop {
+                let claims = state.store.local_observations_after(after, 10_000)
+                    .map_err(ApiError::internal)?;
+                let exhausted = claims.len() < 10_000;
+                for claim in claims {
+                    let position = crate::store::local_observation_position(&claim)
+                        .ok_or_else(|| ApiError::internal("a local observation has no position"))?;
+                    after = after.max(position);
+                    if position > local_latest { break; }
+                    if claim.subject == owner.as_deref().unwrap_or_default() {
+                        changed_indexes.insert(claim.store_index);
+                        changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
+                    }
+                    if claim.subject == owner.as_deref().unwrap_or_default()
+                        && claim.kind == "harness.timeline"
                     {
-                        explicit_ids.insert(id.to_owned());
+                        retention_changed |= claim.body.pointer("/fields/entry_type")
+                            .and_then(Value::as_str) == Some("truncation");
+                        if let Some(id) = claim.body.pointer("/fields/entry_id").and_then(Value::as_str) {
+                            explicit_ids.insert(id.to_owned());
+                        }
                     }
                 }
+                if exhausted || after >= local_latest { break; }
             }
         }
     }
@@ -4530,7 +4677,8 @@ fn conversation_read_now_unbounded(
             "transcript retention changed; refresh the newest conversation page",
         ));
     }
-    let mut items = all
+    // The window is already in presentation order; the delta keeps it.
+    let items = all
         .iter()
         .filter(|item| {
             let Some(ConversationPosition { native_sequence, .. }) = position else {
@@ -4550,19 +4698,11 @@ fn conversation_read_now_unbounded(
             ) {
                 return !explicit_ids.is_empty() || !changed_indexes.is_empty();
             }
-            explicit_ids.contains(id)
-                || item["sequence"]
-                    .as_u64()
-                    .is_some_and(|sequence| changed_indexes.contains(&(sequence / 4)))
+            explicit_ids.contains(id) || changed_ids.contains(id)
         })
         .cloned()
         .collect::<Vec<_>>();
-    items.sort_by(|a, b| {
-        a["timestamp"]
-            .as_str()
-            .cmp(&b["timestamp"].as_str())
-            .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
-    });
+    let changed = |item: &&Value| item["id"].as_str().is_some_and(|id| changed_ids.contains(id));
     let missing_message_pair = message_indexes.iter().any(|index| {
         ![
             index.saturating_mul(4),
@@ -4572,19 +4712,27 @@ fn conversation_read_now_unbounded(
         .all(|sequence| {
             items
                 .iter()
-                .any(|item| item["sequence"].as_u64() == Some(*sequence))
+                .any(|item| item["sequence"].as_u64() == Some(*sequence) && changed(&item))
         })
     });
     let missing_explicit_id = explicit_ids.iter()
         .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)));
-    let native_window_gap = all.len() == 200
-        && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
-            native_oldest.is_some_and(|first| first > native)
-        });
-    if missing_message_pair || missing_explicit_id || native_window_gap {
+    // Every native entry after the cursor must be in the delta: neither the high-water mark nor
+    // the window's oldest row proves it when the window is chronological.
+    let native_window_gap = position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
+        extent.native_window_gap(native, &items)
+    });
+    // A changed graph row the bounded window omits (for example a backdated observation) must
+    // resynchronize, not be skipped as the cursor advances past it.
+    let graph_window_gap = position.is_some() && extent.stored_ids.as_ref().is_some_and(|ids| {
+        ids.iter().filter(|id| changed_ids.contains(*id)).count()
+            != items.iter().filter(changed).count()
+    });
+    if missing_message_pair || missing_explicit_id || native_window_gap || graph_window_gap {
         let reason = if missing_message_pair { "message-pair" }
             else if missing_explicit_id { "explicit-id" }
-            else { "native-window" };
+            else if native_window_gap { "native-window" }
+            else { "graph-window" };
         return Err(conversation_replay_gap(
             session_id, reason, "the conversation exceeded its bounded replay window",
         ));
@@ -17523,10 +17671,9 @@ mission "example/zero-run" state="ready" {
         full_follower.abort();
     }
 
-    /// Stored pages sort by sequence alone. When observed timestamps run against the sequence,
-    /// a follower must still place changes by sequence, as its frame was built.
+    /// Stored projection and follower placement both follow the original timestamps.
     #[tokio::test]
-    async fn stored_deltas_follow_sequence_order_when_timestamps_run_against_it() {
+    async fn stored_deltas_follow_chronology_when_timestamps_run_against_sequence() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "first-frame-skewed");
         let owner = "agent/first-frame-skewed";
@@ -17565,10 +17712,10 @@ mission "example/zero-run" state="ready" {
             claim("harness.timeline", entry(index, 1, &format!("skewed {index}")));
         }
         let session_id = managed_session_id(owner, incarnation);
-        // The page itself is in sequence order whatever the timestamps say.
+        // The page is chronological despite independent source sequence order.
         let full = timeline_walk(&state, &session_id, 200);
         let position = |id: &str| full.iter().position(|item| item["id"] == id).unwrap();
-        assert!(position("timeline-entry/skewed-5") < position("timeline-entry/skewed-25"));
+        assert!(position("timeline-entry/skewed-25") < position("timeline-entry/skewed-5"));
         let session = ClientSession::local(Some("person/example")).unwrap();
         let follow = |limit: Option<usize>| {
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -17587,14 +17734,12 @@ mission "example/zero-run" state="ready" {
             .await.unwrap().unwrap();
         let held = ids(small_first["items"].as_array().unwrap());
         assert_eq!(small_first["has_more"], true, "{small_first}");
-        assert!(held.contains(&"timeline-entry/skewed-25".to_owned()), "{held:?}");
-        assert!(!held.contains(&"timeline-entry/skewed-5".to_owned()), "{held:?}");
+        assert!(held.contains(&"timeline-entry/skewed-5".to_owned()), "{held:?}");
+        assert!(!held.contains(&"timeline-entry/skewed-25".to_owned()), "{held:?}");
         tokio::time::timeout(Duration::from_secs(10), full_frames.recv()).await.unwrap().unwrap();
-        // A new entry, a revision of a held entry with an early timestamp, and a revision of
-        // an older entry with a late one.
+        // Append and revise the late-timestamp entry already held by the small follower.
         claim("harness.timeline", entry(30, 1, "skewed 30"));
-        claim("harness.timeline", entry(25, 2, "skewed 25 revised"));
-        // First check that a held revision stays a delta even with its early timestamp.
+        claim("harness.timeline", entry(5, 2, "skewed 5 revised"));
         async fn sent_until(
             frames: &mut tokio::sync::mpsc::UnboundedReceiver<(String, u64, Value)>,
             wanted: &[&str],
@@ -17617,26 +17762,25 @@ mission "example/zero-run" state="ready" {
         // Control: the whole-window follower receives the append and held revision as deltas.
         sent_until(
             &mut full_frames,
-            &["timeline-entry/skewed-30", "timeline-entry/skewed-25"],
+            &["timeline-entry/skewed-30", "timeline-entry/skewed-5"],
         )
         .await;
         let small = sent_until(
             &mut small_frames,
-            &["timeline-entry/skewed-30", "timeline-entry/skewed-25"],
+            &["timeline-entry/skewed-30", "timeline-entry/skewed-5"],
         )
         .await;
         assert!(
-            small.iter().any(|item| item["id"] == "timeline-entry/skewed-25" && item["revision"] == 2),
-            "a held entry's revision arrives despite its early timestamp: {small:?}"
+            small.iter().any(|item| item["id"] == "timeline-entry/skewed-5" && item["revision"] == 2),
+            "a held entry's revision arrives despite its smaller source sequence: {small:?}"
         );
-        // Now revise the older entry with a late timestamp: it refreshes the frame's cursor,
-        // not an out-of-window delta. The projection's sequence order decides "older".
-        claim("harness.timeline", entry(5, 2, "skewed 5 revised"));
+        // A revision before the chronological window refreshes the older-page cursor.
+        claim("harness.timeline", entry(25, 2, "skewed 25 revised"));
         let replacement = next_replacement(&mut small_frames).await;
         assert_eq!(replacement["items"].as_array().unwrap().len(), 10);
         let history = history_from_frame(&state, &session_id, &replacement).await;
         assert!(history.iter().any(|item|
-            item["id"] == "timeline-entry/skewed-5" && item["revision"] == 2));
+            item["id"] == "timeline-entry/skewed-25" && item["revision"] == 2));
         small_follower.abort();
         full_follower.abort();
     }
@@ -20898,6 +21042,250 @@ mission "example/zero-run" state="ready" {
     }
 
     #[test]
+    fn mixed_timeline_windows_keep_source_sequences_and_original_revision_chronology() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "chronology-node");
+        let owner = "agent/chronology-owner";
+        let incarnation = "chronology-runtime:i1";
+        let stamp = |at: &str| {
+            chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis() as u64
+        };
+        let append = |subject: &str, kind: &str, fields: BTreeMap<String, Value>| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: Some(owner.into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        // These graph claims have no producer timestamp field. Control only the
+        // private projection fixture's accepted clock, without forging their schema.
+        let graph_clock = rusqlite::Connection::open(root.path().join("graph.db")).unwrap();
+        smallclaims::store::configure_projection_writer(&graph_clock).unwrap();
+        let set_graph_time = |claim: ClaimRecord, at: &str| {
+            graph_clock.execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![stamp(at).to_string(), claim.id],
+            ).unwrap();
+        };
+        set_graph_time(append(owner, "runtime.observed", BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("runtime_id".into(), json!("chronology-runtime")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("terminal".into(), json!(false)),
+        ])), "2026-10-04T17:15:16Z");
+        let native = |operation: &str, id: &str, sequence: u64, revision: u64,
+                      at: &str, role: &str, kind: &str, body: Value| {
+            append(owner, "harness.timeline", BTreeMap::from([
+                ("operation".into(), json!(operation)),
+                ("entry_id".into(), json!(id)),
+                ("sequence".into(), json!(sequence)),
+                ("revision".into(), json!(revision)),
+                ("role".into(), json!(role)),
+                ("entry_type".into(), json!(kind)),
+                ("final".into(), json!(kind != "content")),
+                ("body".into(), body),
+                ("driver".into(), json!("omp")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("observed_at_unix_ms".into(), json!(stamp(at))),
+            ]))
+        };
+        native("append", "timeline-entry/answer", 1, 1, "2026-10-04T21:40:10Z",
+               "assistant", "content", json!({"media_type":"text/plain","text":"working"}));
+        // Old graph events have a larger local store-derived sequence than recent native prose.
+        append(owner, "harness.usage", BTreeMap::from([
+            ("input_tokens".into(), json!(7)),
+            ("semantics".into(), json!("response")),
+            ("driver".into(), json!("omp")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("observed_at_unix_ms".into(), json!(stamp("2026-10-04T21:40:11Z"))),
+        ]));
+        let session_id = managed_session_id(owner, incarnation);
+        set_graph_time(append("message/chronology", "message.sent", BTreeMap::from([
+            ("from".into(), json!("agent/peer")),
+            ("to".into(), json!(owner)),
+            ("session_id".into(), json!(session_id)),
+            ("content".into(), json!("continue")),
+            ("status".into(), json!("sent")),
+        ])), "2026-10-04T21:40:12Z");
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let initial = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let collision_sequence = (state.store.index().unwrap() + 1) * 4;
+        native("finalize", "timeline-entry/answer", 999, 2, "2026-10-04T22:00:00Z",
+               "assistant", "content", json!({"media_type":"text/plain","text":"answer"}));
+        native("append", "timeline-entry/call", collision_sequence, 1, "2026-10-04T21:40:19Z",
+               "assistant", "tool_call", json!({"call_id":"call/chronology","name":"read","arguments":{}}));
+        native("append", "timeline-entry/result", collision_sequence + 1, 1, "2026-10-04T21:40:20Z",
+               "tool", "tool_result", json!({"call_id":"call/chronology","status":"success","media_type":"text/plain","content":"ok"}));
+        let page = timeline_value(&state, &new_client_snapshot(&state), &session, &session_id,
+                                  &ClientListQuery { limit: Some(6), ..Default::default() }).unwrap().0;
+        let entries = page["items"].as_array().unwrap();
+        assert_eq!(entries.iter().map(|entry| entry["type"].as_str().unwrap()).collect::<Vec<_>>(),
+                   ["content", "usage", "message", "content", "tool_call", "tool_result"]);
+        assert_eq!(entries[0]["id"], "timeline-entry/answer");
+        assert_eq!(entries[0]["sequence"], 1);
+        assert_eq!(entries[0]["revision"], 2);
+        assert_eq!(entries[0]["timestamp"], "2026-10-04T21:40:10.000Z");
+        assert_eq!(entries[0]["final"], true);
+        assert_eq!(entries[3]["sequence"].as_u64(), entries[2]["sequence"].as_u64().map(|sequence| sequence + 1));
+        let changes = conversation_read_now(&state, &session, &session_id,
+                                            initial["next_cursor"].as_str()).unwrap();
+        assert_eq!(changes["items"].as_array().unwrap().iter().map(|entry| entry["id"].as_str().unwrap()).collect::<Vec<_>>(),
+                   ["timeline-entry/answer", "timeline-entry/call", "timeline-entry/result"]);
+        let idle = conversation_read_now(&state, &session, &session_id,
+                                         changes["next_cursor"].as_str()).unwrap();
+        assert!(idle["items"].as_array().unwrap().is_empty());
+        let usage = append(owner, "harness.usage", BTreeMap::from([
+            ("input_tokens".into(), json!(77)),
+            ("semantics".into(), json!("response")),
+            ("driver".into(), json!("omp")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("observed_at_unix_ms".into(), json!(stamp("2026-10-04T21:40:21Z"))),
+        ]));
+        assert_eq!(usage.store_index * 4, collision_sequence, "fixture exercises a cross-namespace counter collision");
+        let usage_delta = conversation_read_now(&state, &session, &session_id,
+                                                idle["next_cursor"].as_str()).unwrap();
+        assert_eq!(usage_delta["items"].as_array().unwrap().iter().map(|entry| entry["type"].as_str().unwrap()).collect::<Vec<_>>(), ["usage"]);
+    }
+
+    #[test]
+    fn chronological_graph_changes_outside_window_resynchronize_before_cursor_advances() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "backdated-graph-node");
+        let owner = "agent/backdated-graph";
+        let incarnation = "backdated-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("backdated-runtime")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("terminal".into(), json!(false)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        state.store.append_local_observations_for_test(
+            &(1..=205).map(|sequence| ClaimInput {
+                subject: owner.into(), kind: "harness.timeline".into(), actor: Some(owner.into()),
+                fields: BTreeMap::from([
+                    ("operation".into(), json!("append")),
+                    ("entry_id".into(), json!(format!("timeline-entry/newer-{sequence}"))),
+                    ("sequence".into(), json!(sequence)),
+                    ("revision".into(), json!(1)),
+                    ("role".into(), json!("assistant")),
+                    ("entry_type".into(), json!("content")),
+                    ("final".into(), json!(true)),
+                    ("body".into(), json!({"media_type":"text/plain","text":format!("newer {sequence}")})),
+                    ("driver".into(), json!("omp")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("observed_at_unix_ms".into(), json!(1_791_151_200_000_u64)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).collect::<Vec<_>>(),
+        );
+        let session_id = managed_session_id(owner, incarnation);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let initial = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let usage = |semantics: &str| state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "harness.usage".into(), actor: Some(owner.into()),
+            fields: BTreeMap::from([
+                ("semantics".into(), json!(semantics)),
+                ("driver".into(), json!("omp")),
+                ("input_tokens".into(), json!(7)),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("observed_at_unix_ms".into(), json!(1_791_100_000_000_u64)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        // A suppressed rollup is not an omitted conversation event.
+        usage("response_rollup");
+        let rollup = conversation_read_now(&state, &session, &session_id,
+                                           initial["next_cursor"].as_str()).unwrap();
+        assert!(rollup["items"].as_array().unwrap().is_empty());
+        usage("response");
+        let gap = conversation_read_now(&state, &session, &session_id,
+                                        rollup["next_cursor"].as_str()).unwrap_err();
+        assert_eq!(gap.code, "cursor-gap");
+        assert_eq!(gap.details["full_resync"], true);
+    }
+
+    #[test]
+    fn native_conversation_cursor_survives_a_graph_only_window_and_detects_real_loss() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "native-cursor-node");
+        let owner = "agent/native-cursor-owner";
+        let incarnation = "123:2000-01-01T00:00:00.000Z";
+        let transcript = root.path().join("current.jsonl");
+        std::fs::write(&transcript, format!("{}\n{}\n",
+            json!({"type":"session","id":"native-cursor","timestamp":"2000-01-01T00:00:01Z","cwd":root.path()}),
+            json!({"type":"message","id":"old","timestamp":"2000-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"old native prose"}]}}),
+        )).unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("native-cursor-runtime")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("terminal".into(), json!(false)),
+            ])),
+            ("harness.observed", BTreeMap::from([
+                ("state".into(), json!("working")),
+                ("driver".into(), json!("omp")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ])),
+            ("harness.session-file", BTreeMap::from([
+                ("harness".into(), json!("omp")),
+                ("agent".into(), json!(owner)),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("session_id".into(), json!("native-cursor")),
+                ("path".into(), json!(transcript)),
+            ])),
+        ] {
+            state.store.append_claim(&ClaimInput {
+                subject: owner.into(), kind: kind.into(), actor: Some(owner.into()), fields,
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let session_id = managed_session_id(owner, incarnation);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let before = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let native_before = conversation_position(&state, &session_id, before["next_cursor"].as_str().unwrap()).unwrap().native_sequence;
+        for index in 0..101 {
+            state.store.append_claim(&ClaimInput {
+                subject: format!("message/native-cursor-{index}"), kind: "message.sent".into(),
+                actor: Some("person/example".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("person/example")),
+                    ("to".into(), json!(owner)),
+                    ("session_id".into(), json!(session_id)),
+                    ("content".into(), json!(format!("graph message {index}"))),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let baseline = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let cursor = baseline["next_cursor"].as_str().unwrap();
+        assert_eq!(conversation_position(&state, &session_id, cursor).unwrap().native_sequence, native_before);
+        assert!(conversation_read_now(&state, &session, &session_id, Some(cursor)).unwrap()["items"].as_array().unwrap().is_empty());
+        use std::io::Write as _;
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        writeln!(writer, "{}", json!({"type":"message","id":"new","timestamp":"2099-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"new native prose"}]}})).unwrap();
+        let changed = conversation_read_now(&state, &session, &session_id, Some(cursor)).unwrap();
+        assert_eq!(changed["items"].as_array().unwrap().iter()
+            .filter_map(|item| item["body"]["text"].as_str()).collect::<Vec<_>>(), ["new native prose"]);
+        let after = changed["next_cursor"].as_str().unwrap();
+        // A changed native row omitted by the bounded projection is a real gap, even if a
+        // later native row remains visible; neither the high-water mark nor a first-row guess
+        // proves all changes were delivered.
+        writeln!(writer, "{}", json!({"type":"message","id":"backdated","timestamp":"2000-01-01T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"late old prose"}]}})).unwrap();
+        writeln!(writer, "{}", json!({"type":"message","id":"newest","timestamp":"2099-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"newest prose"}]}})).unwrap();
+        assert_eq!(conversation_read_now(&state, &session, &session_id, Some(after)).unwrap_err().code, "cursor-gap");
+    }
+
+    #[test]
     fn durable_timeline_is_cursor_paged_and_enforces_replace_finalize_identity() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "timeline-node");
@@ -21263,9 +21651,6 @@ mission "example/zero-run" state="ready" {
                 .all(|entry| entry["id"] != "timeline-entry/wrong-incarnation"),
             "explicit timeline claims are fenced to the live incarnation"
         );
-        assert!(entries.windows(2).all(|pair| {
-            pair[0]["sequence"].as_u64().unwrap() < pair[1]["sequence"].as_u64().unwrap()
-        }));
     }
 
     #[test]
