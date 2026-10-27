@@ -116,6 +116,11 @@ fn guard_version_two_upgrades_indexed_predicates_and_preserves_active_bounds() {
         [], |row| row.get(0),
     ).unwrap();
     assert!(trigger.contains("CROSS JOIN replica_envelopes"), "old predicates survived: {trigger}");
+    let projection_delete: bool = upgraded.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='documents_checkpoint_capture_DELETE')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(!projection_delete, "a projection row's removal still fences the capture");
     drop(upgraded);
     let reopened = Store::open(&path, "writer", Arc::new(Plain)).unwrap();
     assert_eq!(epoch(&reopened), before + 1, "ordinary reopen repeated the guard migration");
@@ -352,8 +357,67 @@ fn all_below_cut_tombstone_and_document_protection_mutations_invalidate_capture(
         let updated = checkpoint_capture_epoch(&writer).unwrap();
         assert!(updated > inserted, "{table} update");
         writer.execute(&format!("DELETE FROM {table}"), []).unwrap();
-        assert!(checkpoint_capture_epoch(&writer).unwrap() > updated, "{table} delete");
+        let deleted = checkpoint_capture_epoch(&writer).unwrap();
+        if table == "documents" {
+            // A removed binding only removes protection; the staged protection keeps more.
+            assert_eq!(deleted, updated, "{table} delete");
+        } else {
+            assert!(deleted > updated, "{table} delete");
+        }
     }
+}
+
+#[test]
+fn reopening_narrows_old_projection_fences_without_moving_the_epoch() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let store = Store::open(&path, "writer", Arc::new(Plain)).unwrap();
+    let captured = append(&store, "captured");
+    store.seal_local_batches().unwrap();
+    capture_prefix(&store);
+    store.connection.write().execute_batch(
+        "INSERT INTO blobs(hash,bytes,size) VALUES('blob',x'',0);
+         CREATE TRIGGER documents_checkpoint_capture_DELETE AFTER DELETE ON documents BEGIN
+             UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1;
+         END;",
+    ).unwrap();
+    store.connection.write().execute(
+        "INSERT INTO documents(name,hash,created_index,binding_claim_id) VALUES('document','blob',1,?1)",
+        [&captured.id],
+    ).unwrap();
+    let before = epoch(&store);
+    drop(store);
+    // An older build's triggers on the same store, as after a rollback and a roll forward.
+    let reopened = Store::open(&path, "writer", Arc::new(Plain)).unwrap();
+    assert_eq!(epoch(&reopened), before, "narrowing a fence restarted the capture");
+    reopened.connection.write().execute("DELETE FROM documents", []).unwrap();
+    assert_eq!(epoch(&reopened), before, "the old removal fence survived the reopen");
+}
+
+#[test]
+fn a_projection_row_that_stops_naming_a_captured_claim_leaves_the_capture_valid() {
+    let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
+    let captured = append(&store, "captured");
+    let other = append(&store, "other");
+    let newer = append_at(&store, "newer", 200);
+    store.seal_local_batches().unwrap();
+    capture_prefix(&store);
+    let writer = store.connection.write();
+    writer.execute("INSERT INTO blobs(hash,bytes,size) VALUES('blob',x'',0)", []).unwrap();
+    let bind = "INSERT INTO documents(name,hash,created_index,binding_claim_id) VALUES('document','blob',1,?1)";
+    writer.execute(bind, [&captured.id]).unwrap();
+    let before = checkpoint_capture_epoch(&writer).unwrap();
+    // Rebinding to a claim after the cut, as when a watch or a seat's desired state ends, and
+    // removing the row only take protection away from a captured claim.
+    writer.execute("UPDATE documents SET binding_claim_id=?1", [&newer.id]).unwrap();
+    assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), before, "rebound past the cut");
+    writer.execute("DELETE FROM documents", []).unwrap();
+    assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), before, "removed");
+    writer.execute(bind, [&newer.id]).unwrap();
+    assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), before, "bound past the cut");
+    // Naming a captured claim adds protection the capture may lack.
+    writer.execute("UPDATE documents SET binding_claim_id=?1", [&other.id]).unwrap();
+    assert!(checkpoint_capture_epoch(&writer).unwrap() > before, "rebound onto a captured claim");
 }
 
 #[test]
@@ -789,8 +853,6 @@ fn tombstone_and_document_replace_fence_old_below_cut_content_not_identical_igno
              request_digest,200,checkpoint FROM checkpoint_claims",
         "INSERT OR REPLACE INTO checkpoint_envelopes(writer,sequence,envelope_hash,accepted_at_unix_ms,checkpoint)
          SELECT writer,sequence,envelope_hash,200,checkpoint FROM checkpoint_envelopes",
-        "INSERT OR REPLACE INTO documents(name,hash,created_index,binding_claim_id,binding_key)
-         SELECT name,hash,created_index,?1,binding_key FROM documents",
     ] {
         let tx = writer.transaction().unwrap();
         if sql.contains("?1") {
@@ -802,6 +864,19 @@ fn tombstone_and_document_replace_fence_old_below_cut_content_not_identical_igno
         tx.rollback().unwrap();
         assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), before);
     }
+    // Replacing a captured binding with a later claim only removes protection.
+    writer.execute(
+        "INSERT OR REPLACE INTO documents(name,hash,created_index,binding_claim_id,binding_key)
+         SELECT name,hash,created_index,?1,binding_key FROM documents",
+        [&newer.id],
+    ).unwrap();
+    assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), before);
+    writer.execute(
+        "INSERT OR REPLACE INTO documents(name,hash,created_index,binding_claim_id,binding_key)
+         SELECT name,hash,created_index,?1,binding_key FROM documents",
+        [&captured.id],
+    ).unwrap();
+    assert!(checkpoint_capture_epoch(&writer).unwrap() > before, "replaced onto a captured claim");
 }
 
 #[test]

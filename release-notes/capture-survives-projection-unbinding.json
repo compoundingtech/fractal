@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A checkpoint capture is no longer discarded when a desired, mission or document row stops naming a captured claim, as when a GitHub watch or a seat's desired state ends; only a row that newly names a captured claim still invalidates it",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or storage version change. Opening the store drops the projection tables' removal and collision triggers and reinstalls their update trigger on the new reference only; the trigger version stays 3 and the capture epoch does not move, because narrowing a fence invalidates no capture."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged. Staged protection may name a claim a projection no longer names; protection only keeps claims, so such a plan drops a subset of a fresh plan's."},
+  "compatibility": {"status": "none", "detail": "The epoch is local to each store; mixed builds need nothing."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build is safe: it opens the store at trigger version 3 and adds its removal and collision triggers back."}
+}

@@ -38,7 +38,7 @@ fn mission_definitions_projection_rebuild_advances_capture_epoch() {
 }
 
 #[test]
-fn all_projection_protection_insert_update_delete_paths_advance_capture_epoch() {
+fn projection_rows_that_name_a_captured_claim_advance_capture_epoch_and_removal_does_not() {
     let store = projected_store();
     for (table, copy) in [
         ("desired", /* sqlite-large-value: allow-for-now lv-ha09a321378bc owner=fractal_store::store::checkpoint_capture_epoch_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO desired(subject,kind,revision,claim_id,body) SELECT 'agent/writer.copy',kind,revision,claim_id,body FROM desired WHERE subject='agent/writer.capture'"),
@@ -58,7 +58,8 @@ fn all_projection_protection_insert_update_delete_paths_advance_capture_epoch() 
         let updated = smallclaims::store::checkpoint_capture_epoch(&tx).unwrap();
         assert!(updated > inserted, "{table} update");
         assert!(tx.execute(&format!(/* sqlite-large-value: allow-for-now lv-h8e4bf498f9d1 owner=fractal_store::store::checkpoint_capture_epoch_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table}"), []).unwrap() > 0);
-        assert!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap() > updated, "{table} delete");
+        // A removed row only stops protecting; the staged protection keeps more.
+        assert_eq!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap(), updated, "{table} delete");
         tx.rollback().unwrap();
         assert_eq!(smallclaims::store::checkpoint_capture_epoch(&writer).unwrap(), before);
     }
@@ -95,7 +96,7 @@ fn checkpoint_trim_advances_capture_epoch_with_tombstones_and_deletions() {
 }
 
 #[test]
-fn protection_updates_fence_old_and_new_below_cut_references_but_ignore_newer_targets() {
+fn protection_updates_fence_new_below_cut_references_but_ignore_leaving_one() {
     let store = projected_store();
     let cut: i64 = store.readers.get().query_row(
         "SELECT cut_unix_ms FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
@@ -154,7 +155,9 @@ fn protection_updates_fence_old_and_new_below_cut_references_but_ignore_newer_ta
             &format!(/* sqlite-large-value: allow-for-now lv-hb4745e0911a9 owner=fractal_store::store::checkpoint_capture_epoch_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE {table} SET {reference}=?1 WHERE {reference}=?2"),
             params![newer.id, captured],
         ).unwrap();
-        assert!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap() > protected, "{table} OLD captured reference");
+        // Rebinding away from a captured claim, as when a watch's desired state ends, only
+        // stops protecting it.
+        assert_eq!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap(), protected, "{table} OLD captured reference");
         let updated = smallclaims::store::checkpoint_capture_epoch(&tx).unwrap();
         tx.execute(
             &format!(/* sqlite-large-value: allow-for-now lv-hd9b9667be764 owner=fractal_store::store::checkpoint_capture_epoch_tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM {table} WHERE {reference}=?1"), [&newer.id],
@@ -166,7 +169,7 @@ fn protection_updates_fence_old_and_new_below_cut_references_but_ignore_newer_ta
 }
 
 #[test]
-fn protection_replace_cannot_remove_captured_reference_when_recursive_triggers_are_off() {
+fn protection_replace_onto_an_uncaptured_claim_leaves_the_capture_valid() {
     let store = projected_store();
     let mut writer = store.connection.write();
     writer.pragma_update(None, "recursive_triggers", false).unwrap();
@@ -182,7 +185,7 @@ fn protection_replace_cannot_remove_captured_reference_when_recursive_triggers_a
         let before = smallclaims::store::checkpoint_capture_epoch(&writer).unwrap();
         let tx = writer.transaction().unwrap();
         assert!(tx.execute(/* sqlite-large-value: allow-for-now lv-h7d2ddb9152a1 owner=fractal_store::store::checkpoint_capture_epoch_tests TODO=trace-statement-and-value-representation */ sql, []).unwrap() > 0);
-        assert!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap() > before, "{sql}");
+        assert_eq!(smallclaims::store::checkpoint_capture_epoch(&tx).unwrap(), before, "{sql}");
         tx.rollback().unwrap();
         writer.pragma_update(None, "foreign_keys", true).unwrap();
         assert_eq!(smallclaims::store::checkpoint_capture_epoch(&writer).unwrap(), before);

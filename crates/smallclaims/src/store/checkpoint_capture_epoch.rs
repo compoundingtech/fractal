@@ -15,6 +15,14 @@ const TABLES: &[&str] = &[
     "checkpoint_claims",
     "checkpoint_envelopes",
 ];
+/// Projection rows protect the captured claims they name, and protection only keeps claims.
+/// A row that stops naming a captured claim leaves the staged protection a superset, whose
+/// plan drops a subset of a fresh plan's; only a row that newly names one can need protection
+/// the capture lacks. A projection row's removal or rebinding to a later claim, as when a
+/// GitHub watch or a seat's desired state ends, therefore leaves the capture valid.
+/// Narrowing these fences invalidates no capture, so it needs no epoch or version change, and
+/// an older build that opens the store adds its own triggers back.
+const PROJECTIONS: &[&str] = &["documents", "desired", "mission_definitions", "mission_revisions"];
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
@@ -43,20 +51,31 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
         // epoch bump commit together, so a capture using the old guard must restart.
         for table in TABLES {
             for event in ["INSERT", "UPDATE", "DELETE", "replace"] {
-                transaction.execute_batch(&format!(
-                    /* sqlite-large-value: allow-for-now lv-he1de637574d4 owner=smallclaims::store::checkpoint_capture_epoch TODO=stage-generation-and-keyed-reclamation */ "DROP TRIGGER IF EXISTS {table}_checkpoint_capture_{event};"
-                ))?;
+                drop_trigger(&transaction, table, event)?;
+            }
+        }
+    }
+    for table in PROJECTIONS {
+        let fenced_removal: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name IN (?1, ?2))",
+            params![format!("{table}_checkpoint_capture_DELETE"), format!("{table}_checkpoint_capture_replace")],
+            |row| row.get(0),
+        )?;
+        if fenced_removal {
+            for event in ["UPDATE", "DELETE", "replace"] {
+                drop_trigger(&transaction, table, event)?;
             }
         }
     }
     for table in TABLES {
+        let last = if PROJECTIONS.contains(table) { "UPDATE" } else { "replace" };
         let (exists, installed): (bool, bool) = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1),
                     EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?2)",
-            params![table, format!("{table}_checkpoint_capture_replace")],
+            params![table, format!("{table}_checkpoint_capture_{last}")],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        // Installation is atomic; the final BEFORE trigger marks that table complete.
+        // Installation is atomic; the last trigger created marks that table complete.
         // A runtime can add optional protection tables on a later open.
         if exists && !installed {
             install(&transaction, table)?;
@@ -69,6 +88,13 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
         )?;
     }
     transaction.commit()?;
+    Ok(())
+}
+
+fn drop_trigger(connection: &Connection, table: &str, event: &str) -> Result<()> {
+    connection.execute_batch(&format!(
+        /* sqlite-large-value: allow-for-now lv-he1de637574d4 owner=smallclaims::store::checkpoint_capture_epoch TODO=stage-generation-and-keyed-reclamation */ "DROP TRIGGER IF EXISTS {table}_checkpoint_capture_{event};"
+    ))?;
     Ok(())
 }
 
@@ -228,13 +254,15 @@ fn install(connection: &Connection, table: &str) -> Result<()> {
     } else {
         new.clone()
     };
+    let changes = format!("(OLD.rowid IS NOT NEW.rowid OR {})", differences(table, "OLD"));
+    if PROJECTIONS.contains(&table) {
+        create_trigger(connection, table, "INSERT", "AFTER", &inserted)?;
+        return create_trigger(connection, table, "UPDATE", "AFTER", &format!("({new}) AND {changes}"));
+    }
     for (event, condition) in [
         ("INSERT", inserted),
         ("DELETE", old.clone()),
-        ("UPDATE", format!(
-            "(({old}) OR ({new})) AND (OLD.rowid IS NOT NEW.rowid OR {})",
-            differences(table, "OLD")
-        )),
+        ("UPDATE", format!("(({old}) OR ({new})) AND {changes}")),
     ] {
         create_trigger(connection, table, event, "AFTER", &condition)?;
     }
