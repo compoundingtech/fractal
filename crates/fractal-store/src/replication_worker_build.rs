@@ -148,12 +148,12 @@ mod tests {
         assert_eq!(check(root.path(), daemon).status, "pass");
         report.commit = "old".into();
         fs::write(root.path().join(FILE), serde_json::to_vec(&report).unwrap()).unwrap();
-        let mismatch = check(root.path(), &daemon);
+        let mismatch = check(root.path(), daemon);
         assert_eq!(mismatch.status, "warn");
         assert!(mismatch.message.contains("old"));
         report.pid = 0;
         fs::write(root.path().join(FILE), serde_json::to_vec(&report).unwrap()).unwrap();
-        assert_eq!(check(root.path(), &daemon).status, "warn");
+        assert_eq!(check(root.path(), daemon).status, "warn");
     }
 
     #[cfg(target_os = "linux")]
@@ -167,7 +167,7 @@ mod tests {
         ).unwrap();
         report.start_token = report.start_token.wrapping_add(1);
         fs::write(root.path().join(FILE), serde_json::to_vec(&report).unwrap()).unwrap();
-        let stale = check(root.path(), &daemon);
+        let stale = check(root.path(), daemon);
         assert_eq!(stale.status, "warn");
     }
 }
