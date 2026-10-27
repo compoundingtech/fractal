@@ -299,6 +299,14 @@ fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Val
 fn close_schema(schema: &mut Value) {
     match schema {
         Value::Object(object) => {
+            // A negative enum marks the future-tag arm of an open discriminated union.
+            // Reject these structurally, including inline arms and referenced definitions.
+            if object.get("type").and_then(Value::as_str) == Some("string")
+                && object.get("not").and_then(|excluded| excluded.get("enum")).is_some()
+            {
+                *schema = Value::Bool(false);
+                return;
+            }
             // Open enums are encoded as anyOf(enum, string). Strict mode accepts only known cases.
             if let Some(arms) = object.get("anyOf").and_then(Value::as_array) {
                 if arms.len() == 2 && arms[0].get("enum").is_some() && arms[1] == serde_json::json!({"type": "string"}) {
@@ -307,7 +315,12 @@ fn close_schema(schema: &mut Value) {
                     object.insert("enum".into(), known);
                 }
             }
-            if object.get("type") == Some(&Value::String("object".into())) && object.contains_key("properties") {
+            // An explicit schema-valued additionalProperties is a record/map, even when
+            // it also declares known keys (for example ErrorEnvelope.details).
+            if object.get("type") == Some(&Value::String("object".into()))
+                && object.contains_key("properties")
+                && !matches!(object.get("additionalProperties"), Some(Value::Object(_)))
+            {
                 object.insert("additionalProperties".into(), Value::Bool(false));
             }
             for value in object.values_mut() { close_schema(value); }

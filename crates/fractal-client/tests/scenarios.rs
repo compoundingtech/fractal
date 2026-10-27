@@ -162,3 +162,57 @@ fn scenarios_strict_rejects_unknown_error_codes() {
         WireValue::ErrorEnvelope(envelope) if envelope.code == fractal_client::ErrorCode::Unknown
     )));
 }
+
+fn client_fixture(name: &str) -> Value {
+    serde_json::from_slice(&fs::read(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/st3/client-v0/fixtures").join(name),
+    ).unwrap()).unwrap()
+}
+
+#[test]
+fn scenarios_strict_rejects_inline_future_union_views() {
+    // Read the committed client-v0 timeline fixture, without pinning its payload bytes.
+    let timeline = client_fixture("timeline-views.json");
+    let entry = timeline["value"]["items"][1].clone();
+    let mut slice = scenarios::load_slice(fixtures().join("empty/conversation.json")).unwrap();
+    slice.state = serde_json::json!({ "threads": [{ "items": [entry] }] });
+    slice.decode().expect("a known view must pass strict decoding");
+    slice.state["threads"][0]["items"][0]["body"]["blocks"][0]["view"] =
+        serde_json::json!({ "type": "future-view" });
+    assert!(slice.decode().is_err(), "strict must reject inline unknown union arms");
+    slice.decode = DecodeMode::Tolerant;
+    slice.decode().expect("tolerant mode must retain future views");
+}
+
+#[test]
+fn scenarios_strict_preserves_explicit_error_detail_maps() {
+    let envelope = client_fixture("cursor-gap-error.json");
+    let mut slice = scenarios::load_slice(fixtures().join("empty/sync.json")).unwrap();
+    slice.timeline = vec![serde_json::json!({
+        "_tag": "http-error", "envelope": envelope, "at_ms": 0
+    })];
+    let decoded = slice.decode().expect("strict must accept the committed cursor-gap details");
+    assert!(decoded.iter().any(|value| matches!(
+        &value.value,
+        WireValue::ErrorEnvelope(error) if error.details == envelope["details"]
+    )));
+    // Opaque JSON bags must not be mistaken for unknown union/enum cases.
+    slice.timeline[0]["envelope"]["details"]["opaque"] =
+        serde_json::json!({ "_tag": "Unknown", "raw": "user-data" });
+    slice.decode().expect("strict must leave arbitrary map values opaque");
+    // Declared fields of an open map still retain their own constraints.
+    slice.timeline[0]["envelope"]["details"]["applied"] = Value::String("future-applied".into());
+    assert!(slice.decode().is_err(), "an explicit map does not disable known-field validation");
+}
+
+#[test]
+fn scenarios_strict_accepts_shared_producer_conformance_entries() {
+    // Same input as schema.test.cjs's producer conformance strict-codec test.
+    let conformance = client_fixture("timeline-conformance.json");
+    let items = conformance["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    let mut slice = scenarios::load_slice(fixtures().join("empty/conversation.json")).unwrap();
+    slice.state = serde_json::json!({ "threads": [{ "items": items }] });
+    slice.decode().expect("the shared kit producer vectors must pass strict decoding");
+}
