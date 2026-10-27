@@ -123,7 +123,7 @@ async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
 }
 
 #[tokio::test]
-async fn child_session_detail_resolves_readable_transcript_outside_session_inventory() {
+async fn managed_child_session_detail_resolves_readable_transcript_outside_session_inventory() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("native");
     let transcript = home.join(".omp/agent/sessions/example/native-test.jsonl");
@@ -152,9 +152,29 @@ async fn child_session_detail_resolves_readable_transcript_outside_session_inven
         .into_iter()
         .find(|session| session.native_id == "native-test")
         .unwrap();
-    let child_id = crate::subagent_sessions::child_session_id(&parent, "task-1");
+    let owner = "agent/child-detail-owner";
+    let incarnation = "child-detail-runtime:i1";
+    let routing_parent = super::managed_session_id(owner, incarnation);
+    let child_id = crate::subagent_sessions::child_session_id(&parent, "task-1", &routing_parent);
     let mut state = state(root.path());
-    state.native_session_home = Some(home);
+    // The binding must suffice even when native inventory discovery is unavailable.
+    state.native_session_home = None;
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "runtime_id":"child-detail-runtime", "incarnation_id":incarnation})),
+        ("harness.observed", json!({"state":"idle", "driver":"omp", "incarnation_id":incarnation})),
+        ("harness.session-file", json!({"harness":"omp", "agent":owner, "incarnation_id":incarnation,
+            "session_id":parent.native_id, "path":parent.transcript})),
+    ] {
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(),
+            kind: kind.into(),
+            actor: Some(owner.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
     let app = router(state);
     let path = format!("/v1/client/sessions/{child_id}");
     let (status, detail) = get_request(app.clone(), &path).await;
@@ -180,6 +200,24 @@ async fn child_session_detail_resolves_readable_transcript_outside_session_inven
         }),
         "{timeline}"
     );
+    assert!(
+        timeline["items"].as_array().unwrap().iter().all(|item| {
+            item["body"]["text"] != "parent only"
+                && item["type"] != "status"
+        }),
+        "child timelines must not merge the managed parent's content or claims: {timeline}"
+    );
+    let mut different_parent = parent.clone();
+    different_parent.id = "session/external-0123456789abcdef01234567".into();
+    let mismatched = crate::subagent_sessions::child_session_id(
+        &different_parent, "task-1", &routing_parent,
+    );
+    for suffix in ["", "/timeline"] {
+        let (status, refused) = get_request(
+            app.clone(), &format!("/v1/client/sessions/{mismatched}{suffix}"),
+        ).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    }
     std::fs::remove_file(child_transcript).unwrap();
     let (status, missing) = get_request(app, &path).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
