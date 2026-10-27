@@ -43,6 +43,7 @@ pub use process::{
 };
 pub use procfs::ProcessNamespaceMismatch;
 pub use pty::{
-    Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses, PtyObservation, PtyRuntime,
-    PtySpawnTimeout, PtySpawnTimeoutPhase, TerminalSize,
+    Launch, LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable,
+    ProcfsHidesProcesses, PtyLookup, PtyObservation, PtyRuntime, PtySpawnTimeout,
+    PtySpawnTimeoutPhase, TerminalSize,
 };

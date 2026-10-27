@@ -1204,6 +1204,14 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
     let mut resources = BTreeMap::new();
     resources.insert("arrangement".into(), resource("arrangement", "A person-owned per-register arrangement.", &[("owner", FieldSpec { immutable: true, ..required_reference_to(&["person"]) }), ("body", object())]));
     resources.insert(
+        "uri.reference".into(),
+        resource(
+            "uri.reference",
+            "An external resource addressed by an opaque absolute URI.",
+            &[("uri", immutable_string())],
+        ),
+    );
+    resources.insert(
         "vcs.repository".into(),
         resource(
             "vcs.repository",
@@ -1724,6 +1732,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.person-reassigned",
+            &["step-run"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("work"),
+            true,
+            &[],
+        ),
+        (
             "work.person-done",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -1831,6 +1848,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("gates"),
             true,
             &["gate"],
+        ),
+        (
+            "gate.reviewer-reassigned",
+            &["gate-operation"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("gates"),
+            true,
+            &["gate"],
+        ),
+        (
+            "person.rename.completed",
+            &["person"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
         ),
         (
             "gate.result",
@@ -3170,6 +3205,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("episode", string()),
             ("answer", object()),
         ],
+        "work.person-reassigned" => &[
+            ("previous_person", reference()),
+            ("person", reference()),
+            ("run", reference()),
+            ("generation", reference()),
+            ("attempt", integer()),
+            ("episode", string()),
+        ],
         "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
         | "work.released" | "work.extended" => &[
             ("attempt", integer()),
@@ -3294,6 +3337,17 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("attempt_receipt", required_string()),
             ("finding_refs", required_array()),
             ("evidence", required_array()),
+        ],
+        "gate.reviewer-reassigned" => &[
+            ("request", string()),
+            ("owner", reference()),
+            ("previous_reviewer", reference()),
+            ("reviewer", reference()),
+        ],
+        "person.rename.completed" => &[
+            ("old_person", reference()),
+            ("new_person", reference()),
+            ("report", object()),
         ],
         "gate.result" => &[
             (
@@ -4658,8 +4712,8 @@ mod tests {
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
             "assistant/chatgpt[/session/assistant-grant/ID]".into();
-        assert_eq!(previous.digest(), "8e7ccde6e5aa6baf1abc62c3edd764e2cd5d54ac5a3e051e3c27506f2b485db7");
-        assert_eq!(current.digest(), "c7ff9a92287f2eda551d43d62c91da0007b4747f7297b0b9fca8685b6c1cd782");
+        assert_eq!(previous.digest(), "ef5651f14ba0ecbe04fe285d13c161c129efe8b5225174b42a671ee2e1ea529c");
+        assert_eq!(current.digest(), "cfe6ccc2a0defdd6a3e1682603d74981d04af70754ab49f1b5fb140c5b08b468");
         println!("assistant principal registry digest: {} -> {}", previous.digest(), current.digest());
     }
 
@@ -4804,6 +4858,16 @@ mod tests {
                 BTreeMap::from([
                     ("state".into(), Value::String("unreachable".into())),
                     ("revision".into(), Value::String("claim/revision".into())),
+                    ("next_check_unix_ms".into(), Value::String("1000".into())),
+                ]),
+            ),
+            (
+                "observer/run/throttled",
+                "observer.state",
+                BTreeMap::from([
+                    ("state".into(), Value::String("healthy".into())),
+                    ("error_code".into(), Value::String("local-observer-budget".into())),
+                    ("reason".into(), Value::String("local observer budget reached, next slot at 1000 (Unix ms)".into())),
                     ("next_check_unix_ms".into(), Value::String("1000".into())),
                 ]),
             ),

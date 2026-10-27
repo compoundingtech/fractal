@@ -1,10 +1,10 @@
 # Fractal terminal client
 
-`st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
-a mission, a terminal, Inbox or usage. `st ui --space NAME` opens a named space. `st ui --demo`
+`fractal` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
+a mission, a terminal, Inbox or usage. `fractal ui --space NAME` opens a named space. `fractal ui --demo`
 shows them on invented data and sends nothing. Spaces are stui's only layout: the layout from
 before them is gone ([#1166](https://github.com/compoundingtech/fractal/issues/1166)), and
-`st ui --classic` refuses with what to run instead.
+`fractal ui --classic` refuses with what to run instead. `tui` is an alias of `ui`, including after global options such as `fractal --endpoint URL tui`.
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
 
@@ -15,14 +15,14 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#st3` Nix package and run `ST3_PERSON=person/<your-id> st` in a terminal
+Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
 with a running st3 daemon. For source development, use
 `ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
 A concrete person identity is required so Inbox and devices show the right data.
 
-For a laptop without a daemon, run `st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
-single-use code, then run `st`. The paired member supplies the person identity. See
+For a laptop without a daemon, run `fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
+single-use code, then run `fractal`. The paired member supplies the person identity. See
 [client-only setup](../../docs/st3/client-only.md) for gateway setup, multiple members, private
 credentials, offline cache, and automatic reconnect. `--client` requires a saved pairing;
 `--local` selects the local daemon even when a pairing exists. While offline, the terminal UI keeps its last
@@ -55,7 +55,7 @@ attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press ne
 it on release.
 
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
-conversation. An agent without a terminal (a session st did not start, a harness without one) opens
+conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
 its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
 conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced. A
 device that saved the older `terminal_first` keeps attaching. An alert for the agent shows on top
@@ -70,12 +70,12 @@ their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps
 selected card in a regular, closable tab. Opening it again focuses the existing tab in this
 space. Move it into a split with the tab menu or by dragging; Esc does not close it.
 
-A seat can ask the interface to show something with `st ui open agent/NAME` (also `mission/NAME`,
+A seat can ask the interface to show something with `fractal ui open agent/NAME` (also `mission/NAME`,
 `mission-run/NAME/RUN` and `machine/NAME`), `--split` and `--below` for a split, `--keep-focus` to leave
 the person where they are. The command writes a small file into the configured person's private state
 directory (`st3/stui/requests-KEY`) and waits for a terminal interface of that person on the same machine
 to answer: opened, not found, or nobody answered, when nothing is left queued. A pane never takes the
-focus from a message being typed, and a subject st has not listed yet is waited for a few seconds, so an
+focus from a message being typed, and a subject Fractal has not listed yet is waited for a few seconds, so an
 agent made a moment ago can be opened. A paired device does not read the directory. The
 mission view stays on its mission from step to step; between steps its card says what is up next.
 
@@ -92,7 +92,7 @@ cargo build -p fractal --locked
 ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
 ```
 
-The PTY smoke test runs with or without a local daemon or st config. It checks first-frame and key-to-redraw
+The PTY smoke test runs with or without a local daemon or Fractal config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
 binary, pass its path followed by `--ui --no-panic`; the release build has no debug panic hook. The two
@@ -112,7 +112,7 @@ both unset for ordinary use. The selector only observes the UI: it does not open
 change the actor/endpoint, attach a terminal or alter subscriptions. An existing file is
 never appended to or overwritten; a new file is mode 0600 on Unix.
 
-Start the installed `st` once, using the person's ordinary pairing/configuration and
+Start the installed `fractal` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
 Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
 attachment), `--demo`, or a headless test client as a conversation-render measurement.

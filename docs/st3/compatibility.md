@@ -4,7 +4,11 @@ For your own fleet, install the **same verified release source on every member**
 release's **Upgrade impact** before restart. A patch tag is a publication label, not a promise
 of compatible databases, mixed builds or safe rollback. Check exact sources using `BUILD.json`,
 `RELEASE.json`, `st --version --json` and the daemon's `machine_version` in `st doctor --json`.
-Downloading or installing an archive does not replace a running daemon.
+Downloading or installing an archive does not restart or replace the running daemon **process**.
+It does replace the installed command files and, on macOS, the app bundle. Until an explicit
+restart, the daemon keeps its current build while new CLI invocations use the installed build.
+Follow the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
+alone as a daemon upgrade.
 
 ## Upgrade starting points and limits
 

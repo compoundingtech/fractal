@@ -59,8 +59,40 @@ function PressStory({ scheme }: { scheme: Scheme }) {
   </EmbraceRuntimeProvider></main>
 }
 
-const meta = { title: 'Fractal UI/Transcript press', component: PressStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof PressStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Transcript press', component: PressStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof PressStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'BlurEndsPress:contract-fixture',
+  'BlurEndsPressLight:contract-fixture',
+  'HostInsertAncestorScroll:contract-fixture',
+  'HostInsertAncestorScrollLight:contract-fixture',
+  'HostInsertDocumentScroll:contract-fixture',
+  'HostInsertDocumentScrollLight:contract-fixture',
+  'HostInsertFreshObjects:contract-fixture',
+  'HostInsertFreshObjectsLight:contract-fixture',
+  'HostInsertRetainedRows:contract-fixture',
+  'HostInsertRetainedRowsLight:contract-fixture',
+  'HostInsertShiftedIndex:contract-fixture',
+  'HostInsertShiftedIndexLight:contract-fixture',
+  'InsertAbovePressedRow:contract-fixture',
+  'InsertAbovePressedRowLight:contract-fixture',
+  'NewRowDuringPress:contract-fixture',
+  'NewRowDuringPressLight:contract-fixture',
+  'SameLengthRevision:contract-fixture',
+  'SameLengthRevisionLight:contract-fixture',
+  'SameRowsDuringPress:contract-fixture',
+  'SameRowsDuringPressLight:contract-fixture',
+  'SameRowsScrolledUp:contract-fixture',
+  'SameRowsScrolledUpLight:contract-fixture',
+  'ScrollDuringPress:contract-fixture',
+  'ScrollDuringPressLight:contract-fixture',
+  'SecondPointerHoldsDock:contract-fixture',
+  'SecondPointerHoldsDockLight:contract-fixture',
+  'ToolResultArrives:contract-fixture',
+  'ToolResultArrivesLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Controlled host republish, insertion and pointer timing require identity-retained local transcript turns.' } } } satisfies Story
 

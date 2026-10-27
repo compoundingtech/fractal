@@ -294,7 +294,7 @@ async fn checkpoint_plan_waiting_for_proof(
                     && started.elapsed() < CHECKPOINT_PLAN_PROOF_WAIT =>
             {
                 if !announced {
-                    eprintln!("st: waiting for the running checkpoint proof to finish");
+                    crate::stderr_message("st", format_args!("waiting for the running checkpoint proof to finish"));
                     announced = true;
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;

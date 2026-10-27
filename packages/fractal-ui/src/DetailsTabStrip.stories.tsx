@@ -38,6 +38,7 @@ const styles = stylex.create({
 
 /** Only production components are mounted; the CSF render callback owns host observations. */
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Details Tab Strip',
   component: Workbench,
   parameters: {
@@ -86,6 +87,22 @@ const meta = {
   },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'LoneDetailsNarrow:contract-fixture',
+  'ManyTabs:contract-fixture',
+  'Mounted159SelectedFirst:contract-fixture',
+  'Mounted159SelectedLast:contract-fixture',
+  'Mounted160SelectedFirst:contract-fixture',
+  'Mounted160SelectedLast:contract-fixture',
+  'RawStability159:contract-fixture',
+  'RawStability160:contract-fixture',
+  'RawStability:contract-fixture',
+  'Threshold:contract-fixture',
+  'Wide:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 async function frames(count = 3) {

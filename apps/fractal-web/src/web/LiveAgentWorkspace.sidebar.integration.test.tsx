@@ -533,8 +533,10 @@ describe('shipped live sidebar search', () => {
     await mount(1440)
     const rowName = () => roster().querySelector('[role="row"][data-sidebar-tree-key="agent/example"]')?.getAttribute('aria-label')
     expect(rowName()).toBe('Example Agent, Idle')
+    expect(roster().querySelector('[data-subagent-count]')).toBeNull()
     await act(async () => registry.set(agents, { _tag: 'Observed', value: [agent], freshness: 'stale' }))
     expect(rowName()).toBe('Example Agent, Last verified · Idle')
+    expect(roster().querySelector('[data-subagent-count]')).toBeNull()
   })
 })
 

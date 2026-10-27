@@ -13,6 +13,12 @@ older pushes must not keep consuming runners after their source is superseded. M
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The five required queue checks and complete test partitions are retained.
 
+When a trusted note covers a pull request's web check, `fractal-web-execution` skips at job
+level and allocates no runner. The always-emitted `fractal-web` collector accepts that skip
+only for a pull request with an explicit evidence decision and successful change detection;
+failure and cancellation still fail. Merge-group and manual execution never take this shortcut,
+and the queue retains complete shard receipts.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
@@ -598,9 +604,16 @@ inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack s
 The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
 are disabled by the workspace configuration.
 The store cache key is
-`typescript-client-<os>-node24.18.0-pnpm12.7.0-<sha256 of pnpm-lock.yaml>`.
+`typescript-client-<os>-node24.18.0-pnpm12.15.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
+
+The effect-utils GVS shared-store default and `pnpm:store:retire` task do not
+relocate this workspace's stores: Fractal uses the hoisted linker, a plain
+`nix develop .#web` shell (not the upstream pnpm devenv tasks), explicit
+`${{ runner.temp }}/pnpm-store` in CI, and a sandbox-local `$TMPDIR/store`
+for the fixed-output installation. Store cache keys track pnpm 12.15.0;
+no legacy-store retirement is needed for this cutover.
 
 After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
@@ -677,7 +690,7 @@ their sandbox flags and declared-input boundary remain unchanged.
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
-  `fractal-web-pnpm-<os>-pnpm12.7.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  `fractal-web-pnpm-<os>-pnpm12.15.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
@@ -847,7 +860,7 @@ post-DOM readiness, assertion and close timings. The strict lifecycle assertions
 story-identity checks, matrix size and job timeout are unchanged.
 
 Merge groups and manual runs (`KIT_PLAY_SET=all`) with kit-input changes fan execution
-out into two non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
+out into four non-fail-fast shards. Pull requests' per-commit set runs unsharded on shard 0,
 and the gate refuses shard options for any set but `all`. Each shard validates the
 **full** Storybook index, then partitions it by `SHA-256(storyId) mod N`; adding a story
 cannot move existing stories. `kitShardCount` in `.github/workflows/workspace-ci.ts`
@@ -861,6 +874,25 @@ Storybook build and their strict plays. Browser controls and Storybook wait for 
 stream to finish. The kit typecheck, isolation/negative controls and SDK frame CPU budgets
 stay on shard 0. App-only
 changes schedule just shard 0. `KIT_PLAY_SHARD_*` is scoped to the kit invocation.
+
+The job timeout stays **25 minutes**. On 2026-10-26, the two-shard full matrix
+exhausted shard 0's budget: [run 40357292970](https://github.com/compoundingtech/fractal/actions/runs/40357292970)
+spent about four minutes preparing the runner, six minutes installing and running
+the non-play streams, and two minutes on browser controls/builds before strict plays.
+Shard 0 was cancelled after 26m24s with only 998 of its 1,132 cases completed;
+shard 1 finished its 1,265 cases in 13m02s of plays. This is not a larger shard-0
+story partition: shard 0 also owns the other lanes. Play speed varies too:
+[run 40359051491](https://github.com/compoundingtech/fractal/actions/runs/40359051491)
+took 20m39s for shard 1's same 1,265 cases, leaving little room even without
+the non-play lanes. These jobs use GitHub-hosted runners. Observed shard-0 runs
+took 1,444–1,530 seconds on EPYC 7763 runners versus 822–1,065 seconds on
+EPYC 9V45/9V74 runners; the overruns correlate with runner CPU type, not
+contention on a local build host. Four shards halve each old parity partition while preserving
+the stable hash rule, all cases, axe and receipt coverage. A third shard would
+reduce plays by only about a third, leaving less headroom for shard 0's fixed work
+and the observed runner variation. Extra shards duplicate setup and the small
+Storybook build; they do not duplicate app tests or browser controls. These are
+historical timings, not a measured runtime guarantee for the four-shard workflow.
 
 Every shard publishes `receipt.json` in an artifact named
 `kit-play-<run_id>-<github.sha>-shard-<index>-attempt-<run_attempt>`, even on a play failure, and
@@ -902,7 +934,7 @@ Calling-thread CPU excludes host descheduling and unrelated Node worker-thread C
 Each report includes all samples and host load averages; load never skips the lane or
 changes its thresholds.
 
-The web shell supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+The web shell supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
 mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching
@@ -1239,7 +1271,8 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in:
+The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in. It is
+the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
 stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.

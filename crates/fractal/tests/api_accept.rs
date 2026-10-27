@@ -76,6 +76,7 @@ async fn descriptor_exhaustion_child() {
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server =

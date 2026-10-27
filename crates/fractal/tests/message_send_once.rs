@@ -38,6 +38,7 @@ async fn daemon(root: &Path) -> (PathBuf, Arc<Store>, tokio::task::JoinHandle<()
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let store = state.store.clone();
     let server_socket = socket.clone();

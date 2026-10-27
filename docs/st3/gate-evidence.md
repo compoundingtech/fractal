@@ -1342,7 +1342,10 @@ actor and triggering actor are known; the head commit is present or fetchable; t
 (or the head itself); the opener, the actor and the triggering actor are on `.st/evidence-authors.json` at the base and every non-merge commit of
 the branch has a listed author and committer (the signing guard's own `check_authors`, loaded from the base's `ci-evidence-signing`); and no
 protected file differs between the branch point and the base, or the current tip of the merge's first parent (main moved one since the
-branch: that is about which tree, so it still falls back). The protected files the branch ITSELF changes no longer make it fall back: they are
+branch: that is about which tree, so it still falls back), except the three the gate and verifier only ever read at the base when they judge
+a note (`BASE_READ` in the gate: `.st/evidence-keys`, `.st/evidence-authors.json` and `.st/evidence-log-key`). The head tree's copy of
+those decides nothing, so a key rotation or an author-list change on main no longer voids head signatures made before it. A note the
+change distrusts (a dropped key, say) is still refused, by the lists as they are at the base. The protected files the branch ITSELF changes no longer make it fall back: they are
 the run's protected changes, and a protected change skips only on a `pull_request` run whose note is a host level's (`OWN_LEVELS` in the gate),
 since 2026-10-26 (Nathan: our pull requests skip CI entirely). That is safe because the run is judged by the gate and verifier the workflow
 fetches from `BASE_SHA`, never the pull request's copies, and the merge queue runs every check in full, so a change to the machinery is tested
@@ -1453,7 +1456,8 @@ untracked and ignored files except the inputs that cost minutes to fetch again (
 and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
 host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
-its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked by `ST_AGENT` in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`), aged like the cargo shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. its directory. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
+takes a throwaway worktree too, since what a pool tree keeps is a warm cargo target, so it never waits behind building runs for a tree. Each check that is not one of those builds runs with `BUILD_ADMISSION_CLASS=light`, so the nix wrapper starts its `nix develop` shell as a light start rather than waiting in build admission as a heavy one (as the pre-sign worker starts `.#web` and `.#genie`); a building check never gets it, even when the caller set it. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
@@ -1462,10 +1466,22 @@ evicts whole slots, least recently used first, the old per-clone layout included
 `megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
 from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
 shells only warn when it is missing. If that fails, no check runs and nothing is signed. A failing run is
-recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base. It prints one
+recorded too. `evidence-wrap`, `evidence-sign` and `evidence-verify` come from the accepted base, and so does `st-test` itself: a
+run started from a branch whose `scripts/st-test` differs from the base's re-executes the base's copy first (once: `ST_TEST_REEXEC` names the base
+commit; no opt-out), so how runs queue for pool trees and build slots, and which commit they sign, is always main's, however old the branch. A
+branch's own `st-test` changes are tested by its `ci-script-tests`, which run `st-test-test` from the tree. It prints one
 line per check: result, seconds, and whether the verifier, from the base, now counts the tree as covered
 (`untrusted_signer` until the host's key line is on main). `--push REMOTE` pushes the notes after they verify, with the identity git uses for REMOTE (or
 `EVIDENCE_PUSH_TOKEN`); whether that identity may create `refs/notes/evidence/*` is a repository rule not yet confirmed for agent seats.
+Publication delegates the remote name to git unchanged: its configured URL, pushurl, URL rewrites and credential helper apply,
+including transport configuration supplied through `GIT_CONFIG_*`. `EVIDENCE_PUSH_TOKEN` adds an HTTP header without replacing
+that configuration. The child `evidence-wrap` argv is echoed before each signed check (never the token).
+Only the selected checks' covering records are sent, not the checkout's cached evidence namespace; per-crate publication batches at most
+40 explicit refs per push. Repeating `scripts/st-test --check CHECK --push origin` publishes already-covered evidence without rerunning that check.
+
+**Break-glass for a broken `st-test` on main:** `ST_TEST_REEXEC` set to any value skips st-test's re-execution of the base's copy, so the
+branch's own copy runs. It is only for signing and pushing a fix to `st-test` itself, only on the coordinating lead's word for that one run, and
+never otherwise.
 Without `--push`, the run keeps its records in this repository's local refs: per record a tag `refs/tags/evidence/<tree>/<record>` and a note
 `refs/notes/evidence/<tree>/<record>` (per-crate test records add `refs/tags/evidence/input/rust-tests/<key>/<record>` and
 `refs/notes/evidence-input/rust-tests/<key>/<record>`). Run `scripts/st-test --status` to see each check's coverage, not the tree ID.
@@ -1475,11 +1491,22 @@ Use that run's full tree ID, not necessarily `HEAD^{tree}`: when protected files
 `origin/main`. Without a run record, expand the summary's short ID with `tree=$(git for-each-ref --format='%(refname)'
 "refs/notes/evidence/SHORT*" | cut -d/ -f4 | sort -u)`; proceed only if `test "$(printf '%s\n' "$tree" | wc -l)" -eq 1 &&
 test "${#tree}" -eq 40` succeeds (one full tree ID, not an absent or ambiguous prefix).
-To publish by hand, set `tree` to that full ID and push only that tree's refs: `git push origin $(git for-each-ref
---format='%(refname):%(refname)' "refs/tags/evidence/$tree/" "refs/notes/evidence/$tree/")`. Add the run's
-`refs/tags/evidence/input/...` and `refs/notes/evidence-input/...` refs that the remote lacks as explicit `REF:REF` arguments to that push
-(compare with `git ls-remote --refs origin 'refs/tags/evidence/input/*' 'refs/notes/evidence-input/*'`). Do not push the full evidence globs:
-a shared clone holds other runs' records too, and sending them all can fail with a remote `Internal Server Error` per ref.
+Prefer `scripts/st-test --check CHECK --push origin` for publication, so the runner selects the covering record and its input indexes.
+To publish by hand, set `tree` to that full ID and batch only that tree's explicit refs (Bash):
+
+```bash
+refs=()
+while IFS= read -r ref; do refs+=("$ref:$ref"); done < <(
+  git for-each-ref --format='%(refname)' "refs/tags/evidence/$tree/" "refs/notes/evidence/$tree/"
+)
+for ((i=0; i<${#refs[@]}; i+=40)); do
+  git push origin "${refs[@]:i:40}" || break
+done
+```
+
+Add only that run's `refs/tags/evidence/input/...` and `refs/notes/evidence-input/...` names to `refs` as explicit `REF:REF`
+arguments before the loop, if needed. Do not push the full evidence globs: a shared clone holds other runs' records too,
+and sending thousands together can fail with a remote `Internal Server Error` per ref.
 Push the evidence refs before `git push origin HEAD:BRANCH`, so the branch's first CI run finds them; existing evidence refs are never
 updated or deleted (a ruleset protects `refs/tags/evidence/**`). An agent note can yield `decision=skip ... signer=<principal>` only for
 wrapper-kind checks on `pull_request` runs, never in the merge queue (see "Agent keys"), and only when all skip conditions hold.

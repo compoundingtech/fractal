@@ -28,6 +28,12 @@ against `.st/review-verdict.schema.json` (`scripts/review-validate`); a review w
 nothing is signed**. The signature covers the whole artifact, the review's own output included, so what is signed is exactly what
 was said.
 
+**Status of the tools.** The risk script (`scripts/review-risk`), the schema and its validator
+(`.st/review-verdict.schema.json`, `scripts/review-validate`) are merged. The runner (`scripts/review`) follows in the next pull
+request; until it is merged the reviewer does its steps by hand: it writes the verdict against the table below, runs
+`scripts/review-risk` for the deterministic score and `scripts/review-validate` on the verdict. The daily miss rate starts when the
+independent re-review exists.
+
 | Field | Meaning |
 | --- | --- |
 | `head` | the full 40-character commit the verdict is about; a verdict is void the moment the head moves |

@@ -53,6 +53,30 @@ describe('native usage.period quota presentation', () => {
     if (projected._tag !== 'ok') throw new Error(projected.failure.reason)
     expect(decodeQuota(projected.value, { nativeProjection: true })._tag).toBe('ok')
   })
+  it('lists every declared account, an api-key account by its credits, and keeps undeclared readings', () => {
+    const declared = [
+      { name: 'ada/claude-1', account: reading.account, driver: 'claude', provider: 'anthropic', kind: 'subscription' },
+      { name: 'ada/claude-2', account: 'claude/not-reported', driver: 'claude', provider: 'anthropic', kind: 'subscription' },
+      { name: 'ada/key', account: 'omp/key', driver: 'omp', provider: 'anthropic', kind: 'api-key',
+        credits: { budget_microusd: 200_000_000, used_microusd: 154_000_000, unpriced_tokens: 0,
+          period_start_ms: Date.parse('2026-10-01T00:00:00Z') } },
+    ]
+    const stranger = { ...reading, account: 'claude/stranger', account_ref: null }
+    const input = envelope([reading, stranger])
+    const native = projectNativeQuota({ ...input, value: { ...input.value, accounts: declared } }, NOW)
+    if (native._tag !== 'ok') throw new Error(native.failure.reason)
+    expect(native.value.accounts.map((row) => row.accountId)).toEqual(['ada/claude-1', 'ada/claude-2', 'ada/key', 'claude/stranger'])
+    const [first, second, key] = native.value.accounts
+    expect(first?.limits.map(cellState)).toEqual([
+      { _tag: 'fraction', percent: 97, exhausted: false },
+      { _tag: 'fraction', percent: 0, exhausted: false },
+    ])
+    expect(second?.limits).toEqual([])
+    expect(key?.limits.map(cellState)).toEqual([{ _tag: 'fraction', percent: 77, exhausted: false }])
+    expect(key?.limits[0]?.observation).toMatchObject({ state: 'reported', window: { resetsAt: '2026-11-01T00:00:00.000Z' },
+      usage: { unit: 'usd', used: 154, limit: 200 } })
+    expect(decodeQuota(native.value, { nativeProjection: true })._tag).toBe('ok')
+  })
   it('leaves missing percentages unreported rather than zero', () => {
     const { five_hour_percent: _fiveHour, weekly_percent: _weekly, ...withoutPercentages } = reading
     const row = account(envelope([withoutPercentages]))

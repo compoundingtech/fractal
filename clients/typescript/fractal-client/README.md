@@ -45,9 +45,9 @@ pnpm --filter @fractal/client test
 pnpm --filter @fractal/client typecheck
 ```
 
-The root manifest pins pnpm 12.7.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.0 stable in its development dependencies. `pnpm --filter @fractal/client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
+The root manifest pins pnpm 12.15.0, provisioned by Corepack. The workspace shares one root `pnpm-lock.yaml` across every package in `pnpm-workspace.yaml`. The client pins TypeScript 6.0.3 and Effect 4.0.3 stable in its development dependencies. `pnpm --filter @fractal/client test` runs the contract and schema tests; `typecheck` runs `typecheck:client` (`tsc -p tsconfig.json`) and `typecheck:schema` (`tsc -p tsconfig.schema.json`) for the raw client, type fixtures and rich schemas.
 
-To verify generated files against the Rust generator, also run `cargo run -p fractal-client-codegen -- --check`. The sibling [`st3-views`](../st3-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2.
+To verify generated files against the Rust generator, also run `cargo run -p fractal-client-codegen -- --check`. The sibling [`st3-views`](../st3-views/README.md) package shares the phone's view models with other TypeScript clients. After the root frozen install, `bash scripts/ci-typescript-client` checks the generated client, shared views and iOS consumers together. Alternatively, `nix develop .#web` supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2.
 
 ## Native Fabric transport
 

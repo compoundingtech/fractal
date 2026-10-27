@@ -2,6 +2,10 @@
 //!
 //! Every name is made up. The world moves: one agent streams a reply, a tool runs and
 //! finishes, a message arrives, so the scrolling and "new below" behaviour can be felt.
+//!
+//! `world()` also supplies the shared client contract fixture. Its serialized prose,
+//! recorded commands and sender labels retain their contract spelling; product
+//! branding belongs in rendering, not in these values or arbitrary conversation text.
 
 use super::view::*;
 use std::collections::BTreeMap;
@@ -60,7 +64,7 @@ pub fn world() -> World {
     }
     conversations.insert(s("agent/example/atlas/indexer"), Load::Ready(vec![]));
     conversations.insert(s("session/unmanaged-1"), Load::Failed(s(
-        "This codex process was found running on lark, but st cannot tell which session file it writes, so there is no conversation to show. Start it through st to see it here.",
+        "This codex process was found running on lark, but Fractal cannot tell which session file it writes, so there is no conversation to show. Start it through fractal to see it here.",
     )));
     World {
         inventory_supported: None, inventory_partial: Vec::new(),
@@ -99,6 +103,7 @@ pub fn world() -> World {
         quiet_missions: 6,
         usage: Load::Ready(usage()),
         usage_limits: usage_limits(),
+        usage_accounts: Vec::new(),
         agent_messages: None,
         slo: Load::Ready(slo()),
         slo_history: slo_history(),
@@ -164,6 +169,7 @@ pub fn loading() -> World {
         quiet_missions: 0,
         usage: Load::Loading,
         usage_limits: Vec::new(),
+        usage_accounts: Vec::new(),
         agent_messages: None,
         slo: Load::Loading,
         slo_history: BTreeMap::new(),
@@ -574,7 +580,7 @@ fn attention() -> Vec<Attention> {
             blocked: None,
             kind: AttentionKind::Fault {
                 what: s(
-                    "Release Captain exited 4 times in 10 minutes and st stopped restarting it.",
+                    "Release Captain exited 4 times in 10 minutes and Fractal stopped restarting it.",
                 ),
                 because: s("the weekly release cannot tag until this seat is back"),
                 fix: Some(s(
@@ -649,6 +655,7 @@ fn agent(
     Agent {
         id: s(id),
         name: s(name),
+        lifecycle: None,
         harness,
         state,
         host: s(host),
@@ -777,6 +784,7 @@ fn agents() -> Vec<Agent> {
     list.push(Agent {
         id: s("session/unmanaged-1"),
         name: s("codex in ~/src/scratch"),
+        lifecycle: None,
         harness: Harness::Codex,
         state: AgentState::Unknown,
         host: s("lark"),
@@ -872,6 +880,7 @@ fn step(
         name: s(name),
         state,
         owner: owner.map(s),
+        owner_is_system: false,
         note: note.map(s),
         after: after.iter().map(|name| s(name)).collect(),
         age: s(age),
@@ -1399,7 +1408,7 @@ fn cos_conversation() -> Vec<Entry> {
             "c3",
             "08:02",
             Body::Tool {
-                title: s("$ st missions ls --since 22:00"),
+                title: s("$ fractal missions ls --since 22:00"),
                 state: ToolState::Ok,
                 output: vec![
                     s("mission/fleet/atlas/store-move   running  3/5"),
@@ -1456,7 +1465,7 @@ fn cos_conversation() -> Vec<Entry> {
             "c9",
             "08:44",
             Body::Mail {
-                from: s("st"),
+                from: s("Fractal"),
                 to: s("Chief of Staff"),
                 subject: s("Seat release-captain stopped restarting"),
                 body: s(

@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     for (kind,fields) in [("runtime.observed",json!({"status":"running","runtime_id":"prototype-pty","incarnation_id":"native-pty:prototype","terminal":true})),("harness.observed",json!({"state":"working","driver":"codex","incarnation_id":"native-pty:prototype","evidence_incarnation":"prototype-provider"}))] {
         store.append_claim(&ClaimInput {subject:"agent/example-worker.local".into(),kind:kind.into(),actor:Some("agent/example-worker.local".into()),fields:serde_json::from_value(fields)?,evidence:vec![],expected_subject:None,idempotency_key:None})?;
     }
-    let state=AppState {owning_person:Some("person/robin".into()),store,notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,node:"prototype".into(),state_dir:root.clone(),pty_root:root.join("pty"),pty_binary:PathBuf::from("pty"),fleet_id:None,configured_peers:vec![],client_relay:None,native_session_home:Some(home),planner_default:Default::default()};
+    let state=AppState {owning_person:Some("person/robin".into()),store,notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,node:"prototype".into(),state_dir:root.clone(),pty_root:root.join("pty"),pty_binary:PathBuf::from("pty"),fleet_id:None,configured_peers:vec![],client_relay:None,native_session_home:Some(home),planner_default:Default::default(),assistant_receipts:Default::default()};
     fractal_daemon::api::start_agent_roster(&state);
     fractal_daemon::api::start_attention_list(&state);
     fractal_daemon::api::start_published_lists(&state);
