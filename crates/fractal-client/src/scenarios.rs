@@ -11,7 +11,8 @@ use std::{collections::BTreeMap, fs::File, path::Path, sync::LazyLock};
 pub const ANCHOR: &str = "2030-01-01T12:00:00.000Z";
 /// Client-v0 roots carried by the kit's wire-value traversal.
 pub const WIRE_DEFINITIONS: &[&str] = &[
-    "Agent", "Arrangement", "Runtime", "Machine", "Mission", "Work", "Attention",
+    "Agent", "Arrangement", "Runtime", "Machine", "Session", "Device", "Launch",
+    "LaunchVariant", "Mission", "Work", "Attention",
     "Message", "Resource", "TimelineEntry", "TerminalScreen", "Capabilities",
     "ErrorEnvelope", "SyncPeer",
 ];
@@ -176,8 +177,8 @@ impl Slice {
         };
         let state = &self.state;
         let fields: &[(&str, &str)] = match self.slice.as_str() {
-            "roster" => &[("agents", "Agent"), ("arrangements", "Arrangement"), ("resources", "Resource"), ("runtimes", "Runtime"), ("machines", "Machine")],
-            "details" => &[("missions", "Mission"), ("resources", "Resource"), ("work", "Work")],
+            "roster" => &[("agents", "Agent"), ("arrangements", "Arrangement"), ("resources", "Resource"), ("runtimes", "Runtime"), ("machines", "Machine"), ("sessions", "Session"), ("devices", "Device")],
+            "details" => &[("missions", "Mission"), ("resources", "Resource"), ("work", "Work"), ("launches", "Launch"), ("launch_variants", "LaunchVariant")],
             "attention" => &[("attention", "Attention"), ("resources", "Resource"), ("messages", "Message")],
             "conversation" => {
                 for (index, thread) in array(state, "threads")?.iter().enumerate() {

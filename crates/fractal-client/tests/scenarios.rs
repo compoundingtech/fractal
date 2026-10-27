@@ -226,3 +226,34 @@ fn scenarios_strict_accepts_shared_producer_conformance_entries() {
     slice.state = serde_json::json!({ "threads": [{ "items": items }] });
     slice.decode().expect("the shared kit producer vectors must pass strict decoding");
 }
+
+#[test]
+fn scenarios_decode_all_committed_inventory_roots() {
+    for (kind, field) in [
+        ("roster", "sessions"), ("roster", "devices"),
+        ("details", "launches"), ("details", "launch_variants"),
+    ] {
+        let mut slice = scenarios::load_slice(
+            fixtures().join("fleet-mid-refactor").join(format!("{kind}.json")),
+        ).unwrap();
+        let inventory = slice.state[field].as_array().unwrap();
+        assert!(!inventory.is_empty(), "exercise populated {field}");
+        let decoded = slice.decode().unwrap();
+        let prefix = format!("/state/{field}/");
+        let values: Vec<_> = decoded.iter().filter(|value| value.pointer.starts_with(&prefix)).collect();
+        assert_eq!(values.len(), inventory.len(), "decode every {field} record");
+        for value in values {
+            let WireValue::Resource(resource) = &value.value else { panic!("expected inventory resource") };
+            assert!(matches!((field, resource.as_ref()),
+                ("sessions", fractal_client::Resource::Session(_))
+                | ("devices", fractal_client::Resource::Device(_))
+                | ("launches", fractal_client::Resource::Launch(_))
+                | ("launch_variants", fractal_client::Resource::LaunchVariant(_))
+            ));
+        }
+        slice.state[field][0]["unexpected_inventory_field"] = Value::Bool(true);
+        assert!(slice.decode().is_err(), "strict must validate {field}");
+        slice.decode = DecodeMode::Tolerant;
+        slice.decode().expect("tolerant inventories must accept future fields");
+    }
+}
