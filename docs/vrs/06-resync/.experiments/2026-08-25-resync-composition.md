@@ -14,7 +14,7 @@ visible?
 Direct test-first implementation on the feature branch (decision Q6), no
 throwaway spike. Three integration tests in `tests/resync.rs` exercise
 `ResyncSupervisor::spawn` + `refresh` against a real temp catalog, the real
-inotify backend, and the unchanged `st2::event::emit` ingress:
+inotify backend, and the unchanged `fractal_legacy_runner::event::emit` ingress:
 
 1. `carrier_change_emits_one_superseded_resync_event_and_silent_stores_stay_quiet`
    — seeds baselines silently, then asserts: goal write → exactly one event

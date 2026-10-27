@@ -7,7 +7,8 @@ import {
 } from '@assistant-ui/react'
 import { readingColumnStyles } from './reading-column.stylex'
 import type { ConversationItem } from './embrace-data/model'
-import { accentTokens, tokens, geometry, density } from './embrace-tokens.stylex'
+import { tokens, geometry, density } from './embrace-tokens.stylex'
+import { interactionVars as interaction, geometryVars as g } from './composition-tokens.stylex'
 import { EmbraceVirtualConversation } from './EmbraceVirtualConversation'
 import { WorkLogV1 } from './taste/WorkLogV1'
 import { committedWorkLogs, type WorkLogProjection } from './taste/work-log'
@@ -16,7 +17,7 @@ import { EmbraceToolCall, EmbraceToolRegistrations, EmbraceToolRun, EmbraceToolV
 import { EmbraceScrollViewport } from './EmbraceScrollViewport'
 import { Markdown, MarkdownImagePolicy, type MarkdownImageOpener, type MarkdownImageResolver } from './composition/Markdown'
 import { ThinkingEntry } from './composition/ThinkingEntry'
-import { SendFailure, TranscriptEmptyContent, type TranscriptEmptyState } from './composition/TranscriptFeedback'
+import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEmptyState } from './composition/TranscriptFeedback'
 
 export type EmbraceLevel = 'E1' | 'E2' | 'E3' | 'E4'
 export type SenderVariant = 'S1' | 'S2' | 'S3'
@@ -77,7 +78,7 @@ export function EmbraceMessage() {
       {options.senders === 'S1' ? null : <span aria-hidden="true" data-testid="sender-avatar" {...stylex.props(styles.avatar)}>{label.slice(0, 2).toUpperCase()}</span>}
       <strong {...stylex.props(styles.senderName)}>{label}</strong>
     </header> : null}
-    {editing ? <ComposerPrimitive.Root {...stylex.props(styles.edit)}><ComposerPrimitive.Input aria-label="Edit message" {...stylex.props(styles.input)} /><ComposerPrimitive.Send {...stylex.props(styles.button)}>Save edit</ComposerPrimitive.Send><ComposerPrimitive.Cancel {...stylex.props(styles.button)}>Cancel edit</ComposerPrimitive.Cancel></ComposerPrimitive.Root> : <><MessagePrimitive.Parts components={{ Text: TextPart, Reasoning: ReasoningPart, tools: { Fallback: EmbraceToolCall } }} />{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}</>}
+    {editing ? <ComposerPrimitive.Root {...stylex.props(styles.edit)}><ComposerPrimitive.Input aria-label="Edit message" {...stylex.props(styles.input)} /><ComposerPrimitive.Send {...stylex.props(styles.button)}>Save edit</ComposerPrimitive.Send><ComposerPrimitive.Cancel {...stylex.props(styles.button)}>Cancel edit</ComposerPrimitive.Cancel></ComposerPrimitive.Root> : <><MessagePrimitive.Parts components={{ Text: TextPart, Reasoning: ReasoningPart, tools: { Fallback: EmbraceToolCall } }} />{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}</>}
     {options.embrace !== 'E1' ? <>
       <MessagePrimitive.Attachments components={{ Attachment }} />
       <MessagePrimitive.Error><ErrorPrimitive.Root {...stylex.props(styles.error)}><ErrorPrimitive.Message /></ErrorPrimitive.Root></MessagePrimitive.Error>
@@ -176,7 +177,7 @@ const styles = stylex.create({
   avatar: { display: geometry.avatarDisplay, placeItems: 'center', width: density.avatarSize, height: density.avatarSize, backgroundColor: tokens.recess, borderRadius: geometry.avatarRadius, color: tokens.muted, fontSize: '10px' },
   muted: { color: tokens.muted },
   actions: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px', marginTop: '6px', fontSize: '11px' },
-  button: { backgroundColor: tokens.recess, color: tokens.ink, borderWidth: '1px', borderStyle: 'solid', borderColor: tokens.line, borderRadius: '4px', paddingBlock: '4px', paddingInline: '8px', fontSize: '11px', cursor: 'pointer', ':focus-visible': { outline: `2px solid ${accentTokens.accent}`, outlineOffset: '2px' }, ':disabled': { opacity: 0.45, cursor: 'not-allowed' } },
+  button: { backgroundColor: tokens.recess, color: tokens.ink, borderWidth: '1px', borderStyle: 'solid', borderColor: tokens.line, borderRadius: '4px', paddingBlock: '4px', paddingInline: '8px', fontSize: '11px', cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset }, ':disabled': { opacity: 0.45, cursor: 'not-allowed' } },
   attachment: { display: 'inline-flex', padding: '6px', borderWidth: '1px', borderStyle: 'solid', borderColor: tokens.line, borderRadius: '4px' },
   error: { color: tokens.danger, paddingBlock: '6px' },
   edit: { display: 'flex', flexDirection: 'column', gap: '6px' },

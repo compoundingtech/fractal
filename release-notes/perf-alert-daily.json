@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The main_performance_failures P0 alert also reports a failed daily-perf- lane of the daily long lanes on main, naming the failed lanes",
+  "replay": {"status": "none", "detail": "Delivery receipts and baselines keep their run/attempt/head keys; the new failed_jobs fact is not part of the key."},
+  "schema": {"status": "none", "detail": "No registry change: main_performance_failures stays an array. Its entries gain an optional failed_jobs list, absent for perf.yml runs, and stored entries without it still parse."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "changed", "detail": "The field also lists failed daily-long.yml runs on main (schedule or workflow_dispatch) and reads the jobs of the ten newest; a run counts only when a job named daily-perf-* concluded failure. A daily run red only in other lanes is not reported. perf.yml push failures are reported as before with the same title. A daily failure's title names its lanes (P0: main daily-perf-load failed: ...). A missing daily-long.yml workflow, a refused read or a jobs listing over 100 fails the shared observation, as the perf.yml listing does."},
+  "downtime": {"status": "none", "detail": "No restart beyond the daemon deploy."},
+  "manual": {"status": "changed", "detail": "No subscription change. After deploy, a recipient already subscribed receives a P0 for any of the ten newest failed daily runs on main with a red daily-perf- lane that it has no receipt for, since the field is not new and no baseline is taken."},
+  "recovery": {"status": "none", "detail": "Revert the commit; older builds ignore failed_jobs and treat daily entries as invalid, skipping them."}
+}

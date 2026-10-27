@@ -1069,7 +1069,7 @@ impl ResourceProfileRegistry {
     }
 }
 
-/// RFC 3986 scheme characters: the same test `st2::resync` uses to decide whether a URI string
+/// RFC 3986 scheme characters: the same test `fractal_legacy_runner::resync` uses to decide whether a URI string
 /// carries a scheme at all. Shared so both sides agree on where profiles take over.
 fn is_uri_scheme(scheme: &str) -> bool {
     scheme

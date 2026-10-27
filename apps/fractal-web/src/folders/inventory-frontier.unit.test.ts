@@ -1,5 +1,5 @@
-import type { Arrangement, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@smalltalk/st3-client'
-import { ActionResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import type { Arrangement, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@fractal/client'
+import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { Effect } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi } from 'vitest'
@@ -28,7 +28,7 @@ it('rejects a delayed subscription inventory captured before an accepted rename'
     collectionStream: async (options) => {
       stream = options
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: noop }
     },
     actions: {
       snapshot: Effect.succeed(testSnapshot.id),

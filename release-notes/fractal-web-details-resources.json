@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The agent inspector opens on a Details tab that shows what the session reports, explains missing details and marks context percentages derived from token counts as estimates. Spend has Refresh, and failed reads have their own Try again action. On wider screens, Resources keeps the conversation usable, starts with the agent's To-dos and keeps its last reading for quick reopening.",
+  "replay": {
+    "status": "none",
+    "detail": "No replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Additive: Fractal UI exports SidePanel and SidePanelProps from its shell entry; SidePanel requires a visible heading and accepts optional header actions. Optional DetailsDisplayObservation.pending/detail and DetailsSection.pending fields reserve reported content. Hosts omitting these fields retain the reported-total Subagents badge, visible known-zero observations, and wrapped role/model/session titles. Details reads use existing client read endpoints and request redacted declaration values only. Resources is a labelled complementary region named by the trigger's aria-controls, not a dialog; opening focuses its heading without outlining the whole panel."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Nothing to recover."
+  }
+}

@@ -498,7 +498,7 @@ fn write_agent(catalog: &Path, identity: &str, body: &str) {
 }
 
 fn assert_migration_catalog_safe(catalog: &Path, expected_ids: &[&str]) -> Result<(), String> {
-    let found = st2::discover(catalog);
+    let found = fractal_legacy_runner::discover(catalog);
     if !found.errors.is_empty() {
         return Err(format!("migration discovery errors: {:?}", found.errors));
     }

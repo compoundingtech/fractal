@@ -131,4 +131,12 @@ describe('reactive Fractal tab', () => {
     expect(document.title).toBe('(2) Example · Fractal')
     expect(sidebarAttention({ agents, subjects: [] }).size).toBe(0)
   })
+  it('counts native pending questions through the existing sidebar attention projection', async () => {
+    const asking = { ...agent, activity: 'waiting' as const, ask: { _tag: 'Known' as const, value: 'question' } }
+    const needsYou = sidebarAttention({ agents: [asking], subjects: [] })
+    await render(tabTitle({ agentName: asking.name, needsYouCount: needsYou.size, offline: false }),
+      selectedFaviconState({ agent: asking, needsYou: needsYou.has(asking.ref), offline: false }))
+    expect(document.title).toBe('(1) Example · Fractal')
+    expect(paints).toEqual(['rgb(254, 154, 0)'])
+  })
 })

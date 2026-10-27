@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Shared helper: integrate sig.sup's clone with origin/main (the agents pushed their lanes there), then export W
 # (the integrated workspace) + BASE (the seed root commit). Sourced by every judge. Idempotent.
-SB="${ST_WORKSPACE:?ST_WORKSPACE not set}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+SB="${FRACTAL_WORKSPACE-${ST_WORKSPACE:?ST_WORKSPACE not set}}"
 W="$SB/sup"
 [ -d "$W/.git" ] || { echo "FAIL: no integrated workspace at $W — did the run happen?"; exit 1; }
 git -C "$W" fetch -q origin 2>/dev/null || true
