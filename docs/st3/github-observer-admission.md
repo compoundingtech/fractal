@@ -298,8 +298,8 @@ and does not populate the app cache with a PAT representation.
 Local fixture tests cover supplied-root reads, endpoint selection, no-root PAT,
 rotation, expiry, invalid/unreadable/missing sources and reason counts,401 reload
 and fallback, separately authorized mixed identity pages, PAT-only writes and
-legacy-status merging. They are written but not run in this slice; no build,
-test, lint, formatter, credential inspection or live migration was performed.
+legacy-status merging. The same-origin redirect fixture verifies installation
+authorization and separate admission for each hop. No live migration is required.
 
 Response accounting runs once at the one-send transport boundary, including each
 initial installation401, reload401 and final PAT response; resource wrappers do
