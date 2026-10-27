@@ -1,0 +1,233 @@
+use super::*;
+use fractal_store::private_notes::{NotesFence, NotesWrite, operation_key};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteParameters {
+    uri: String,
+    markdown: String,
+}
+
+pub(super) async fn detail(
+    State(state): State<AppState>,
+    Extension(snapshot): Extension<ClientSnapshot>,
+    Extension(session): Extension<ClientSession>,
+    AxumPath(uri): AxumPath<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_scope(&session, "read.projections")?;
+    let reader = state.clone();
+    let notes = super::super::blocking_action(move || {
+        reader.private_notes.read(&reader.node, &uri)
+    }).await?;
+    let mut actions = Vec::new();
+    if session.allows("control.work") && acting_party(&session) {
+        actions.push(json!({"id":"private-notes.write", "fence":{"snapshot_id":snapshot.id, "subject_revisions":{}, "private_notes":notes.fence}}));
+    }
+    Ok(Json(json!({"ref":notes.uri,"family":"private-notes","schema":"fractal.private-notes@1","data":notes,"actions":actions,"live":null})))
+}
+
+fn reuse_observation_transport(state: &AppState, input: &mut ClaimInput) -> Result<(), St3Error> {
+    let key = input.idempotency_key.as_deref().expect("notes observations have stable keys");
+    let existing = smallclaims::store::operation_tx(
+        &state.store.readers.get(), &smallclaims::store::operation_id_for_key(key),
+    ).map_err(|_| St3Error::new("private-notes-indeterminate", "the notes audit metadata is unavailable"))?;
+    let Some((_, claim_id, operation_state)) = existing else { return Ok(()) };
+    if operation_state != "active" {
+        return Err(St3Error::new("private-notes-indeterminate", "the notes audit operation has conflicting authority"));
+    }
+    let claim = state.store.claim_by_id(&claim_id).map_err(|_| St3Error::new("private-notes-indeterminate", "the notes audit metadata is unavailable"))?
+        .ok_or_else(|| St3Error::new("private-notes-indeterminate", "the original notes audit metadata is unavailable"))?;
+    let fields = claim.body.get("fields").and_then(Value::as_object)
+        .ok_or_else(|| St3Error::new("private-notes-indeterminate", "the persisted notes observation has no fields"))?;
+    if claim.subject != input.subject || claim.kind != input.kind || claim.actor != input.actor
+        || fields.len() != input.fields.len()
+        || input.fields.iter().any(|(key, value)| key != "transport" && fields.get(key) != Some(value)) {
+        return Err(St3Error::new("idempotency-conflict", "the notes key names a different attributed observation"));
+    }
+    let transport = fields.get("transport")
+        .filter(|value| matches!(value.as_str(), Some("unix" | "fabric-loopback")))
+        .ok_or_else(|| St3Error::new("private-notes-indeterminate", "the persisted notes observation has no normal transport"))?;
+    // The same ordinary paired session may retry through either listener.
+    // Preserve the original durable intent's transport, not the recovery hop.
+    input.fields.insert("transport".into(), transport.clone());
+    Ok(())
+}
+
+fn publish_observation(state: &AppState, input: &mut ClaimInput) -> Result<(), St3Error> {
+    reuse_observation_transport(state, input)?;
+    if let Err(error) = state.store.append_claim(input) {
+        if error.code != "idempotency-mismatch" { return Err(error); }
+        // Another daemon process may have published this key after our lookup.
+        reuse_observation_transport(state, input)?;
+        state.store.append_claim(input)?;
+    }
+    signal_changed(state);
+    Ok(())
+}
+
+pub(super) async fn write(state: &AppState, session: &ClientSession, request: ActionRequest) -> Result<Value, ApiError> {
+    require_scope(session, "control.work")?;
+    if !acting_party(session) {
+        return Err(forbidden("client mutations require a concrete person or a local agent"));
+    }
+    validate_fence(state, &request.fence)?;
+    let parameters: WriteParameters = serde_json::from_value(request.parameters).map_err(|_| validation("notes write requires only a canonical URI and complete Markdown"))?;
+    fractal_schema::private_notes::PrivateNotesUri::parse(&parameters.uri).map_err(|error| validation(error.message))?;
+    let fence: NotesFence = request.fence.private_notes.ok_or_else(|| validation("notes write requires its carrier generation and revision fence"))?;
+    let write = NotesWrite { uri: parameters.uri, markdown: parameters.markdown, fence };
+    let operation = operation_key(&session.actor, &request.idempotency_key).map_err(ApiError::bad)?;
+    // No supported write can change bytes without a durable attributed intent.
+    // A graph failure after local completion remains an error; exact-key retry
+    // recovers the private receipt and idempotently publishes completion.
+    let audit = ClaimInput {
+        subject: format!("resource/{}", crate::graph::uri_reference_name(&write.uri)),
+        kind: "resource.observed".into(),
+        actor: Some(session_claim_actor(session)),
+        fields: BTreeMap::from([
+            ("kind".into(), json!("uri.reference")),
+            // Only the URI is a resource fact; attribution is observation metadata.
+            ("facts".into(), json!({"uri":write.uri})),
+            ("action".into(), json!("private-notes.write")),
+            ("operation_id".into(), json!(format!("operation/private-notes-{}", &operation[..24]))),
+            ("stage".into(), json!("requested")),
+            ("authority_actor".into(), json!(session.authority_actor)),
+            ("session_actor".into(), json!(session.actor)),
+            ("transport".into(), json!(session.transport)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(format!("private-notes:{operation}:requested")),
+    };
+    let audit = std::cell::RefCell::new(audit);
+    let writer = state.clone();
+    let actor = session.actor.clone();
+    let key = request.idempotency_key;
+    let mut result = super::super::blocking_action(move || {
+        writer.private_notes.write_with_audit(
+            &writer.node, &writer.state_dir, &actor, &key, &write,
+            || publish_observation(&writer, &mut audit.borrow_mut()),
+            || {
+                let mut completed = audit.borrow_mut();
+                completed.fields.insert("stage".into(), json!("completed"));
+                completed.idempotency_key = Some(format!("private-notes:{operation}:completed"));
+                publish_observation(&writer, &mut completed)
+            },
+        )
+    }).await?;
+    result["action_id"] = request.id.into();
+    result["snapshot_id"] = new_client_snapshot(state).id.into();
+    Ok(result)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    fn state(root: &std::path::Path) -> AppState {
+        let catalog = root.join("catalog");
+        let subject = catalog.join("agents/example/worker");
+        std::fs::create_dir_all(subject.join("resources")).unwrap();
+        std::fs::write(subject.join("agent.kdl"), format!(
+            "agent \"worker\" {{\n host \"example\"\n resource \"notes\" uri=\"{URI}\"\n}}\n"
+        )).unwrap();
+        let mut state = super::super::tests::test_state_named(root, "example");
+        state.private_notes = Arc::new(fractal_store::private_notes::Authority { catalogs: vec![catalog] });
+        state
+    }
+
+    const URI: &str = "dev.schickling.agent-private-notes://example/worker";
+
+    async fn read(state: &AppState, session: &ClientSession) -> Value {
+        detail(State(state.clone()), Extension(new_client_snapshot(state)),
+            Extension(session.clone()), AxumPath(URI.into())).await.unwrap().0
+    }
+
+    fn action(notes: &Value, key: &str, markdown: &str) -> ActionRequest {
+        serde_json::from_value(json!({
+            "api_version":"fractal.client.v0", "id":"action/private-notes-test", "type":"private-notes.write",
+            "idempotency_key":key, "fence":notes["actions"][0]["fence"],
+            "parameters":{"uri":URI,"markdown":markdown},
+        })).unwrap()
+    }
+
+    async fn invoke(state: &AppState, session: &ClientSession, request: ActionRequest) -> Result<Value, ApiError> {
+        super::super::action(State(state.clone()), Extension(new_client_snapshot(state)),
+            Extension(session.clone()), Json(request)).await.map(|value| value.0)
+    }
+
+    #[tokio::test]
+    async fn ordinary_person_and_agent_share_fenced_private_notes_permissions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let read_only = ClientSession::for_tests_scoped("person/ada", "person/ada", &["read.projections"]);
+        assert_eq!(read(&state, &read_only).await["actions"], json!([]));
+        for (index, actor) in ["person/ada", "agent/example/worker"].into_iter().enumerate() {
+            let session = ClientSession::for_tests_scoped(actor, actor, &["read.projections", "control.work"]);
+            let notes = read(&state, &session).await;
+            let request = action(&notes, &format!("notes-write-{index}-00000001"), &format!("Private owner context {index}.\n"));
+            assert_eq!(invoke(&state, &read_only, request.clone()).await.unwrap_err().status, StatusCode::FORBIDDEN);
+            let written = invoke(&state, &session, request.clone()).await.unwrap();
+            assert_eq!(written["affected_ids"], json!([]));
+            let retried = invoke(&state, &session, request.clone()).await.unwrap();
+            assert_eq!(written["private_notes"], retried["private_notes"]);
+            let mut stale = request;
+            stale.idempotency_key = format!("notes-stale-{index}-00000001");
+            stale.parameters["markdown"] = "stale replacement".into();
+            assert_eq!(invoke(&state, &session, stale).await.unwrap_err().code, "stale-fence");
+            let resource = format!("resource/{}", crate::graph::uri_reference_name(URI));
+            let claims = state.store.claims_for(&resource, Some("resource.observed")).unwrap();
+            let completed = claims.iter().filter(|claim| claim.body["fields"]["stage"] == "completed"
+                && claim.body["fields"]["session_actor"] == actor).collect::<Vec<_>>();
+            assert_eq!(completed.len(), 1);
+            assert_eq!(completed[0].actor.as_deref(), Some(actor));
+            let wire = serde_json::to_string(&claims).unwrap();
+            for private in ["Private owner context", "stale replacement", "carrier_generation", "revision", "markdown"] {
+                assert!(!wire.contains(private), "private audit field: {private}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_failure_requires_exact_recovery_with_original_transport() {
+        use std::os::unix::fs::MetadataExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let mut session = ClientSession::for_tests_scoped("client/paired-example", "person/ada", &["read.projections", "control.work"]);
+        let notes = read(&state, &session).await;
+        let request = action(&notes, "notes-audit-recovery-0001", "Private durable context.\n");
+        let graph = rusqlite::Connection::open(root.path().join("graph.db")).unwrap();
+        graph.execute_batch("CREATE TRIGGER refuse_notes_audit BEFORE INSERT ON claims
+            WHEN NEW.kind='resource.observed' AND json_extract(NEW.body,'$.fields.stage')='requested'
+            BEGIN SELECT RAISE(FAIL, 'requested audit refusal'); END;").unwrap();
+        assert!(invoke(&state, &session, request.clone()).await.is_err());
+        let carrier = root.path().join("catalog/agents/example/worker/resources/private-notes.md");
+        assert!(!carrier.exists());
+        graph.execute_batch("DROP TRIGGER refuse_notes_audit;
+            CREATE TRIGGER refuse_notes_audit BEFORE INSERT ON claims
+            WHEN NEW.kind='resource.observed' AND json_extract(NEW.body,'$.fields.stage')='completed'
+            BEGIN SELECT RAISE(FAIL, 'completed audit refusal'); END;").unwrap();
+        assert_eq!(invoke(&state, &session, request.clone()).await.unwrap_err().code, "private-notes-indeterminate");
+        assert_eq!(std::fs::read_to_string(&carrier).unwrap(), "Private durable context.\n");
+        let before = std::fs::metadata(&carrier).unwrap();
+        let newer = read(&state, &session).await;
+        let other = action(&newer, "notes-other-operation-0001", "must not bypass pending completion");
+        assert_eq!(invoke(&state, &session, other).await.unwrap_err().code, "private-notes-indeterminate");
+        graph.execute_batch("DROP TRIGGER refuse_notes_audit;").unwrap();
+        session.transport = "fabric-loopback";
+        let recovered = invoke(&state, &session, request.clone()).await.unwrap();
+        let repeated = invoke(&state, &session, request).await.unwrap();
+        assert_eq!(recovered["private_notes"], repeated["private_notes"]);
+        let after = std::fs::metadata(&carrier).unwrap();
+        assert_eq!((before.ino(), before.mtime(), before.mtime_nsec()), (after.ino(), after.mtime(), after.mtime_nsec()));
+        let resource = format!("resource/{}", crate::graph::uri_reference_name(URI));
+        let claims = state.store.claims_for(&resource, Some("resource.observed")).unwrap();
+        assert_eq!(claims.len(), 2);
+        for claim in claims {
+            assert_eq!(claim.body["fields"]["transport"], "unix");
+            assert_eq!(claim.body["fields"]["session_actor"], session.actor);
+            assert_eq!(claim.actor.as_deref(), Some("person/ada"));
+        }
+    }
+}

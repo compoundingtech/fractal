@@ -11,6 +11,7 @@ pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
+pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
@@ -707,6 +708,7 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
@@ -781,6 +783,12 @@ impl Registry {
                 validate_value(kind, name, value, field)?;
                 self.validate_reference(kind, name, value, field)?;
             }
+        }
+        if kind == "uri.reference"
+            && let Some(uri) = facts.get("uri").and_then(Value::as_str)
+            && private_notes::claims(uri)
+        {
+            private_notes::PrivateNotesUri::parse(uri)?;
         }
         Ok(spec)
     }

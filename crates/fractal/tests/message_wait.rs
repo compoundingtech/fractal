@@ -52,24 +52,21 @@ async fn counted_daemon(
     root: &Path,
 ) -> (PathBuf, Arc<Store>, Arc<Requests>, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        // A file, like the daemon's own store: an in-memory store locks a table against a reader
-        // while another request writes, which the counting test below does constantly.
-        store: Arc::new(Store::open(&root.join("graph.sqlite3"), "message-wait").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "message-wait".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    // A file, like the daemon's own store: an in-memory store locks a table against a reader
+    // while another request writes, which the counting test below does constantly.
+    store: Arc::new(Store::open(&root.join("graph.sqlite3"), "message-wait").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "message-wait".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let store = state.store.clone();
     let requests = Arc::new(Requests::default());
     let app = fractal_daemon::api::router(state)

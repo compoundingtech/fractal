@@ -1421,6 +1421,7 @@ async fn receive_client_read(
                     runtime_desired_revision: None,
                     terminal_sequence: Some(expected_sequence),
                     preview_token: None,
+                    private_notes: None,
                 };
                 let result = match action_type.as_str() {
                     "terminal.input" => {

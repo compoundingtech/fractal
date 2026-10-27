@@ -114,6 +114,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/client/private-notes/{*uri}",
+        "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
+    ),
+    (
         "POST /v1/deploy/verify-go",
         "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
     ),
@@ -1485,20 +1489,17 @@ mission "cost/history" state="ready" {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = fractal_daemon::api::router(AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.path().join("state"),
-        pty_root: root.path().join("pty"),
-        pty_binary: stub_pty(root.path()),
-        fleet_id: None, configured_peers: Vec::new(), client_relay: None,
-        native_session_home: Some(root.path().join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    });
+    let app = fractal_daemon::api::router(AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.path().join("state"),
+    pty_root: root.path().join("pty"),
+    pty_binary: stub_pty(root.path()),
+    fleet_id: None, configured_peers: Vec::new(), client_relay: None,
+    native_session_home: Some(root.path().join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  });
     let mut measurements = Vec::new();
     for run in 0..100 {
         let view = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
@@ -2404,22 +2405,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         ..Default::default()
     })
     .unwrap();
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.join("state"),
-        pty_root: root.join("pty"),
-        pty_binary: pty,
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![PEER.into()],
-        client_relay: relay,
-        native_session_home: Some(root.join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.join("state"),
+    pty_root: root.join("pty"),
+    pty_binary: pty,
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![PEER.into()],
+    client_relay: relay,
+    native_session_home: Some(root.join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);

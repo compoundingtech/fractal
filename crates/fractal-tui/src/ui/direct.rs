@@ -346,22 +346,19 @@ mod tests {
     }
 
     fn state(root: &Path) -> fractal_daemon::api::AppState {
-        fractal_daemon::api::AppState {
-            owning_person: None,
-            store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "attach-node".into(),
-            state_dir: root.join("daemon"),
-            pty_root: root.join("pty"),
-            pty_binary: root.join("bin/pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: fractal_daemon::model::PlannerSpec::default(),
-            assistant_receipts: Default::default(),
-        }
+        fractal_daemon::api::AppState { owning_person: None,
+        store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "attach-node".into(),
+        state_dir: root.join("daemon"),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("bin/pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     fn observe_terminal(store: &fractal_daemon::store::Store, incarnation: &str) {

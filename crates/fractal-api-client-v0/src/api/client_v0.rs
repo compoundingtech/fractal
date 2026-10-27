@@ -42,6 +42,7 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod inventory;
 pub mod raw_terminal;
+pub mod private_notes;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -105,6 +106,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
         .route("/v1/client/devices", get(devices))
+        .route("/v1/client/private-notes/{*uri}", get(private_notes::detail))
         .route("/v1/client/resources", get(resources::list))
         .route(
             "/v1/client/agent-workspaces/{*id}",
@@ -8632,6 +8634,9 @@ async fn action_inner(
     if reserved_gate.is_none() {
         validate_action_admission(&session, &request)?;
     }
+    if request.action_type == "private-notes.write" {
+        return private_notes::write(&state, &session, request).await.map(Json);
+    }
     let gate = action_gate(&state, &session, &request.idempotency_key);
     let _guard = match reserved_gate {
         Some(guard) => guard,
@@ -12900,22 +12905,19 @@ mission "differential" state="ready" {
     }
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
-        AppState {
-            owning_person: Some("person/operator".into()),
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.to_path_buf(),
-            pty_root: root.join("pty"),
-            pty_binary: root.join("unused-pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: crate::model::PlannerSpec::default(),
-            assistant_receipts: Default::default(),
-        }
+        AppState { owning_person: Some("person/operator".into()),
+        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     #[tokio::test]
@@ -16220,6 +16222,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({"target_id": external.id}),
         };
@@ -16372,6 +16375,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({"target_id": external.id}),
         };
@@ -18589,6 +18593,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters,
         };
@@ -21617,6 +21622,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(1),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/terminal-owner" }),
         };
@@ -21692,6 +21698,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": attachment_id }),
         };
@@ -22009,6 +22016,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(snapshot.store_index),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/concurrent-terminal-owner" }),
         };
@@ -22573,6 +22581,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(owner.store.index().unwrap()),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/fleet-terminal" }),
         };

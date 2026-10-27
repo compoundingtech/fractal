@@ -204,6 +204,7 @@ pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
+    pub private_notes: Arc<fractal_store::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
     pub node: String,
@@ -412,6 +413,9 @@ impl ApiError {
             | "retirement-upgrade-required"
             | "custody-pending"
             | "stale-subject"
+            | "stale-fence"
+            | "idempotency-conflict"
+            | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -424,9 +428,11 @@ impl ApiError {
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
+            | "forbidden"
             | "lane-approval-denied"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
@@ -1848,6 +1854,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
+        | "private-notes-unreachable"
+        | "private-notes-carrier-conflict"
+        | "private-notes-indeterminate"
         | "inventory-unavailable"
         | "conversation-content-invalidated"
         | "transcript-unavailable"

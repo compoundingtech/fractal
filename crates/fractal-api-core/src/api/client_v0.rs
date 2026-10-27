@@ -297,6 +297,7 @@ pub const ALL_SCOPES: &[&str] = &[
     "control.pairing",
 ];
 const ACTIONS: &[&str] = &[
+    "private-notes.write",
     "arrangement.edit",
     "attention.resolve",
     "review.approve",
@@ -355,6 +356,7 @@ const ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 const AVAILABLE_ACTIONS: &[&str] = &[
+    "private-notes.write",
     "custom.reply",
     "prompt.respond",
     "arrangement.edit",
@@ -423,7 +425,7 @@ pub struct LocalWebSession {
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
     pub actor: String,
-    /// The concrete graph person whose explicitly delegated authority is exercised.
+    /// The concrete graph person or local agent whose authority is exercised.
     pub authority_actor: String,
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
@@ -4177,9 +4179,11 @@ pub struct Fence {
     pub runtime_desired_revision: Option<String>,
     pub terminal_sequence: Option<u64>,
     pub preview_token: Option<String>,
+    pub private_notes: Option<fractal_store::private_notes::NotesFence>,
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
+    if action == "private-notes.write" { return Some("control.work"); }
     if matches!(
         action,
         "agent.create"

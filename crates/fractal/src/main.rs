@@ -6390,6 +6390,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
         assistant_receipts: Default::default(),
+        private_notes: Arc::new(fractal_store::private_notes::Authority {
+            catalogs: config.private_notes_catalogs.clone(),
+        }),
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));

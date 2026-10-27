@@ -51,22 +51,19 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
     let socket = dir.join("st3.sock");
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(dir.join("stop"));
-    let state = AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("studio").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "studio".into(),
-        state_dir: dir.clone(),
-        pty_root: dir.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("studio").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "studio".into(),
+    state_dir: dir.clone(),
+    pty_root: dir.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let store = state.store.clone();
     let intent = fractal_daemon::graph::parse_intent(SOURCE, "studio").unwrap();
     let planned = store

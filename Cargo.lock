@@ -2479,6 +2479,7 @@ version = "0.1.0"
 name = "fractal-store"
 version = "0.1.0"
 dependencies = [
+ "agent-spec",
  "anyhow",
  "axum",
  "base64 0.22.1",

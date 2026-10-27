@@ -89,13 +89,10 @@ async fn verifier_cli_api_uses_signed_local_replica_and_fixed_policy() {
     let (store, request) = fixture();
     let store = Arc::new(store);
     let before = store.event_bounds().unwrap();
-    let state = AppState {
-        owning_person:None, store:store.clone(), notify:Arc::new(Notify::new()), event_notify:watch::channel(0).0,
-        node:"host-a".into(), state_dir:root.path().into(), pty_root:root.path().join("pty"), pty_binary:"pty".into(),
-        fleet_id:Some(FLEET.into()), configured_peers:vec![], client_relay:None, native_session_home:None,
-        planner_default:PlannerSpec::default(),
-        assistant_receipts:Default::default(),
-    };
+    let state = AppState { owning_person:None, store:store.clone(), notify:Arc::new(Notify::new()), event_notify:watch::channel(0).0,
+    node:"host-a".into(), state_dir:root.path().into(), pty_root:root.path().join("pty"), pty_binary:"pty".into(),
+    fleet_id:Some(FLEET.into()), configured_peers:vec![], client_relay:None, native_session_home:None,
+    planner_default:PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     // The Fabric router must refuse this route even if a caller bypasses the Unix-only client.
     use tower::ServiceExt as _;
     let response = fractal_daemon::api::fabric_router(state.clone()).oneshot(
