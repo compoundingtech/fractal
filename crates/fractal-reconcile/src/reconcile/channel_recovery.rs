@@ -414,13 +414,31 @@ fn claude_channel_policy_blocked(screen: &str) -> bool {
             quoted = !quoted;
             continue;
         }
-        if quoted || line != "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)" {
+        const FLAG: &str = "--dangerously-load-development-channels";
+        if quoted || !(line.starts_with(FLAG) || (line.starts_with("--") && FLAG.starts_with(line))) {
             continue;
         }
-        // Claude renders this diagnostic as three unprefixed lines. Text inside a
-        // user prompt, a blockquote or a fenced reply is not provider authority.
-        return lines.next().is_some_and(|line| line.trim() == "Inbound messages will be silently dropped")
-            && lines.next().is_some_and(|line| line.trim() == "Have an administrator set channelsEnabled: true in managed settings to enable");
+        // Claude 2.1.306 renders three Text nodes in a column, without a period.
+        // The issue's 2.1.310 quotation includes a period and collapses the lines.
+        // Match the complete diagnostic, allowing physical terminal soft-wraps,
+        // but never quote prefixes or conversation markers within its text.
+        let mut rendered = std::iter::once(line).chain(lines)
+            .flat_map(str::chars).filter(|character| !character.is_whitespace()).peekable();
+        for (index, expected) in [
+            "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)",
+            "Inbound messages will be silently dropped",
+            "Have an administrator set channelsEnabled: true in managed settings to enable",
+        ].into_iter().enumerate() {
+            for character in expected.chars().filter(|character| !character.is_whitespace()) {
+                if rendered.next() != Some(character) {
+                    return false;
+                }
+            }
+            if index == 1 && rendered.peek() == Some(&'.') {
+                rendered.next();
+            }
+        }
+        return true;
     }
     false
 }

@@ -193,6 +193,41 @@ fn quoted_channel_policy_banner_is_not_a_provider_refusal() {
     }
 }
 
+// The quotation in #3999 is one line and includes a period after "dropped".
+const GEOFFREY_POLICY_BANNER: &str = include_str!("../../../../fractal-drivers/tests/fixtures/blocking-screens/claude-channel-policy-geoffrey.txt");
+
+#[test]
+fn verbatim_and_wrapped_policy_banners_stop_only_in_provider_startup_chrome() {
+    for source in [POLICY_BANNER, GEOFFREY_POLICY_BANNER] {
+        for width in [usize::MAX, 80, 60, 40, 20] {
+            // Both fixture sources are ASCII. A PTY soft-wrap may split a word at
+            // the right edge, whereas Claude can also wrap at a space.
+            let wrapped = source.lines()
+                .flat_map(|line| line.as_bytes().chunks(width))
+                .map(|line| std::str::from_utf8(line).unwrap())
+                .collect::<Vec<_>>().join("\n");
+            for (screen, refusal) in [
+                (format!("Claude Code v2.1.306\n{wrapped}\n❯ "), true),
+                (format!("❯ Explain this error:\n{wrapped}"), false),
+                (format!("● You quoted:\n{wrapped}"), false),
+                (format!("> {}", wrapped.replace('\n', "\n> ")), false),
+                (format!("```\n{wrapped}\n```"), false),
+            ] {
+                let (store, runtime, reconciler, desired) = setup();
+                let since = attachment(&store, "orchid-one", false);
+                policy_launch(&store, "orchid-one");
+                *runtime.screen.lock().unwrap() = screen;
+                assert_eq!(
+                    recover(&reconciler, &desired, "orchid-one", since).is_err(),
+                    refusal, "width={width}, source={source:?}",
+                );
+                assert_eq!(runtime.stops.lock().unwrap().len(), usize::from(refusal));
+                assert!(attempts(&store).is_empty());
+            }
+        }
+    }
+}
+
 #[test]
 fn predecessor_policy_banner_does_not_fence_the_replacement_declaration() {
     let (store, runtime, reconciler, desired) = setup();
