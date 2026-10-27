@@ -678,6 +678,20 @@ mod tests {
     }
 
     #[test]
+    fn signed_or_out_of_screen_cursors_stay_hidden_without_wrapping() {
+        for (row, column) in [(-1, 0), (0, -1), (i64::MAX, 0), (0, i64::MAX)] {
+            let mut frame = screen(2, &[(0, "one")], (0, 0));
+            frame.cursor.row = row;
+            frame.cursor.column = column;
+            let mut painter = Painter::default();
+            painter.resize(2);
+            let paint = String::from_utf8(painter.paint(&frame)).unwrap();
+            assert!(paint.contains("one"));
+            assert!(!paint.contains("\x1b[?25h"), "cursor {row},{column} must stay hidden");
+        }
+    }
+
+    #[test]
     fn a_shorter_remote_screen_clears_the_local_rows_below_it() {
         let mut painter = Painter::default();
         painter.resize(5);
