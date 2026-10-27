@@ -392,7 +392,9 @@ const styles = stylex.create({
   matrix: { display: 'flex', flexDirection: 'column', gap: s.xl, minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.canvas, fontFamily: t.fontSans },
   specimen: { display: 'flex', flexDirection: 'column', gap: s.md, padding: s.md, backgroundColor: surface.canvas, color: ink.fg },
   heading: { margin: s.zero, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
-  host: { display: 'flex', flexDirection: 'column', gap: s.md, maxWidth: '100%', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  // Like the composer width-budget frames, specimens own their width even in a narrower runner viewport.
+  // ResizeFit changes this width directly; a viewport max-width would silently cap its wide phase.
+  host: { display: 'flex', flexDirection: 'column', gap: s.md, flexShrink: 0, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   wide: { width: g.polishWide }, narrow: { width: g.polishNarrow },
   toolbar: { display: 'flex', alignItems: 'center', gap: s.md },
   button: { minHeight: g.controlMd, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
