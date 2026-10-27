@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Stop automatic Claude restarts when organization policy blocks channels and report the required managed setting.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph replay change. Policy refusals use existing runtime action failure and reconciliation decision records."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema or migration change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules, digests or member coordination change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "New supervisors recognize the Claude organization-policy banner and retain a refusal for the launching declaration. Older supervisors do not honor this policy-specific restart fence after downgrade and may attempt ordinary channel recovery."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional fleet-wide interruption is required. An affected policy-blocked Claude runtime is stopped because its channel cannot receive messages."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "For affected Enterprise or Team organizations, an administrator must set channelsEnabled: true in Claude Code managed settings, then explicitly restart the agent."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "A recognized organization-policy refusal stops automatic retries and surfaces an actionable agent fault. An explicit restart or replacement declaration permits a new attempt; unrelated transient channel recovery retains its existing bounded retry budget."
+  }
+}

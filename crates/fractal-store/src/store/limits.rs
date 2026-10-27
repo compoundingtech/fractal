@@ -383,6 +383,19 @@ pub fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
+    account_limits_with(connection, None)
+}
+
+/// A reading the projection does not hold yet: its seat, the node that measured it and its
+/// claim body.
+type Candidate<'a> = (&'a str, &'a str, &'a Value);
+
+/// The account limits, as they would read with `candidate` folded in as its seat's newest
+/// reading, when one is given.
+fn account_limits_with(
+    connection: &Connection,
+    candidate: Option<Candidate<'_>>,
+) -> Result<Vec<AccountLimit>> {
     type Key = (String, String, Option<String>);
     let mut statement = connection.prepare_cached(
         "SELECT driver, account, account_ref, weekly, origin, subject, body, head_key
@@ -403,6 +416,22 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
     })? {
         rows.push(row?);
     }
+    // The candidate is the newest claim, so it sorts after every key a tie could reach.
+    let candidate = candidate.and_then(|(subject, origin, body)| {
+        let (limit, _) = reading(origin, body)?;
+        let account_ref = limit.account_ref.clone().unwrap_or_default();
+        rows.push((
+            limit.driver.clone(),
+            limit.account.clone(),
+            account_ref.clone(),
+            limit.weekly_percent.is_some(),
+            origin.to_owned(),
+            subject.to_owned(),
+            body.to_string(),
+            vec![u8::MAX; 64],
+        ));
+        Some((subject, limit.driver, limit.account, account_ref))
+    });
     // A seat that reported under a provider identity and later under a declared account is one
     // login that changed identity (a re-login), not two accounts: the identity's readings are the
     // declared account's. Only a seat's own reports link them, so nothing else is ever merged.
@@ -489,15 +518,22 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
     let mut seats = connection.prepare_cached(
         "SELECT subject, driver, account, account_ref FROM account_limit_seats ORDER BY subject",
     )?;
-    for row in seats.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-        ))
-    })? {
-        let (seat, driver, account, account_ref) = row?;
+    let mut members = seats
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if let Some((subject, driver, account, account_ref)) = candidate {
+        members.retain(|(seat, ..)| seat != subject);
+        members.push((subject.to_owned(), driver, account, account_ref));
+        members.sort();
+    }
+    for (seat, driver, account, account_ref) in members {
         let key = resolve(driver, account, account_ref);
         accounts
             .get_mut(&key)
@@ -520,6 +556,66 @@ pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
             || limit.seats.iter().any(|seat| active_seats.contains(seat))
     });
     Ok(accounts.into_values().collect())
+}
+
+/// How long an account's reading may stand unchanged before a newer measurement of the same
+/// values replicates, well inside the hour after which the limits policy and `st slo ls` call a
+/// reading stale.
+pub const LIMITS_REFRESH_MS: u64 = 15 * 60_000;
+
+/// Whether a seat's limits reading changes what the projection answers, so that it must
+/// replicate: the seat names an account it has no reading for yet, the account's chosen reading
+/// would change, or the account has measured nothing newer for [`LIMITS_REFRESH_MS`].
+///
+/// Every seat on an account reports the account's limits, and an idle seat keeps re-sending the
+/// reading it last saw. Replicating each report wrote one claim per seat every few minutes with
+/// nothing new in it, and older re-sends made the stored readings flap.
+pub fn limits_publication_due(
+    connection: &Connection,
+    origin: &str,
+    subject: &str,
+    body: &Value,
+) -> Result<bool> {
+    let Some((limit, account)) = reading(origin, body) else {
+        return Ok(true);
+    };
+    let member: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT driver, account, account_ref FROM account_limit_seats WHERE subject=?1",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if member != Some((limit.driver.clone(), account, limit.account_ref.clone().unwrap_or_default())) {
+        return Ok(true);
+    }
+    let of_seat = |limits: Vec<AccountLimit>| {
+        limits
+            .into_iter()
+            .find(|limit| limit.seats.iter().any(|seat| seat == subject))
+    };
+    let (Some(before), Some(after)) = (
+        of_seat(account_limits_at(connection)?),
+        of_seat(account_limits_with(connection, Some((subject, origin, body)))?),
+    ) else {
+        return Ok(true);
+    };
+    let values = |limit: &AccountLimit| {
+        (
+            limit.account.clone(),
+            limit.account_ref.clone(),
+            limit.identified,
+            limit.driver.clone(),
+            limit.plan.clone(),
+            limit.five_hour_percent.map(f64::to_bits),
+            limit.five_hour_resets_at_unix_ms,
+            limit.weekly_percent.map(f64::to_bits),
+            limit.weekly_resets_at_unix_ms,
+        )
+    };
+    Ok(values(&before) != values(&after)
+        || limit.measured_at_unix_ms
+            >= before.measured_at_unix_ms.saturating_add(LIMITS_REFRESH_MS))
 }
 
 #[cfg(test)]

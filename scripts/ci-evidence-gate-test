@@ -2033,8 +2033,8 @@ class WorkflowStructure(unittest.TestCase):
         self.assertIn('KIT_SHARD_COUNT: ' + env['KIT_SHARD_COUNT'].strip(), execution)
         self.assertIn('KIT_PLAY_SET: ' + env['KIT_PLAY_SET'].strip(), execution)
         self.assertIn('APP_TEST_SET: ' + env['APP_TEST_SET'].strip(), execution)
-        self.assertIn('matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == \'true\' && github.event_name != \'pull_request\' && \'{"shard":[0,1]}\'', execution)
-        self.assertIn("&& '2' || '1' }}", env['KIT_SHARD_COUNT'])
+        self.assertIn('matrix: ${{ fromJSON(needs.fractal-web-changes.outputs.kit-inputs == \'true\' && github.event_name != \'pull_request\' && \'{"shard":[0,1,2,3]}\'', execution)
+        self.assertIn("&& '4' || '1' }}", env['KIT_SHARD_COUNT'])
         self.assertEqual(env['KIT_INPUTS'].strip(), '${{ needs.fractal-web-changes.outputs.kit-inputs }}')
         self.assertIn('python3 "$helper" once fractal-web', sign)
         self.assertIn('python3 "$helper" aggregate "$RUNNER_TEMP/fractal-web-facts.json"', sign)
@@ -2051,30 +2051,21 @@ class WorkflowStructure(unittest.TestCase):
         self.assertEqual(json.loads(shard_env['STEP_COMMAND'].strip().strip("'")), FRACTAL_WEB_SHARD_ARGV)
         self.assertNotEqual(FRACTAL_WEB_SHARD_ARGV, rule['command'])
 
-    def test_the_fractal_web_lane_skips_its_shards_steps_only_when_its_own_gate_says_so(self):
-        """Wired like typescript-client: each execution shard keeps running and skips its steps (never the checkout) on its own
-        gate's skip, so an enforce flip is the only change a skip needs; the verdict job still runs and the kit coverage check
-        in the merge queue never reads the gate."""
+    def test_the_fractal_web_lane_skips_its_jobs_only_for_trusted_pull_request_evidence(self):
+        """The semantic check remains emitted; only PR execution avoids runner allocation.
+        Queue and manual execution retain their complete proof and shard coverage."""
         blocks = self.blocks()
         execution, verdict = blocks['fractal-web-execution'], blocks['fractal-web']
         self.assertIn('evidence-gate-fractal-web', self.needs_of(execution))
         self.assertIn('evidence-gate-fractal-web', self.needs_of(verdict))
-        self.assertNotIn('evidence-gate', self.job_condition(execution))
+        condition = self.job_condition(execution)
+        self.assertIn("github.event_name == 'pull_request'", condition)
+        self.assertIn("needs.evidence-gate-fractal-web.outputs.skip == 'true'", condition)
+        self.assertIn("!(", condition)
         self.assertNotIn('evidence-gate', self.job_condition(verdict))
-        covered = "needs.evidence-gate-fractal-web.outputs.skip != 'true'"
-        steps = self.steps_of('fractal-web-execution')
-        names = [n for n, _ in steps]
-        self.assertIn('evidence covered by a trusted note', names)
-        for name, condition in steps:
-            if str(name).startswith('actions/checkout'):
-                self.assertIsNone(condition, 'the checkout is never skipped')
-            elif name == 'evidence covered by a trusted note':
-                self.assertEqual(condition, "needs.evidence-gate-fractal-web.outputs.skip == 'true'")
-            elif name == 'Report job cache coverage':
-                self.assertEqual(condition, 'always()')
-            else:
-                self.assertIsNotNone(condition, f'{name} would run on a skip')
-                self.assertIn(covered, condition, name)
+        self.assertNotIn('evidence covered by a trusted note', execution)
+        self.assertIn("EVIDENCE_SKIP: ${{ needs.evidence-gate-fractal-web.outputs.skip }}", verdict)
+        self.assertIn("EVENT_NAME: ${{ github.event_name }}", verdict)
         for name, condition in self.steps_of('fractal-web'):
             if name == 'Require every kit shard and exact full-index coverage':
                 self.assertNotIn('evidence-gate', condition)

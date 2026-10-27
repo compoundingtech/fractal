@@ -2,6 +2,19 @@
 use super::*;
 use crate::model::LoopSpec;
 
+/// The operational failure episodes as last folded, under the newest index and the count of
+/// their claims.
+#[derive(Default)]
+struct OperationalFailures(Mutex<Option<FoldedFailures>>);
+
+type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How often this thread folded the operational failure claims.
+    pub static OPERATIONAL_FAILURE_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// How long a run whose cleanup failed shows that fault after it finishes.
 const FINAL_STEP_FAULT_MS: u128 = 24 * 60 * 60 * 1000;
 /// How long a declared seat may go without any runtime observation before that is a fault. A seat
@@ -429,6 +442,26 @@ impl Store {
 
     pub fn operational_failures(&self) -> Result<Vec<AttentionRequestView>> {
         let connection = self.readers.get();
+        // An append raises the newest index and a checkpoint trim lowers the count, so the
+        // episodes folded under the same key are the same; the key is read from the kind index.
+        let key: (u64, u64) = connection.query_row(
+            "SELECT COALESCE(MAX(store_index), 0), COUNT(*) FROM claims INDEXED BY claims_kind_index
+             WHERE kind IN ('operational.failure','operational.recovered')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let kept = self.extension::<OperationalFailures>();
+        if let Some((_, episodes)) = kept
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .filter(|(at, _)| *at == key)
+        {
+            return Ok(episodes.as_ref().clone());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        OPERATIONAL_FAILURE_FOLDS.with(|folds| folds.set(folds.get() + 1));
         let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2929002f0c0e owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
             FROM claims WHERE kind IN ('operational.failure','operational.recovered') ORDER BY CANONICAL_ASC(claims)"))?;
         let claims = query
@@ -471,7 +504,9 @@ impl Store {
                 },
             );
         }
-        Ok(episodes.into_values().collect())
+        let episodes = episodes.into_values().collect::<Vec<_>>();
+        *kept.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, Arc::new(episodes.clone())));
+        Ok(episodes)
     }
 
     fn reconcile_fault_attention(
@@ -985,6 +1020,7 @@ impl Store {
             } else {
                 match code {
                     "access-denied" => ObserverCondition::Access(reason),
+                    "local-observer-budget" => ObserverCondition::LocalBudget(reason),
                     "rate-limited" => ObserverCondition::RateLimited {
                         reason,
                         outlasted: fields["next_check_unix_ms"]

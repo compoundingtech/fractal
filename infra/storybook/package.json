@@ -2,7 +2,7 @@
   "name": "@fractal/storybook-deploy",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@12.7.0",
+  "packageManager": "pnpm@12.15.0",
   "scripts": {
     "deploy": "alchemy deploy",
     "typecheck": "tsc --noEmit"

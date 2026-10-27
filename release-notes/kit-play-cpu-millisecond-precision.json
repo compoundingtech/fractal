@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Round kit play CPU receipts and policy ceilings to millisecond precision",
+  "replay": {"status": "none", "detail": "CI harness only; no replay changes."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "No product rule or case-set changes."},
+  "compatibility": {"status": "changed", "detail": "CPU seconds and the derived CPU ceiling are rounded to milliseconds before receipt emission and budget comparison. The 413.9-second anchor yields an exact 455.29-second ceiling, and non-commit runs retain rounded CPU telemetry without enforcing the commit CPU policy. Other receipt fields and wall guard behavior are unchanged."},
+  "downtime": {"status": "none", "detail": "No deployment impact."},
+  "manual": {"status": "none", "detail": "No additional manual steps."},
+  "recovery": {"status": "none", "detail": "No persisted state changes."}
+}

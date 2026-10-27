@@ -4,6 +4,7 @@ import { Families } from './Families'
 import type { Theme } from './kit'
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Component families',
   component: Families,
   args: { direction: 'folio', scheme: 'light', density: 'comfortable' },
@@ -32,6 +33,12 @@ const meta = {
   },
 } satisfies Meta<typeof Families>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllFamilies:contract-fixture',
+  'FamiliesDark:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 export const AllFamilies: Story = {}
 export const FamiliesDark: Story = { args: { scheme: 'dark' } }

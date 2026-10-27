@@ -37,6 +37,7 @@ pub mod rollout;
 pub mod sekrets_daemon;
 pub mod store;
 pub mod suspension;
+pub mod work_eta;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, St3Error};

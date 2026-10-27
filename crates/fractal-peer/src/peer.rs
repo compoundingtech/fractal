@@ -146,6 +146,9 @@ pub enum ClientReadOperation {
         limit: usize,
         cursor: Option<String>,
     },
+    SessionDetail {
+        session_id: String,
+    },
     TerminalScreen {
         terminal_id: String,
         /// Ask the owner for its best-effort session facts too.
@@ -1362,6 +1365,9 @@ async fn receive_client_read(
                 let value = answer?.value;
                 relay_trace::result(Phase::Envelope, || Ok(serde_json::to_value(value)?))
             }
+            ClientReadOperation::SessionDetail { session_id } => {
+                Ok(serde_json::to_value(client.sessions_get(&session_id).await?.value)?)
+            }
             ClientReadOperation::TerminalScreen { terminal_id, facts } => {
                 let value = if facts {
                     client.terminal_screen_with_facts(&terminal_id).await?.value
@@ -1668,6 +1674,43 @@ impl MainBackend {
     }
 }
 
+impl MainBackend {
+    /// Send this worker's process CPU to the daemon every `WORKER_REPORT`, for the member's CPU
+    /// targets, until the process stops. An older daemon refuses the report; nothing retries it.
+    async fn report_process_cpu(self) {
+        let process = |cpu_ns| smallclaims::replication::ReplicationWorkerProcess {
+            pid: std::process::id(),
+            started_at_unix_ms: started_at_unix_ms(),
+            cpu_ns,
+        };
+        let mut interval = tokio::time::interval(smallclaims::windows::cpu_minutes::WORKER_REPORT);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let request = smallclaims::replication::ReplicationWorkerStatusRequest {
+                peer: String::new(),
+                worker: None,
+                process: Some(process(smallclaims::windows::process_cpu_ns())),
+            };
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.client.post::<_, Value>("/v1/internal/replication/worker-status", &request),
+            )
+            .await;
+        }
+    }
+}
+
+/// When this process started, in Unix milliseconds, read once.
+fn started_at_unix_ms() -> u64 {
+    static STARTED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64)
+    })
+}
+
 impl Backend for MainBackend {
     async fn ready(&self) {
         loop {
@@ -1823,7 +1866,8 @@ impl Backend for MainBackend {
                 "/v1/internal/replication/worker-status",
                 &smallclaims::replication::ReplicationWorkerStatusRequest {
                     peer: peer.to_owned(),
-                    worker,
+                    worker: Some(worker),
+                    process: None,
                 },
             )
             .await?;
@@ -1942,6 +1986,8 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             }
         })?;
     database_watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive)?;
+    started_at_unix_ms();
+    tokio::spawn(MainBackend::new(config.socket.clone()).report_process_cpu());
     smallclaims::sync::run(
         worker,
         MainBackend::new(config.socket.clone()),

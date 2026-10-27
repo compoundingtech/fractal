@@ -61,6 +61,9 @@ def apparent_gb(path):
     return sum(file.stat().st_size for file in path.rglob('*') if file.is_file()) / 1e9
 
 
+NEEDS_TREE = st_test.needs_tree
+
+
 class PoolTreeTest(unittest.TestCase):
     """Pool reuse without a signer or remote: only disposable local worktrees are involved."""
 
@@ -135,6 +138,9 @@ class StTest(unittest.TestCase):
         patcher = mock.patch.dict(st_test.LOCAL, {'demo': ['sh', '-c', 'echo ran']}, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
+        trees = mock.patch.object(st_test, 'needs_tree', return_value=True)  # demo stands in for a check that builds, so the pool is exercised
+        trees.start()
+        self.addCleanup(trees.stop)
 
     def commit(self, name, content, branch=None):
         if branch:
@@ -755,6 +761,18 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn('all 1 pool trees are in use', err)
 
+    def test_a_run_of_checks_that_build_nothing_takes_no_pool_tree_and_never_waits_for_one(self):
+        self.commit('b.txt', 'two')
+        self.assertTrue(NEEDS_TREE(['ci-script-tests', 'linux-gate']))
+        self.assertFalse(NEEDS_TREE(['ci-script-tests', 'typescript-client', 'genie-freshness']))
+        with mock.patch.object(st_test, 'needs_tree', NEEDS_TREE), \
+                mock.patch.object(st_test, 'acquire_tree', side_effect=AssertionError('a light run waits for no tree')):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertEqual(code, 0, out + err)
+        self.assertFalse((self.home / '.cache/st-test/pools').exists(), 'no pool tree was made')
+        statement, = self.statements()
+        self.assertIn(git(self.work, 'rev-parse', 'HEAD^{tree}'), json.dumps(statement))
+
     def test_the_pool_holds_the_heavy_slots_plus_one_trees_unless_told_otherwise(self):
         with mock.patch.dict(os.environ, {'HOME': str(self.home)}, clear=True), mock.patch.dict(st_test.POOL_SETTINGS, {}, clear=True):
             self.assertEqual(st_test.pool_size(), 2)
@@ -1027,6 +1045,31 @@ class StTest(unittest.TestCase):
         self.assertIn(expected, json.dumps(statement))
         self.assertEqual(self.run_st_test('--status', '--check', 'demo')[0], 0, 'the tree CI judges now is the one signed')
 
+    def test_a_branch_with_an_old_st_test_runs_the_base_s_copy_once(self):
+        stub = ('import json, os, sys\n'
+                'print(json.dumps({"copy": "base", "argv": sys.argv[1:], "guard": os.environ.get("ST_TEST_REEXEC")}))\n')
+        self.main_commits('scripts/st-test', stub)  # main's st-test now differs from the copy this branch runs
+        base = git(self.work, 'rev-parse', 'origin/main')
+        run = lambda **extra_env: subprocess.run([sys.executable, str(ROOT / 'scripts/st-test'), '--list', '--base', 'origin/main'], cwd=self.work,
+                                                capture_output=True, text=True, timeout=60, env=dict(GIT_ENV, HOME=str(self.home), **extra_env))
+        done = run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout), {'copy': 'base', 'argv': ['--list', '--base', 'origin/main'], 'guard': base})
+        self.assertIn("running the base's st-test (origin/main at", done.stderr)
+        done = run(ST_TEST_REEXEC=base)  # already the base's copy: it runs itself, never re-executes again
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn('"copy": "base"', done.stdout)
+        self.assertIn('linux-gate:', done.stdout)  # this copy's own --list
+        # A real base copy (this st-test, one line newer) runs and removes the copy it was written to when it ends.
+        self.main_commits('scripts/st-test', (ROOT / 'scripts/st-test').read_text() + '# newer\n')
+        scratch = Path(self.tmp.name) / 'tmp'
+        scratch.mkdir()
+        done = run(TMPDIR=str(scratch))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("running the base's st-test", done.stderr)
+        self.assertIn('linux-gate:', done.stdout)
+        self.assertEqual(list(scratch.iterdir()), [])
+
     def test_when_main_moved_only_unprotected_files_the_head_tree_is_signed_as_before(self):
         self.branch_from_a_base_with_the_gate()
         head_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
@@ -1121,6 +1164,39 @@ class StTest(unittest.TestCase):
         code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')  # idempotent
         self.assertEqual(code, 0, err)
         self.assertEqual(len(pushed('tags')), 1)
+
+    def test_https_publication_keeps_transport_config_and_only_pushes_the_heads_records(self):
+        self.commit('b.txt', 'old head')
+        self.assertEqual(self.run_st_test('--check', 'demo')[0], 0)
+        old_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        old_record = git(self.work, 'for-each-ref', '--format=%(objectname)', f'refs/tags/evidence/{old_tree}/')
+        git(self.work, 'update-ref', '--stdin', stdin=''.join(
+            f'update refs/tags/evidence/{old_tree}/cached-{n} {old_record}\n' for n in range(2000)).encode())
+        self.commit('c.txt', 'published head')
+        tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        origin = Path(self.tmp.name) / 'origin.git'
+        url = 'https://evidence.invalid/org/repo.git'
+        git(self.work, 'remote', 'set-url', 'origin', url)
+        env = {
+            'GIT_CONFIG_COUNT': '3',
+            'GIT_CONFIG_KEY_0': f'url.{origin.as_uri()}.insteadOf', 'GIT_CONFIG_VALUE_0': url,
+            'GIT_CONFIG_KEY_1': 'protocol.file.allow', 'GIT_CONFIG_VALUE_1': 'always',
+            'GIT_CONFIG_KEY_2': 'gc.auto', 'GIT_CONFIG_VALUE_2': '0',
+            'EVIDENCE_PUSH_TOKEN': 'test-https-token',
+        }
+        for already_signed in (False, True):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin', extra_env=env)
+            self.assertEqual(code, 0, out + err)
+            if already_signed:
+                self.assertIn('already signed', out)
+            else:
+                self.assertIn('st-test: evidence-wrap argv:', err)
+                self.assertIn('--push origin', err)
+                self.assertIn("-- sh -c 'echo ran'", err)
+                self.assertNotIn('test-https-token', err)
+            refs = git(origin, 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/', 'refs/notes/evidence/').splitlines()
+            self.assertEqual(len(refs), 2, refs)
+            self.assertTrue(all(f'/{tree}/' in ref for ref in refs), refs)
 
     def test_an_already_signed_note_that_cannot_be_pushed_is_a_failure(self):
         self.commit('b.txt', 'two')
@@ -1225,6 +1301,16 @@ class StTest(unittest.TestCase):
         self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
         self.assertEqual(self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'CARGO_INCREMENTAL': '1'})[0], 0)
         self.assertEqual(seen.read_text().split(), ['0', '1'])
+
+    def test_a_check_that_builds_nothing_starts_as_light_and_a_build_never_does(self):
+        self.commit('b.txt', 'two')
+        seen = Path(self.tmp.name) / 'seen'
+        command = ['sh', '-c', f'echo "${{BUILD_ADMISSION_CLASS:-unset}}" >> {seen}']
+        self.assertEqual(self.run_st_test('--check', 'demo', command=command)[0], 0)
+        with mock.patch.object(st_test, 'BUILDS', frozenset({'demo'})):
+            code, out, err = self.run_st_test('--check', 'demo', '--rerun', command=command, extra_env={'BUILD_ADMISSION_CLASS': 'light'})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(seen.read_text().split(), ['light', 'unset'])
 
     def test_a_heavy_run_says_how_big_its_target_ended(self):
         self.commit('b.txt', 'two')
@@ -1676,7 +1762,7 @@ if os.environ.get('CI_TEST_FLAKY'):
 
 
 class PoolQueue(unittest.TestCase):
-    """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT, aged as the shim ages it, then arrival), not by a race."""
+    """Pool trees go to waiters in the build host's order (cargo-priority rank by ST_AGENT or CARGO_PRIORITY_CALLER, aged as the shim ages it, then arrival), not by a race."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -1727,6 +1813,22 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 0)
         got[0][1].close()
 
+    def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
+        self.root.mkdir(parents=True)
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        size, got = [1], []                                                     # the host's heavy slots go from 1 to 2 while it waits
+        with contextlib.redirect_stderr(io.StringIO()):
+            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, lambda: size[0], rank=50)))
+            waiter.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])                                           # tree-0 is held, and the pool has no other
+            size[0] = 2
+            waiter.join(5)
+        self.assertEqual(got[0][0], 1)                                          # the new tree, while tree-0 is still held
+        got[0][1].close()
+
     def test_the_queue_orders_by_aged_rank_then_arrival_and_drops_dead_tickets(self):
         queue = Path(self.tmp.name) / 'queue'
         queue.mkdir()
@@ -1739,9 +1841,23 @@ class PoolQueue(unittest.TestCase):
                  'dead': f'001.{now:019d}.999999999'}
         for name in names.values():
             (queue / name).touch()
-        order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):  # tickets from 1970 for a live pid: only the order is asked
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['p0'], names['old-50'], names['new-12'], names['young-50']])
         self.assertFalse((queue / names['dead']).exists())
+
+    def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        started = st_test.process_started_ns(os.getpid())
+        self.assertIsNotNone(started)
+        self.assertLess(abs(started - time.time_ns()), 3600 * 10**9)              # this test process started within the hour
+        stale = queue / f'050.{started - 60 * 10**9:019d}.{os.getpid()}'        # taken a minute before this pid's process existed
+        own = queue / f'050.{started + 10**9:019d}.{os.getpid()}'
+        stale.touch()
+        own.touch()
+        self.assertEqual([name for _, _, name in st_test.tree_queue(queue, time.time_ns())], [own.name])
+        self.assertFalse(stale.exists())
 
     def test_the_rank_is_the_first_matching_line_of_the_priority_file_and_50_otherwise(self):
         priority = Path(self.tmp.name) / 'cargo-priority'
@@ -1751,6 +1867,11 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(rank('agent/crew/leads/lead-2'), 4)
         self.assertEqual(rank('agent/other'), 12)
         self.assertEqual(rank(''), 50)
+        # The shim's caller: ST_AGENT, else CARGO_PRIORITY_CALLER (st-test and ci-local stages run without ST_* variables).
+        by = lambda environment: st_test.priority_rank(dict(environment, CARGO_PRIORITY_FILE=str(priority)))
+        self.assertEqual(by({'CARGO_PRIORITY_CALLER': 'agent/crew/hot/2026-10-26/hot-builder'}), 3)
+        self.assertEqual(by({'ST_AGENT': 'agent/crew/leads/lead-2', 'CARGO_PRIORITY_CALLER': 'agent/crew/hot/x/hot-builder'}), 4)
+        self.assertEqual(by({'ST_AGENT': '', 'CARGO_PRIORITY_CALLER': 'agent/crew/leads/lead-2'}), 4)
         self.assertEqual(st_test.priority_rank({'ST_AGENT': 'agent/x', 'CARGO_PRIORITY_FILE': str(priority) + '.missing'}), 50)
 
     def test_an_interrupted_waiter_leaves_no_ticket(self):
@@ -2160,15 +2281,28 @@ class PerCrate(StTest):
         calls = Path(self.tmp.name) / 'pushes'
         refs = self.push_refs(85)
         self.hook(f'echo x >> {calls}\nif [ ! -e {calls}.rejected ]; then touch {calls}.rejected; echo "transient" >&2; exit 1; fi\nexit 0\n')
-        with mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
             self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
         self.assertEqual(sorted(self.remote_refs()), sorted(refs))
         self.assertEqual(len(calls.read_text().split()), 4, 'three chunks of at most 40, and the one that failed once again')
 
+    def test_batched_publication_only_sends_selected_refs_not_the_cached_namespace(self):
+        refs = self.push_refs(85)
+        head = git(self.work, 'rev-parse', 'HEAD')
+        git(self.work, 'update-ref', '--stdin', stdin=''.join(
+            f'update refs/notes/pushtest/cached-{n} {head}\n' for n in range(2000)).encode())
+        calls = Path(self.tmp.name) / 'batch-sizes'
+        self.hook(f'count=0\nwhile read -r old new ref; do count=$((count + 1)); done\n'
+                  f'echo "$count" >> {calls}\n[ "$count" -le {st_test.PUSH_CHUNK} ]\n')
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), contextlib.chdir(self.work):
+            self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
+        self.assertEqual(sorted(self.remote_refs()), sorted(refs))
+        self.assertEqual(calls.read_text().split(), ['40', '40', '5'])
+
     def test_a_ref_the_remote_keeps_rejecting_is_named_with_its_reason_after_the_tries(self):
         refs = self.push_refs(3)
         self.hook('echo "no such thing" >&2\nexit 1\n')
-        with mock.patch.object(st_test.time, 'sleep') as slept, contextlib.chdir(self.work):
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep') as slept, contextlib.chdir(self.work):
             error = st_test.push_records(self.work, 'origin', refs)
         self.assertIn('push of 3 of 3 refs failed after 3 tries', error)
         self.assertIn('refs/notes/pushtest/r0', error)
