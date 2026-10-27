@@ -185,6 +185,12 @@ Agent rows include `subagents` (empty when none are running) only for observing 
 Each entry gets increasing `sequence`, `revision` 1 unless revised, and a timestamp from the
 time model. A streaming entry is emitted as revisions with `final: false` until its last revision.
 
+Native harness turn headers keep non-`message/` body `message_id` values, including
+normalized provider UUIDs (`native/scenario-...`). Like the daemon, they omit `from`/`to`;
+their user/assistant roles distinguish the person from the agent. Only real graph mail
+uses `message/` IDs and carries sender/recipient fields. Timeline entry IDs remain
+`timeline-entry/...` in either case.
+
 ### Slices
 
 A slice holds the state at `now` (offset 0) and a timeline of events after `now` (offset > 0).
@@ -208,6 +214,7 @@ after it (see [Store versions](#store-versions)).
 Synthetic details missions include `run_details`, derived from the same work inventory at
 the baseline and after every details change. Each run's progress, step states and claimants
 match its work rows; the cast maps each `work/...` ID to its `step-run/...` identity.
+This is the cast `work` ↔ `stepRun` mapping: Work keeps `work`; run details use `stepRun`.
 Work-only changes also publish the affected mission's joined run details. Recorded slices
 remain unmodified captures.
 
