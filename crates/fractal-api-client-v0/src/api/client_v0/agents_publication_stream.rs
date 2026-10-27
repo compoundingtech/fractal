@@ -115,11 +115,9 @@ pub(super) async fn prepare(
     // Snapshot provenance is a pure function of the captured immutable metadata, not a
     // per-subscriber Store read or a moving current clock.
     let metadata = publication.metadata();
-    let snapshot = ClientSnapshot {
-        published_at: Some(client_timestamp(u128::from(metadata.materialized_at_ms))),
-        ..client_snapshot_with_time(&state, metadata.status_watermark.store_index,
-            u128::from(metadata.materialized_at_ms))
-    };
+    let mut snapshot = client_snapshot_with_time(&state, metadata.status_watermark.store_index,
+        u128::from(metadata.materialized_at_ms));
+    snapshot.published_at = Some(client_timestamp(u128::from(metadata.materialized_at_ms)));
     tokio::task::spawn_blocking(move || {
         // Caller cancellation must not release this physical preparation slot early.
         let _permit = permit;

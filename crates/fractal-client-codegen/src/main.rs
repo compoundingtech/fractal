@@ -852,15 +852,17 @@ fn validate_surfaces(
         validate_model(schema, definition, definition, definition, rust, swift)?;
     }
     for definition in ["AgentsSnapshotChunk", "AgentsChanges"] {
-        let properties = schema_properties(&schema["$defs"][definition])
-            .with_context(|| format!("{definition} properties"))?;
+        let mut properties = schema_properties(&schema["$defs"][definition]).peekable();
+        if properties.peek().is_none() {
+            bail!("client schema `{definition}` has no properties");
+        }
         let rust_variant = rust_client
             .split(&format!("    {definition} {{"))
             .nth(1)
             .and_then(|rest| rest.split("\n    }").next())
             .with_context(|| format!("Rust CollectionEvent::{definition}"))?;
         let swift_variant = struct_block(swift, &format!("public struct {definition}:"))?;
-        for property in properties.keys().filter(|name| name.as_str() != "kind") {
+        for property in properties.flat_map(|properties| properties.keys()).filter(|name| name.as_str() != "kind") {
             if !rust_variant.contains(&format!("{property}:"))
                 || !swift_variant.contains(&lower_camel_snake(property))
             {

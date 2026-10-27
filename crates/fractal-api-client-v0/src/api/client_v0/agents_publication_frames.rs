@@ -32,14 +32,15 @@ struct AgentsRowsDiff {
 impl AgentsRowsDiff {
     fn base_revision(&self) -> u64 { self.base_revision }
     fn upsert_bytes(&self) -> usize { self.upsert_bytes }
-    fn encoded_removes(&self) -> &[u8] { &self.removes }
+    fn encoded_removes(&self) -> &[u8] { &self.removes[1..self.removes.len() - 1] }
     fn upserts(&self) -> impl Iterator<Item = usize> + '_ { self.upserts.iter().copied() }
 }
 
 // Weak summaries share indexing and cryptographic fingerprints across subscribers without
 // retaining a publication, its encoded bytes, or even a summary after the last subscriber.
 type SummaryKey = (uuid::Uuid, u64);
-static SUMMARIES: std::sync::LazyLock<parking_lot::Mutex<BTreeMap<SummaryKey, std::sync::Weak<AgentsRowsSummary>>>> =
+type Summaries = BTreeMap<SummaryKey, std::sync::Weak<AgentsRowsSummary>>;
+static SUMMARIES: std::sync::LazyLock<parking_lot::Mutex<Summaries>> =
     std::sync::LazyLock::new(Default::default);
 /// Index into the core publication's shared canonical encoding; no copied row JSON.
 struct IndexedPublication {
@@ -88,9 +89,7 @@ impl IndexedPublication {
         let upsert_bytes = upserts.iter().map(|index| self.summary.row_ranges[*index].len()).sum::<usize>()
             + upserts.len().saturating_sub(1);
         let removes: Vec<_> = previous.rows.keys().filter(|id| !self.summary.rows.contains_key(*id)).collect();
-        let mut removes = serde_json::to_vec(&removes).expect("IDs serialize");
-        removes.remove(0);
-        removes.pop();
+        let removes = serde_json::to_vec(&removes).expect("IDs serialize");
         Some(Arc::new(AgentsRowsDiff { base_revision: previous.revision, upserts, upsert_bytes, removes }))
     }
 }
