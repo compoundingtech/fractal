@@ -8,6 +8,7 @@
  * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
 import * as Fractal from '@fractal/client/schema'
+import { classifySubagentDriver } from '@fractal/client'
 import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/effect'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
@@ -118,6 +119,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     lifecycle: lifecycleOf(row),
     host: hostName(row),
     ...(harness === undefined ? {} : { harness }),
+    driver: classifySubagentDriver(driver === undefined ? undefined : leafText(driver)),
     activity: activityOf(row),
     status: statusOf(row),
     state: leafText(row.state),
@@ -290,6 +292,8 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   a.lifecycle._tag === b.lifecycle._tag &&
   a.host === b.host &&
   a.harness === b.harness &&
+  a.driver?._tag === b.driver?._tag &&
+  a.driver?.name === b.driver?.name &&
   a.activity === b.activity &&
   a.status === b.status &&
   a.state === b.state &&
