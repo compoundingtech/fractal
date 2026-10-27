@@ -18,7 +18,7 @@ Observation reporting holds one send slot during both batch preparation and tran
 
 ## Layout
 
-The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Other tabs retain the stui-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
+The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the stui-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the stui-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.
 
 | Piece | Native component | Package |
 | --- | --- | --- |
