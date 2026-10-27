@@ -1189,11 +1189,7 @@ async fn onboarding_preserves_customized_assistant_resource_references() {
                 let spec = store.mission_spec("example/resources", None).unwrap().unwrap();
                 assert_eq!(spec.resources, references[..1], "{path}");
                 let extracted = spec.declarations_kdl.expect("mission retains its agent declaration");
-                let parsed = fractal_daemon::parse_intent(
-                    &format!("version 2\n{extracted}"),
-                    "studio",
-                )
-                .unwrap();
+                let parsed = fractal_daemon::parse_intent(&extracted, "studio").unwrap();
                 let agents = parsed.subjects.values().filter(|subject| subject.kind == "agent")
                     .collect::<Vec<_>>();
                 assert_eq!(agents.len(), 1, "{path}");

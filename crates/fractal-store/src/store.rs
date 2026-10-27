@@ -2423,7 +2423,8 @@ impl Store {
         publication_facts::install_cache_observer(&graph, &fractal);
         // Fold preexisting declaration edges in bounded writer batches off the open path.
         #[cfg(not(test))]
-        let resource_backfill = resource_references::spawn_backfill(&graph.connection);
+        let resource_backfill =
+            resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
@@ -2442,7 +2443,8 @@ impl Store {
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         #[cfg(not(test))]
-        let resource_backfill = resource_references::spawn_backfill(&graph.connection);
+        let resource_backfill =
+            resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
