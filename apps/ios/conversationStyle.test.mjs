@@ -6,8 +6,8 @@ import { COLLAPSED_TOOL_LINES, folds, HOME_LEGEND } from '@fractal/views';
 import { tokenColor } from './conversationStyle.ts';
 import { inLight, lightPalette, lightTheme, palette, theme } from './theme.ts';
 
-// stui writes the drawing rules; the phone draws from the same file. Every colour it names must
-// be one of the phone's theme tokens, and the phone's fold must match stui's.
+// The Fractal terminal UI writes the drawing rules; the phone draws from the same file. Every colour it names must
+// be one of the phone's theme tokens, and the phone's fold must match the Fractal terminal UI's.
 const rules = JSON.parse(readFileSync(new URL('../../fixtures/clients/conversation-style.json', import.meta.url), 'utf8'));
 const tokens = [];
 const walk = (value, key) => {

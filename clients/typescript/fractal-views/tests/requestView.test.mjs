@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { ANSWERS, isRequest, report, spaced, yesNo } from '@fractal/views/requestView';
 
-// The same report stui's test reads (crates/fractal-tui/src/ui/screens.rs).
+// The same report the Fractal terminal UI's test reads (crates/fractal-tui/src/ui/screens.rs).
 const text = 'The deploy finished: {"status":"failed","error":"unit st3.service did not start","commit":"8821eced","host":"willow","attempt":2,"log":"/var/log/x","duration_ms":1234,"members":["maple","cedar"],"plan":{"a":1},"notes":"long\\nnotes"}';
 const shown = report(text);
 assert.equal(shown.before, 'The deploy finished:');
@@ -18,7 +18,7 @@ assert.ok(isRequest('person-step') && isRequest('agent-request') && !isRequest('
 assert.ok(yesNo('Should I merge it? ') && !yesNo('Please review the plan.'));
 assert.equal(ANSWERS.nothing, 'Nothing for me to do here.');
 
-// An agent's question gets room to read, as stui's: prose apart, a short label in bold.
+// An agent's question gets room to read, as in the Fractal terminal UI: prose apart, a short label in bold.
 assert.equal(
   spaced('Recommend: yes, in three parts.\nWhy: the release run failed.\nMy proposal:\n1. Land #1049.\n2. Build on main.\n```\ncargo build\nnext\n```\nAnswer yes and I queue it.'),
   '**Recommend:** yes, in three parts.\n\n**Why:** the release run failed.\n\nMy proposal:\n1. Land #1049.\n2. Build on main.\n```\ncargo build\nnext\n```\nAnswer yes and I queue it.',

@@ -12,7 +12,7 @@ import { tokens } from '../../ui-compat/tokens.stylex.ts'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 
 // Asks, review gates and launch approvals in an agent's conversation, answered in place with the
-// answers stui and the phone give: a structured request's named answers, Yes and No for a
+// answers the Fractal terminal UI and the phone give: a structured request's named answers, Yes and No for a
 // yes-or-no question, the person's own words, Nothing to do; a gate's approve, send back or
 // reject; a launch's approve, send back to its planner, or cancel. Every answer is confirmed
 // before it is sent, so a stray click answers nothing.
@@ -36,7 +36,7 @@ const done = (summary: string, answer?: { readonly id?: string; readonly text?: 
   ...(answer === undefined ? {} : { answer }),
 })
 
-/** The person's answer to a structured request, as stui types it; the words become the summary. */
+/** The person's answer to a structured request, as the Fractal terminal UI types it; the words become the summary. */
 const typed = (request: NonNullable<Native.Attention['request']>, chosen: string | undefined, words: string) => {
   const answer = personAnswer(request as Parameters<typeof personAnswer>[0], chosen, words)
   return typeof answer === 'object' ? answer : undefined
@@ -44,7 +44,7 @@ const typed = (request: NonNullable<Native.Attention['request']>, chosen: string
 
 /**
  * The answers an alert offers here, or null when it is answered elsewhere. A request is answered
- * only while st offers `work.done` on it; a gate offers only the `review.*` actions st lists.
+ * only while Fractal offers `work.done` on it; a gate offers only the `review.*` actions Fractal lists.
  */
 export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | null => {
   const offered = alert.actions as readonly string[]
@@ -67,7 +67,7 @@ export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | 
           action: (words) => done(words.trim(), typed(request, undefined, words)),
         })
       }
-      // A request with named answers is set aside by name; st tells its asker it was dismissed.
+      // A request with named answers is set aside by name; Fractal tells its asker it was dismissed.
       choices.push((request.answers ?? []).length > 0
         ? { key: 'dismiss', label: 'Dismiss', words: 'none', tone: 'secondary', action: () => done('Dismissed without an answer.', { id: 'dismiss' }) }
         : { key: 'nothing', label: 'Nothing to do', words: 'none', tone: 'secondary', action: () => done(ANSWERS.nothing, typed(request, undefined, ANSWERS.nothing)) })
@@ -266,7 +266,7 @@ const Body = ({ alert }: { readonly alert: Native.Attention }): React.ReactNode 
 type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
 
 /**
- * An ask, a review gate, or another alert st shows in this conversation. Answers show only when
+ * An ask, a review gate, or another alert Fractal shows in this conversation. Answers show only when
  * this device can send them; otherwise the alert says where it is answered.
  */
 export const AnswerAlert = ({

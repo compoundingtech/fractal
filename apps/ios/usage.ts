@@ -1,7 +1,7 @@
-// What the Usage tab shows, as stui's Usage tab shows it (crates/fractal-tui/src/ui/usage.rs): each
+// What the Usage tab shows, as the Fractal terminal UI's Usage tab shows it (crates/fractal-tui/src/ui/usage.rs): each
 // account's spend and limits, a summary, then every group, the largest first. Row ids are the
 // subject a group names (agent/…, mission/…, step-run/…, machine/…) or account/…, model/… and
-// usage/no-… for what st has no subject for, so a detail screen can be opened by id alone.
+// usage/no-… for what Fractal has no subject for, so a detail screen can be opened by id alone.
 import type { UsageAccount, UsageLimit, UsageRow } from '../../clients/typescript/fractal-client';
 
 export const BY = ['agent', 'mission', 'step', 'model', 'account', 'host'] as const;
@@ -139,7 +139,7 @@ export function creditsLine(credits: NonNullable<UsageAccount['credits']>) {
 }
 
 export type Tone = 'ok' | 'warning' | 'fault' | 'quiet';
-/** A share of a limit, coloured as stui colours it: yellow from 75%, red from 90%. */
+/** A share of a limit, coloured as the Fractal terminal UI colours it: yellow from 75%, red from 90%. */
 export function share(percent: number | null | undefined): { text: string; tone: Tone } {
   if (percent === null || percent === undefined) return { text: '?', tone: 'quiet' };
   return { text: `${Math.round(percent)}%`, tone: percent >= 90 ? 'fault' : percent >= 75 ? 'warning' : 'ok' };
@@ -154,7 +154,7 @@ export function span(ms: number): string {
   return `${Math.floor(seconds / 86_400)}d`;
 }
 
-/** An account's limits as stui words them: weekly first, since that is the one that stops seats. */
+/** An account's limits as the Fractal terminal UI words them: weekly first, since that is the one that stops seats. */
 export function limitLine(limit: UsageLimit, now: number) {
   return {
     weekly: share(limit.weekly_percent),

@@ -1,9 +1,9 @@
-// A message st may have taken stays that one message until st says what became of it.
+// A message Fractal may have taken stays that one message until Fractal says what became of it.
 //
-// A message is sent once with its own id and key, signed with a fresh nonce. When st's reply is
-// lost, or st says it may still complete (`applied: "unknown"`, as `message-send-unconfirmed` does
-// when it cannot confirm in time), the identical request is sent again: st returns its first answer
-// and never records a second message. If st still has not said, the send is unconfirmed and the
+// A message is sent once with its own id and key, signed with a fresh nonce. When Fractal's reply is
+// lost, or Fractal says it may still complete (`applied: "unknown"`, as `message-send-unconfirmed` does
+// when it cannot confirm in time), the identical request is sent again: Fractal returns its first answer
+// and never records a second message. If Fractal still has not said, the send is unconfirmed and the
 // app keeps the exact request, so the person can send it again: the same id, key and parameters
 // (signature and nonce included) under a fresh fence. A request rebuilt with a new id could be a
 // second message; a changed one under the same key is refused (`idempotency-conflict`).
@@ -19,7 +19,7 @@ export type SendPorts<R> = {
 
 export type SendOutcome<R> =
   | { how: 'sent' }
-  /** st may have taken it and has not said: `request` is what to send again, unchanged but for its fence. */
+  /** Fractal may have taken it and has not said: `request` is what to send again, unchanged but for its fence. */
   | { how: 'unconfirmed'; request: R }
   | { how: 'failed'; error: unknown };
 
@@ -38,7 +38,7 @@ export function resendMessage<R extends { fence: unknown }>(ports: SendPorts<R> 
   return deliver(ports, async () => ({ ...request, fence: await ports.fence() }), request);
 }
 
-/** `original` is the unconfirmed request being sent again: whatever st does not answer, it stays unconfirmed. */
+/** `original` is the unconfirmed request being sent again: whatever Fractal does not answer, it stays unconfirmed. */
 async function deliver<R>(ports: SendPorts<R>, next: () => Promise<R>, original?: R): Promise<SendOutcome<R>> {
   let last: unknown;
   let wait = 50;
@@ -48,7 +48,7 @@ async function deliver<R>(ports: SendPorts<R>, next: () => Promise<R>, original?
     try { request = await next(); } catch (error) { return original ? { how: 'unconfirmed', request: original } : { how: 'failed', error }; }
     try { await ports.send(request); return { how: 'sent' }; } catch (error) { last = error; }
     if (outcomeUnknown(last)) {
-      // st may have taken it: the identical request gets st's first answer, never a second message.
+      // Fractal may have taken it: the identical request gets Fractal's first answer, never a second message.
       await ports.wait(REPEAT_AFTER_MS);
       try { await ports.send(request); return { how: 'sent' }; } catch (error) { last = error; }
       // The first may still land, so a new request could be a second message: keep this one.

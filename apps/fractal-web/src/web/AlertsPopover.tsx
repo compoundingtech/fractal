@@ -11,7 +11,7 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 import { useAttention } from '../data/react.tsx'
 import type { Feed } from '../data/source.ts'
 
-// Every open alert across conversations, behind a count, as stui's top bar shows it: nothing at
+// Every open alert across conversations, behind a count, as the Fractal terminal UI's top bar shows it: nothing at
 // zero, `N alerts` otherwise. It reads the attention collection the conversation strips read, so
 // the count, the list and each conversation agree. A row opens the conversation that answers it.
 
@@ -30,11 +30,11 @@ export type AlertsListRow = {
   readonly kind: string
   readonly from: string
   readonly age: string
-  /** The agent conversation that answers it, when st names one. */
+  /** The agent conversation that answers it, when Fractal names one. */
   readonly conversation?: string
 }
 
-/** The open alerts in Home's order (who is stopped first), st's order within each tier. */
+/** The open alerts in Home's order (who is stopped first), Fractal's order within each tier. */
 export const alertsList = (items: readonly Native.Attention[], now: number): readonly AlertsListRow[] =>
   openAlerts(items, undefined)
     .map((item, index) => ({ item, index, place: homeKind(item)! }))

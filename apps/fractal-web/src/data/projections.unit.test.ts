@@ -284,7 +284,7 @@ test('agent roster preserves usage scope, requested checkout, workspace and huma
   })
 })
 
-test('omitted st roster facts remain Unknown, including session timestamps', () => {
+test('omitted Fractal roster facts remain Unknown, including session timestamps', () => {
   expect(fleetFromAgents([row]).agents[0]).toMatchObject({
     usage: { _tag: 'Unknown' }, checkout: { _tag: 'Unknown' }, workspace: { _tag: 'Unknown' },
     blockedOn: { _tag: 'Unknown' }, ask: { _tag: 'Unknown' },

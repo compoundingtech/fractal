@@ -1,6 +1,6 @@
 // moves to fractal/clients/typescript
 //
-// The normalized conversation view model. Both sources fold into it: the live st3 conversation
+// The normalized conversation view model. Both sources fold into it: the live Fractal conversation
 // follow (generated `TimelineEntry`, see ./fromTimeline.ts) and offline harness history
 // (`@overeng/agent-session-ingest` `NormalizedRecord`, see ./ingest.ts + ./fromIngest.ts).
 // Renderers only ever see `ConversationItem`; the case set follows the draft in
@@ -66,8 +66,8 @@ export type NoticeKind = typeof NoticeKind.Type
  * Local send lifecycle, not a streaming revision or a server delivery acknowledgement.
  * `Sent`: the gateway action completed authoritatively while the message's own mailbox
  * echo is outside the loaded conversation window; it is kept (never duplicated) until
- * the window shows it. `Unconfirmed`: st may have taken the send and has not confirmed it
- * yet; resending the identical request is safe and returns st's first answer.
+ * the window shows it. `Unconfirmed`: Fractal may have taken the send and has not confirmed it
+ * yet; resending the identical request is safe and returns Fractal's first answer.
  */
 export const SendState = Schema.TaggedUnion({
   Pending: {},
@@ -117,7 +117,7 @@ export const ConversationItem = Schema.TaggedUnion({
     sender: Schema.optional(Sender),
     sendState: Schema.optional(SendState),
   },
-  /** A Fractal message envelope joined into the conversation (st `message` entry). */
+  /** A Fractal message envelope joined into the conversation (Fractal `message` entry). */
   Message: {
     id: Schema.String,
     messageId: Schema.String,
@@ -128,7 +128,7 @@ export const ConversationItem = Schema.TaggedUnion({
     at: Schema.String,
     sender: Schema.optional(Sender),
   },
-  /** Model reasoning. No st wire source yet (open Q2); ingest `Thinking` and proposed D08 feed it. */
+  /** Model reasoning. No Fractal wire source yet (open Q2); ingest `Thinking` and proposed D08 feed it. */
   Reasoning: {
     id: Schema.String,
     text: Schema.String,

@@ -17,7 +17,7 @@ import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
 
-// Now: what needs the person, as stui's Home lists it.
+// Now: what needs the person, as the Fractal terminal UI's Home lists it.
 export function NowScreen() {
   const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
@@ -31,7 +31,7 @@ export function NowScreen() {
     const agent = data.agents.find(candidate => candidate.id === id);
     return agent ? agentName(agent) : id.replace(/^agent\//, '');
   };
-  // Start something, as stui's launcher does: a shell or a mission.
+  // Start something, as the Fractal terminal UI's launcher does: a shell or a mission.
   useLayoutEffect(() => {
     navigation.setOptions({
       unstable_headerRightItems: () => [{
@@ -46,7 +46,7 @@ export function NowScreen() {
   // The count of what waits on the person, as the other clients print it: nothing at zero.
   const heading = alertsHeading(openAlerts(data.attention, caps?.session_actor).length);
   const sections = useMemo(() => homeSections(rows).map(section => ({ ...section, data: section.rows })), [rows]);
-  // Dismiss, as stui's x: a request is closed with word to its asker that there is nothing for
+  // Dismiss, as the Fractal terminal UI's x: a request is closed with word to its asker that there is nothing for
   // the person to do (after a confirm), an update or a message is read. A decision has none.
   const dismiss = (row: HomeRow): (() => void) | undefined => {
     const item = row.item;

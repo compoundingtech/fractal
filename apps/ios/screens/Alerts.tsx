@@ -23,7 +23,7 @@ export function AlertsStrip({ agentId, entries }: { agentId: string; entries: Re
   const alerts = useMemo(() => alertsIn(data.attention, agentId, caps?.session_actor), [data.attention, agentId, caps?.session_actor]);
   const [toggled, setToggled] = useState<ReadonlySet<string>>(new Set());
   const calls = useMemo(() => pendingCalls(entries), [entries]);
-  // One line until it is opened, as in stui: the cards take the conversation's room only when asked for.
+  // One line until it is opened, as in the Fractal terminal UI: the cards take the conversation's room only when asked for.
   const [expanded, setExpanded] = useState(false);
   const { palette } = useTextAppearance();
   if (!alerts.length) return null;
@@ -142,7 +142,7 @@ function PromptAnswerView({ item, calls }: { item: KeptAttention; calls: Pending
   </View>;
 }
 
-// A structured request (#1010) as stui shows it: the recommendation first, then the question, its
+// A structured request (#1010) as the Fractal terminal UI shows it: the recommendation first, then the question, its
 // summary, reasons and links, and each named answer with what it does. A tap on an answer asks
 // to confirm, then sends it by its id.
 type Structured = NonNullable<Parameters<ReturnType<typeof useStore>['actions']['done']>[0]['request']>;
@@ -158,7 +158,7 @@ export function StructuredRequestView({ item, request, from, onAnswered }: { ite
     { text: 'Cancel', style: 'cancel' },
     { text: 'Send', onPress: () => void actions.done(item, answer.label, answer.id).then(done => { if (done) onAnswered(); }) },
   ]);
-  // The images the ask carries, read from st by its person step, as a message's are by the message.
+  // The images the ask carries, read from Fractal by its person step, as a message's are by the message.
   const images = useMemo(() => requestImages(request, item.source_id), [request, item.source_id]);
   const viewport = useWindowViewport();
   const words = () => Alert.prompt(`Answer ${from}`, item.title, text => { if (text.trim()) void actions.done(item, text.trim()).then(done => { if (done) onAnswered(); }); });
@@ -195,7 +195,7 @@ export function RequestQuestion({ text }: { text: string }) {
   </View>;
 }
 
-// stui's answers: Yes and No for a yes-or-no question, words, or Nothing to do. Each completes
+// The Fractal terminal UI's answers: Yes and No for a yes-or-no question, words, or Nothing to do. Each completes
 // the waiting step with a short reason, after the person confirms it.
 export function RequestAnswers({ item, from, onAnswered }: { item: Parameters<ReturnType<typeof useStore>['actions']['done']>[0]; from: string; onAnswered: () => void }) {
   const { busy, status, actions } = useStore();

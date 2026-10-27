@@ -61,7 +61,7 @@ class Gateway {
   socket: CollectionSocket | undefined
   readonly commands: CollectionCommand[] = []
   readonly decodeMs: number[] = []
-  /** Advertise the st main's `collections` v1 capability (subscription cap 16) when set. */
+  /** Advertise Fractal main's `collections` v1 capability (subscription cap 16) when set. */
   collectionsV1 = false
   onUnsubscribe: (() => void) | undefined
   denyReads = false
@@ -1051,7 +1051,7 @@ describe('warm conversation switching at the data layer', () => {
     } finally {
       await legacy.live.dispose()
     }
-    // The st main's collections v1 raises the cap to 16: 12 conversation slots.
+    // Fractal main's collections v1 raises the cap to 16: 12 conversation slots.
     const modern = openLive({ maxFollows: 8, conversationSlots: 'advertised' })
     modern.gateway.collectionsV1 = true
     try {
