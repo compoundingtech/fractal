@@ -562,6 +562,7 @@ impl Daemon {
             client_relay: None,
             native_session_home: Some(root.join("native")),
             planner_default: Default::default(),
+            assistant_receipts: Default::default(),
         }
     }
 
@@ -2762,6 +2763,39 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 .status,
             "ready"
         );
+    }
+}
+
+/// What a run waits on reads the daemon's published lists, as a daemon serves them; before and
+/// after a restart, the same run reads the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_waiting_on_reads_published_lists_after_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    daemon.apply("version 2\nmission \"example/inspect\" state=\"ready\" { goal \"Inspect the graph.\"; step \"work\" { assigned-to \"agent/example/worker\" } }\n", "inspect-mission");
+    let run = daemon.start("example/inspect", "inspect-run");
+    daemon.store().set_step_state(&run.steps[0].subject, "ready", None).unwrap();
+    for _ in 0..2 {
+        fractal_daemon::api::start_published_lists(&daemon.state);
+        let cut = daemon.store().index().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            fractal_daemon::api::wait_published_lists_at_least(daemon.store(), cut),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let output = daemon.cli(PERSON, &["missions", "waiting-on", &run.subject]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let waiting: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!((waiting["run"].as_str(), waiting["verdict"].as_str()), (Some(run.subject.as_str()), Some("moving")));
+        assert_eq!(waiting["open"][0]["path"], "work");
+        assert_eq!(waiting["open"][0]["kind"], "ready");
+        assert_eq!(waiting["open"][0]["who"], WORKER);
+        daemon.restart().await;
     }
 }
 

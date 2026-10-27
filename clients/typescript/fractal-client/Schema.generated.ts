@@ -3717,11 +3717,13 @@ export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   /** The assistant grant that authorized the send, with sender_class. */
   "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
   "attachments": optionalKey(Schema.Array(Attachment)),
+  "author": optionalKey(ActorRef),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
   "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "from": optionalKey(SenderRef),
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
+  "recipients": optionalKey(Schema.Array(ParticipantRef)),
   "reply_to": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   /** Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text. */
   "sender_class": optionalKey(Schema.Literals(["external-assistant"])).annotate({ description: "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text." }),

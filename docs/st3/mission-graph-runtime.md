@@ -1980,10 +1980,36 @@ child revision changes and daemon restarts. An already reached tick is never rep
 `catch-up "latest"`. Members admitting the same tick while apart converge on one run and initial
 generation; the first creation in canonical claim order supplies its child definition.
 
-A fleet member holds scheduled admission until it has completed an exchange since startup, and
-while replication reports missing history or a deferred projection. A local-only daemon and a
-fleet's sole member can admit immediately. Other fleet members may continue local work during a
-partition; a cold member needs a peer exchange before starting scheduled work.
+A fleet member holds scheduled admission until at least one peer comparison since startup
+reports zero peer-only envelopes. A local-only daemon and a fleet's sole member can admit
+immediately. Deferred projection, active catch-up and first-sync still hold admission.
+A fresh positive peer-only count blocks every schedule. For a primary-only schedule with
+unchanged placement and ownership, an old positive comparison stops blocking when replication
+marks it stale (35 seconds without renewal). This does not erase the count or prove that
+the offline peer has no history; the startup barrier and durable occurrence deduplication remain.
+
+Schedules declaring a standby keep positive comparisons blocking even when stale, on both
+primary and standby. Placement/ownership changes retain the same conservative policy:
+if any retained schedule declaration names another primary, declares a standby, or differs
+in owner run/generation/step, stale positive counts still block. This deliberately includes
+completed historical moves and removed standbys rather than guessing when a move is settled.
+Staged or conflicting owned-set changes remain fenced by the existing ownership guard,
+including at the due callback. No elapsed timeout grants takeover authority.
+
+If a locally due tick remains replication-blocked for fifteen minutes of continuous
+observation, the existing operational-failure attention surface warns the operator.
+The warning names the schedule, host, first blocked occurrence and due instant, and
+lists peer-only/local-only counts, staleness and measurement times (or explicitly
+unknown comparisons), plus projection/catch-up/first-sync state. It is one pending
+warning per schedule and observing host, not a warning per retry or per tick.
+Short intervals and `skip` do not restart the warning clock as later ticks pass.
+Already requested work blocked at its admission boundary is included.
+
+The fifteen-minute clock is monotonic and local: a daemon restart begins a new
+observation window, not a new stored-state schema. A revision change or replicated
+completion retires the old observation. Admission recovery, stopping, or moving the
+schedule away from the observing member recovers its warning. A future tick alone
+does not warn. The warning never changes admission, catch-up, or standby eligibility.
 
 The mission steps are normal claimable work. A schedule does not start another occurrence while its prior mission run remains active.
 
