@@ -1061,6 +1061,26 @@ pub fn with_authority<T>(
     peer: &NativeDeliveryPeer,
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
+    with_authority_mode(state, fence, peer, true, action)
+}
+
+/// Native observations use physical custody without creating/promoting a mailbox lease.
+pub(super) fn with_observation_authority<T>(
+    state: &AppState,
+    fence: &Fence,
+    peer: &NativeDeliveryPeer,
+    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+) -> Result<T, St3Error> {
+    with_authority_mode(state, fence, peer, false, action)
+}
+
+fn with_authority_mode<T>(
+    state: &AppState,
+    fence: &Fence,
+    peer: &NativeDeliveryPeer,
+    promote: bool,
+    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+) -> Result<T, St3Error> {
     if fence.epoch != 0 {
         state.store.check_mailbox_custody_fence(fence)?;
     }
@@ -1267,7 +1287,9 @@ pub fn with_authority<T>(
             // Terminal state may be written without changing session/sequence. Recheck
             // it while holding the record lock rather than admitting a completion race.
             current_provider(state, fence, &agent_dir, &authority)?;
-            state.store.promote_current_mailbox_ownership(fence, &authority)?;
+            if promote {
+                state.store.promote_current_mailbox_ownership(fence, &authority)?;
+            }
             action(&authority, &validate).map_err(anyhow::Error::new)
         },
     )
