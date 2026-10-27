@@ -58,12 +58,21 @@ const TreeBindingSurface = ({ scheme, variant = 'default' }: { readonly scheme: 
   </main>
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'wf/Sidebar/Live tree binding',
   component: TreeBindingSurface,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed fixture agents projected through the live sidebarRow binding into the production tree, frame and row.' } },
   args: { scheme: 'dark', variant: 'default' },
 } satisfies Meta<typeof TreeBindingSurface>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Dark:contract-fixture',
+  'Light:contract-fixture',
+  'LongNamesManyFolders:contract-fixture',
+  'LongNamesManyFoldersLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const rowFor = (canvasElement: HTMLElement, ref: string) => canvasElement.querySelector<HTMLElement>(`[data-wf-agent-ref="${ref}"] [data-testid="taste-agent-row"]`)
 const play: NonNullable<Story['play']> = async ({ canvasElement }) => {

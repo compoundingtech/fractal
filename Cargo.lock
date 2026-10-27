@@ -1500,6 +1500,7 @@ dependencies = [
  "fractal-drivers",
  "fractal-runtime",
  "fractal-schema",
+ "fractal-store",
  "fractal-terminal-direct",
  "fractal-tui",
  "fractal-ui-model",
@@ -4684,7 +4685,7 @@ dependencies = [
 [[package]]
 name = "pty-client"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=6336c376fe3d1657d825f4278465b6192b770b40#6336c376fe3d1657d825f4278465b6192b770b40"
+source = "git+https://github.com/compoundingtech/pty?rev=79d526d1be4f77bb3764dc1d880492806f8a07fc#79d526d1be4f77bb3764dc1d880492806f8a07fc"
 dependencies = [
  "libc",
  "pty-core",
@@ -4695,7 +4696,7 @@ dependencies = [
 [[package]]
 name = "pty-core"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=6336c376fe3d1657d825f4278465b6192b770b40#6336c376fe3d1657d825f4278465b6192b770b40"
+source = "git+https://github.com/compoundingtech/pty?rev=79d526d1be4f77bb3764dc1d880492806f8a07fc#79d526d1be4f77bb3764dc1d880492806f8a07fc"
 dependencies = [
  "indexmap",
  "libc",
@@ -4710,7 +4711,7 @@ dependencies = [
 [[package]]
 name = "pty-terminal"
 version = "0.13.0-rust"
-source = "git+https://github.com/compoundingtech/pty?rev=6336c376fe3d1657d825f4278465b6192b770b40#6336c376fe3d1657d825f4278465b6192b770b40"
+source = "git+https://github.com/compoundingtech/pty?rev=79d526d1be4f77bb3764dc1d880492806f8a07fc#79d526d1be4f77bb3764dc1d880492806f8a07fc"
 dependencies = [
  "libghostty-vt",
  "libghostty-vt-sys",

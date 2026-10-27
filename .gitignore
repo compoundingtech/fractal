@@ -36,6 +36,7 @@ packages/fractal-sdk/node_modules/
 
 # Buck2: the web devShell links the rules and capabilities cells; build output.
 /.buck2/
+/apps/ios/.buck2
 /buck-out/
 # Written into the checkout by the web dev shell's Buck tooling (the file watcher admission) on a host that runs Watchman; not source.
 /.buckconfig.local

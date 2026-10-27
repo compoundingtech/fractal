@@ -125,6 +125,14 @@ pub struct ProjectionProgress {
     pub total: Option<u64>,
 }
 
+fn projection_diagnostic_prefix() -> &'static str {
+    // Exec gates capture stderr as JSON; keep their established diagnostic spelling.
+    static PREFIX: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        if std::env::var_os("ST_GATE_REPORT").is_some() { "st" } else { "fractal" }
+    });
+    *PREFIX
+}
+
 /// Keep diagnostics on one bounded line even when an error code or caller phase is untrusted.
 fn full_replay_log_line(phase: &str, reason: &str, frontier: u64, target: u64) -> String {
     fn bounded(value: &str) -> String {
@@ -135,7 +143,8 @@ fn full_replay_log_line(phase: &str, reason: &str, frontier: u64, target: u64) -
             .collect()
     }
     format!(
-        "st: projection full replay phase={} reason={} frontier={frontier} target={target}",
+        "{}: projection full replay phase={} reason={} frontier={frontier} target={target}",
+        projection_diagnostic_prefix(),
         bounded(phase),
         bounded(reason)
     )
@@ -253,12 +262,33 @@ fn projection_failure_log_line(
             || ["projection_stage", "projection_claim_id", "projection_subject", "projection_operation_id", "projection_claim_kind"].iter()
                 .any(|name| details.get(*name).and_then(Value::as_str).is_some_and(|value| value.chars().take(257).count()>256)),
     });
-    format!("st: projection failure detail {diagnostic}")
+    format!("{}: projection failure detail {diagnostic}", projection_diagnostic_prefix())
 }
 
 #[cfg(test)]
 mod projection_failure_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn projection_diagnostic_prefix_preserves_gate_stderr() {
+        const CHILD: &str = "FRACTAL_TEST_PROJECTION_PREFIX_CHILD";
+        if let Some(expected) = std::env::var_os(CHILD) {
+            let line = full_replay_log_line("replay", "test", 0, 1);
+            assert!(line.starts_with(&format!("{}: projection ", expected.to_string_lossy())), "{line}");
+            return;
+        }
+        for (gate, expected) in [(false, "fractal"), (true, "st")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "store::projection_failure_diagnostic_tests::projection_diagnostic_prefix_preserves_gate_stderr", "--nocapture"])
+                .env(CHILD, expected)
+                .env_remove("ST_GATE_REPORT");
+            if gate {
+                command.env("ST_GATE_REPORT", "/unused/gate-report");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
 
     #[test]
     fn diagnostic_rate_keeps_first_error_and_reports_reset_counts_by_stage_and_code() {
@@ -392,7 +422,7 @@ mod projection_failure_diagnostic_tests {
         assert_eq!(lines.len(), 2);
         for (line, suppressed) in lines.iter().zip([0, 1]) {
             let value: Value =
-                serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+                serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                     .unwrap();
             assert_eq!(value["error"], error.message);
             assert_eq!(value["suppressed_errors"], suppressed);
@@ -419,7 +449,7 @@ mod projection_failure_diagnostic_tests {
         );
         assert_eq!(line.lines().count(), 1);
         let value: Value =
-            serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+            serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                 .unwrap();
         assert_eq!(value["error"].as_str().unwrap().chars().count(), 4096);
         assert_eq!(value["error_truncated"], true);
@@ -441,7 +471,7 @@ mod projection_failure_diagnostic_tests {
         );
         let value: Value = serde_json::from_str(
             short
-                .strip_prefix("st: projection failure detail ")
+                .strip_prefix("fractal: projection failure detail ")
                 .unwrap(),
         )
         .unwrap();

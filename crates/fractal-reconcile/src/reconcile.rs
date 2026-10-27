@@ -47,8 +47,8 @@ use crate::model::{
     WorkSelector, ObserverSpec,
 };
 use crate::resource::{
-    ObservationRequest, ObserverCondition, ProviderRateLimit, RegisteredResourceProvider,
-    ResourceProvider,
+    LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
+    RegisteredResourceProvider, ResourceProvider,
 };
 use crate::store::Store;
 
@@ -63,6 +63,7 @@ pub mod waits;
 mod schedule_standby_selection_tests;
 #[cfg(test)]
 mod schedule_admission_tests;
+mod schedule_replication_block;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -183,21 +184,7 @@ fn schedule_admission_ready(
     {
         return Ok(false);
     }
-    let membership = store.fleet_membership()?;
-    let peers = configured
-        .iter()
-        .cloned()
-        .chain(
-            membership
-                .incarnations()
-                .filter(|member| member.end.is_none())
-                .map(|member| member.name.clone()),
-        )
-        .filter(|peer| peer != host && !matches!(membership.state(peer),
-            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let peers = schedule_admission_peers(store, host, configured)?;
     if peers.is_empty() {
         return Ok(true);
     }
@@ -205,6 +192,16 @@ fn schedule_admission_ready(
     let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
         && schedule_requires_complete_history(store, schedule)?;
     Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
+    let membership = store.fleet_membership()?;
+    Ok(configured.iter().cloned()
+        .chain(membership.incarnations().filter(|member| member.end.is_none())
+            .map(|member| member.name.clone()))
+        .filter(|peer| peer != host && !matches!(membership.state(peer),
+            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
+        .collect::<BTreeSet<_>>().into_iter().collect())
 }
 
 /// Moving a schedule (or removing its standby) must not turn an old missing-history
@@ -1150,6 +1147,7 @@ pub struct Reconciler<R = NativeRuntime> {
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
+    schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1335,6 +1333,7 @@ impl Reconciler<NativeRuntime> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1497,6 +1496,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -3273,6 +3273,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         // A pending publication must not orphan a suspend or block its resume.
                         if let Some(suspension) = &suspension {
+                            self.retire_obsolete_failed_restart(subject, now_ms())?;
                             return self.reconcile_suspension(
                                 subject,
                                 member,
@@ -6146,6 +6147,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return Ok(None);
                 }
                 Ok(Some(caught(|| -> Result<()> {
+                    self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
@@ -7141,7 +7143,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() {
+        if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }
         let selected_token = self.store.selected_desired_token(&subject.subject)?;
@@ -7573,7 +7575,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        // Native drivers must bind before readiness can be established. Publish running
+        // authority at launch completion only for the physically observed incarnation
+        // owned by this start operation; readiness and restart completion remain separate.
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
+            self.runtime.observe_start(member)?.is_some_and(|observation| {
+                observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(incarnation)
+            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+                .as_deref() == Some(operation_id)
+        } else {
+            false
+        };
+        let mut starting = member_fields(
+            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+        );
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
@@ -8178,16 +8194,79 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// A requester-authored action replicates to the runtime owner. The declaration and old
-    /// incarnation fence it, so a delayed request cannot stop a replacement or revive a stop.
-    /// A start that FAILED and whose producer closure was never proven stays pending, and while it
-    /// does an explicit restart is swallowed (the seat looks parked for good). Once the failed start
-    /// is older than any launcher could still publish a session, no runtime of the seat is observed
-    /// running, and no launch worker holds the start lock, the failure is final: close the operation
-    /// so the request makes a new attempt. Returns whether it did.
-    fn supersede_stale_failed_start(
+    /// A failed launch is not a durable grant to restart after later lifecycle intent.
+    /// Keep its unresolved producer fenced, but consume the obsolete restart request.
+    fn retire_obsolete_failed_restart(&self, subject: &DesiredSubject, now: u128) -> Result<bool> {
+        let Some(pending) = self.store.runtime_start_for(&subject.subject)? else {
+            return Ok(false);
+        };
+        if !pending.finished || pending.cleanup_verified
+            || !pending.result.as_ref().is_some_and(|result| result["error"].is_string())
+        {
+            return Ok(false);
+        }
+        let Some(request) = crate::restart::latest_request(&self.store, &subject.subject)? else {
+            return Ok(false);
+        };
+        let completion = format!("agent-restart-completed:{}", request.id);
+        if self.store.operation_claim(&completion)?.is_some() {
+            return Ok(false);
+        }
+        let later_control = self.store.observations_for(&subject.subject, "runtime.action.requested")?
+            .into_iter().rev().take_while(|claim| claim.id != request.id)
+            .any(|claim| matches!(
+                claim.body["fields"]["action"].as_str(),
+                Some("suspend" | "resume" | "stop" | "terminate")
+            ));
+        let retired = self.store.claims_for(&subject.subject, Some("agent.retired"))?
+            .into_iter().any(|claim| claim.store_index > request.store_index);
+        let reason = if self.store.selected_desired_token(&subject.subject)?.as_deref()
+            != request.body.pointer("/evidence/0").and_then(Value::as_str)
+        {
+            "the desired declaration changed after the restart request"
+        } else if retired || later_control || crate::suspension::current(&self.store, &subject.subject)?
+            .is_some_and(|suspension| suspension.holds_seat())
+        {
+            "later lifecycle control or suspension superseded the restart request"
+        } else if now.saturating_sub(request.accepted_at_unix_ms) > crate::restart::FAILED_START_RETRY_MAX_AGE_MS {
+            "the failed-start restart request exceeded its one-hour retry authority"
+        } else {
+            return Ok(false);
+        };
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("decision".into(), Value::from("restart-retired-obsolete-request")),
+                ("reason".into(), Value::from(reason)),
+                ("key".into(), Value::from(format!("restart-retired-obsolete-request:{}", request.id))),
+            ]),
+            evidence: vec![request.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(format!("restart-retired-obsolete-request:{}", request.id)),
+        })?;
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.action.succeeded".into(),
+            actor: Some(RECONCILER_ACTOR.into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("operation_status".into(), Value::from("retired")),
+                ("reason".into(), Value::from(reason)),
+            ]),
+            evidence: vec![request.id],
+            expected_subject: None,
+            idempotency_key: Some(completion),
+        })?;
+        self.signal_changed();
+        Ok(true)
+    }
+
+    /// Preflight the stale producer and runtime evidence. This never releases admission;
+    /// the replacement's writer transaction fences intent and closes the old hold together.
+    fn stale_failed_start_ready(
         &self,
-        subject: &DesiredSubject,
         pending: &RuntimeStartOperation,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
@@ -8221,30 +8300,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         if observation.is_some_and(|item| !matches!(item.status.as_str(), "exited" | "vanished" | "stopped")) {
             return Ok(false);
         }
-        // The kernel lock, not a PID guess, says no launch worker holds admission.
-        let Some(_lock) = self.store.try_runtime_start_lock(&subject.subject)? else {
-            return Ok(false);
-        };
-        if pending.revoked_by.is_none() {
-            self.revoke_start(&subject.subject)?;
-        }
-        self.store.retain_runtime_start_producer_closed(&pending.id)?;
-        self.record_once(
-            &subject.subject,
-            "runtime.reconcile-decision",
-            BTreeMap::from([
-                ("key".into(), Value::String(format!("restart-superseded-failed-start:{}", pending.id))),
-                ("decision".into(), Value::String("restart-superseded-failed-start".into())),
-                (
-                    "reason".into(),
-                    Value::String(format!(
-                        "the failed runtime start {} never proved its producer closed; it is older than any launcher could still publish and no runtime is running, so a new restart request makes a new attempt",
-                        pending.id
-                    )),
-                ),
-            ]),
-        )?;
-        self.start_changed(&subject.subject);
+        // This is only physical preflight. The admission writer must fence lifecycle intent,
+        // release this exact failed operation and admit its replacement atomically.
         Ok(true)
     }
 
@@ -8262,6 +8319,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(false);
         };
+        if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
+        }
         if self
             .store
             .selected_desired_token(&subject.subject)?
@@ -8288,8 +8348,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .operation_claim(&format!("agent-restart-attempt:{}", request.id))?;
         if let Some(pending) = self.store.runtime_start_for(&subject.subject)? {
-            if self.supersede_stale_failed_start(subject, &pending, observation)? {
-                // The failed start no longer holds the seat: this request makes the new attempt.
+            if self.stale_failed_start_ready(&pending, observation)? {
+                // Admission will release this exact failed operation with the replacement.
             } else {
                 // The request is not lost: it waits for this start. Say so (once per request and
                 // start), so a restart that is never consumed is visible and not a silent success.
@@ -8546,7 +8606,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
         if attempted.is_some() {
             return self.fail_requested_restart(
                 subject,
@@ -14265,6 +14324,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .and_then(Value::as_str)
                     .filter(|reason| !reason.trim().is_empty())
                     .context("a request for changes has no feedback text")?;
+                let reviewer = decision
+                    .actor
+                    .as_deref()
+                    .context("human feedback has no reviewer actor")?;
                 self.apply_human_feedback(subject, attempt, reviewer, reason, &decision.id)?;
                 Ok(GateOutcome::Pending)
             }
@@ -14621,13 +14684,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn schedules_caught_up(&self, schedule: &DesiredSubject) -> Result<bool> {
-        schedule_admission_ready(
+        let ready = schedule_admission_ready(
             &self.store,
             &self.host,
             &self.schedule_peers,
             self.started_at_unix_ms,
             schedule,
-        )
+        )?;
+        self.observe_schedule_replication_gate(schedule, ready, now_ms())?;
+        Ok(ready)
     }
 
     /// A late standby wake cannot turn a past candidate into new catch-up policy.
@@ -14661,9 +14726,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if spec.stopped || (spec.host != self.host
             && !spec.standby.as_ref().is_some_and(|standby| standby.host == self.host)) {
+            self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
         if self.schedule_has_open_work(&schedule.subject)? {
+            if self.store.schedule_has_active_started_run(&schedule.subject)? {
+                self.clear_schedule_replication_block(schedule)?;
+            }
             return Ok(());
         }
         if !self.schedules_caught_up(schedule)? {
@@ -15085,6 +15154,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let on_standby = spec.host != self.host
             && spec.standby.as_ref().is_some_and(|standby| standby.host == self.host);
         if spec.host != self.host && !on_standby {
+            self.clear_schedule_replication_block(schedule)?;
             self.schedule_workspace_retries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -16146,14 +16216,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
         // a newer watcher observation if it was already in flight.
         if watched_ref && refresh_attempt.is_none() && observer_actual.as_ref().is_none_or(|actual|
-            actual["error_code"] != "rate-limited") {
+            !matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget"))) {
             next_check = next_check.min(now_ms().saturating_add(u128::from(spec.every_ms.unwrap())));
         }
-        // Provider retry deadlines remain a lower bound even after a restart or a
-        // desired revision change. Older rate-limit receipts have no revision.
+        // Provider and local admission deadlines remain lower bounds after restart or
+        // desired revision changes. Older rate-limit receipts have no revision.
         if refresh_attempt.is_none()
             && let Some(retry_at) = observer_actual.as_ref()
-                .filter(|actual| actual["error_code"] == "rate-limited")
+                .filter(|actual| matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget")))
                 .and_then(|actual| actual.get("next_check_unix_ms"))
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<u128>().ok())
@@ -16394,25 +16464,40 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
-                        let rate_limit = error.downcast_ref::<ProviderRateLimit>();
-                        let retry_at = rate_limit.map_or_else(
-                            || now_ms().saturating_add(60_000),
-                            |limit| limit.retry_at_unix_ms.max(now_ms().saturating_add(1_000)),
+                        let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
+                            .map(|limit| limit.retry_at_unix_ms)
+                            .or_else(|| error.downcast_ref::<LocalObserverBudget>()
+                                .map(|limit| limit.retry_at_unix_ms));
+                        let now = now_ms();
+                        let retry_at = refusal_deadline.map_or_else(
+                            || now.saturating_add(60_000),
+                            |deadline| if deadline > now { deadline }
+                                else { now.saturating_add(15 * 60_000) },
                         );
                         let reason = error.to_string();
                         completed_deadline = Some(retry_at);
                         error_backoff = true;
                         let previous = store.latest_actual_value(&observer_subject).ok().flatten();
                         let condition = ObserverCondition::of(&error, previous.as_ref());
+                        let state = if matches!(condition, ObserverCondition::LocalBudget(_)) {
+                            // Existing readers alert on degraded and reject new state values.
+                            // Local admission made no provider attempt; retain facts and expose the defer code/deadline.
+                            "healthy"
+                        } else {
+                            "unreachable"
+                        };
                         let unchanged_failure = previous.as_ref().is_some_and(|actual| {
-                            actual.get("state").and_then(Value::as_str) == Some("unreachable")
+                            actual.get("state").and_then(Value::as_str) == Some(state)
                                 && actual.get("reason").and_then(Value::as_str)
                                     == Some(reason.as_str())
+                                && (refusal_deadline.is_none()
+                                    || actual.get("next_check_unix_ms").and_then(Value::as_str)
+                                        .and_then(|value| value.parse::<u128>().ok()) == Some(retry_at))
                         });
                         if !unchanged_failure || refresh_attempt.is_some() {
                             let failure_hash = hex::encode(sha2::Sha256::digest(
                                 format!(
-                                    "{operation}:{reason}:{}",
+                                    "{operation}:{reason}:{retry_at}:{}",
                                     store
                                         .claims_for(&observer_subject, Some("observer.state"))
                                         .unwrap_or_default()
@@ -16424,7 +16509,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .as_bytes(),
                             ));
                             let mut fields = BTreeMap::from([
-                                ("state".into(), Value::String("unreachable".into())),
+                                ("state".into(), Value::String(state.into())),
                                 ("reason".into(), Value::String(reason)),
                                 ("error_code".into(), Value::String(condition.code().into())),
                                 ("revision".into(), Value::String(revision.clone())),
@@ -23247,6 +23332,58 @@ mission "feedback-review" state="ready" {
     }
 
     #[test]
+    fn failed_start_restart_authority_expires_without_closing_the_producer() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "original",
+        );
+        let subject = "agent/example/worker";
+        let desired = store.desired_subject_with_writer(subject).unwrap().unwrap().0;
+        let token = store.selected_desired_token(subject).unwrap().unwrap();
+        let mut operation = RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(),
+            subject: subject.into(),
+            owner: "fixture".into(),
+            body: serde_json::json!({
+                "subject": desired, "selected_token": token, "request": null,
+                "member": desired.member, "reason": "fixture failed start",
+            }),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        store.admit_runtime_start(&mut operation, 2).unwrap();
+        store.finish_runtime_start(&operation.id, &serde_json::json!({
+            "error": "producer closure unverified", "producer_closed": false,
+        })).unwrap();
+        let request = store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/avery".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+            evidence: vec![token], expected_subject: None,
+            idempotency_key: Some("age-bounded-restart".into()),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let deadline = request.accepted_at_unix_ms + 60 * 60 * 1000;
+        assert!(!reconciler.retire_obsolete_failed_restart(&desired, deadline).unwrap());
+        assert!(reconciler.retire_obsolete_failed_restart(&desired, deadline + 1).unwrap());
+        let result = store.operation_claim(&format!("agent-restart-completed:{}", request.id))
+            .unwrap().unwrap();
+        assert_eq!(result.body["fields"]["operation_status"], "retired");
+        assert_eq!(result.body["evidence"][0], request.id);
+        let pending = store.runtime_start_for(subject).unwrap().unwrap();
+        assert_eq!(pending.id, operation.id);
+        assert!(!pending.cleanup_verified);
+    }
+
+    #[test]
     fn publication_found_launch_cache_invalidates_on_retained_source_mutations() {
         // Mutate the native source tables here to cover the same-frontier seam which
         // the append feed cannot see. Native admission/repair/trim paths are exercised
@@ -23890,6 +24027,21 @@ agent "import/omp/repair-order" {{
         old.import_replication("author", &declaration.export_replication(0).unwrap())
             .unwrap();
         let append_binding = |store: &Store, incarnation: &str| {
+            // A driver's binding is accepted only while its incarnation is the running one.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
             store
                 .append_claim(&ClaimInput {
                     subject: seat.into(),
@@ -24088,6 +24240,20 @@ agent "import/omp/repair-order" {{
         old_build
             .append_claim(&ClaimInput {
                 subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
                 kind: "harness.session-file".into(),
                 actor: Some(seat.into()),
                 fields: BTreeMap::from([
@@ -24160,6 +24326,21 @@ agent "import/omp/fixture" {{
                     "desired_token".into(),
                     Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
                 );
+                // A driver's binding is accepted only while its incarnation is the running one.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.subject.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.subject.clone()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("running".into())),
+                            ("incarnation_id".into(), Value::String(incarnation.into())),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             store
                 .append_claim(&ClaimInput {
@@ -35515,7 +35696,8 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
         Observe,
         /// An observation that asks to continue at once, as a listing longer than one read does.
         Continue,
-        RateLimit,
+        RateLimitAt(u128),
+        LocalBudget(u128),
         Forbidden,
         Fail,
     }
@@ -35569,10 +35751,15 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
                         next_check_unix_ms: now_ms()
                             .saturating_add(crate::resource::PROVIDER_CONTINUE_MS),
                     }),
-                    ScriptedObservation::RateLimit => {
+                    ScriptedObservation::RateLimitAt(deadline) => {
                         Err(anyhow::Error::new(crate::resource::ProviderRateLimit {
-                            retry_at_unix_ms: now_ms() + 180_000,
+                            retry_at_unix_ms: deadline,
                             status: 403,
+                        }))
+                    }
+                    ScriptedObservation::LocalBudget(deadline) => {
+                        Err(anyhow::Error::new(crate::resource::LocalObserverBudget {
+                            retry_at_unix_ms: deadline,
                         }))
                     }
                     ScriptedObservation::Forbidden => {
@@ -35752,6 +35939,24 @@ observer "{subject}" {{
             .unwrap();
         let key = format!("observer/repo:{revision}");
         let expected = calls.load(Ordering::SeqCst) + 1;
+        // Persisted refusal deadlines deliberately override an in-memory deadline. Use the
+        // public refresh contract to force the next scripted refusal without sleeping.
+        if reconciler.store.latest_actual_value("observer/repo").unwrap().is_some_and(|actual|
+            matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget")))
+        {
+            reconciler.store.append_claim(&ClaimInput {
+                subject: "observer/repo".into(),
+                kind: "observer.refresh-requested".into(),
+                actor: Some("person/test".into()),
+                fields: BTreeMap::from([
+                    ("revision".into(), Value::String(revision)),
+                    ("attempt".into(), Value::String(format!("scripted-{expected}"))),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
         reconciler
             .armed_observers
             .lock()
@@ -35872,10 +36077,11 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
     }
 
     #[tokio::test]
-    async fn a_rate_limit_asks_a_person_only_after_it_outlasts_its_reset() {
+    async fn a_rate_limit_persists_each_new_deadline_and_clears_stale_attention() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, SCRIPTED_OBSERVER, "outlasted-rate-limit");
         let calls = Arc::new(AtomicUsize::new(0));
+        let reset = now_ms() + 180_000;
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -35885,8 +36091,9 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         .with_resource_provider(Arc::new(ScriptedResourceProvider::new(
             calls.clone(),
             [
-                ScriptedObservation::RateLimit,
-                ScriptedObservation::RateLimit,
+                ScriptedObservation::RateLimitAt(reset),
+                ScriptedObservation::RateLimitAt(reset + 180_000),
+                ScriptedObservation::RateLimitAt(reset + 360_000),
                 ScriptedObservation::Observe,
             ],
         )));
@@ -35897,7 +36104,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(state["error_code"], "rate-limited");
         assert!(observer_items(&store).is_empty());
 
-        // The reset it named passed, and the observer is still limited.
+        // Until another refusal is observed, a missed reset can ask for attention.
         let revision = store
             .selected_desired_revision("observer/repo")
             .unwrap()
@@ -35925,7 +36132,6 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 idempotency_key: None,
             })
             .unwrap();
-        observe_now(&reconciler, &calls).await;
         let items = observer_items(&store);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "A GitHub rate limit outlasted its reset");
@@ -35936,6 +36142,14 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
             "{}",
             items[0].detail
         );
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 180_000).to_string());
+        assert!(observer_items(&store).is_empty(), "the new refusal supersedes the old reset");
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 360_000).to_string());
+        assert!(observer_items(&store).is_empty());
 
         // Observing again closes it.
         observe_now(&reconciler, &calls).await;
@@ -35948,6 +36162,28 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 .body["fields"]["state"],
             "healthy"
         );
+    }
+
+    #[tokio::test]
+    async fn a_local_observer_refusal_persists_its_slot_without_provider_attention() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "local-budget");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slot = now_ms() + 180_000;
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(ScriptedResourceProvider::new(
+            calls.clone(), [ScriptedObservation::LocalBudget(slot)],
+        )));
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["error_code"], "local-observer-budget");
+        assert_eq!(state["state"], "healthy", "compatible non-fault deferred receipt");
+        assert_eq!(state["next_check_unix_ms"], slot.to_string());
+        assert_eq!(state["reason"], format!("local observer budget reached, next slot at {slot} (Unix ms)"));
+        assert!(observer_items(&store).is_empty());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

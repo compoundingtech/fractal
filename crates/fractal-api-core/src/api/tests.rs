@@ -123,7 +123,7 @@ async fn fleet_pairing_admission_pins_the_live_worker_incarnation() {
 }
 
 #[tokio::test]
-async fn child_session_detail_resolves_readable_transcript_outside_session_inventory() {
+async fn managed_child_session_detail_resolves_readable_transcript_outside_session_inventory() {
     let root = tempfile::tempdir().unwrap();
     let home = root.path().join("native");
     let transcript = home.join(".omp/agent/sessions/example/native-test.jsonl");
@@ -152,9 +152,29 @@ async fn child_session_detail_resolves_readable_transcript_outside_session_inven
         .into_iter()
         .find(|session| session.native_id == "native-test")
         .unwrap();
-    let child_id = crate::subagent_sessions::child_session_id(&parent, "task-1");
+    let owner = "agent/child-detail-owner";
+    let incarnation = "child-detail-runtime:i1";
+    let routing_parent = super::managed_session_id(owner, incarnation);
+    let child_id = crate::subagent_sessions::child_session_id(&parent, "task-1", &routing_parent);
     let mut state = state(root.path());
-    state.native_session_home = Some(home);
+    // The binding must suffice even when native inventory discovery is unavailable.
+    state.native_session_home = None;
+    for (kind, fields) in [
+        ("runtime.observed", json!({"status":"running", "runtime_id":"child-detail-runtime", "incarnation_id":incarnation})),
+        ("harness.observed", json!({"state":"idle", "driver":"omp", "incarnation_id":incarnation})),
+        ("harness.session-file", json!({"harness":"omp", "agent":owner, "incarnation_id":incarnation,
+            "session_id":parent.native_id, "path":parent.transcript})),
+    ] {
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(),
+            kind: kind.into(),
+            actor: Some(owner.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
     let app = router(state);
     let path = format!("/v1/client/sessions/{child_id}");
     let (status, detail) = get_request(app.clone(), &path).await;
@@ -180,6 +200,24 @@ async fn child_session_detail_resolves_readable_transcript_outside_session_inven
         }),
         "{timeline}"
     );
+    assert!(
+        timeline["items"].as_array().unwrap().iter().all(|item| {
+            item["body"]["text"] != "parent only"
+                && item["type"] != "status"
+        }),
+        "child timelines must not merge the managed parent's content or claims: {timeline}"
+    );
+    let mut different_parent = parent.clone();
+    different_parent.id = "session/external-0123456789abcdef01234567".into();
+    let mismatched = crate::subagent_sessions::child_session_id(
+        &different_parent, "task-1", &routing_parent,
+    );
+    for suffix in ["", "/timeline"] {
+        let (status, refused) = get_request(
+            app.clone(), &format!("/v1/client/sessions/{mismatched}{suffix}"),
+        ).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
+    }
     std::fs::remove_file(child_transcript).unwrap();
     let (status, missing) = get_request(app, &path).await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
@@ -461,6 +499,155 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
         })).await;
         assert_eq!(snapshot["code"], "stale-fence", "{snapshot}");
     }
+}
+
+#[tokio::test]
+async fn native_session_revisit_rebinds_todos_and_deduplicates_current_reports() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subject = "agent/test/todo-seat";
+    let incarnation = "4242:2026-10-04T20:00:00.000Z";
+    state.store.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "runtime.observed".into(),
+        actor: Some(subject.into()),
+        fields: serde_json::from_value(json!({
+            "status":"running", "runtime_id":"todo-seat", "incarnation_id":incarnation,
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let app = router(state.clone());
+    let report = |session: &str| {
+        json!({"subject": subject, "actor": subject, "incarnation_id": incarnation,
+               "harness": "omp", "session_id": session})
+    };
+    let (status, first) = json_request(
+        app.clone(), "/v1/agents/native-session", report("native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, other) = json_request(
+        app.clone(), "/v1/agents/native-session", report("native-b"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    let (status, revisited) = json_request(
+        app.clone(), "/v1/agents/native-session", report("native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{revisited}");
+    assert_ne!(first["id"], revisited["id"]);
+    let current = state.store.latest_claim(subject, Some("harness.session-file"))
+        .unwrap().unwrap();
+    assert_eq!(current.id, revisited["id"].as_str().unwrap());
+    let todo = state.store.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "harness.todo.observed".into(),
+        actor: Some(subject.into()),
+        fields: serde_json::from_value(json!({
+            "harness":"omp", "session_id":"native-a", "incarnation_id":incarnation,
+            "observed_at":"2026-10-04T20:00:00Z", "source_op":"hydrate",
+            "phases":[{"name":"Current", "tasks":[{"content":"Native task", "status":"pending"}]}],
+            "totals":{"pending":1,"in_progress":0,"completed":0,"blocked":0,"abandoned":0},
+            "truncated":false
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert_eq!(client_v0::agent_todo_value(
+        Some(&todo), Some(&current), Some(incarnation),
+    )["stale"], false);
+    let mut repeats = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let app = app.clone();
+        let request = report("native-a");
+        repeats.spawn(async move {
+            json_request(app, "/v1/agents/native-session", request).await
+        });
+    }
+    while let Some(response) = repeats.join_next().await {
+        let (status, repeated) = response.unwrap();
+        assert_eq!(status, StatusCode::OK, "{repeated}");
+        assert_eq!(repeated["id"], revisited["id"]);
+    }
+    assert_eq!(state.store.claims_for(subject, Some("harness.session-file")).unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn native_session_reports_cannot_replace_a_successor_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subject = "agent/test/native-authority";
+    let app = router(state.clone());
+    let runtime = |incarnation: &str, status: &str| {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({
+                "status":status, "runtime_id":"native-authority", "incarnation_id":incarnation,
+            })).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    let report = |incarnation: &str, session: &str| {
+        json!({"subject":subject, "actor":subject, "incarnation_id":incarnation,
+               "harness":"omp", "session_id":session})
+    };
+    let (status, unbound) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-a", "native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{unbound}");
+    assert_eq!(unbound["code"], "stale-harness-event-session");
+    runtime("runtime-a", "running");
+    let (status, predecessor) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-a", "native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{predecessor}");
+    runtime("runtime-b", "running");
+    let (status, successor) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-b", "native-b"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{successor}");
+    let (status, stale) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-a", "native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{stale}");
+    assert_eq!(stale["code"], "stale-harness-event-session");
+    let mut reports = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        for (incarnation, session, accepted) in [
+            ("runtime-a", "native-a", false), ("runtime-b", "native-b", true),
+        ] {
+            let app = app.clone();
+            let request = report(incarnation, session);
+            reports.spawn(async move {
+                (accepted, json_request(app, "/v1/agents/native-session", request).await)
+            });
+        }
+    }
+    while let Some(response) = reports.join_next().await {
+        let (accepted, (status, body)) = response.unwrap();
+        if accepted {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["id"], successor["id"]);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["code"], "stale-harness-event-session");
+        }
+    }
+    runtime("runtime-b", "exited");
+    let (status, ended) = json_request(
+        app, "/v1/agents/native-session", report("runtime-b", "native-b"),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{ended}");
+    assert_eq!(ended["code"], "stale-harness-event-session");
+    let current = state.store.latest_claim(subject, Some("harness.session-file"))
+        .unwrap().unwrap();
+    assert_eq!(current.id, successor["id"].as_str().unwrap());
+    assert_eq!(state.store.claims_for(subject, Some("harness.session-file")).unwrap().len(), 2);
 }
 
 #[test]
@@ -11258,6 +11445,67 @@ version 2
         json!(mission_request.accepted_at_unix_ms)
     );
 
+    let index_before_refusals = store.index().unwrap();
+    for actor in ["agent/test.operator", "person/intruder"] {
+        let (status, error) = json_request(app.clone(), "/v1/persons/rename", json!({
+            "old_person": "person/alex",
+            "new_person": "person/robin",
+            "actor": actor,
+            "idempotency_key": format!("review-api-refused-{actor}"),
+        })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{error}");
+        assert_eq!(store.index().unwrap(), index_before_refusals);
+    }
+    let (status, error) = json_request(app.clone(), "/v1/persons/rename", json!({
+        "old_person": "person/alex",
+        "new_person": "person/robin",
+        "actor": "person/alex",
+        "idempotency_key": "review-api-unknown-person",
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(store.index().unwrap(), index_before_refusals);
+    store.append_claim(&ClaimInput {
+        subject: "message/review-api-known-robin".into(),
+        kind: "message.sent".into(),
+        actor: Some("person/robin".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("person/robin")),
+            ("to".into(), json!("person/alex")),
+            ("content".into(), json!("The new person already participates in the graph.")),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("review-api-known-robin".into()),
+    }).unwrap();
+    let repair = json!({
+        "old_person": "person/alex",
+        "new_person": "person/robin",
+        "actor": "person/alex",
+        "idempotency_key": "review-api-person-rename",
+    });
+    let (status, renamed) =
+        json_request(app.clone(), "/v1/persons/rename", repair.clone()).await;
+    assert_eq!(status, StatusCode::OK, "{renamed}");
+    assert_eq!(renamed["reassigned_reviews"], json!([run.subject, step.subject]));
+    for request in [&mission_again, &step_request] {
+        assert!(
+            store
+                .human_gate_requests()
+                .unwrap()
+                .iter()
+                .any(|(id, _, reviewer)| id == &request.id && reviewer == "person/robin")
+        );
+    }
+    let (status, repeated) =
+        json_request(app.clone(), "/v1/persons/rename", repair).await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(renamed, repeated);
+    assert_eq!(
+        store.claim_by_id(&mission_again.id).unwrap().unwrap().body["fields"]["reviewer"],
+        "person/alex"
+    );
+
     let body = |actor: &str| {
         serde_json::to_value(ReviewRequest {
             delegation: None,
@@ -11271,7 +11519,7 @@ version 2
     let (status, rejected) = json_request(
         app.clone(),
         &format!("/v1/reviews/{}", run.subject),
-        body("person/someone-else"),
+        body("person/alex"),
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{rejected}");
@@ -11280,7 +11528,7 @@ version 2
     let (status, accepted_mission) = json_request(
         app.clone(),
         &format!("/v1/reviews/{}", run.subject),
-        body("person/alex"),
+        body("person/robin"),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{accepted_mission}");
@@ -11295,7 +11543,7 @@ version 2
         delegation: None,
         decision: "rejected".into(),
         reason: None,
-        actor: Some("person/alex".into()),
+        actor: Some("person/robin".into()),
         expected_subject: None,
     })
     .unwrap();
@@ -11312,7 +11560,7 @@ version 2
         delegation: None,
         decision: "rejected".into(),
         reason: Some("the evidence is incomplete".into()),
-        actor: Some("person/alex".into()),
+        actor: Some("person/robin".into()),
         expected_subject: None,
     })
     .unwrap();
@@ -12021,6 +12269,15 @@ async fn renamed_agent_restart_and_native_report_resolve_aliases_before_lookup()
         if claim_id.is_null() { claim_id = claim["id"].clone(); }
         assert_eq!(claim["id"], claim_id);
     }
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/example-restart-original/worker".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
+            "status":"running", "incarnation_id":"native-incarnation",
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
     let mut report_id = Value::Null;
     for (subject, actor) in [
         ("agent/example-restart-renamed/worker", "agent/example-restart-original/worker"),

@@ -24,6 +24,7 @@ success, error, or interruption. Never touches existing simulators.
 Outputs now-light.png, now-dark.png, conversation-light.png,
 conversation-dark.png, and command/service logs under DIR (default:
 <repo>/tmp/landing-screenshots/<timestamp>). Existing PNGs are not overwritten.
+Light and dark PNGs must differ for each view; byte-identical pairs are fatal.
 Uses ports 8791 (demoGateway) and 8081 (Metro); these must be free.
 Build or gateway failures are fatal: no retries, patches, or fallback builds.
 The generated native project is disposable; do not run in a checkout whose
@@ -181,7 +182,7 @@ run node --input-type=module -e '
   const { name, version } = require("ws/package.json");
   console.log(JSON.stringify({ name, version, path: import.meta.resolve("ws"), server: typeof WebSocketServer }));
 '
-start_service "$out/demoGateway.log" node demoGateway.mjs 8791
+start_service "$out/demoGateway.log" node --experimental-transform-types demoGateway.mjs 8791
 gateway_pid="$service_pid"
 wait_service "$gateway_pid" 'http://127.0.0.1:8791/v1/client/capabilities' "$out/demoGateway.log"
 start_service "$out/metro.log" corepack pnpm exec expo start --localhost --port 8081 --clear
@@ -233,7 +234,7 @@ appId: com.compoundingtech.fractal.starter
 # Maestro matches text case-insensitively by default; do not tap the navigation title.
 - tapOn: '(?-i:^pair this device$)'
 - extendedWaitUntil:
-    visible: '.*Approve the widget release.*'
+    visible: '.*Review the loadUser rename.*'
     timeout: 30000
 - assertNotVisible: '.*Open debugger to view warnings.*'
 FLOW
@@ -242,10 +243,10 @@ stop_pairing_log
 for view in now conversation; do
   if [[ "$view" = now ]]; then
     link='com.compoundingtech.fractal.starter://tab/Now'
-    expected='Approve the widget release'
+    expected='Review the loadUser rename'
   else
-    link='com.compoundingtech.fractal.starter://agent?id=agent/example/beacon'
-    expected='beacon'
+    link='com.compoundingtech.fractal.starter://agent?id=agent/example/atlas/builder'
+    expected='Atlas Builder'
   fi
   cat > "$out/navigate.yaml" <<FLOW
 appId: com.compoundingtech.fractal.starter
@@ -268,5 +269,10 @@ FLOW
     sleep 2
     run xcrun simctl io "$sim" screenshot --type=png "$out/$view-$appearance.png"
   done
+  if cmp -s "$out/$view-light.png" "$out/$view-dark.png"; then
+    printf 'FAILED: %s light/dark screenshots are byte-identical: %s and %s\n' \
+      "$view" "$out/$view-light.png" "$out/$view-dark.png" >&2
+    exit 1
+  fi
 done
 printf '\nScreenshots saved to %s\n' "$out"

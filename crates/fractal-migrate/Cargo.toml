@@ -2,7 +2,7 @@
 name = "fractal-migrate"
 version = "0.1.0"
 edition = "2024"
-description = "Offline st2 to st3 KDL transformer"
+description = "Offline st2 to Fractal KDL transformer"
 license = "MIT"
 
 [dependencies]
