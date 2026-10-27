@@ -2033,6 +2033,10 @@ enum DevicesCommand {
         /// Delegate only observation: projections, glasses frames, and terminal output.
         #[arg(long, conflicts_with_all = ["full_control", "assistant"])]
         read_only: bool,
+        /// Let this pairing grant the device this member's client gateway over Fabric (after
+        /// `devices fabric enable`); without it pairing grants nothing over Fabric.
+        #[arg(long, conflicts_with = "assistant")]
+        fabric_gateway: bool,
         /// Begin a revocable external-assistant grant instead of a person device.
         #[arg(long, value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
@@ -2080,6 +2084,27 @@ enum DevicesCommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Reach this member's client gateway over Fabric: pairing grants a device it, revoking removes it.
+    Fabric {
+        #[command(subcommand)]
+        command: DevicesFabricCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DevicesFabricCommand {
+    /// Expose the paired-only client gateway as one Fabric service. From then on, pairing a
+    /// device that sends its Fabric NodeID grants it that service, inbound-only, and revoking
+    /// the pairing removes the grant. Needs fabric 0.2.41 or later.
+    Enable {
+        /// The Fabric service name devices dial.
+        #[arg(long, default_value = fractal_daemon::fabric_gateway::DEFAULT_SERVICE)]
+        service: String,
+    },
+    /// Stop exposing the client gateway over Fabric and remove every grant Fractal made for a device.
+    Disable,
+    /// Show the Fabric service and the devices Fractal has granted it.
+    Status,
 }
 
 /// Grant terms sealed when the configured owning person begins or changes an assistant grant.
@@ -3715,7 +3740,7 @@ enum WorkCommand {
     ///
     /// Records progress in the graph without messaging another agent; people read it in stui.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
-    Progress(WorkActionArgs),
+    Progress(WorkProgressArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
     /// Stop the execution clock while claimed work waits for something outside this agent.
@@ -3965,6 +3990,19 @@ struct WorkWaitArgs {
     /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
+}
+
+#[derive(Args)]
+struct WorkProgressArgs {
+    #[command(flatten)]
+    action: WorkActionArgs,
+    /// Estimated finish: a positive duration from now or a future RFC3339 timestamp.
+    ///
+    /// Adds a self-reported ETA to this progress note, not an execution deadline.
+    /// The next nonempty summary replaces it. Use --summary without --eta to withdraw it.
+    /// Handoff clears it; revisions do not carry it. Work show prints its age and author.
+    #[arg(long)]
+    eta: Option<String>,
 }
 
 #[derive(Args)]
@@ -5386,6 +5424,10 @@ async fn run(cli: Cli) -> Result<()> {
             .await
         }
         Command::Activity(args) => run_activity(&endpoint, args, cli.json).await,
+        Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Fabric { command }),
+            ..
+        }) => run_devices_fabric(&config, command, cli.json).await,
         Command::Schedules { command } => schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await,
         Command::Devices(args) => {
             run_devices(endpoint.clone(), config.person.as_deref(), args, cli.json).await
@@ -5656,8 +5698,9 @@ fn guard_mutating_cli_actor(
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
-            WorkCommand::Claim(args) | WorkCommand::Renew(args) | WorkCommand::Progress(args)
+            WorkCommand::Claim(args) | WorkCommand::Renew(args)
             | WorkCommand::Complete(args) | WorkCommand::Fail(args) | WorkCommand::Release(args) => args.actor.as_deref(),
+            WorkCommand::Progress(args) => args.action.actor.as_deref(),
             WorkCommand::Wake(args) => args.actor.as_deref(),
             WorkCommand::PublishMission(args) => args.actor.as_deref(),
             WorkCommand::Revise(args) => args.actor.as_deref(),
@@ -5733,6 +5776,7 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     let state = match text("state") {
         "ended" => format!("ended ({})", text("ended")),
         "degraded" => format!("degraded: {}", text("reason")),
+        "active" if !text("reason").is_empty() => format!("active ({})", text("reason")),
         state => state.to_owned(),
     };
     let until = view
@@ -8130,6 +8174,102 @@ async fn run_activity(endpoint: &Endpoint, args: ActivityArgs, json_output: bool
     }
 }
 
+async fn run_devices_fabric(
+    config: &Config,
+    command: DevicesFabricCommand,
+    json_output: bool,
+) -> Result<()> {
+    use fractal_daemon::fabric_gateway::{GatewayExposure, granted_peers};
+    use fractal_daemon::fleet::transport::{Fabric, resolve_tool};
+    let state_dir = &config.state_dir;
+    let exposure = GatewayExposure::load(state_dir)?;
+    match command {
+        DevicesFabricCommand::Enable { service } => {
+            anyhow::ensure!(
+                !service.trim().is_empty(),
+                "the Fabric service name must not be empty"
+            );
+            let override_path = fractal_daemon::config::FleetFile::load(state_dir)?.and_then(|file| file.fabric);
+            let program = resolve_tool(override_path.as_deref(), "fabric")
+                .context("this machine cannot use Fabric: fabric is not installed")?;
+            let program = std::fs::canonicalize(&program).unwrap_or(program);
+            let fabric = Fabric::new(program.clone());
+            if let Some(previous) = exposure.as_ref().filter(|previous| previous.service != service) {
+                anyhow::bail!(
+                    "the client gateway is already exposed as {}; run st devices fabric disable first",
+                    previous.service
+                );
+            }
+            fabric
+                .expose_socket(&service, &config.client_gateway_socket)
+                .await
+                .context("Fabric could not expose the client gateway; nothing changed")?;
+            GatewayExposure {
+                service: service.clone(),
+                fabric: program,
+            }
+            .save(state_dir)?;
+            if json_output {
+                println!("{}", json!({"service": service, "enabled": true}));
+            } else {
+                println!(
+                    "The client gateway is exposed over Fabric as {service}. Pairing a device now grants it that service, inbound-only; st devices revoke removes the grant."
+                );
+            }
+        }
+        DevicesFabricCommand::Disable => {
+            let Some(exposure) = exposure else {
+                println!("The client gateway is not exposed over Fabric.");
+                return Ok(());
+            };
+            let fabric = Fabric::new(exposure.fabric.clone());
+            let mut removed = Vec::new();
+            for peer in granted_peers(&fabric).await? {
+                fabric.remove(&peer).await?;
+                removed.push(peer);
+            }
+            fabric
+                .unexpose(&exposure.service)
+                .await
+                .with_context(|| format!("removed {} device grant(s); run fabric unexpose {}", removed.len(), exposure.service))?;
+            GatewayExposure::remove(state_dir)?;
+            if json_output {
+                println!("{}", json!({"service": exposure.service, "enabled": false, "removed": removed}));
+            } else {
+                println!(
+                    "The client gateway is no longer exposed over Fabric; removed {} device grant(s).",
+                    removed.len()
+                );
+            }
+        }
+        DevicesFabricCommand::Status => {
+            let peers = match &exposure {
+                Some(exposure) => granted_peers(&Fabric::new(exposure.fabric.clone())).await?,
+                None => Vec::new(),
+            };
+            if json_output {
+                println!(
+                    "{}",
+                    json!({"service": exposure.as_ref().map(|exposure| &exposure.service), "enabled": exposure.is_some(), "granted": peers})
+                );
+            } else if let Some(exposure) = exposure {
+                println!("The client gateway is exposed over Fabric as {}.", exposure.service);
+                if peers.is_empty() {
+                    println!("No paired device has a grant yet.");
+                }
+                for peer in peers {
+                    println!("{peer}");
+                }
+            } else {
+                println!(
+                    "The client gateway is not exposed over Fabric. Run st devices fabric enable."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_devices(
     endpoint: Endpoint,
     configured_person: Option<&str>,
@@ -8147,6 +8287,7 @@ async fn run_devices(
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
         DevicesCommand::Complete { .. } => unreachable!("handled before loading local config"),
+        DevicesCommand::Fabric { .. } => unreachable!("handled without a client"),
         DevicesCommand::Ls => {
             anyhow::ensure!(
                 limit > 0 && limit <= 200,
@@ -8206,6 +8347,7 @@ async fn run_devices(
             device_name,
             full_control,
             read_only,
+            fabric_gateway,
             assistant: None,
             grant,
         } => {
@@ -8226,6 +8368,7 @@ async fn run_devices(
                             .map(|scope| (*scope).to_owned())
                             .collect()
                     }),
+                    fabric_gateway: fabric_gateway.then_some(true),
                 })
                 .await?;
             print_client_value(&response, json_output)?;
@@ -12152,7 +12295,12 @@ fn agent_start_document(
             ));
         }
         let harness = body.get_mut("harness").expect("harness was inserted");
-        if let Some(driver) = &args.harness {
+        if let Some(driver) = &args.harness
+            && harness.entries()[0].value().as_string() != Some(driver.as_str())
+        {
+            // Models, effort and native arguments belong to their provider. A harness
+            // replacement starts with its own body, then takes the explicit options below.
+            harness.set_children(KdlDocument::new());
             harness.entries_mut()[0] = KdlEntry::new(driver.as_str());
         }
         let harness_body = harness.ensure_children();
@@ -13479,6 +13627,12 @@ fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bo
     }
     for blocker in &work.blockers {
         let _ = writeln!(output, "Blocker: {blocker}");
+    }
+    if let Some(progress) = &work.last_progress {
+        let age = work.progress_at.as_deref()
+            .map(|at| ago(at, now_ms()))
+            .unwrap_or_else(|| "age unknown".to_owned());
+        let _ = writeln!(output, "Progress ({age}): {progress}");
     }
     for goal in &work.goals {
         let _ = writeln!(output, "Goal: {goal}");
@@ -16712,9 +16866,10 @@ async fn renew_claimed_work(
         .into_iter()
         .filter(|step| work_claim_has_active_harness(step, subject, harness))
     {
+        // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
-                &format!("/v1/work/renew/{}", urlencoding::encode(&step.subject)),
+                &format!("/v1/work/renew/{}?view=lease", urlencoding::encode(&step.subject)),
                 &WorkRequest {
                     wait_ms: None,
                     actor: Some(subject.into()),

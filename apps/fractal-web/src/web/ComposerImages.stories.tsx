@@ -11,6 +11,8 @@ function ComposerImages({ scheme, slow = false, previewImages = false, stateLabe
   const [receipts, setReceipts] = React.useState<readonly string[]>([])
   const [messages, setMessages] = React.useState<readonly (TextItem & { readonly role: 'user' })[]>([])
   const [blobUrls] = React.useState(() => new Map<string, string>())
+  // The fixture already holds each uploaded image's bytes; a retry only re-reads that map.
+  const [, rereadBlobUrls] = React.useReducer((reads: number) => reads + 1, 0)
   const [transport, setTransport] = React.useState<
     { readonly _tag: 'Idle' } |
     { readonly _tag: 'Pending' | 'Complete'; readonly attempt: number; readonly freshSignal: boolean } |
@@ -87,7 +89,7 @@ function ComposerImages({ scheme, slow = false, previewImages = false, stateLabe
   const turns: readonly TranscriptTurn[] = messages.map(prompt => ({ id: prompt.id, prompt, items: [], work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false } }))
   return <section aria-label={stateLabel ?? (slow ? 'Controlled image upload' : 'Live image adapter')} data-scheme={scheme} {...stylex.props(styles.surface, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
     <EmbraceRuntimeProvider options={options}>
-      {messages.length > 0 && <div {...stylex.props(styles.transcript)}><Transcript turns={turns} title="Image review" showHeader={false} sync={{ _tag: 'Live', since: 0 }} now={1792822871000} observedAt={1792822871000} {...(previewImages ? { resolveImage: (id: string) => { const src = blobUrls.get(id); return src === undefined ? { _tag: 'Defer' as const } : { _tag: 'Load' as const, src } } } : {})} /></div>}
+      {messages.length > 0 && <div {...stylex.props(styles.transcript)}><Transcript turns={turns} title="Image review" showHeader={false} sync={{ _tag: 'Live', since: 0 }} now={1792822871000} observedAt={1792822871000} {...(previewImages ? { attachmentImages: { state: (id: string) => { const src = blobUrls.get(id); return src === undefined ? { _tag: 'Failed' as const } : { _tag: 'Loaded' as const, src } }, load: () => rereadBlobUrls() } } : {})} /></div>}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={stateLabel ?? (slow ? 'Pending image review' : 'Image review')} imageAttachments={{ max: 4 }} />
     </EmbraceRuntimeProvider>
     {slow && <button onClick={upload.finish}>Complete fixture upload</button>}
@@ -208,7 +210,7 @@ export const SentImage: Story = {
   tags: ['critical'],
   play: async ({ canvasElement }) => showSentImage(canvasElement),
 }
-/** Follow-up target only: the live app does not yet supply an authorized blob resolver (#3778). */
+/** Kit viewer fixture; authorized transcript chunk retrieval is covered by TranscriptImages. */
 export const ResolvedImageFollowup: Story = {
   tags: ['critical'], args: { previewImages: true },
   play: async ({ canvasElement }) => {

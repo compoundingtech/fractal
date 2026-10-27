@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn github_watch_line_shows_throttling_without_a_new_wire_state() {
+    let view = serde_json::json!({
+        "thread": "acme/garden#12", "state": "active",
+        "reason": "throttled: local observer budget reached, next slot at 1000 (Unix ms)"
+    });
+    let line = gh_watch_line(&view, false);
+    assert!(line.contains("active (throttled: local observer budget reached"));
+    assert!(line.contains("next slot at 1000"));
+    assert!(!line.contains("degraded"));
+}
+
+#[test]
 fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
     let value = "fabric://devbox/st3-client-v0";
     let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
@@ -4897,6 +4909,18 @@ fn wait_timeout_accepts_bounded_units_and_zero() {
     assert_eq!(parse_timeout("2m").unwrap(), Duration::from_secs(120));
     assert_eq!(parse_timeout("0").unwrap(), Duration::ZERO);
     assert!(parse_timeout("forever").is_err());
+}
+
+#[test]
+fn progress_eta_flag_is_not_an_execution_action_flag() {
+    assert!(Cli::try_parse_from([
+        "fractal", "work", "progress", "step-run/example", "--eta", "2h"
+    ]).is_ok());
+    for action in ["claim", "renew", "complete", "fail", "release", "resume"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "work", action, "step-run/example", "--eta", "2h"
+        ]).is_err(), "{action}");
+    }
 }
 
 #[test]
