@@ -50,6 +50,7 @@ const emulateCoarsePointer = () => {
 
 /** Below 900 px the thread is the only thing on screen; one Agent details button opens the agent's actions and Details as a sheet. Wider windows keep the inline panel. */
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal/Narrow layout',
   component: NarrowLayoutStory,
   parameters: { layout: 'fullscreen' },
@@ -66,6 +67,24 @@ const meta = {
   },
 } satisfies Meta<typeof NarrowLayoutStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AgentRowDetails:contract-fixture',
+  'AgentRowDetailsLight:contract-fixture',
+  'BreakpointDensity:contract-fixture',
+  'BreakpointDensityCoarse:contract-fixture',
+  'DecodeStaleSidebarHosts:contract-fixture',
+  'DrawerFocusReturn:contract-fixture',
+  'Drawers:contract-fixture',
+  'DrawersFlow:contract-fixture',
+  'DrawersLight:contract-fixture',
+  'DrawersOpen:contract-fixture',
+  'SidebarDragUnmountCleanup:contract-fixture',
+  'SidebarShortcutFocusReturn:contract-fixture',
+  'TerminalToggle:contract-fixture',
+  'TerminalToggleLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 /**

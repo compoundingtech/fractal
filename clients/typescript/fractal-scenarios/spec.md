@@ -45,7 +45,7 @@ These decisions are fixed for this package. Sections below cite them as D1–D10
 - **D8 Binding:** the kit is Effect-free. Components get props through `useScenarioSlice`.
   App-level stories and fractal-web dev/e2e replay client-v0 frames over a mock WebSocket through
   the real data layer. Fractal TUI and iOS read JSON or use the same replay.
-- **D9 Catalog:** seven narratives and the edge states listed under [Catalog](#catalog-d9);
+- **D9 Catalog:** seven recorded narratives, the authored `transcript-families` world and the edge states listed under [Catalog](#catalog-d9);
   failed sync has one world per cause.
 - **D10 Storybook:** a global Scenario toolbar selects the world. Every story declares exactly
   one mode in `parameters.scenario`: `{ _tag: 'slices', slices, ... }`,
@@ -196,8 +196,8 @@ after it (see [Store versions](#store-versions)).
 
 | Slice | State | Timeline events |
 | --- | --- | --- |
-| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `order: Id[]`, optional `arrangements: Arrangement[]` (omission means empty) | `changes {upserts, removes, order?}` for roster resources; arrangements are snapshot-only |
-| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them) | `changes {upserts, removes, order?}` |
+| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `sessions: Session[]`, `devices: Device[]`, `order: Id[]`, optional `arrangements: Arrangement[]` (omission means empty) | `changes {upserts, removes, order?}` for roster resources; arrangements are snapshot-only |
+| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them), `launches: Launch[]`, `launch_variants: LaunchVariant[]` | `changes {upserts, removes, order?}` |
 | `attention` | `attention: Attention[]`, `messages: Message[]` (sources the cards load) | `changes {upserts, removes, order?}` |
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
@@ -265,6 +265,7 @@ The catalog's default inventory is:
 | `merge-conflict-standoff` | Empty. |
 | `offline-reconnect-storm` | Empty. |
 | `release-candidate-polish` | Empty. |
+| `transcript-families` | Empty. |
 | `empty` | Empty. |
 | `loading` | Empty; ordinary first-reply hold behavior remains independent of inventory. |
 | `unknown-fields` | Empty. |
@@ -629,6 +630,8 @@ identifies the recorded contribution without attributing synthetic frames to the
 All seven terminal slices are recorded. Roster, details, attention and sync slices remain
 synthetic: capture receipt times are not the authored product milestones, and the single-host
 daemon cannot witness remote cast activity.
+The authored `transcript-families` world is wholly synthetic: it supplies existing wire families
+not present in those captures and does not claim recorder provenance.
 
 | World | Recorded contribution | Synthetic slices and reason | Explicit splice |
 | --- | --- | --- | --- |
@@ -775,6 +778,17 @@ replay.actions  // actions the client submitted, in order, for test assertions
   socket accepts. Other actions are recorded in `replay.actions` and answered with an accepted
   `ActionResult` and an operation that completes; a world may declare a different answer per
   action. Replay does not simulate the effects of actions.
+  The complete modeled route set is listed below. An unmodelled route or route shape returns
+  an `ErrorEnvelope` with code `unsupported-capability` and HTTP 501, never an empty successful
+  page or the resource at a recognized parent path.
+- **Inventories:** session and device list/detail reads use `roster.state.sessions` and
+  `roster.state.devices`; launch and variant reads use `details.state.launches` and
+  `details.state.launch_variants`. These required arrays are independent inventories:
+  sessions are not synthesized from conversation threads, and launches are not inferred from
+  missions. Lists, details, generic resource observations and timeline folds share these rows.
+  Nested variant reads filter by the parent launch before paging or resolving a detail, so a
+  variant belonging to another launch is not returned. In recording-backed replay, these new
+  inventory routes use the synthetic inventory overlay rather than requiring captured HTTP.
 - **Arrangements:** `GET /v1/client/arrangements?person=…`, the arrangement detail route, and
   `collection: 'arrangements'` subscriptions all read `roster.arrangements`. Lists and
   subscriptions require an explicit person selector; they never infer an owner from an agent.
@@ -810,6 +824,46 @@ replay.actions  // actions the client submitted, in order, for test assertions
   `replay.flush()` before asserting socket output. It waits until the delivery queue is idle,
   including replies queued by handlers, but neither advances the clock nor releases future
   timeline events. Awaiting only a microtask is insufficient.
+
+### Served HTTP routes
+
+These are replay's modeled routes, not an assertion that replay implements every daemon
+operation in the [client-v0 manifest](../../../docs/st3/client-v0/schemas/operations.json).
+Every path below is relative to `/v1/client`; `{id}` and `{variant_id}` are URL-encoded
+resource IDs occupying one path segment. Session and launch reads also accept the routed
+ID suffix emitted by the generated client (without `session/` or `launch/`).
+List reads support bounded cursor pagination.
+
+| Method | Path | Source |
+| --- | --- | --- |
+| `GET` | `/capabilities` | `sync` capabilities |
+| `GET` | `/agents`, `/agents/{id}` | `roster` agents |
+| `GET` | `/runtimes`, `/runtimes/{id}` | `roster` runtimes and terminal runtimes |
+| `GET` | `/machines`, `/machines/{id}` | `roster` machines |
+| `GET` | `/sessions`, `/sessions/{id}` | `roster` sessions |
+| `GET` | `/devices`, `/devices/{id}` | `roster` devices |
+| `GET` | `/missions`, `/missions/{id}` | `details` missions |
+| `GET` | `/work`, `/work/{id}` | `details` work |
+| `GET` | `/launches`, `/launches/{id}` | `details` launches |
+| `GET` | `/launches/{id}/variants` | `details` launch variants belonging to this launch |
+| `GET` | `/launches/{id}/variants/{variant_id}` | A `details` launch variant belonging to this launch |
+| `GET` | `/attention`, `/attention/{id}` | `attention` cards |
+| `GET` | `/messages`, `/messages/{id}` | `attention` messages |
+| `GET` | `/terminals`, `/terminals/{id}` | Terminal runtimes |
+| `GET` | `/terminals/{id}/screen` | Current terminal screen |
+| `GET` | `/sessions/{id}/timeline` | `conversation` thread entries and seeded older history |
+| `GET` | `/arrangements?person=…` | Person-scoped `roster` arrangements |
+| `GET` | `/arrangements/{person_name}/{uuid}` | Person-scoped `roster` arrangement detail |
+| `GET` | `/resources` | Generic observations over modeled resource inventories |
+| `GET` | `/operations`, `/operations/{id}` | Operations created by replay actions |
+| `GET` | `/events` | Empty event page with the advertised event cursors |
+| `POST` | `/actions` | Action handling described above, including `terminal.attach` |
+
+WebSocket collection, conversation and terminal subscriptions use `replay.socket`, not
+additional HTTP fetch routes. Recording-backed replay also retains explicitly captured HTTP
+responses at their recorded request and clock offset; that evidence does not add a generic
+synthetic implementation of those routes. In particular, launch decisions and approvals and
+unmodelled agent subroutes are unsupported, not empty inventories.
 
 ### Store versions
 
@@ -1061,8 +1115,8 @@ The consumption check enforces both directions: a missing or invalid declaration
 story must consume its declared slices, and an exempt story must not declare slices or scenario
 args or call `useScenarioSlice`. Forbidden hook reads are recorded out of band as well as thrown,
 so a React error boundary cannot hide a violation. Exemptions appear in the check output with
-their reasons. The consumer pins their sorted `file#export` identities and modes, as well as the
-count, so even a count-neutral exemption swap is visible in review.
+their reasons. Each CSF exports its reviewed `scenarioExemptions` as sorted `export:mode` ids.
+The collected exemptions must equal their union, so an exemption swap is visible in that file’s review.
 Blocked story files have a separate explicit undeclared-story ratchet with blocking PR numbers;
 the ratchet fails if it grows or retains an entry after the story gains a declaration.
 
@@ -1175,6 +1229,7 @@ Narratives:
 | `merge-conflict-standoff` | Two agents edit the same files. A person adjudicates through review cards with a three-way diff. |
 | `offline-reconnect-storm` | The socket drops mid-stream repeatedly. Stale badges, backoff, resubscription and authoritative snapshots. |
 | `release-candidate-polish` | A calm tail: changelog, version bump, a green matrix, mostly idle agents, few cards. |
+| `transcript-families` | One builder inspects a report, exports it unsuccessfully, cancels a retry, then streams a handoff summary. Content `blocks` carry visible reasoning (`kind`, `source_type`, `visibility`, `payload`); generic `tool_call` names retain nested `arguments`; `tool_result.content` retains native JSON with `media_type: application/json`. Separate terminal `status: failed` and `status: cancelled` turns keep unresolved calls and `detail`; the failed turn also retains an `error` entry. The final content entry keeps its ID and sequence while revision 1 becomes final revision 2. |
 
 Edge states:
 
@@ -1244,7 +1299,7 @@ breaks a scenario fails in the same pull request.
 
 | Consumer | Owner | Contract |
 | --- | --- | --- |
-| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. The inventory is every CSF loaded by the kit Storybook, including app CSFs, from the shared Storybook configuration. Configured files are discovered without extension filtering; unsupported files fail explicitly instead of escaping the check. The inventory expands nested brace alternatives before deriving static story roots, rejects patterns whose roots cannot be determined or that mention `node_modules` until the check is extended, walks supported roots with `lstat` without following symlinks, and reports any directory or file symlink outside excluded dependencies (including literal file entries). Traversal skips directories named `node_modules`; discovery filters exact `node_modules` path segments independently of glob matching, including patterns with leading `../` prefixes and brace alternatives. Similarly named directories remain included. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries and the separate app-mode deferral list owned by fractal-web-app, a reviewed shrink-only pin. The app list pins exactly the undeclared app export ids with its own count; missing or already-declared entries fail. Exemptions list their reasons and have a pinned count. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
+| fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. The inventory is every CSF loaded by the kit Storybook, including app CSFs, from the shared Storybook configuration. Configured files are discovered without extension filtering; unsupported files fail explicitly instead of escaping the check. The inventory expands nested brace alternatives before deriving static story roots, rejects patterns whose roots cannot be determined or that mention `node_modules` until the check is extended, walks supported roots with `lstat` without following symlinks, and reports any directory or file symlink outside excluded dependencies (including literal file entries). Traversal skips directories named `node_modules`; discovery filters exact `node_modules` path segments independently of glob matching, including patterns with leading `../` prefixes and brace alternatives. Similarly named directories remain included. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries and the separate app-mode deferral list owned by fractal-web-app, a reviewed shrink-only pin. The app list pins exactly the undeclared app export ids with its own count; missing or already-declared entries fail. Exemptions list their reasons; each CSF exports its reviewed `scenarioExemptions` (sorted `export:mode` ids, excluded from stories), and the collected exemptions must equal their union, with no stale or duplicate id. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
 | `@fractal/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
 | fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a live source built with the app-local `adoptEarlyCollections: false` option that passes `replay.socket` and `replay.fetch` to `St3Options`. Browser transport, early socket adoption, and visibility/LRU admission are supplied by the app's `src/data/sdk-browser` platform Layer, not the portable SDK. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
 | Fractal TUI (`crates/fractal-tui`, formerly stui) | Fractal Product Lead | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through Fractal TUI's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
@@ -1266,9 +1321,10 @@ breaks a scenario fails in the same pull request.
 - Every story in every CSF loaded by the fractal-ui kit Storybook, including app CSFs,
   declares `slices`, `contract-fixture` or `primitive` in `parameters.scenario`, with a reason
   for either exemption. The check enforces declarations and slice consumption in both
-  directions, reports exemptions with a pinned count, and rejects stale or growing blocked-file
-  ratchet entries. The separate app deferral list, owned by fractal-web-app, is a reviewed
-  shrink-only pin of undeclared app story ids with its own count, independently of the
+  directions, reports exemptions against each CSF's reviewed `scenarioExemptions` list, and
+  rejects stale or growing blocked-file ratchet entries. The separate app deferral list, owned
+  by fractal-web-app, is a reviewed shrink-only pin of undeclared app story ids with its own
+  count, independently of the
   blocked-PR ratchet. Review must reject replacement ids or growth; count and membership
   checks alone do not establish that history. Declaring a mode or removing a story requires
   removing its app deferral; new app stories must declare modes. Deferred app CSFs still

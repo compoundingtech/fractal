@@ -543,7 +543,7 @@ pub(super) async fn run_mission_view(
         }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         MissionViewCommand::Publish(args) => {
-            eprintln!("st: missions publish is legacy; use fractal apply FILE with the same options");
+            crate::stderr_message("st", format_args!("missions publish is legacy; use fractal apply FILE with the same options"));
             publish_mission_file(client, args, json_output).await
         }
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases

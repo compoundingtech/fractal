@@ -215,6 +215,9 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Caller-bound assistant read receipts committed off the request path. Shut it down before
+    /// the store closes; the last state reference to drop commits what remains.
+    pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
 }
 
 // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old output until all members accept aliases; sunset 60 days after first shipping release.
@@ -949,11 +952,19 @@ async fn response_envelope_unbounded(
         && request.uri().path() == "/v1/client/capabilities"
         && !request.headers().contains_key(axum::http::header::AUTHORIZATION)
     {
-        return Json(json!({
-            "api_version": CLIENT_API_VERSION,
-            "capabilities": [{"id":"device-key-proofs", "version":1, "state":"granted"}],
-        }))
-        .into_response();
+        // The second capability goes only to a client that says it understands it
+        // (`?accepts=fabric-gateway-grant`): an older client validating this answer as exactly
+        // one `device-key-proofs` entry keeps getting exactly that.
+        let mut capabilities = vec![json!({"id":"device-key-proofs", "version":1, "state":"granted"})];
+        if request
+            .uri()
+            .query()
+            .is_some_and(|query| query.split('&').any(|pair| pair == "accepts=fabric-gateway-grant"))
+        {
+            capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
+        }
+        return Json(json!({"api_version": CLIENT_API_VERSION, "capabilities": capabilities}))
+            .into_response();
     }
     let started = Instant::now();
     let client_request = request.uri().path().starts_with("/v1/client/");
@@ -10210,6 +10221,20 @@ async fn work_action_response(
     extend_ms: Option<u64>,
     handoff: Option<crate::model::WorkHandoffRequest>,
 ) -> Result<Json<StepRunView>, ApiError> {
+    work_action_response_viewing(state, action, subject, request, extend_ms, handoff, false).await
+}
+
+/// A work action; with `lease_view`, a renewal answers with the step's row view alone, without the
+/// hierarchy, queue, timing, summaries and wake a reader would fold for it after COMMIT.
+async fn work_action_response_viewing(
+    state: AppState,
+    action: String,
+    subject: String,
+    request: WorkRequest,
+    extend_ms: Option<u64>,
+    handoff: Option<crate::model::WorkHandoffRequest>,
+    lease_view: bool,
+) -> Result<Json<StepRunView>, ApiError> {
     let actor = request
         .actor
         .as_deref()
@@ -10237,7 +10262,7 @@ async fn work_action_response(
         if let Some(input) = handoff.as_ref() {
             state.store.handoff_retry(&subject, input).map_err(ApiError::bad)?;
         }
-        if action == "renew" {
+        if action == "renew" && !lease_view {
             // A renewal caches its view without the fields the writer no longer folds.
             let store = state.store.clone();
             response = blocking_action(move || {
@@ -10272,10 +10297,11 @@ async fn work_action_response(
         let mut response = if let Some(input) = handoff {
             store.handoff_work(&subject, &input)?
         } else {
-            store.work_action_extending(&subject, &action, &request, extend_ms)?
+            store.work_action_answering(&subject, &action, &request, extend_ms, None, !lease_view)?
         };
-
-        work_response::enrich_under(&store, &mut response)?;
+        if !lease_view {
+            work_response::enrich_under(&store, &mut response)?;
+        }
         Ok(response)
     })
     .await?;

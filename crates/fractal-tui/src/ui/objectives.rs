@@ -143,7 +143,7 @@ pub fn detail(world: &World, id: &str, hours: u64, width: usize) -> Doc {
     };
     let Some(row) = row else {
         doc.line(Line::from(span(
-            format!("{slo} is not an objective or budget this st reports."),
+            format!("{slo} is not an objective or budget this version of Fractal reports."),
             theme::dim(),
         )));
         return doc;
@@ -242,7 +242,7 @@ fn span_of(ms: u64) -> String {
 pub fn chart(history: &SloHistory, width: usize) -> Vec<Line<'static>> {
     if history.samples == 0 {
         return vec![Line::from(span(
-            "No readings in this period. st records one a minute from when it starts, and keeps seven days.",
+            "No readings in this period. Fractal records one a minute from when it starts, and keeps seven days.",
             theme::dim(),
         ))];
     }
@@ -324,10 +324,10 @@ fn level_color(percent: f64) -> ratatui::style::Color {
 pub fn error(error: &fractal_client::ClientError) -> String {
     match error {
         fractal_client::ClientError::Api(fractal_client::ErrorCode::NotFound, _, _) => {
-            "This st does not serve objectives and budgets yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve objectives and budgets yet: its daemon needs an update.".into()
         }
         fractal_client::ClientError::Protocol(message) if message.starts_with("HTTP 404") => {
-            "This st does not serve objectives and budgets yet: its daemon needs an update.".into()
+            "This version of Fractal does not serve objectives and budgets yet: its daemon needs an update.".into()
         }
         error => format!("Could not read objectives and budgets: {}", error.human()),
     }

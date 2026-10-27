@@ -62,6 +62,7 @@ because one of its tests passed only on a retry (CI's own per-crate notes refuse
 as flaky_tests).
 """
 import argparse
+import atexit
 import base64
 import codecs
 import concurrent.futures
@@ -75,6 +76,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import select
 import shutil
 import signal
@@ -332,6 +334,39 @@ def gate_commit(base):
                 result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
     GATE_TREE[key] = result
     return result
+
+
+REEXEC = 'ST_TEST_REEXEC'  # set to the base commit in the base's copy that run_base_copy started: it never re-executes again
+
+
+def run_base_copy(argv):
+    """Replace this process with the base's own scripts/st-test, as BASE_SCRIPTS does for the wrapper, signer and verifier. Every seat runs
+    st-test from its own branch, so without this, how runs queue for pool trees and build slots (and which commit they sign) stays at whatever
+    the branch last merged, for days, and old branches keep racing while new ones queue. A branch's own st-test changes are still tested, by
+    its ci-script-tests (st-test-test runs from the tree), and that is what is signed. There is no opt-out: an opt-out would be a way around
+    the queue. This copy runs (the call returns) only when the base has no scripts/st-test, the base's copy is this file, or this already is
+    the base's copy (ST_TEST_REEXEC)."""
+    if os.environ.get(REEXEC):
+        return
+    scrub_git_environment()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--base', default='origin/main')
+    base = parser.parse_known_args(argv)[0].base
+    try:
+        commit = fetch_base(base)
+    except Exception:  # offline, or no such remote: the base as this clone has it, else this copy
+        commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not commit:
+        return
+    shown = git('show', f'{commit}:scripts/st-test', check=False)
+    if shown.returncode != 0 or not shown.stdout or shown.stdout == Path(__file__).read_bytes():
+        return
+    scratch = Path(tempfile.mkdtemp(prefix='st-test-base-'))
+    path = scratch / 'st-test'
+    path.write_bytes(shown.stdout)
+    path.chmod(0o700)
+    print(f"st-test: running the base's st-test ({base} at {commit[:12]}), not this branch's copy", file=sys.stderr, flush=True)
+    os.execve(sys.executable, [sys.executable, str(path), *argv], dict(os.environ, **{REEXEC: commit}))
 
 
 def fetch_base(base):
@@ -932,7 +967,9 @@ def push_record(directory, remote, tree, record):
     token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
     if token:
         header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader', 'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
+        count = int(os.environ.get('GIT_CONFIG_COUNT', '0'))
+        extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                 f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
     pushed = git('push', '--quiet', remote, *[f'{ref}:{ref}' for ref in refs], cwd=directory, env=extra, check=False)
     if pushed.returncode != 0:
         message = pushed.stderr.decode(errors='replace')
@@ -1095,7 +1132,9 @@ def push_records(directory, remote, refs):
     environment = dict(os.environ)
     if token:  # the same header evidence-wrap sets; it travels in the environment, never in an argument
         header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        environment.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraheader', GIT_CONFIG_VALUE_0=f'Authorization: Basic {header}')
+        count = int(environment.get('GIT_CONFIG_COUNT', '0'))
+        environment.update({'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                            f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'})
     pending, reasons = list(refs), {}
     for attempt in range(PUSH_TRIES):
         if attempt:
@@ -1272,7 +1311,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         if args.out:
             wrap += ['--out', args.out]
         started = time.monotonic()
-        signed = subprocess.run(wrap + ['--'] + RUST_TESTS_COMMAND, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
+        command = wrap + ['--'] + RUST_TESTS_COMMAND
+        print(f'st-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
+        signed = subprocess.run(command, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if signed.returncode != 0:
             detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
@@ -1765,6 +1806,7 @@ def main(argv):
                 limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit)
                 environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
                 command = wrap + ['--'] + LOCAL[name]
+                print(f'st-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
                 command = governed(command, name) if name in BUILDS else command
                 if output is None and CI_LOCAL in LOCAL[name]:
                     # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
@@ -1850,7 +1892,10 @@ def main(argv):
 if __name__ == '__main__':
     # TERM (the pre-push hook's timeout, a closed terminal) unwinds like an error so the throwaway worktree is removed.
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+    if os.environ.get(REEXEC) and Path(__file__).parent.name.startswith('st-test-base-'):
+        atexit.register(shutil.rmtree, Path(__file__).parent, True)  # the copy run_base_copy wrote: gone when this run ends
     try:
+        run_base_copy(sys.argv[1:])
         sys.exit(main(sys.argv[1:]))
     except Failure as error:
         print(f'st-test: {error}', file=sys.stderr)
