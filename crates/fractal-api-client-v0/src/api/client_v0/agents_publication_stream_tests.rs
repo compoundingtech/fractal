@@ -25,7 +25,10 @@ fn publish(state: &AppState, cut: u64, rows: Vec<Value>) -> Arc<crate::store::ag
 }
 
 async fn connect(state: AppState, session: ClientSession) -> (Socket, Server) {
-    
+    connect_with_backpressure(state, session, false).await
+}
+
+async fn connect_with_backpressure(state: AppState, session: ClientSession, backpressure: bool) -> (Socket, Server) {
     let app = axum::Router::new().route("/stream", axum::routing::get(move |upgrade: WebSocketUpgrade| {
         let (state, session) = (state.clone(), session.clone());
         async move {
@@ -36,11 +39,13 @@ async fn connect(state: AppState, session: ClientSession) -> (Socket, Server) {
         }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    socket2::SockRef::from(&listener).set_send_buffer_size(4096).unwrap();
+    if backpressure {
+        socket2::SockRef::from(&listener).set_send_buffer_size(4096).unwrap();
+    }
     let address = listener.local_addr().unwrap();
     let server = Server(tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); }));
     let (socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
-    if let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_ref() {
+    if backpressure && let tokio_tungstenite::MaybeTlsStream::Plain(stream) = socket.get_ref() {
         socket2::SockRef::from(stream).set_recv_buffer_size(4096).unwrap();
     }
     (socket, server)
@@ -278,7 +283,7 @@ async fn revisioned_agents_non_reader_times_out_releases_retired_roster_and_does
     let first = publish(&state, 1, (0..401).map(|index| row(index, &detail)).collect());
     let retired = Arc::downgrade(&first);
     let held = agents_publication_stream::HeldPreparation::new(&first);
-    let (mut stalled, _stalled_server) = connect(state.clone(), ClientSession::local(None).unwrap()).await;
+    let (mut stalled, _stalled_server) = connect_with_backpressure(state.clone(), ClientSession::local(None).unwrap(), true).await;
     subscribe(&mut stalled).await;
     tokio::time::timeout(Duration::from_secs(5), held.entered.notified()).await.unwrap();
     let current = publish(&state, 2, vec![row(0, "current")]);
