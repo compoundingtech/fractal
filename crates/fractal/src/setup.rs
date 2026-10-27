@@ -386,6 +386,9 @@ async fn prepare_harness(
         }
         // CLI plugin commands must see the same account login environment as the daemon.
         if let Err(error) = ensure_claude_channel(executable) {
+            if args.harness.is_some() || (!args.yes && found.len() > 1) {
+                anyhow::bail!("Claude channel installation failed: {error}");
+            }
             say!("Claude channel installation failed: {error}");
             return Ok(fallback_harness(&found));
         }
