@@ -460,7 +460,7 @@ async fn claude_channel_policy_banner_keeps_driver_alive_and_channel_unattached(
     declare_claude(&daemon, seat);
     daemon.observe_running(seat, incarnation);
     daemon.start_admitted_protocol().await;
-    let provider = "printf '%s\\n' '--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)' 'Inbound messages will be silently dropped. Have an administrator set channelsEnabled: true in managed settings to enable'; exec sleep 300";
+    let provider = "printf '%s\\n' '--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)' 'Inbound messages will be silently dropped' 'Have an administrator set channelsEnabled: true in managed settings to enable'; exec sleep 300";
     let mut driver = TestSeat(Some(
         seat_command(root, &daemon.socket)
             .env("ST_AGENT", seat)
@@ -476,9 +476,10 @@ async fn claude_channel_policy_banner_keeps_driver_alive_and_channel_unattached(
         assert_alive(&mut driver, "policy-blocked driver");
         daemon.has_diagnostic(seat, incarnation, "claude-channel-unattached")
     }).await;
-    // Read only the two flushed banner lines; the still-running provider owns the pipe.
+    // Read only the three flushed banner lines; the still-running provider owns the pipe.
     let mut output = BufReader::new(driver.stdout.take().unwrap());
     let mut banner = String::new();
+    output.read_line(&mut banner).unwrap();
     output.read_line(&mut banner).unwrap();
     output.read_line(&mut banner).unwrap();
     assert!(banner.contains("blocked by org policy") && banner.contains("channelsEnabled"));

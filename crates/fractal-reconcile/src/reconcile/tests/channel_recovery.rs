@@ -111,13 +111,27 @@ fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
         .collect()
 }
 
-const POLICY_BANNER: &str = "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)\nInbound messages will be silently dropped. Have an administrator set channelsEnabled: true in managed settings to enable";
+const POLICY_BANNER: &str = "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)\nInbound messages will be silently dropped\nHave an administrator set channelsEnabled: true in managed settings to enable";
+
+fn policy_launch(store: &Store, incarnation: &str) {
+    let token = store.selected_desired_token(SEAT).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.succeeded".into(), actor: None,
+        fields: BTreeMap::from([
+            ("action".into(), json!("start")),
+            ("desired_token".into(), json!(token)),
+            ("incarnation_id".into(), json!(incarnation)),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
 
 #[test]
 fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_restart() {
     let (store, runtime, reconciler, mut desired) = setup();
     desired.member.as_mut().unwrap().restart = RestartType::Always;
     let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
     *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
     let error = recover(&reconciler, &desired, "orchid-one", since).unwrap_err();
     assert!(error.to_string().contains("channelsEnabled: true"), "{error}");
@@ -151,11 +165,59 @@ fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_res
 fn channel_policy_banner_does_not_stop_an_attached_or_stale_incarnation() {
     let (store, runtime, reconciler, desired) = setup();
     let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
     *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
     assert!(!recover(&reconciler, &desired, "predecessor", since).unwrap());
     attachment(&store, "orchid-one", true);
     assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
     assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
+#[test]
+fn quoted_channel_policy_banner_is_not_a_provider_refusal() {
+    for screen in [
+        format!("❯ Please explain this error:\n> {}", POLICY_BANNER.replace('\n', "\n> ")),
+        format!("❯ Please explain this error:\n```\n{POLICY_BANNER}\n```"),
+        format!("❯ {POLICY_BANNER}"),
+    ] {
+        let (store, runtime, reconciler, desired) = setup();
+        let since = attachment(&store, "orchid-one", false);
+        policy_launch(&store, "orchid-one");
+        *runtime.screen.lock().unwrap() = screen;
+        assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn predecessor_policy_banner_does_not_fence_the_replacement_declaration() {
+    let (store, runtime, reconciler, desired) = setup();
+    reconciler.reconcile_once().unwrap();
+    let initial_starts = runtime.starts.lock().unwrap().len();
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    apply_source(
+        &store,
+        "version 2\nagent \"orchid\" { workspace \"/var/tmp\"; restart \"always\"; harness \"claude\" {} }",
+        "policy-replacement",
+    );
+    let replacement = store.desired_subjects().unwrap().remove(0);
+    assert_ne!(desired.member.as_ref().unwrap().workspace, replacement.member.as_ref().unwrap().workspace);
+    assert!(!recover(&reconciler, &replacement, "orchid-one", since).unwrap());
+    assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    // The normal launch-change path remains authoritative; no policy stop or fence is minted.
+    assert!(reconciler.declared_launch_changes(
+        &replacement, &claude_seat_pty("orchid", "running", "orchid-one"),
+    ).unwrap().is_some());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "exited", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(runtime.starts.lock().unwrap().len(), initial_starts + 1);
 }
 
 #[test]

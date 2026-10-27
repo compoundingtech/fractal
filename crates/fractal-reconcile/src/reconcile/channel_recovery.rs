@@ -345,6 +345,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             let Some(observation) = running else { return Ok(()); };
             let Some(incarnation) = observation.incarnation_id.as_deref() else { return Ok(()); };
+            let Some((launch_token, _)) =
+                crate::rollout::launched_member(&self.store, &subject.subject, incarnation)?
+            else {
+                return Ok(());
+            };
+            if launch_token != token {
+                // This banner describes the predecessor, not the selected replacement.
+                // Leave declaration cutover to the ordinary fenced replacement path.
+                return Ok(());
+            }
             if self.running_runtime_claim(&subject.subject, incarnation)?
                 .is_some_and(|claim| claim.store_index < reset)
             {
@@ -391,7 +401,21 @@ impl<R: RuntimeControl> Reconciler<R> {
 }
 
 fn claude_channel_policy_blocked(screen: &str) -> bool {
-    screen.contains("--dangerously-load-development-channels")
-        && screen.contains("blocked by org policy")
-        && screen.contains("channelsEnabled")
+    let mut quoted = false;
+    let mut lines = screen.lines();
+    while let Some(line) = lines.next() {
+        let line = line.trim();
+        if line.starts_with("```") {
+            quoted = !quoted;
+            continue;
+        }
+        if quoted || line != "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)" {
+            continue;
+        }
+        // Claude renders this diagnostic as three unprefixed lines. Text inside a
+        // user prompt, a blockquote or a fenced reply is not provider authority.
+        return lines.next().is_some_and(|line| line.trim() == "Inbound messages will be silently dropped")
+            && lines.next().is_some_and(|line| line.trim() == "Have an administrator set channelsEnabled: true in managed settings to enable");
+    }
+    false
 }
