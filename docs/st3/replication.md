@@ -1,6 +1,6 @@
-# st fleet replication
+# Fractal fleet replication
 
-Fleet replication is optional. A node outside a fleet is a complete local-only st system.
+Fleet replication is optional. A node outside a fleet is a complete local-only Fractal system.
 `st doctor` reports this default as `pass` with “no fleet is configured” and points to
 `st fleet create` or `st fleet join`. It reports “intentionally local-only after leaving its
 fleet” only when `st fleet leave` has recorded that explicit decision in `left-fleet.json`.
@@ -345,7 +345,7 @@ replication activation after the daemon serves runs them on a read connection.
 
 Admission prepares each envelope before it takes the writer: it decodes the payload, checks
 the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
-classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+classifies without the store (Fractal's does), classifies its kinds and fields. The writer is held
 only for the checks that read stored state and the writes: the envelope row is still there and
 not dropped by a checkpoint, membership and signatures still admit it, earlier record states
 (a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
@@ -480,7 +480,7 @@ This projection is independent of the claim/resource vocabulary and replication 
 
 ## Add any machine
 
-Install st on the new machine and configure the person who operates it, as described in the
+Install Fractal on the new machine and configure the person who operates it, as described in the
 [README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
 
 ```sh
@@ -550,7 +550,7 @@ Fabric routes name the lasting remote endpoint: the worker creates or reacquires
 tunnel itself. Several peer entries may name the same member with distinct routes.
 Arbitrary DNS names and LAN/public HTTP peer URLs remain rejected. The listener refuses a
 wildcard, LAN or public address unless `peer_listen_allow_plain_http = true` (or
-`--peer-listen-allow-plain-http`) is set: st cannot tell whether such a path is encrypted,
+`--peer-listen-allow-plain-http`) is set: Fractal cannot tell whether such a path is encrypted,
 and the listener carries terminal input and attach grants as well as replication.
 Replication is plain HTTP, encrypted between hosts by Tailscale or a Fabric tunnel;
 the fleet secret and joined members' signatures still authenticate the exchange.
@@ -1250,7 +1250,7 @@ st replication checkpoint excuse node-c --reason "away for a week" --as person/o
 
 `plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
 runs there at a time. While another proof runs, as one does right after the daemon starts, the
-daemon holds the plan for up to a minute, and `st` asks again for up to four minutes more and
+daemon holds the plan for up to a minute, and Fractal asks again for up to four minutes more and
 prints that it is waiting. A proof still running after that is refused with
 `checkpoint-proof-in-progress` (HTTP 503); run the plan again shortly.
 
