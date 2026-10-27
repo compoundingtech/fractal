@@ -1470,6 +1470,15 @@ An unknown variable or a variable that is not available in the current phase is 
 
 ## Agent start
 
+Typed harness bodies are optional: `harness "codex"` and `harness "codex" {}` use
+the same native defaults, as do the other supported providers (`claude`, `pi`,
+`omp`, `opencode`). Each accepts an optional `executable` string, for example
+`harness "codex" { executable "/opt/codex/bin/codex"; }`, to replace only the native
+program in the typed driver's argv. It is not a shell command; flags belong in
+`args`. The default program is the provider name on the seat's PATH. See the
+[configuration reference](../site/reference/configuration.md#executable-selection-and-path)
+for login-shell environment capture, agent PATH overrides, and executable examples.
+
 A native harness starts idle by default. Its creator can supply an explicit first message:
 
 ```kdl
@@ -1951,6 +1960,21 @@ in owner run/generation/step, stale positive counts still block. This deliberate
 completed historical moves and removed standbys rather than guessing when a move is settled.
 Staged or conflicting owned-set changes remain fenced by the existing ownership guard,
 including at the due callback. No elapsed timeout grants takeover authority.
+
+If a locally due tick remains replication-blocked for fifteen minutes of continuous
+observation, the existing operational-failure attention surface warns the operator.
+The warning names the schedule, host, first blocked occurrence and due instant, and
+lists peer-only/local-only counts, staleness and measurement times (or explicitly
+unknown comparisons), plus projection/catch-up/first-sync state. It is one pending
+warning per schedule and observing host, not a warning per retry or per tick.
+Short intervals and `skip` do not restart the warning clock as later ticks pass.
+Already requested work blocked at its admission boundary is included.
+
+The fifteen-minute clock is monotonic and local: a daemon restart begins a new
+observation window, not a new stored-state schema. A revision change or replicated
+completion retires the old observation. Admission recovery, stopping, or moving the
+schedule away from the observing member recovers its warning. A future tick alone
+does not warn. The warning never changes admission, catch-up, or standby eligibility.
 
 The mission steps are normal claimable work. A schedule does not start another occurrence while its prior mission run remains active.
 

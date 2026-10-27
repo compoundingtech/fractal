@@ -8149,8 +8149,8 @@ pub fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// While a harness works, its usage replicates at most once in this window. Once it stops
-/// working, its newest usage replicates at once.
+/// A usage slot replicates at most once in this window, apart from its first reading, a
+/// compaction or model change, and the end of a turn.
 const USAGE_PUBLISH_INTERVAL_MS: u128 = 5 * 60 * 1000;
 
 pub fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
@@ -8644,8 +8644,16 @@ fn publish_changed_harness_state_tx(
                 })
             })
     });
+    let resting = input.fields.get("state").and_then(Value::as_str) != Some("working");
+    let incarnation = fields.get("incarnation_id").and_then(Value::as_str).unwrap_or("").to_owned();
+    // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
+    // waited out its interval, so a reading after the turn's tally waits no longer than that.
+    let due_usage = now.saturating_sub(USAGE_PUBLISH_INTERVAL_MS);
     // Refresh remote freshness at most once a minute, without manufacturing transitions.
     if unchanged && latest.as_ref().is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000) {
+        if resting {
+            publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage))?;
+        }
         return Ok(None);
     }
     let observed_at = fields.get("observed_at_ms").and_then(Value::as_u64)
@@ -8689,10 +8697,10 @@ fn publish_changed_harness_state_tx(
         input.actor.as_deref(),
         &json!(fields),
     )?;
-    if input.fields.get("state").and_then(Value::as_str) != Some("working") {
+    if resting {
         publish_pending_usage_tx(
-            transaction, origin, &input.subject,
-            fields.get("incarnation_id").and_then(Value::as_str).unwrap_or(""), now,
+            transaction, origin, &input.subject, &incarnation, now,
+            same_state.then_some(due_usage),
         )?;
     }
     Ok(Some(claim))
@@ -8780,8 +8788,13 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
 
 /// Publish a usage observation when its slot (incarnation and semantics) has no claim yet,
 /// its compactions or model changed, this node last replicated the slot at least
-/// `USAGE_PUBLISH_INTERVAL_MS` ago, or the harness is not working. Otherwise it stays local
-/// and pending until one of those holds or the harness stops working.
+/// `USAGE_PUBLISH_INTERVAL_MS` ago, or it is the slot's first reading since the harness
+/// stopped working (a turn's last response can arrive after its idle report). Otherwise it
+/// stays local and pending until one of those holds or the harness stops working.
+///
+/// Responses keep arriving while a harness reports idle: its subagents and background tasks
+/// answer while the main loop waits. Replicating each of them at once wrote one claim every
+/// few seconds per busy seat, so after the turn's tally they wait for the interval too.
 fn publish_due_usage_tx(
     transaction: &Transaction<'_>,
     origin: &str,
@@ -8799,17 +8812,27 @@ fn publish_due_usage_tx(
         )
         .optional()
         .map_err(internal)?;
-    let working = latest_claim_of_kind_tx(transaction, &input.subject, "harness.observed")?
-        .is_some_and(|claim| {
-            claim.body.pointer("/fields/state").and_then(Value::as_str) == Some("working")
-        });
+    // When the harness is not working: since when, as its replicated state says. A harness
+    // that never reported a state has no turn end to wait for, so each reading replicates.
+    let resting_since = match latest_claim_of_kind_tx(transaction, &input.subject, "harness.observed")? {
+        None => Some(u128::MAX),
+        Some(claim) if claim.body.pointer("/fields/state").and_then(Value::as_str) == Some("working") => None,
+        Some(claim) => Some(
+            claim
+                .body
+                .pointer("/fields/observed_since_ms")
+                .and_then(Value::as_u64)
+                .map_or(claim.accepted_at_unix_ms, u128::from),
+        ),
+    };
     let due = match &last {
         None => true,
         Some((published_at, published_fields)) => {
             let published: BTreeMap<String, Value> =
                 serde_json::from_str(published_fields).unwrap_or_default();
-            !working
-                || now.saturating_sub((*published_at).max(0) as u128) >= USAGE_PUBLISH_INTERVAL_MS
+            let published_at = (*published_at).max(0) as u128;
+            resting_since.is_some_and(|since| published_at < since)
+                || now.saturating_sub(published_at) >= USAGE_PUBLISH_INTERVAL_MS
                 || ["compactions", "model"]
                     .iter()
                     .any(|name| published.get(*name) != input.fields.get(*name))
@@ -8883,15 +8906,17 @@ fn publish_usage_slot_tx(
     )
 }
 
-/// Replicate the newest local usage of each pending slot of `subject`.
+/// Replicate the newest local usage of each pending slot of `subject`: every one when the
+/// harness stops working, or only the slots last replicated at or before `published_by`.
 fn publish_pending_usage_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     subject: &str,
     incarnation: &str,
     now: u128,
+    published_by: Option<u128>,
 ) -> Result<Vec<ClaimRecord>, St3Error> {
-    let pending = {
+    let mut pending = {
         let mut statement = transaction
             .prepare(/* sqlite-large-value: allow-for-now lv-h0385a1228a70 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
                 "{LOCAL_OBSERVATION_COLUMNS} WHERE id IN (
@@ -8906,13 +8931,34 @@ fn publish_pending_usage_tx(
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(internal)?
     };
-    transaction
-        .execute(
-            /* sqlite-large-value: allow-for-now lv-h1629790977a3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
+    if let Some(published_by) = published_by {
+        // Publishing a slot clears its pending reading; the rest keep waiting.
+        let due = transaction
+            .prepare(
+                "SELECT pending_local_id FROM local_latest_slots
+                 WHERE subject=?1 AND kind='harness.usage' AND pending_local_id IS NOT NULL
+                   AND published_at_unix_ms <= ?2",
+            )
+            .map_err(internal)?
+            .query_map(
+                params![subject, published_by.min(i64::MAX as u128) as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(internal)?
+            .collect::<rusqlite::Result<BTreeSet<_>>>()
+            .map_err(internal)?;
+        pending.retain(|observation| {
+            local_observation_position(observation).is_some_and(|id| due.contains(&(id as i64)))
+        });
+    } else {
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-h1629790977a3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
              WHERE subject=?1 AND kind='harness.usage'",
-            [subject],
-        )
-        .map_err(internal)?;
+                [subject],
+            )
+            .map_err(internal)?;
+    }
     let mut published = pending
         .into_iter()
         .map(|observation| {
@@ -8928,6 +8974,9 @@ fn publish_pending_usage_tx(
             )
         })
         .collect::<Result<Vec<_>, St3Error>>()?;
+    if published_by.is_some() {
+        return Ok(published);
+    }
     // Even a single response can have published before its native binding arrived, leaving
     // no pending token change. Capture that binding in the normal stop flush as well.
     let unbound = {
@@ -18125,7 +18174,12 @@ pub fn enrich_step_summaries_at(
                 continue;
             };
             if kind == "work.progress" && view.progress_summary.is_none() {
-                view.progress_summary = Some(summary.to_owned());
+                view.progress_summary = Some(if subject == view.subject {
+                    summary.to_owned()
+                } else {
+                    crate::work_eta::without_eta_on_revision(summary)
+                        .unwrap_or_else(|| summary.to_owned())
+                });
                 view.progress_at_unix_ms = Some(accepted);
             } else if kind == "work.submitted" && view.completion_summary.is_none() {
                 view.completion_summary = Some(summary.to_owned());
@@ -20452,6 +20506,14 @@ pub fn append_claim_with_commit_context(
             }
             let outcome = (|| {
             check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
+            if input.kind == "harness.session-file" {
+                // A predecessor retry cannot replace a successor's binding, even if it
+                // was accepted before. Check authority under the same writer lock as dedup.
+                check_harness_event_runtime(
+                    transaction, &input.subject,
+                    input.fields.get("incarnation_id").and_then(Value::as_str),
+                )?;
+            }
             let normalized_fence = fence.map(|fence| -> Result<_,St3Error> {
                 let identity = identities::resolve_reference_conn(transaction, &fence.subject)?;
                 Ok(if identity == fence.subject { std::borrow::Cow::Borrowed(fence) }
@@ -20575,6 +20637,22 @@ pub fn append_claim_with_commit_context(
                     .with_detail("expected_head", json!(expected))
                     .with_detail("current_head", json!(actual)));
                 }
+            }
+            // A native session is a current binding, not an incarnation-wide operation ID:
+            // A -> B -> A must publish A again, while retries of the current A stay quiet.
+            if input.kind == "harness.session-file"
+                && input.idempotency_key.is_none()
+                && input.evidence.is_empty()
+                && let Some(existing) = latest_claim_of_kind_tx(
+                    transaction, &input.subject, "harness.session-file",
+                )?
+                && existing.actor == input.actor
+                && existing.body.get("fields").and_then(Value::as_object).is_some_and(|fields| {
+                    fields.len() == input.fields.len()
+                        && input.fields.iter().all(|(key, value)| fields.get(key) == Some(value))
+                })
+            {
+                return Ok((existing, false));
             }
             if input.kind == crate::model::PLACEMENT_SOURCE_OFFLINE_KIND {
                 let current: Option<String> = transaction.query_row(
@@ -20893,6 +20971,49 @@ pub fn append_latest_observation_publication(
                 }
             }
             Ok((published.unwrap_or(local), true, status_transition))
+        })
+        .map_err(|error| St3Error::new("internal", error))?
+}
+
+/// Record a native limits report in the local observation log, and replicate it as a claim
+/// only when it changes what the account limits answer ([`limits::limits_publication_due`]).
+/// The returned record is that claim, or the local observation when nothing replicated.
+pub fn append_limits_publication(
+    graph: &GraphStore,
+    input: &ClaimInput,
+    now: u128,
+    event_runtime: Option<&str>,
+) -> Result<(ClaimRecord, bool), St3Error> {
+    validate_local_observation(input)?;
+    graph
+        .connection
+        .batched(|transaction| {
+            check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
+            let (local, appended) =
+                insert_local_observation_tx(transaction, &graph.origin, input, now)?;
+            if !appended {
+                return Ok((local, false));
+            }
+            let fields = json!(input.fields);
+            if !limits::limits_publication_due(
+                transaction,
+                &graph.origin,
+                &input.subject,
+                &json!({ "fields": &fields }),
+            )
+            .map_err(internal)?
+            {
+                return Ok((local, true));
+            }
+            publish_latest_claim_tx(
+                transaction,
+                &graph.origin,
+                &input.subject,
+                &input.kind,
+                input.actor.as_deref(),
+                &fields,
+            )
+            .map(|claim| (claim, true))
         })
         .map_err(|error| St3Error::new("internal", error))?
 }

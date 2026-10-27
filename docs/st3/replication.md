@@ -533,6 +533,26 @@ See [Tailscale setup](tailscale.md) for direct-host setup and
 [the migration procedure](../fleet-join.md#move-an-existing-fleet-off-local-dial-helpers)
 for replacing a legacy local dial helper.
 
+The per-peer HTTP client retires pooled connections after ten idle seconds.
+The Axum listener enables keep-alive but configures no finite idle deadline:
+Hyper's nominal 30-second header-read default is inactive without a timer.
+TCP keepalive remains reqwest's default; it does not detect an established
+carrier stream that accepts TCP traffic but stops forwarding application bytes.
+
+A signed exchange that fails with a typed transport error or timeout before
+complete response headers is retried once using a new client with an empty pool.
+The retry retains the signed body and correlation ID. The protocol has no
+request nonce or timestamp window; identical active requests share a backend job
+by sender and body digest, and envelope receipt remains idempotent after completion.
+No retry occurs after response headers (including overload or refusal), during
+response-body reads, for application errors, or for other peer endpoints.
+Each HTTP send retains its twenty-second timeout, so two stalled sends can take
+forty seconds before route fallback/backoff. The enclosing five-minute overload
+poll deadline still bounds both sends; poll counts and retry delays are unchanged.
+The fallback cooldown and recent-peer retry waits begin after the final outcome,
+so this additional attempt can delay route fallback by up to twenty seconds.
+
+
 Only transport failures advance to the next configured route: connection failures,
 broken request/response streams (including typed TLS fatal alerts and bad records),
 HTTP transport timeouts, and unavailable carriers (including Fabric's typed `fault`
@@ -1283,8 +1303,9 @@ Success records omit `failure`. Older worker requests and older observations wit
 details remain readable and do not invent a cause. Carrier-only client sync notices
 remain unchanged; use replication-status JSON for the diagnostic details.
 
-For HTTP failures, `failure.correlation_id` identifies one request (each overload
-poll has its own ID), and `failure.client_stage` names the last observed client
+For HTTP failures, `failure.correlation_id` identifies one signed request including
+its optional fresh-connection retry (each overload poll has its own ID), and
+`failure.client_stage` names the last observed client
 boundary: `send-started`, `connected`, `headers-received`, or `pooled-or-unknown`.
 `connected` means request-scoped connector middleware observed a fresh connection;
 on a Fabric route this is the local tunnel connection, not proof that the remote
@@ -1299,17 +1320,26 @@ Structured `smallclaims::replication` events carry `correlation_id`, `stage`,
 Fast successful clients log boundaries at DEBUG. A locally failed client exchange
 or one crossing five seconds promotes retained boundaries to INFO with their
 original timestamps; subsequent client boundaries remain INFO. The client emits
-`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`.
+`client-send-start`, `connect-done`, `client-fresh-retry`,
+`client-headers-received`, and `client-failed`.
 
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.
 Search both hosts' journals for the ID from the failed record; no DEBUG logging
-is required. The summary includes `status`, `server_ingress_unix_ms`,
+is required. The summary includes `status`, `head_received_unix_ms`,
+`body_read_complete_unix_ms`, `request_body_bytes`, `server_ingress_unix_ms`,
 `server_ingress_elapsed_us`, `backend_done_unix_ms`, `backend_done_elapsed_us`,
 `response_headers_ready_unix_ms`, and `response_headers_ready_elapsed_us`.
 `backend_done: false` and absent backend timestamps mean no completed backend
 answer was observed at response handoff (for example an overload or early refusal).
 The server's individual boundaries remain DEBUG, including late backend completion.
+Head-received means the HTTP request head reached the route middleware, before
+Axum buffers the body. Body-read-complete means that buffering reached the end
+of the wire body; the byte count is compressed bytes when content encoding is used.
+An upload that errors, exceeds the body limit, or is cancelled before completion
+emits one INFO `replication exchange request body incomplete` record when dropped,
+with correlation ID, head arrival time, bytes read so far and `body_read_error`.
+A missing handler summary alone therefore does not prove a missing request head.
 Ingress means the handler entered after Axum extracted the body. Headers-ready
 means the signed/compressed response was handed to Axum, not that the socket write
 completed. A retained backend job records completion with its originating request

@@ -63,6 +63,7 @@ pub mod waits;
 mod schedule_standby_selection_tests;
 #[cfg(test)]
 mod schedule_admission_tests;
+mod schedule_replication_block;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -183,21 +184,7 @@ fn schedule_admission_ready(
     {
         return Ok(false);
     }
-    let membership = store.fleet_membership()?;
-    let peers = configured
-        .iter()
-        .cloned()
-        .chain(
-            membership
-                .incarnations()
-                .filter(|member| member.end.is_none())
-                .map(|member| member.name.clone()),
-        )
-        .filter(|peer| peer != host && !matches!(membership.state(peer),
-            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let peers = schedule_admission_peers(store, host, configured)?;
     if peers.is_empty() {
         return Ok(true);
     }
@@ -205,6 +192,16 @@ fn schedule_admission_ready(
     let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
         && schedule_requires_complete_history(store, schedule)?;
     Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
+    let membership = store.fleet_membership()?;
+    Ok(configured.iter().cloned()
+        .chain(membership.incarnations().filter(|member| member.end.is_none())
+            .map(|member| member.name.clone()))
+        .filter(|peer| peer != host && !matches!(membership.state(peer),
+            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
+        .collect::<BTreeSet<_>>().into_iter().collect())
 }
 
 /// Moving a schedule (or removing its standby) must not turn an old missing-history
@@ -1150,6 +1147,7 @@ pub struct Reconciler<R = NativeRuntime> {
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
+    schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1335,6 +1333,7 @@ impl Reconciler<NativeRuntime> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1497,6 +1496,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -7573,7 +7573,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        // Native drivers must bind before readiness can be established. Publish running
+        // authority at launch completion only for the physically observed incarnation
+        // owned by this start operation; readiness and restart completion remain separate.
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
+            self.runtime.observe_start(member)?.is_some_and(|observation| {
+                observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(incarnation)
+            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+                .as_deref() == Some(operation_id)
+        } else {
+            false
+        };
+        let mut starting = member_fields(
+            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+        );
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
@@ -14621,13 +14635,15 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn schedules_caught_up(&self, schedule: &DesiredSubject) -> Result<bool> {
-        schedule_admission_ready(
+        let ready = schedule_admission_ready(
             &self.store,
             &self.host,
             &self.schedule_peers,
             self.started_at_unix_ms,
             schedule,
-        )
+        )?;
+        self.observe_schedule_replication_gate(schedule, ready, now_ms())?;
+        Ok(ready)
     }
 
     /// A late standby wake cannot turn a past candidate into new catch-up policy.
@@ -14661,9 +14677,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if spec.stopped || (spec.host != self.host
             && !spec.standby.as_ref().is_some_and(|standby| standby.host == self.host)) {
+            self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
         if self.schedule_has_open_work(&schedule.subject)? {
+            if self.store.schedule_has_active_started_run(&schedule.subject)? {
+                self.clear_schedule_replication_block(schedule)?;
+            }
             return Ok(());
         }
         if !self.schedules_caught_up(schedule)? {
@@ -15085,6 +15105,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let on_standby = spec.host != self.host
             && spec.standby.as_ref().is_some_and(|standby| standby.host == self.host);
         if spec.host != self.host && !on_standby {
+            self.clear_schedule_replication_block(schedule)?;
             self.schedule_workspace_retries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -23890,6 +23911,21 @@ agent "import/omp/repair-order" {{
         old.import_replication("author", &declaration.export_replication(0).unwrap())
             .unwrap();
         let append_binding = |store: &Store, incarnation: &str| {
+            // A driver's binding is accepted only while its incarnation is the running one.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
             store
                 .append_claim(&ClaimInput {
                     subject: seat.into(),
@@ -24088,6 +24124,20 @@ agent "import/omp/repair-order" {{
         old_build
             .append_claim(&ClaimInput {
                 subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
                 kind: "harness.session-file".into(),
                 actor: Some(seat.into()),
                 fields: BTreeMap::from([
@@ -24160,6 +24210,21 @@ agent "import/omp/fixture" {{
                     "desired_token".into(),
                     Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
                 );
+                // A driver's binding is accepted only while its incarnation is the running one.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.subject.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.subject.clone()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("running".into())),
+                            ("incarnation_id".into(), Value::String(incarnation.into())),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             store
                 .append_claim(&ClaimInput {

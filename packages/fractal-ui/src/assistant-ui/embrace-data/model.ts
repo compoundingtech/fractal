@@ -13,6 +13,9 @@ export type Attachment = {
   readonly id: string
   readonly mediaType: string
   readonly name?: string
+  readonly size?: number
+  /** Native message carrier, not the transcript row's presentation identity. */
+  readonly messageId?: string
 }
 export type ToolCallStatus = 'running' | 'success' | 'error' | 'interrupted'
 export type ToolResult = {
