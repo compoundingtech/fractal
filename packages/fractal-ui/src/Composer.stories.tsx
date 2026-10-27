@@ -146,8 +146,12 @@ export const scenarioExemptions: readonly string[] = [
   'EffortUnknown:contract-fixture',
   'EffortUnsupported:contract-fixture',
   'FailedSendRestored:contract-fixture',
-  'FooterWidthBudget:contract-fixture',
-  'FooterWidthBudgetLight:contract-fixture',
+  'FooterWidthBudget320:contract-fixture',
+  'FooterWidthBudget320Light:contract-fixture',
+  'FooterWidthBudget360:contract-fixture',
+  'FooterWidthBudget360Light:contract-fixture',
+  'FooterWidthBudget451:contract-fixture',
+  'FooterWidthBudget451Light:contract-fixture',
   'Geometry:contract-fixture',
   'Idle:contract-fixture',
   'IdleLight:contract-fixture',
@@ -515,22 +519,23 @@ export const EffortAllStates: Story = {
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{effortFrames.map(frame => <ComposerFrame key={frame.id} policy={decided} state={frame.state} effort={frame.effort} frameId={`effort.${frame.id}`} />)}</div></Surface>,
 }
 
-const footerBudgetFrames = ([320, 360, 451] as const).flatMap(composerWidth =>
-  (['C1', 'C2', 'C3'] as const).flatMap(layout => (['K1', 'K2', 'K3'] as const).flatMap(target => (['R1', 'R2', 'R3'] as const).map(running => ({
+/** Partition by width so each scenario check mounts 27 composers, not the complete 81-frame gallery. */
+const footerWidthBudgetStory = (composerWidth: 320 | 360 | 451): Story => {
+  const frames = (['C1', 'C2', 'C3'] as const).flatMap(layout => (['K1', 'K2', 'K3'] as const).flatMap(target => (['R1', 'R2', 'R3'] as const).map(running => ({
     composerWidth, policy: { layout, target, running, mentions: 'M2' } satisfies ComposerPolicy, frameId: `footer-budget.${composerWidth}.${layout}.${target}.${running}`,
-  })))))
-/** The declared width is the real form width; every footer control stays inside its running composer. */
-export const FooterWidthBudget: Story = { tags: ['critical'],
+  }))))
+  return { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'running', effort: 'supported' },
-  render: args => <Surface scheme={args.scheme} testId="composer-footer-width-budget"><div aria-label="Footer width budget previews" {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames.map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme} testId="composer-footer-width-budget"><div aria-label={`Footer width budget previews at ${composerWidth}px`} {...stylex.props(styles.budgetPreviews)}>{frames.map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
   play: async ({ canvasElement }) => {
     await canvasElement.ownerDocument.fonts.ready
     let previousGeometry: number[] | undefined
     // Retry through React/ResizeObserver updates, then require two matching measurements.
     await waitFor(() => {
       const cards = [...canvasElement.querySelectorAll<HTMLElement>('[data-footer-budget-width]')]
-      expect(cards).toHaveLength(81)
+      expect(cards).toHaveLength(27)
+      expect(cards.every(card => Number(card.dataset.footerBudgetWidth) === composerWidth)).toBe(true)
       const keyOf = (card: HTMLElement) => `${card.dataset.footerBudgetWidth}.${card.dataset.footerBudgetLayout}.${card.dataset.footerBudgetTarget}.${card.dataset.footerBudgetRunning}`
       const geometry: number[] = []
       for (const card of cards) {
@@ -562,8 +567,15 @@ export const FooterWidthBudget: Story = { tags: ['critical'],
       expect(geometry).toEqual(previous)
     }, { timeout: 10_000 })
   },
+  }
 }
-export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+/** The declared width is the real form width; every footer control stays inside its running composer. */
+export const FooterWidthBudget320: Story = { ...footerWidthBudgetStory(320), tags: ['critical'] }
+export const FooterWidthBudget320Light: Story = { ...FooterWidthBudget320, args: { ...FooterWidthBudget320.args, scheme: 'light' } }
+export const FooterWidthBudget360: Story = { ...footerWidthBudgetStory(360), tags: ['critical'] }
+export const FooterWidthBudget360Light: Story = { ...FooterWidthBudget360, args: { ...FooterWidthBudget360.args, scheme: 'light' } }
+export const FooterWidthBudget451: Story = { ...footerWidthBudgetStory(451), tags: ['critical'] }
+export const FooterWidthBudget451Light: Story = { ...FooterWidthBudget451, args: { ...FooterWidthBudget451.args, scheme: 'light' } }
 
 /** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab. */
 export const LayoutShapes: Story = { tags: ['critical'],
