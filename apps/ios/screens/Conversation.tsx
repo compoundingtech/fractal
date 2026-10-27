@@ -22,7 +22,7 @@ import { rememberBounded } from '../boundedCache';
 import { ConversationImageViewport } from '../visibleConversationImages';
 import { ImageBox, MailImageView, useWindowViewport } from '../imageBox';
 import { IMAGES } from '../imageView';
-import { dictationAvailable, startDictation } from '../modules/st-dictation';
+import { dictationAvailable, startDictation } from '../modules/fractal-dictation';
 import type { RootScreen } from '../navigation';
 import { openSubagentConversation } from '../conversationNavigation';
 import { useStore, type MessageRequest, type Sent } from '../store';
@@ -30,12 +30,12 @@ import { fonts, theme } from '../theme';
 import { Button, Field, LINE, Markdown, T } from '../ui';
 import { AlertsStrip } from './Alerts';
 
-// Drawn by stui's rules (fixtures/clients/conversation-style.json), so both apps look alike.
+// Drawn by the Fractal terminal UI's rules (fixtures/clients/conversation-style.json), so both apps look alike.
 const RULES: ConversationRules = rules;
 const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
-// `unconfirmed` is the exact request st may have taken and has not confirmed, to send again unchanged.
+// `unconfirmed` is the exact request Fractal may have taken and has not confirmed, to send again unchanged.
 type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
@@ -44,13 +44,13 @@ function nowClock() {
   return `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
 }
 
-// One agent's conversation, drawn as stui draws it and kept pinned to the newest entry just
+// One agent's conversation, drawn as the Fractal terminal UI draws it and kept pinned to the newest entry just
 // above the composer, unless the person has scrolled back to read.
 export function ConversationScreen({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
   const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
-  // A running session st manages belongs to its agent: name it, and send to it, as the agent.
+  // A running session Fractal manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
     ?? (session?.state === 'running' && session.managed !== false ? data.agents.find(candidate => candidate.id === session.owner_id) : undefined);
   const unresolved = session ? isUnresolved(session) : false;
@@ -74,17 +74,17 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
       error => setTimeline(previous => olderFailed(previous, request, error instanceof Error ? error.message : String(error))),
     );
   };
-  // Whether st has answered at all: until it has, the screen says it is loading, never "nothing".
+  // Whether Fractal has answered at all: until it has, the screen says it is loading, never "nothing".
   const [loaded, setLoaded] = useState(() => conversationCache.current.has(target));
   const [issue, setIssue] = useState('');
-  // st refused for good: nothing asks again until the person taps to retry, which follows again.
+  // Fractal refused for good: nothing asks again until the person taps to retry, which follows again.
   const [stopped, setStopped] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const retry = () => { if (stopped) { setStopped(false); setIssue(''); setAttempt(count => count + 1); } };
-  // When st last sent this conversation, so a view that may be stale says how old it is.
+  // When Fractal last sent this conversation, so a view that may be stale says how old it is.
   const [lastFrame, setLastFrame] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  // Asking st again: true from the moment the phone starts following this conversation until st sends it.
+  // Asking Fractal again: true from the moment the phone starts following this conversation until Fractal sends it.
   const [refreshing, setRefreshing] = useState(true);
   // The entry whose text is open for selecting in place: a long press selects it, any part of it can be copied.
   const [selecting, setSelecting] = useState<string | null>(null);
@@ -166,7 +166,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     });
   }, [navigation, title, agent, status, actions]);
 
-  // st follows the session an agent had when the subscription started. After the agent restarts
+  // Fractal follows the session an agent had when the subscription started. After the agent restarts
   // into a new session, subscribe again, once per new session, or this would keep showing the old
   // one (and a message sent to the new one would never show up here).
   const [followed, setFollowed] = useState<string | undefined>(undefined);
@@ -215,7 +215,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     if (person) map.set(person, 'you');
     return map;
   }, [data.agents, caps?.session_actor]);
-  // Half a conversation is worse than none: when st could not read the transcript, say why.
+  // Half a conversation is worse than none: when Fractal could not read the transcript, say why.
   const unreadable = useMemo(() => unreadableTranscript(timeline.entries), [timeline.entries]);
   useEffect(() => { if (unreadable) quality.conversationError(qualityOpen.current, 'transcript-not-bound'); }, [unreadable]);
   // An entry that did not change keeps its object, so its row is not drawn and measured again:
@@ -234,7 +234,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     stable.current = kept;
     return result;
   }, [unreadable, timeline.entries, names]);
-  // A message st has taken shows up in the conversation; the pending copy then gives way.
+  // A message Fractal has taken shows up in the conversation; the pending copy then gives way.
   useEffect(() => {
     setPending(previous => previous.filter(item => item.failed || !entries.some(entry => entry.body.kind === 'mail' && entry.body.from === 'you' && entry.body.text.trim() === item.text.trim())));
   }, [entries]);
@@ -274,7 +274,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     const item: Pending = { id: `pending-${Date.now()}`, text, at: nowClock(), ...(sending.length ? { images: sending.length } : {}) };
     setPending(previous => [...previous, item]);
     // The words sent from dictation include what was in the box, so it empties either way; a send that
-    // does not go puts the text back, and one that st acknowledged leaves it empty.
+    // does not go puts the text back, and one that Fractal acknowledged leaves it empty.
     emptyBox();
     setImages([]); setImageIssue('');
     // To the newest, where the message appears: animated from nearby, a jump from far up, since an
@@ -287,7 +287,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     // Images that did not go stay ready to send again.
     if (sent.how === 'failed' && sending.length) setImages(previous => addImages(sending, previous).images);
     if (sent.how === 'failed') {
-      // The text goes back in the box, whatever the reason: only a send st acknowledged clears it. Words
+      // The text goes back in the box, whatever the reason: only a send Fractal acknowledged clears it. Words
       // typed while it was on its way stay after it. The cache holds the box's text even if the person
       // has left the conversation, so the text is there when they come back.
       const restored = restoreDraft(draftCache.current.get(target) ?? '', text);
@@ -302,13 +302,13 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
     }
     settle(item.id, sent);
   }
-  // An unconfirmed message goes again as the same request, so st keeps at most one of it.
+  // An unconfirmed message goes again as the same request, so Fractal keeps at most one of it.
   async function sendAgain(item: Pending) {
     if (!item.unconfirmed || item.resending) return;
     setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
     settle(item.id, await actions.resend(item.unconfirmed));
   }
-  // A sent message waits to show up in the conversation; one st has not confirmed keeps its request.
+  // A sent message waits to show up in the conversation; one Fractal has not confirmed keeps its request.
   function settle(id: string, sent: Sent) {
     setPending(previous => previous.map(candidate => candidate.id !== id ? candidate
       : { ...candidate, resending: false, failed: sent.how === 'failed' ? sent.error : undefined, unconfirmed: sent.how === 'unconfirmed' ? sent.request : undefined }));
@@ -385,7 +385,7 @@ export function ConversationScreen({ route, navigation }: RootScreen<'Conversati
   const toggle = useCallback((id: string) => setOpen(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; }), []);
   // A subagent card opens its child conversation as its own, through the session's own route.
   const openSession = useCallback((sessionId: string, title: string) => openSubagentConversation(navigation, sessionId, title), [navigation]);
-  // The conversation header, as st last sent it: what is running, what it costs, what waits.
+  // The conversation header, as Fractal last sent it: what is running, what it costs, what waits.
   const header = useMemo(() => headerLine(timeline.header, new Date(lastFrame ?? Date.now()).toISOString()), [timeline.header, lastFrame]);
 
   return <KeyboardAvoidingView style={styles.screen} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={headerHeight}>
@@ -512,7 +512,7 @@ const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }:
   </View>;
 });
 
-/** How fresh the conversation is, as stui says it on the rule above its box: live, how long since st
+/** How fresh the conversation is, as the Fractal terminal UI says it on the rule above its box: live, how long since Fractal
  * last sent it, and that the phone is asking again. It keeps its own clock so a tick redraws only this line. */
 function Freshness({ refreshing, loaded, lastFrame }: { refreshing: boolean; loaded: boolean; lastFrame: number | null }) {
   const [now, setNow] = useState(() => Date.now());
@@ -535,8 +535,8 @@ const EntryView = memo(function EntryView(props: { entry: ConversationEntry; con
 
 type ConversationImageProps = { conversationId: string; reference: ConversationContentRef; viewport: ConversationImageViewport; client: FractalClient | null };
 
-// A transcript's image, read in chunks from st (and from the owner of the message through it) only
-// while it is on screen; st names its real type and size before the bytes arrive.
+// A transcript's image, read in chunks from Fractal (and from the owner of the message through it) only
+// while it is on screen; Fractal names its real type and size before the bytes arrive.
 function VisibleConversationImageView({ conversationId, reference, viewport, client }: ConversationImageProps) {
   const load = (current: () => boolean) => IMAGES.read(`${conversationId}:${reference.ref}`, async () => {
     if (!client) throw new Error('Connect to the server and try again.');
@@ -601,7 +601,7 @@ const EntryBodyView = memo(function EntryBodyView({ entry, open, onToggle, brief
       </View>;
     }
     case 'tool': {
-      // Quiet until opened, as in stui: an edge in the outcome's colour, dim text, no fill, and
+      // Quiet until opened, as in the Fractal terminal UI: an edge in the outcome's colour, dim text, no fill, and
       // at most six one-line rows; opened, it reads at full brightness.
       const rule = RULES.tool;
       const [glyph, color] = body.state === 'running' ? ['⠿', c(rule.running)] : body.state === 'ok' ? [rule.ok.text, c(rule.ok.color)] : [rule.failed.text, c(rule.failed.color)];
@@ -665,7 +665,7 @@ type Mail = Extract<ConversationEntry['body'], { kind: 'mail' }>;
 
 // Mail the person is part of leads; mail between others stays back and folds to a few rows,
 // like a tool call, until tapped. Mail to the person is filled like their own messages, and
-// their own says how far it got: ✓ st has it, ✓✓ the agent has it.
+// their own says how far it got: ✓ Fractal has it, ✓✓ the agent has it.
 const MailView = memo(function MailView({ entry, body, open, onToggle, brief = false, imageViewport }: { entry: ConversationEntry; body: Mail; open: boolean; onToggle: (id: string) => void; brief?: boolean; imageViewport?: ConversationImageViewport }) {
   // Outside a conversation's list (a fetched turn, a card), the window is the viewport.
   const windowViewport = useWindowViewport();
@@ -706,7 +706,7 @@ const MailView = memo(function MailView({ entry, body, open, onToggle, brief = f
 
 function kib(bytes: number) { return bytes < 1024 ? `${bytes} bytes` : `${Math.round(bytes / 102.4) / 10} KiB`; }
 
-/** The whole text of a long message, read from st on request: the text, a note on why it is partial or missing, and a way to ask. */
+/** The whole text of a long message, read from Fractal on request: the text, a note on why it is partial or missing, and a way to ask. */
 function useWholeText(whole: { message: string; bytes: number } | undefined) {
   const { actions } = useStore();
   const [state, setState] = useState<{ text?: string; note?: string; loading: boolean }>({ loading: false });

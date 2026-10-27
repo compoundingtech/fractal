@@ -1,4 +1,4 @@
-// A stand-in gateway with invented data, for Debug simulator screenshots without a real st or a
+// A stand-in gateway with invented data, for Debug simulator screenshots without a real Fractal or a
 // real pairing. It speaks just enough of st3.client.v0 for the app: capabilities, pairing, the
 // on-demand lists, a few actions, the collections socket, one conversation, and one terminal.
 //

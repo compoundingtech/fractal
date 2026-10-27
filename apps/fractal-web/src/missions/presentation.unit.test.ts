@@ -1,4 +1,4 @@
-import type * as St3 from '@fractal/client/schema'
+import type * as Fractal from '@fractal/client/schema'
 import type { DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
@@ -21,7 +21,7 @@ const step = (path: string, state: string, fields: Record<string, unknown> = {})
   ...fields,
 })
 
-const mission = (steps: readonly ReturnType<typeof step>[], fields: Record<string, unknown> = {}): St3.Mission =>
+const mission = (steps: readonly ReturnType<typeof step>[], fields: Record<string, unknown> = {}): Fractal.Mission =>
   ({
     id: 'mission/example/nightly',
     kind: 'mission',
@@ -31,17 +31,17 @@ const mission = (steps: readonly ReturnType<typeof step>[], fields: Record<strin
     run_details: [{ id: 'mission-run/example/nightly/1', status: 'running', steps: Option.some(steps), outcome: Option.none() }],
     updated_at: at,
     ...fields,
-  }) as unknown as St3.Mission
+  }) as unknown as Fractal.Mission
 
 const agent = (fields: Record<string, unknown> = {}): DecodedAgent =>
   ({ id: 'agent/example/builder', name: 'builder', state: 'running', fault: Option.none(), next_work_id: Option.none(), upcoming_work_ids: [], current_work: [], ...fields }) as unknown as DecodedAgent
 
-const word = (m: St3.Mission, agents: readonly DecodedAgent[] = [agent()], attention: readonly St3.Attention[] = []) =>
+const word = (m: Fractal.Mission, agents: readonly DecodedAgent[] = [agent()], attention: readonly Fractal.Attention[] = []) =>
   presentMission({ mission: m, agents, attention }).word
 
 describe('presentMission', () => {
   it('follows fractal-ui-model\'s precedence, first match wins', () => {
-    const gate = { attention_kind: 'human-gate', state: 'open', mission_id: 'mission/example/nightly', source_id: 'step-run/example/review' } as unknown as St3.Attention
+    const gate = { attention_kind: 'human-gate', state: 'open', mission_id: 'mission/example/nightly', source_id: 'step-run/example/review' } as unknown as Fractal.Attention
     expect(word(mission([step('build', 'claimed')]), [agent()], [gate])).toBe('decision')
     expect(word(mission([], { runs: [], run_details: [] }))).toBe('not_started')
     expect(word(mission([step('build', 'blocked')]))).toBe('stalled')
@@ -67,7 +67,7 @@ describe('presentMission', () => {
   })
 
   it('orders steps like a pipeline, names their owners and counts progress', () => {
-    const gated = { attention_kind: 'human-gate', state: 'open', mission_id: 'mission/other', source_id: 'step-run/example/review' } as unknown as St3.Attention
+    const gated = { attention_kind: 'human-gate', state: 'open', mission_id: 'mission/other', source_id: 'step-run/example/review' } as unknown as Fractal.Attention
     const presented = presentMission({
       mission: mission([
         step('deploy', 'pending'),
@@ -96,7 +96,7 @@ describe('presentMission', () => {
     expect(presentMission({ mission: mission([], { run_details: [runs[0], { ...runs[1], status: 'failed' }] }), agents: [], attention: [] }).steps.map((each) => each.path)).toEqual(['new'])
   })
 
-  it('folds away st\'s own, never started and settled-before-today missions, and sorts by word', () => {
+  it('folds away Fractal\'s own, never started and settled-before-today missions, and sorts by word', () => {
     const today = Date.parse('2026-10-14T00:00:00Z')
     const yesterday = DateTime.makeUnsafe('2026-10-13T10:00:00Z')
     const settledYesterday = presentMission({ mission: mission([step('build', 'completed')], { state: 'completed', updated_at: yesterday }), agents: [], attention: [] })

@@ -22,7 +22,7 @@ const meta = {
 export default meta
 
 interface MissionDeclaration { readonly title: string; readonly state: DeclarationPanelState }
-/** st serves no mission KDL, so each mission's structured fallback is its wire record plus its work, as canonical JSON. */
+/** Fractal serves no mission KDL, so each mission's structured fallback is its wire record plus its work, as canonical JSON. */
 const missionDeclarations = ({ loading, state }: WireSlice<'details'>): readonly MissionDeclaration[] => {
   if (loading) return [{ title: 'Missions', state: { _tag: 'Loading' } }]
   if (state.missions.length === 0) return [{ title: 'Missions', state: { _tag: 'Unavailable', message: 'This scenario has no published mission.' } }]
@@ -32,7 +32,7 @@ const missionDeclarations = ({ loading, state }: WireSlice<'details'>): readonly
       _tag: 'Ready',
       text: `${JSON.stringify({ ...mission, work: state.work.filter(item => item.mission_id === mission.id) }, null, 2)}\n`,
       language: 'json',
-      source: `Structured definition · revision ${mission.revision} · st serves no mission KDL`,
+      source: `Structured definition · revision ${mission.revision} · Fractal serves no mission KDL`,
     },
   }))
 }
@@ -65,7 +65,7 @@ const structuredFallbackPlay: Play = async ({ canvasElement }) => {
     if (typeof record !== 'object' || record === null || !('id' in record) || typeof record.id !== 'string' || !('revision' in record) || typeof record.revision !== 'string' || !('work' in record) || !Array.isArray(record.work)) throw new Error('The fallback must be a mission wire record with its work')
     if (text !== `${JSON.stringify(record, null, 2)}\n`) throw new Error('The fallback must be canonical two-space JSON, shown verbatim')
     if (panel.querySelector('h2')?.textContent !== record.id) throw new Error('The panel names the mission whose record it shows')
-    if (panel.querySelector('[data-testid="declaration-source"]')?.textContent !== `Structured definition · revision ${record.revision} · st serves no mission KDL`) throw new Error('The provenance line names the shown revision')
+    if (panel.querySelector('[data-testid="declaration-source"]')?.textContent !== `Structured definition · revision ${record.revision} · Fractal serves no mission KDL`) throw new Error('The provenance line names the shown revision')
     const missionId = record.id
     if (record.work.some((item: unknown) => typeof item !== 'object' || item === null || !('mission_id' in item) || item.mission_id !== missionId)) throw new Error('A mission shows only its own work')
   }

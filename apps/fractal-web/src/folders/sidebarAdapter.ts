@@ -141,7 +141,7 @@ const validArrangementKey = (key: string): boolean => {
 }
 
 /**
- * st admits only canonical fractional-indexing keys (generated ArrangementKey), not core.mts's legacy claim alphabet.
+ * Fractal admits only canonical fractional-indexing keys (generated ArrangementKey), not core.mts's legacy claim alphabet.
  * Invalid or colliding neighbour keys are rekeyed in the same edit; noncanonical or oversized outputs rekey the whole partition.
  */
 export const nativeInsertAt = (siblings: readonly string[], index: number): Insertion => {

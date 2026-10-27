@@ -133,7 +133,7 @@ describe('gatewayPromptAnswers', () => {
   })
   const promptAlert = { id: 'attention/one', revision: 'r1', source_id: seat, target_id: seat, episode: 'episode-1' } as const
 
-  it('sends one answer fenced on the alert, and says why st refused one', async () => {
+  it('sends one answer fenced on the alert, and says why Fractal refused one', async () => {
     const sent: unknown[] = []
     const client = {
       capabilities: async () => capabilities(true),

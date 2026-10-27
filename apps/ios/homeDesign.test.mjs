@@ -6,8 +6,8 @@ import { alertsHeading, homeRows, homeSections, keepClosed, openAlerts, personAn
 
 const now = Date.parse('2026-10-14T12:00:00Z');
 const actor = 'person/demo/session/example-phone';
-// What st presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
-// derives nothing, so these rows carry it as st serves them.
+// What Fractal presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
+// derives nothing, so these rows carry it as Fractal serves them.
 const presented = (attention_kind, extra) => {
   const card = {
     'human-gate': { tier: 'stopped', kind: extra.review_mode === 'feedback' ? 'feedback' : 'review' },
