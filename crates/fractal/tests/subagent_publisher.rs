@@ -349,7 +349,7 @@ async fn a_codex_run_cut_short_by_its_harness_still_counts_its_tokens() {
 /// `native-1`. The seat is declared, so the agents list shows it.
 fn omp_channel(store: &Store, agent_dir: &Path) -> fractal_drivers::pi_channel::EventObserver {
     let intent = fractal_daemon::parse_intent(
-        "version 2\nagent \"example/omp\" { workspace \"/tmp\"; command \"true\"; }",
+        "version 2\nagent \"example/omp\" { workspace \"/tmp\"; harness \"omp\" {}; }",
         "example",
     )
     .unwrap();
@@ -373,13 +373,14 @@ fn omp_channel(store: &Store, agent_dir: &Path) -> fractal_drivers::pi_channel::
 /// The `subagents` of the omp seat's row in the agents list.
 async fn listed_subagents(client: &Client) -> Value {
     let agents: Value = client.get("/v1/client/agents").await.unwrap();
-    agents["items"]
+    let agent = agents["items"]
         .as_array()
         .unwrap()
         .iter()
         .find(|agent| agent["id"] == OMP_SEAT)
-        .unwrap_or_else(|| panic!("the omp seat is listed: {agents}"))["subagents"]
-        .clone()
+        .unwrap_or_else(|| panic!("the omp seat is listed: {agents}"));
+    assert_eq!(agent["driver"], "omp", "the fixture declares an OMP harness");
+    agent["subagents"].clone()
 }
 
 fn subagent_frame(event: &str) -> Value {
