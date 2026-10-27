@@ -96,6 +96,7 @@ export type Agent = ResourceHeader & {
   active_work_count?: number;
   activity?: string | null;
   ask?: string | null;
+  background_jobs?: number | null;
   blocked_on?: string | null;
   checkout?: (AgentCheckout | null);
   current_session_id?: string | null;
@@ -401,6 +402,25 @@ export type AgentWorkspace = {
   host_id: HostId;
   kind: "agent-workspace";
   workspace: string;
+};
+
+export type AgentsPublication = {
+  has_more: false;
+  items: Array<Agent>;
+  order: Array<Id>;
+  publication: AgentsPublicationMetadata;
+};
+
+export type AgentsPublicationMetadata = {
+  materialized_at_ms: number;
+  node_epoch: string;
+  revision: number;
+  status_watermark: AgentsStatusWatermark;
+};
+
+export type AgentsStatusWatermark = {
+  local_frontier: number;
+  store_index: number;
 };
 
 export type Arrangement = ResourceHeader & {
