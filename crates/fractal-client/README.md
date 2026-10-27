@@ -47,6 +47,11 @@ preserving explicitly schema-declared open maps (including error details) and va
 constraints such as device variant requirements. Tolerant slices
 retain the production models' forward-compatible behavior. Diagnostic `unknown` repair
 witnesses never replace wire data. Replay offsets, durations and opaque content are not shifted.
+Object intersections are composed before closing their fields. Validation follows the kit's
+safe-integer and time-codec bounds, timestamp grammar, UTF-16 string lengths and ECMAScript
+whitespace; `uri-reference` is annotation-only. Integral numeric spellings such as `1.0` decode
+like `1`. Existing client models still have some `u32` fields: otherwise kit-valid values wider
+than those fields return a typed `serde_json::Error`, never a truncated value.
 
 ## Retained typed collection follows
 

@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, fs::File, path::Path, sync::LazyLock};
+use std::{borrow::Cow, collections::BTreeMap, fs::File, path::Path, sync::LazyLock};
 
 pub const ANCHOR: &str = "2030-01-01T12:00:00.000Z";
 /// Client-v0 roots carried by the kit's wire-value traversal.
@@ -164,6 +164,10 @@ impl Slice {
         let mut add = |pointer: String, definition: &str, value: &Value| -> Result<()> {
             validator(definition, self.decode)?.validate(value)
                 .map_err(|error| anyhow::anyhow!("{:?} {definition} at {pointer}: {error}", self.decode))?;
+            // JavaScript JSON numbers have no distinct integer spelling. Preserve ordinary
+            // inputs by borrowing; normalize only mathematically integral floating spellings.
+            let model_input = model_input(value);
+            let value = model_input.as_ref();
             let decoded = match definition {
                 "TimelineEntry" => WireValue::TimelineEntry(crate::TimelineEntry::deserialize(value)?),
                 "TerminalScreen" => WireValue::TerminalScreen(crate::TerminalScreen::deserialize(value)?),
@@ -265,38 +269,232 @@ fn validator(definition: &str, mode: DecodeMode) -> Result<&'static jsonschema::
 fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Validator>> {
     let mut schema: Value = serde_json::from_str(include_str!("../../../docs/st3/client-v0/schemas/client-v0.schema.json"))?;
     if mode == DecodeMode::Strict {
-    let header = schema["$defs"]["ResourceHeader"].clone();
-    schema["$defs"]["UnknownResource"] = Value::Bool(false);
-    for definition in schema["$defs"].as_object_mut().context("missing schema definitions")?.values_mut() {
-        // Merge the resource header before closing its object, rather than closing each allOf arm.
-        if let Some(parts) = definition.get_mut("allOf").and_then(Value::as_array_mut)
-            && parts.first().and_then(|part| part["$ref"].as_str()) == Some("#/$defs/ResourceHeader")
-            && parts.len() == 2
-        {
-            let mut object = parts[1].clone();
-            let properties = object["properties"].as_object_mut().context("missing resource properties")?;
-            for (key, value) in header["properties"].as_object().context("missing header properties")? {
-                properties.entry(key.clone()).or_insert_with(|| value.clone());
-            }
-            let required = object["required"].as_array_mut().context("missing resource required fields")?;
-            for field in header["required"].as_array().context("missing header required fields")? {
-                if !required.contains(field) { required.push(field.clone()); }
-            }
-            // Replace only this conjunction, not sibling oneOf/conditional constraints.
-            definition["allOf"] = Value::Array(vec![object]);
-        }
-    }
-    close_schema(&mut schema);
+        schema["$defs"]["UnknownResource"] = Value::Bool(false);
+        let definitions = schema["$defs"].clone();
+        merge_object_intersections(&mut schema, &definitions)?;
+        close_schema(&mut schema);
     } else {
         allow_excess_fields(&mut schema);
     }
+    apply_wire_codecs(&mut schema);
     schema.as_object_mut().context("schema is not an object")?.remove("oneOf");
     let mut out = BTreeMap::new();
     for &name in WIRE_DEFINITIONS {
         schema["$ref"] = Value::String(format!("#/$defs/{name}"));
-        out.insert(name.into(), jsonschema::options().should_validate_formats(true).build(&schema)?);
+        out.insert(name.into(), jsonschema::options()
+            .with_format("date-time", date_time_grammar)
+            .with_format("st-timestamp", timestamp_codec)
+            // The kit deliberately treats uri-reference as an unconstrained string.
+            .with_format("uri-reference", |_| true)
+            .with_keyword("minLength", utf16_length_keyword)
+            .with_keyword("maxLength", utf16_length_keyword)
+            .should_validate_formats(true).build(&schema)?);
     }
     Ok(out)
+}
+
+/// Compose object fields before closing structs. Keep assertion/combinator siblings intact.
+fn merge_object_intersections(schema: &mut Value, definitions: &Value) -> Result<()> {
+    match schema {
+        Value::Object(object) => {
+            if let Some(Value::Array(mut parts)) = object.remove("allOf") {
+                for part in &mut parts {
+                    if let Some(reference) = part.get("$ref").and_then(Value::as_str) {
+                        let name = reference.strip_prefix("#/$defs/").context("non-local object reference")?;
+                        *part = definitions.get(name).with_context(|| format!("missing definition {name}"))?.clone();
+                    }
+                    merge_object_intersections(part, definitions)?;
+                }
+                let composed_object = object.get("type").and_then(Value::as_str) == Some("object")
+                    || parts.iter().any(|part| part.get("type").and_then(Value::as_str) == Some("object"));
+                if composed_object {
+                    object.insert("type".into(), Value::String("object".into()));
+                    for part in &mut parts {
+                        let Some(fragment) = part.as_object_mut() else { continue };
+                        if fragment.contains_key("if") { continue; }
+                        if fragment.get("type").is_some_and(|kind| kind != "object") { continue; }
+                        fragment.remove("type");
+                        if let Some(Value::Object(fields)) = fragment.remove("properties") {
+                            let properties = object.entry("properties").or_insert_with(|| serde_json::json!({}))
+                                .as_object_mut().context("object properties")?;
+                            for (name, field) in fields {
+                                match properties.get_mut(&name) {
+                                    Some(existing) if *existing != field => {
+                                        *existing = serde_json::json!({"allOf": [existing.clone(), field]});
+                                    }
+                                    Some(_) => {}
+                                    None => { properties.insert(name, field); }
+                                }
+                            }
+                        }
+                        if let Some(Value::Array(fields)) = fragment.remove("required") {
+                            let required = object.entry("required").or_insert_with(|| serde_json::json!([]))
+                                .as_array_mut().context("object required fields")?;
+                            for field in fields {
+                                if !required.contains(&field) { required.push(field); }
+                            }
+                        }
+                        if let Some(excess) = fragment.remove("additionalProperties") {
+                            ensure!(excess.is_boolean(), "composed record schemas need explicit normalization");
+                            if excess == Value::Bool(false) {
+                                object.insert("additionalProperties".into(), excess);
+                            }
+                        }
+                    }
+                }
+                // Do not drop siblings (notably Device.oneOf), conditionals, or other assertions.
+                object.insert("allOf".into(), Value::Array(parts));
+            }
+            for child in object.values_mut() { merge_object_intersections(child, definitions)?; }
+        }
+        Value::Array(children) => {
+            for child in children { merge_object_intersections(child, definitions)?; }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn apply_wire_codecs(schema: &mut Value) {
+    match schema {
+        Value::Object(object) => {
+            if object.get("type").is_some_and(|kind| kind == "integer"
+                || kind.as_array().is_some_and(|kinds| kinds.iter().any(|kind| kind == "integer")))
+            {
+                let minimum = object.get("minimum").and_then(Value::as_i64)
+                    .map_or(-9_007_199_254_740_991, |old| old.max(-9_007_199_254_740_991));
+                let maximum = object.get("maximum").and_then(Value::as_i64)
+                    .map_or(9_007_199_254_740_991, |old| old.min(9_007_199_254_740_991));
+                object.insert("minimum".into(), minimum.into());
+                object.insert("maximum".into(), maximum.into());
+            }
+            match object.get("x-st-codec").and_then(Value::as_str) {
+                Some("timestamp") => { object.insert("format".into(), Value::String("st-timestamp".into())); }
+                Some("duration-ms" | "duration-s" | "epoch-ms") => {
+                    let maximum = if object["x-st-codec"] == "epoch-ms" { MAX_MS } else { 9_007_199_254_740_991 };
+                    let maximum = object.get("maximum").and_then(Value::as_i64).map_or(maximum, |old| old.min(maximum));
+                    object.insert("maximum".into(), maximum.into());
+                    let minimum = object.get("minimum").and_then(Value::as_i64).unwrap_or(0).max(0);
+                    object.insert("minimum".into(), minimum.into());
+                }
+                _ => {}
+            }
+            if let Some(Value::String(pattern)) = object.get_mut("pattern") {
+                // Expand ECMAScript whitespace instead of jsonschema's approximate table.
+                *pattern = pattern.replace(r"\s", "\u{0009}-\u{000D}\u{0020}\u{00A0}\u{1680}\u{2000}-\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}");
+            }
+            for child in object.values_mut() { apply_wire_codecs(child); }
+        }
+        Value::Array(children) => { for child in children { apply_wire_codecs(child); } }
+        _ => {}
+    }
+}
+
+/// The kit's DATE_TIME grammar (ASCII digits, four-digit year, mandatory seconds and zone).
+fn date_time_grammar(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 { return false; }
+    for index in [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18] {
+        if !bytes[index].is_ascii_digit() { return false; }
+    }
+    if bytes[4] != b'-' || bytes[7] != b'-' || !matches!(bytes[10], b'T' | b't')
+        || bytes[13] != b':' || bytes[16] != b':' { return false; }
+    let mut zone = 19;
+    if bytes[zone] == b'.' {
+        zone += 1;
+        let start = zone;
+        while bytes.get(zone).is_some_and(u8::is_ascii_digit) { zone += 1; }
+        if start == zone { return false; }
+    }
+    match &bytes[zone..] {
+        [b'Z' | b'z'] => true,
+        [b'+' | b'-', h1, h2, b':', m1, m2] => [h1, h2, m1, m2].iter().all(|digit| digit.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+fn timestamp_codec(text: &str) -> bool {
+    date_time_grammar(text) && &text[17..19] != "60"
+        && DateTime::parse_from_rfc3339(text).is_ok_and(|instant| {
+            // The codec permits year zero; scenario rebasing separately requires 0001..9999.
+            (-62_167_219_200_000..=MAX_MS).contains(&instant.timestamp_millis())
+        })
+}
+
+fn model_input(value: &Value) -> Cow<'_, Value> {
+    fn integral_float(number: &serde_json::Number) -> Option<i64> {
+        if !number.is_f64() { return None; }
+        number.as_f64()
+            .filter(|number| number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_991.0)
+            .map(|number| number as i64)
+    }
+    fn has_integral_float(value: &Value) -> bool {
+        match value {
+            Value::Number(number) => integral_float(number).is_some(),
+            Value::Array(values) => values.iter().any(has_integral_float),
+            Value::Object(values) => values.values().any(has_integral_float),
+            _ => false,
+        }
+    }
+    fn normalize(value: &mut Value) {
+        match value {
+            Value::Number(number) => {
+                if let Some(integer) = integral_float(number) { *number = integer.into(); }
+            }
+            Value::Array(values) => { for value in values { normalize(value); } }
+            Value::Object(values) => { for value in values.values_mut() { normalize(value); } }
+            _ => {}
+        }
+    }
+    if has_integral_float(value) {
+        let mut owned = value.clone();
+        normalize(&mut owned);
+        Cow::Owned(owned)
+    } else {
+        Cow::Borrowed(value)
+    }
+}
+
+struct Utf16Length {
+    minimum: Option<u64>,
+    maximum: Option<u64>,
+    location: jsonschema::paths::Location,
+}
+
+fn utf16_length_keyword<'a>(
+    parent: &'a serde_json::Map<String, Value>,
+    _: &'a Value,
+    location: jsonschema::paths::Location,
+) -> Result<Box<dyn jsonschema::Keyword>, jsonschema::ValidationError<'a>> {
+    Ok(Box::new(Utf16Length {
+        minimum: parent.get("minLength").and_then(Value::as_u64),
+        maximum: parent.get("maxLength").and_then(Value::as_u64),
+        location,
+    }))
+}
+
+impl jsonschema::Keyword for Utf16Length {
+    fn is_valid(&self, instance: &Value) -> bool {
+        instance.as_str().is_none_or(|text| {
+            let length = text.encode_utf16().count() as u64;
+            self.minimum.is_none_or(|minimum| length >= minimum)
+                && self.maximum.is_none_or(|maximum| length <= maximum)
+        })
+    }
+
+    fn validate<'i>(
+        &self,
+        instance: &'i Value,
+        location: &jsonschema::paths::LazyLocation,
+    ) -> Result<(), jsonschema::ValidationError<'i>> {
+        if self.is_valid(instance) {
+            Ok(())
+        } else {
+            Err(jsonschema::ValidationError::custom(
+                self.location.clone(), location.into(), instance, "string length outside kit UTF-16 bounds",
+            ))
+        }
+    }
 }
 
 fn close_schema(schema: &mut Value) {

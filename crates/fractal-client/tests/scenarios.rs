@@ -310,3 +310,154 @@ fn scenarios_schema_engine_enforces_combinators() {
     assert!(!validator.is_valid(&serde_json::json!(11.5)), "allOf requires an integer");
     assert!(!validator.is_valid(&serde_json::json!(12)), "not excludes its matching value");
 }
+
+#[test]
+fn scenarios_strict_composes_presentation_now_before_closing() {
+    let mut slice = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
+    slice.state["agents"][0]["presentation"] = serde_json::json!({
+        "state": "working", "group": "working", "because": null, "next": [], "queued": 0,
+        "now": {
+            "step": "step-run/x", "mission": "mission/x", "path": "a",
+            "label": "x › a", "since": "2030-01-01T12:00:00.000Z"
+        }
+    });
+    slice.decode().expect("the kit's non-null presentation.now counterexample must decode");
+    for field in ["step", "mission", "path", "label", "since"] {
+        let mut missing = slice.clone();
+        missing.state["agents"][0]["presentation"]["now"].as_object_mut().unwrap().remove(field);
+        assert!(missing.decode().is_err(), "composed presentation requires {field}");
+    }
+    slice.state["agents"][0]["presentation"]["now"]["extra"] = Value::Bool(true);
+    assert!(slice.decode().is_err(), "the composed object remains closed");
+}
+
+fn sync_peer_slice() -> scenarios::Slice {
+    let mut slice = scenarios::load_slice(fixtures().join("empty/sync.json")).unwrap();
+    slice.timeline = vec![serde_json::json!({
+        "_tag": "notice", "at_ms": 0,
+        "peers": [{"host_id": "host/x", "peer_only_envelopes": 0, "local_only_envelopes": 0}]
+    })];
+    slice
+}
+
+#[test]
+fn scenarios_enforces_duration_and_epoch_codec_bounds() {
+    for mode in [DecodeMode::Strict, DecodeMode::Tolerant] {
+        let mut sync = sync_peer_slice();
+        sync.decode = mode;
+        sync.timeline[0]["peers"][0]["estimated_catch_up_seconds"] = 9_007_199_254_740_991_i64.into();
+        sync.decode().expect("the largest safe duration in seconds must pass");
+        sync.timeline[0]["peers"][0]["estimated_catch_up_seconds"] = 9_007_199_254_740_992_i64.into();
+        assert!(sync.decode().is_err(), "unsafe duration-s must fail in {mode:?}");
+
+        let mut details = scenarios::load_slice(fixtures().join("fleet-mid-refactor/details.json")).unwrap();
+        details.decode = mode;
+        for field in ["execution_elapsed_ms", "timeout_ms"] {
+            details.state["work"][0][field] = 9_007_199_254_740_991_i64.into();
+            details.decode().expect("the largest safe duration in milliseconds must pass");
+            details.state["work"][0][field] = 9_007_199_254_740_992_i64.into();
+            assert!(details.decode().is_err(), "unsafe {field} must fail in {mode:?}");
+            details.state["work"][0][field] = 0.into();
+        }
+        for field in ["claim_expires_at_unix_ms", "execution_started_at_unix_ms", "nudged_at_unix_ms"] {
+            details.state["work"][0][field] = 253_402_300_799_999_i64.into();
+            details.decode().expect("the final supported epoch millisecond must pass");
+            details.state["work"][0][field] = 253_402_300_800_000_i64.into();
+            assert!(details.decode().is_err(), "out-of-range {field} must fail in {mode:?}");
+            details.state["work"][0][field] = 0.into();
+        }
+    }
+}
+
+#[test]
+fn scenarios_timestamp_codec_matches_kit_grammar_and_calendar() {
+    let mut slice = sync_peer_slice();
+    for instant in [
+        "2030-01-01T12:00:00.000Z", "2030-01-01t12:00:00z",
+        "2000-02-29T23:59:59.123456789123+23:59",
+        "0000-01-01T00:00:00Z", "9999-12-31T23:59:59.9999Z",
+    ] {
+        slice.timeline[0]["peers"][0]["last_exchange_at"] = instant.into();
+        slice.decode().unwrap_or_else(|error| panic!("kit accepts {instant}: {error:#}"));
+    }
+    for instant in [
+        "2016-12-31T23:59:60Z", "2030-02-30T12:00:00Z", "1900-02-29T12:00:00Z",
+        "2030-01-01T24:00:00Z", "2030-01-01T12:60:00Z", "2030-01-01T12:00:00+24:00",
+        "2030-01-01 12:00:00Z", "2030-01-01T12:00Z", "2030-01-01T12:00:00.Z",
+        "0000-01-01T00:00:00+00:01", "9999-12-31T23:59:59-00:01",
+    ] {
+        slice.timeline[0]["peers"][0]["last_exchange_at"] = instant.into();
+        assert!(slice.decode().is_err(), "kit rejects {instant}");
+    }
+}
+
+#[test]
+fn scenarios_uri_reference_remains_a_kit_string_annotation() {
+    let mut slice = scenarios::load_slice(fixtures().join("empty/sync.json")).unwrap();
+    slice.state["capabilities"]["schemas"] = serde_json::json!(["not a URI reference"]);
+    slice.decode().expect("the kit does not validate the uri-reference annotation");
+}
+
+#[test]
+fn scenarios_plain_integers_are_safe_and_accept_integral_spellings() {
+    let mut slice = sync_peer_slice();
+    for spelling in ["1.0", "1e0"] {
+        slice.timeline[0]["peers"][0]["peer_only_envelopes"] = serde_json::from_str(spelling).unwrap();
+        let decoded = slice.decode().expect("kit accepts integral JSON number spellings");
+        assert!(decoded.iter().any(|item| matches!(
+            &item.value, WireValue::SyncPeer(peer) if peer.peer_only_envelopes == 1
+        )));
+    }
+    slice.timeline[0]["peers"][0]["peer_only_envelopes"] = 9_007_199_254_740_991_i64.into();
+    slice.decode().expect("the largest safe counter must pass");
+    slice.timeline[0]["peers"][0]["peer_only_envelopes"] = 9_007_199_254_740_992_i64.into();
+    assert!(slice.decode().is_err(), "plain integer counters must also be JSON-safe");
+}
+
+#[test]
+fn scenarios_strict_string_bounds_count_utf16_units() {
+    let mut slice = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
+    slice.state["agents"][0]["revision"] = "😀".repeat(128).into();
+    slice.decode().expect("256 UTF-16 units must fit Revision");
+    slice.state["agents"][0]["revision"] = "😀".repeat(129).into();
+    assert!(slice.decode().is_err(), "129 code points exceed 256 UTF-16 units");
+}
+
+#[test]
+fn scenarios_reference_patterns_use_ecmascript_whitespace() {
+    let mut slice = sync_peer_slice();
+    for whitespace in [
+        '\t', '\n', '\u{000B}', '\u{000C}', '\r', ' ', '\u{00A0}', '\u{1680}',
+        '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}', '\u{2005}',
+        '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200A}', '\u{2028}',
+        '\u{2029}', '\u{202F}', '\u{205F}', '\u{3000}', '\u{FEFF}',
+    ] {
+        slice.timeline[0]["peers"][0]["host_id"] = format!("host/a{whitespace}b").into();
+        assert!(slice.decode().is_err(), "ECMAScript whitespace {whitespace:?} cannot occur in Id");
+    }
+    slice.timeline[0]["peers"][0]["host_id"] = "host/a\u{0085}b".into();
+    slice.decode().expect("U+0085 is not ECMAScript whitespace");
+    // Lookahead-bearing propertyNames bypasses jsonschema's normal ECMA translation.
+    let mut roster = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
+    let placement = roster.state["arrangements"][0]["body"]["placements"]
+        .as_object().unwrap().values().next().unwrap().clone();
+    roster.state["arrangements"][0]["body"]["placements"] =
+        serde_json::json!({"agent/a\u{0085}b": placement});
+    roster.decode().expect("propertyNames must also accept the non-JS whitespace U+0085");
+    roster.state["arrangements"][0]["body"]["placements"] =
+        serde_json::json!({"agent/a\u{FEFF}b": placement});
+    assert!(roster.decode().is_err(), "propertyNames must reject JS whitespace U+FEFF");
+}
+
+#[test]
+fn scenarios_model_width_limit_fails_with_typed_error_without_truncating() {
+    let mut slice = scenarios::load_slice(fixtures().join("empty/sync.json")).unwrap();
+    slice.state["capabilities"]["capabilities"] = serde_json::json!([
+        {"id": "read", "version": 4_294_967_296_u64, "state": "granted"}
+    ]);
+    // The kit accepts this safe integer, but the existing production model stores u32.
+    // Keep that API unchanged here: surface its typed decode error, never truncate.
+    let error = slice.decode().expect_err("a wider-than-model version must fail closed");
+    assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
+    assert_eq!(slice.state["capabilities"]["capabilities"][0]["version"], 4_294_967_296_u64);
+}
