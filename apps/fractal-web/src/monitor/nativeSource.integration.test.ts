@@ -25,7 +25,7 @@ const gateway = Effect.acquireRelease(
     })
     const address = server.address()
     if (address === null || typeof address === 'string') throw new Error('Missing loopback address')
-    return { server, requests, source: nativeUsageSource({ label: 'Native st usage',
+    return { server, requests, source: nativeUsageSource({ label: 'Native Fractal usage',
       prefix: `http://127.0.0.1:${address.port}/v1/client/usage` }),
       setStatus: (next: number) => { status = next },
       setLimits: (next: unknown) => { limits = next },
