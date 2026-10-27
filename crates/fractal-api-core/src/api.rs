@@ -3112,6 +3112,16 @@ pub const AUTHORITY_INDETERMINATE_REASON: &str =
 /// Live presentation of already folded cards: freshness, delivery presence, subagents, and the
 /// agent presentation that reads them (docs/clients/ui-contract.md, Agent).
 pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
+    overlay_agent_resources_at(store, items, at, client_now_ms(), None)
+}
+
+fn overlay_agent_resources_at(
+    store: &Store,
+    items: &mut [Value],
+    at: &str,
+    now: u128,
+    subagents: Option<Vec<crate::store::SubagentView>>,
+) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         for item in items.iter_mut() {
@@ -3130,7 +3140,7 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
             let report_age_ms = harness
                 .as_ref()
                 .map(|harness| {
-                    u64::try_from(client_now_ms().saturating_sub(harness.observed_at_unix_ms))
+                    u64::try_from(now.saturating_sub(harness.observed_at_unix_ms))
                         .unwrap_or(u64::MAX)
                 });
             let observation = match report_age_ms {
@@ -3148,8 +3158,8 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                     item["state"] = json!("waiting");
                 }
             }
-            overlay_declaration_restart(item, client_now_ms());
-            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
+            overlay_declaration_restart(item, now);
+            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), now as u64);
             overlay_delivery_presence(item, &local_host);
             // The presentation reads the facts settled just above, so it is settled with them. A
             // row it cannot read goes without one; it never fails the read for every client.
@@ -3160,7 +3170,11 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                 Err(error) => eprintln!("st3: WARN agent {} has no presentation: {error}", item["id"]),
             }
         }
-        overlay_subagents(store, items)?;
+        if let Some(subagents) = subagents {
+            overlay_subagent_rows(items, subagents);
+        } else {
+            overlay_subagents(store, items)?;
+        }
         Ok(())
     })
 }
@@ -3280,6 +3294,11 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
             store.running_subagents(now)
         }
     })?;
+    overlay_subagent_rows(items, subagents);
+    Ok(())
+}
+
+fn overlay_subagent_rows(items: &mut [Value], subagents: Vec<crate::store::SubagentView>) {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
     for subagent in subagents {
         running
@@ -3308,7 +3327,6 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
         let subagents = running.remove(id).unwrap_or_default();
         item["subagents"] = Value::Array(subagents);
     }
-    Ok(())
 }
 
 /// Delivery presence is independent of harness readiness: a local native seat waiting on a human
@@ -5449,21 +5467,56 @@ const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
 /// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
 /// refresh fails and is tried again on the next request.
 pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
+    let generation = store.agents_publication_build()?;
+    let Some(CapturedPresentedAgents { source, subagents, now }) =
+        refresh_agent_roster_source(store, history)? else { return Ok(()); };
+    let valid_until = source.valid_until_ms.map_or(now.saturating_add(1000),
+        |deadline| deadline.min(now.saturating_add(1000)));
+    let mut rows = (*source.rows).clone();
+    overlay_agent_resources_at(store, &mut rows, &client_timestamp(u128::from(now)),
+        u128::from(now), Some(subagents))?;
+    store.publish_presented_agents(generation, source, now, Some(valid_until), rows)
+}
+
+struct CapturedPresentedAgents {
+    source: crate::store::evidence::AgentsPublicationSource,
+    subagents: Vec<crate::store::SubagentView>,
+    now: u64,
+}
+
+fn capture_presented_agents(store: &Store, index: u64) -> anyhow::Result<CapturedPresentedAgents> {
+    let now = client_now_ms().min(u128::from(u64::MAX)) as u64;
+    Ok(CapturedPresentedAgents {
+        source: store.agents_publication_source(index)?,
+        subagents: store.running_subagents(now)?,
+        now,
+    })
+}
+
+fn refresh_agent_roster_source(
+    store: &Store, history: bool,
+) -> anyhow::Result<Option<CapturedPresentedAgents>> {
     store.begin_agent_roster_fault_retries(history);
-    if store.read_snapshot(|index| store.agent_roster_current(index, history))? {
-        return Ok(());
-    }
+    let (current, captured) = store.read_snapshot(|index| {
+        let current = store.agent_roster_current(index, history)?;
+        let captured = if current && !history { Some(capture_presented_agents(store, index)?) } else { None };
+        Ok((current, captured))
+    })?;
+    if current { return Ok(captured); }
     let complete = |store: &Store| store.read_snapshot(|index| {
         if let Some(reason) =
             store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
         {
-            return Ok(Some(reason));
+            return Ok((Some(reason), None));
         }
-        client_agent_resources_cached(store, history, index).map(|_| None)
+        client_agent_resources_cached(store, history, index)?;
+        let captured = if history { None } else { Some(capture_presented_agents(store, index)?) };
+        Ok((None, captured))
     });
     for _ in 0..AGENT_ROSTER_ASSEMBLY_ROUNDS {
-        let Some(reason) = complete(store)? else {
-            return Ok(());
+        let (reason, captured) = complete(store)?;
+        let Some(reason) = reason else {
+            return Ok(captured);
         };
         store.note_agent_roster_chunked(&reason);
         let order = store.read_snapshot(|index| {
@@ -5478,8 +5531,9 @@ pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> 
             })?;
         }
     }
-    if complete(store)?.is_none() {
-        return Ok(());
+    let (reason, captured) = complete(store)?;
+    if reason.is_none() {
+        return Ok(captured);
     }
     anyhow::bail!("the agents roster kept changing in ways no short fold can follow; keeping the previous one")
 }
@@ -6218,9 +6272,22 @@ pub fn start_agent_roster(state: &AppState) {
                 () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
                 () = store.fresh_agent_roster_wanted() => {}
             }
-            wake.notified().await;
+            // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
+            // paced by the existing refresh pause, never a timer per subscriber.
+            if store.agent_roster_refresh_failed() {
+                wake.notified().await;
+            }
+            wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {
+    // Notifications may have been queued while readers were present. Recheck demand
+    // after consuming them rather than doing one last presentation fold on an idle node.
+    while !store.agents_publication_demand() {
+        wake.notified().await;
+    }
 }
 
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
