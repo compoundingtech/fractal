@@ -1262,6 +1262,7 @@ struct FileWatch {
     _watcher: notify::RecommendedWatcher,
     target: PathBuf,
     directory: PathBuf,
+    referent: Option<PathBuf>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -17910,18 +17911,27 @@ impl<R: RuntimeControl> Reconciler<R> {
             .flat_map(Path::ancestors)
             .find(|candidate| candidate.is_dir())
             .context("file watch has no existing parent directory")?;
-        if watchers.get(subject).is_some_and(|watch| {
-            watch.target == target && watch.directory == directory
-        }) {
-            return Ok(());
-        }
         let next_component = target
             .strip_prefix(directory)?
             .components()
             .next()
             .context("file watch has no target component")?;
+        // Backends report canonical directories (notably /private/tmp on macOS).
+        // Keep the lexical target as identity, but compare events in their namespace.
+        let directory = directory.canonicalize()?;
         let relevant = directory.join(next_component);
-        let watched_directory = directory.to_path_buf();
+        // A file symlink can point outside the lexical parent. Observe its referent's
+        // parent too, so both writes and inode replacements preserve file-gate behavior.
+        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        if watchers.get(subject).is_some_and(|watch| {
+            watch.target == target
+                && watch.directory == directory
+                && watch.referent == referent
+        }) {
+            return Ok(());
+        }
+        let watched_directory = directory.clone();
+        let watched_referent = referent.clone();
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
@@ -17936,7 +17946,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                         | notify::EventKind::Remove(_)
                 ) && event.paths.iter().any(|path| {
                     *path == relevant
-                        || (*path == watched_directory
+                        || watched_referent.as_ref().is_some_and(|referent| path == referent)
+                        || ((*path == watched_directory
+                            || watched_referent.as_ref().and_then(|referent| referent.parent())
+                                == Some(path.as_path()))
                             && matches!(event.kind,
                                 notify::EventKind::Remove(_)
                                     | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
@@ -17952,12 +17965,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                     notify.notify_one();
                 }
             })?;
-        watcher.watch(directory, notify::RecursiveMode::NonRecursive)?;
-        let directory = directory.to_path_buf();
+        watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        if let Some(parent) = referent.as_ref().and_then(|path| path.parent())
+            && parent != directory
+        {
+            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        }
         watchers.insert(subject.into(), FileWatch {
             _watcher: watcher,
             target,
             directory,
+            referent,
         });
         // A refreshed subscription may now refer to a different file at the same stamp.
         self.file_observations
@@ -25078,6 +25096,113 @@ agent "import/omp/fixture" {{
         tokio::time::timeout(Duration::from_secs(5), notify.notified())
             .await
             .expect("the new target must wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_resolve_symlinked_parent_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let path = alias.join("missing/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        std::fs::write(actual.join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::create_dir(actual.join("missing")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("canonical ancestor creation must wake an aliased file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(actual.join("missing/gate.txt"), "ready").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the file under an aliased parent must remain watched");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_symlink_referent_writes_and_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let referents = tempfile::tempdir().unwrap();
+        let first = referents.path().join("first.txt");
+        let second = referents.path().join("second.txt");
+        let path = root.path().join("gate.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        std::os::unix::fs::symlink(&first, &path).unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+
+        for content in ["written", "replaced"] {
+            if content == "written" {
+                std::fs::write(&first, content).unwrap();
+            } else {
+                let replacement = referents.path().join("replacement");
+                std::fs::write(&replacement, content).unwrap();
+                std::fs::rename(&replacement, &first).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("referent writes and replacements must wake the file gate");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert_eq!(
+                reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+                content
+            );
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await.is_ok()
+            {}
+        }
+
+        let replacement_link = root.path().join("replacement-link");
+        std::os::unix::fs::symlink(&second, &replacement_link).unwrap();
+        std::fs::rename(&replacement_link, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("retargeting the symlink must wake the file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "second"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(&first, "old referent").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::write(&second, "new referent").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the newly resolved referent must remain watched");
     }
 
     #[test]

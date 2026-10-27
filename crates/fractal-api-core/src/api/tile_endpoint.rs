@@ -433,7 +433,10 @@ impl Change {
     fn target(path: &Path) -> Option<(PathBuf, PathBuf)> {
         let directory = path.parent()?.ancestors().find(|path| path.is_dir())?;
         let next = path.strip_prefix(directory).ok()?.components().next()?;
-        Some((directory.to_path_buf(), directory.join(next)))
+        // FSEvents reports canonical paths (for example /private/etc, not /etc).
+        let directory = directory.canonicalize().ok()?;
+        let next = directory.join(next);
+        Some((directory, next))
     }
 
     /// Starts synchronously, before the caller reads the file. Missing ancestors wake this
@@ -542,6 +545,26 @@ pub use crate::api::tile_endpoint_tests_shared_client_v0_tests::{call, caller, g
 use super::*;
     use std::io::{Read as _, Write as _};
     use std::sync::Mutex;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn registry_watch_follows_a_symlinked_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("real");
+        std::fs::create_dir(&directory).unwrap();
+        let alias = root.path().join("alias");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        let path = alias.join("tiles.toml");
+        let (watched, next) = Change::target(&path).unwrap();
+        assert_eq!(watched, directory.canonicalize().unwrap());
+        assert_eq!(next, watched.join("tiles.toml"));
+        let changed = Change::watch(&path);
+        std::fs::write(directory.join("tiles.toml"), "registry").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), changed)
+            .await
+            .expect("canonicalized parent paths still observe registry creation");
+    }
+
     #[tokio::test]
     async fn registry_watch_ignores_reads_and_unrelated_entries_but_sees_replacement() {
         let root = tempfile::tempdir().unwrap();
