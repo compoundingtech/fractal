@@ -4475,6 +4475,12 @@ fn native_replay_extent(
     })
 }
 
+#[cfg(test)]
+thread_local! {
+    static NATIVE_EXTENT_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 /// Read OPEN and change-replay pages through the same bounded fold, retaining the generation
 /// and suppressed-native high-water. The flag says whether the page came from the native
 /// projection rather than the stored timeline; the extent is what the bounded window can omit.
@@ -4498,20 +4504,51 @@ fn conversation_first_page_at_generation(
             if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
                 *rebuilds.entry(session_id.to_owned()).or_default() += 1;
             }
-            let (page, generation, suppressed_sequence) = native_slice_page_at_generation(
-                state, snapshot, session, session_id, &query, source, managed,
-            )?;
-            let extent = native_replay_extent(
-                state, snapshot, session, session_id, source, &page.0, generation, native_mark, managed,
-            )?;
-            // OpenCode's generation moves on every append, so it cannot fence rewrites
-            // without turning each append into a full reload.
-            let fence = if source.driver == crate::external_sessions::ExternalDriver::OpenCode {
-                0
-            } else {
-                generation
-            };
-            Ok((page.0, fence, true, suppressed_sequence, extent))
+            // Generation alone does not fence appends. Bracket the display read with
+            // sequence-head reads and retry if its append frontier moved. An append after
+            // the second read remains beyond the returned cursor and is replayable.
+            for _ in 0..3 {
+                let head = if native_timeline_order(managed)
+                    == crate::external_sessions::TimelineOrder::TimestampSequence
+                {
+                    let messages = native_session_messages(state, snapshot, session, session_id, managed)?;
+                    let (head, suppressed) = canonical_native_slice(
+                        state, snapshot, source, session, session_id, &messages,
+                        crate::external_sessions::TimelineOrder::Sequence, None, 1, managed,
+                    )?;
+                    Some(head.items.iter().filter_map(native_entry_sequence).max().unwrap_or(0)
+                        .max(suppressed))
+                } else {
+                    None
+                };
+                let (page, generation, suppressed_sequence) = native_slice_page_at_generation(
+                    state, snapshot, session, session_id, &query, source, managed,
+                )?;
+                #[cfg(test)]
+                NATIVE_EXTENT_READ_HOOK.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().take() { hook(); }
+                });
+                let extent = native_replay_extent(
+                    state, snapshot, session, session_id, source, &page.0, generation, native_mark, managed,
+                )?;
+                if page.0["page"]["has_more"].as_bool().unwrap_or(false)
+                    && head.is_some_and(|head| head != extent.native_latest())
+                {
+                    continue;
+                }
+                // OpenCode's generation moves on every append, so it cannot fence rewrites
+                // without turning each append into a full reload.
+                let fence = if source.driver == crate::external_sessions::ExternalDriver::OpenCode {
+                    0
+                } else {
+                    generation
+                };
+                return Ok((page.0, fence, true, suppressed_sequence, extent));
+            }
+            Err(conversation_replay_gap(
+                session_id, "source-appending",
+                "the transcript changed while reading; refresh the newest conversation page",
+            ))
         }
         None => {
             let mut projected = ReplayExtent::default();
@@ -4521,6 +4558,22 @@ fn conversation_first_page_at_generation(
             Ok((page.0, 0, false, 0, projected))
         }
     }
+}
+
+// Replays are bounded independently of cursor age and unrelated local subjects.
+// Exceeding this budget asks the client for an authoritative newest page.
+const CONVERSATION_REPLAY_SCAN_LIMIT: usize = 10_000;
+
+fn charge_conversation_replay_scan(
+    session_id: &str,
+    remaining: &mut usize,
+    count: usize,
+) -> Result<(), ApiError> {
+    *remaining = remaining.checked_sub(count).ok_or_else(|| conversation_replay_gap(
+        session_id, "scan-limit",
+        "the conversation exceeded its replay scan limit; refresh the newest conversation page",
+    ))?;
+    Ok(())
 }
 
 fn conversation_read_now_unbounded(
@@ -4577,6 +4630,7 @@ fn conversation_read_now_unbounded(
     let mut explicit_ids = BTreeSet::new();
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
+    let mut scan_remaining = CONVERSATION_REPLAY_SCAN_LIMIT;
     if let Some(ConversationPosition { store_index, local_position, .. }) = position {
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
@@ -4596,8 +4650,10 @@ fn conversation_read_now_unbounded(
             let mut after = store_index;
             loop {
                 let page = state.store.claims_page(
-                    Some(owner), None, after, snapshot.store_index.checked_add(1), false, 10_000,
+                    Some(owner), None, after, snapshot.store_index.checked_add(1), false,
+                    scan_remaining + 1,
                 ).map_err(ApiError::internal)?;
+                charge_conversation_replay_scan(session_id, &mut scan_remaining, page.claims.len())?;
                 for claim in page.claims {
                     after = after.max(claim.store_index);
                     changed_indexes.insert(claim.store_index);
@@ -4635,9 +4691,11 @@ fn conversation_read_now_unbounded(
         if !native_replay {
             let mut after = local_position;
             loop {
-                let claims = state.store.local_observations_after(after, 10_000)
+                let limit = scan_remaining + 1;
+                let claims = state.store.local_observations_after(after, limit)
                     .map_err(ApiError::internal)?;
-                let exhausted = claims.len() < 10_000;
+                charge_conversation_replay_scan(session_id, &mut scan_remaining, claims.len())?;
+                let exhausted = claims.len() < limit;
                 for claim in claims {
                     let position = crate::store::local_observation_position(&claim)
                         .ok_or_else(|| ApiError::internal("a local observation has no position"))?;
