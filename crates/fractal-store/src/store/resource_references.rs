@@ -212,7 +212,6 @@ pub(super) fn backfill_step_tx(transaction: &Transaction<'_>, limit: usize) -> R
 
 /// Run one bounded backfill step as a batched write on the store's writer, sharing its
 /// transaction discipline with every other write; the writer is free again between steps.
-#[cfg(not(test))]
 pub(crate) fn backfill_step(
     jobs: &std::sync::mpsc::Sender<WriterJob>,
 ) -> Result<BackfillStep, String> {
@@ -248,27 +247,51 @@ pub(crate) fn backfill_step(
         .map_err(|error| error.to_string())
 }
 
-/// Finish the edge backfill off the open path: one bounded step per writer transaction,
-/// yielding between steps, until the projection is complete. `Store::open` starts this once
-/// the store is otherwise ready, so open itself never waits on declaration history.
+/// Own the worker's queue access without letting the detached thread keep the writer alive.
+/// Store drops this before its graph; only an already-running bounded step may then finish.
+pub(super) struct BackfillWorker {
+    _jobs: Arc<std::sync::mpsc::Sender<WriterJob>>,
+}
+
+/// Finish the edge backfill off the open path, releasing queue ownership between committed
+/// batches. Tests inject the same worker explicitly so they can pause at a committed cursor.
 #[cfg(not(test))]
-pub(super) fn spawn_backfill(connection: &WriterConnection) {
-    let Some(jobs) = connection.jobs.lock().ok().and_then(|jobs| jobs.clone()) else {
-        return;
-    };
-    let _ = std::thread::Builder::new()
+pub(super) fn spawn_backfill(connection: &WriterConnection) -> Option<BackfillWorker> {
+    spawn_backfill_with(connection, |_| {})
+}
+
+fn spawn_backfill_with(
+    connection: &WriterConnection,
+    mut after_step: impl FnMut(BackfillStep) + Send + 'static,
+) -> Option<BackfillWorker> {
+    let jobs = Arc::new(connection.jobs.lock().ok()?.clone()?);
+    let worker_jobs = Arc::downgrade(&jobs);
+    std::thread::Builder::new()
         .name("fractal-resource-backfill".into())
         .spawn(move || loop {
-            match backfill_step(&jobs) {
-                Ok(step) if !step.complete => {}
-                Ok(_) => return,
+            let result = {
+                let Some(jobs) = worker_jobs.upgrade() else {
+                    return;
+                };
+                backfill_step(&jobs)
+            };
+            // No strong queue sender survives this boundary, including the test hook.
+            match result {
+                Ok(step) => {
+                    after_step(step);
+                    if step.complete {
+                        return;
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(%error, "declared resource backfill failed; declaration reads remain active");
                     return;
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
-        });
+        })
+        .ok()?;
+    Some(BackfillWorker { _jobs: jobs })
 }
 
 /// The same referrers read straight from the selected declarations, for while a preexisting
@@ -392,6 +415,86 @@ mod tests {
             )
             .unwrap();
         transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn backfill_worker_stops_on_store_drop_and_resumes_committed_cursor() {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("store.sqlite3");
+        let mut store = Store::open(&path, "node").unwrap();
+        publish_many(&store, 80);
+        wipe_projection(&store);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            open(&transaction, false).unwrap();
+            transaction.commit().unwrap();
+        }
+        let (committed, committed_here) = channel();
+        let (resume, resume_here) = channel();
+        store._resource_backfill = spawn_backfill_with(&store.connection, move |step| {
+            committed.send(step).unwrap();
+            resume_here.recv().unwrap();
+        });
+        assert!(store._resource_backfill.is_some());
+        let first = committed_here.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(first.folded, BACKFILL_BATCH);
+        assert!(!first.complete);
+        let cursor = |store: &Store| -> Option<String> {
+            store.readers.get().query_row(
+                "SELECT value FROM meta WHERE key='declared_resource_edges_cursor'",
+                [],
+                |row| row.get(0),
+            ).optional().unwrap()
+        };
+        let committed_cursor = cursor(&store);
+        assert!(committed_cursor.is_some());
+
+        // Pause the real worker after one commit. Drop must join the writer without waiting
+        // for this worker or draining the remaining backlog.
+        let (dropped, dropped_here) = channel();
+        let dropper = std::thread::spawn(move || {
+            drop(store);
+            dropped.send(()).unwrap();
+        });
+        let drop_result = dropped_here.recv_timeout(Duration::from_secs(5));
+        // Always release the hook, even when the assertion below fails.
+        resume.send(()).unwrap();
+        assert!(drop_result.is_ok(), "store drop waited for the backfill worker");
+        dropper.join().unwrap();
+        assert_eq!(
+            committed_here.recv_timeout(Duration::from_secs(5)),
+            Err(RecvTimeoutError::Disconnected),
+            "the worker must exit without starting another transaction"
+        );
+
+        let mut store = Store::open(&path, "node").unwrap();
+        assert_eq!(cursor(&store), committed_cursor);
+        assert!(backfilling(&store.readers.get()).unwrap());
+        let (committed, committed_here) = channel();
+        store._resource_backfill = spawn_backfill_with(&store.connection, move |step| {
+            committed.send(step).unwrap();
+        });
+        assert!(store._resource_backfill.is_some());
+        let mut folded = first.folded;
+        loop {
+            let step = committed_here.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(step.folded <= BACKFILL_BATCH);
+            folded += step.folded;
+            if step.complete {
+                break;
+            }
+        }
+        assert_eq!(folded, 160, "resume must not refold committed declarations");
+        assert_eq!(cursor(&store), None);
+        assert!(!backfilling(&store.readers.get()).unwrap());
+        assert_eq!(
+            store.declared_resource_referrers("resource/shared").unwrap().len(),
+            160
+        );
     }
 
     #[test]

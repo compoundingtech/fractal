@@ -1070,6 +1070,88 @@ async fn onboarding_publication_is_graph_decided_and_preserves_stopped_assistant
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn onboarding_preserves_customized_assistant_resource_references() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    use sha2::Digest as _;
+
+    let fixture = Fixture::new();
+    let (store, client, server) = onboarding_api(&fixture).await;
+    let uri = "https://github.com/acme/garden/issues/42";
+    let resource = format!("resource/uri/{}", hex::encode(sha2::Sha256::digest(uri)));
+    let source = format!(
+        r#"version 2
+agent "st/assistant" {{
+  name "My customized assistant"
+  description "Keep the person's existing seat."
+  workspace {}
+  harness "codex" {{}}
+  env {{ CUSTOMIZED "kept" }}
+  resource "issue" uri="{uri}" reason="Track onboarding work"
+  resource "explicit" subject="{resource}" reason="Keep an explicit subject edge"
+  resource "unresolved" subject="resource/example/not-yet-published" reason="Keep unresolved work"
+}}
+"#,
+        serde_json::to_string(&fixture.path("assistant-workspace")).unwrap(),
+    );
+    let intent = fractal_daemon::parse_intent(&source, "studio").unwrap();
+    let expected = intent.subjects["agent/st/assistant"].desired.clone();
+    let preview = store
+        .mission(
+            &intent,
+            fractal_daemon::model::IntentInput {
+                kdl: source,
+                source_name: None,
+            },
+        )
+        .unwrap();
+    store
+        .apply_as(
+            &intent,
+            &preview.subject_tokens,
+            "customized-assistant",
+            Some("person/ada"),
+        )
+        .unwrap();
+
+    let mut setup = fixture.cli();
+    setup.args([
+        "setup",
+        "--person",
+        "ada",
+        "--node",
+        "studio",
+        "--yes",
+        "--install",
+        "false",
+        "--service",
+        "false",
+        "--start",
+        "false",
+    ]);
+    let output = tokio::task::spawn_blocking(move || setup.output().unwrap())
+        .await
+        .unwrap();
+    assert!(success(&output).contains("Started mission/st/onboarding"));
+    let token = store
+        .selected_desired_token("agent/st/assistant")
+        .unwrap()
+        .unwrap();
+    let claim: fractal_daemon::model::ClaimRecord = client
+        .get(&format!("/v1/claims/by-id/{token}"))
+        .await
+        .unwrap();
+    let actual: fractal_daemon::model::DesiredSubject =
+        serde_json::from_value(claim.body).unwrap();
+    // Compare the whole normalized declaration, including URI-vs-subject edge kind,
+    // reference names and reasons, and non-resource person-authored customization.
+    assert_eq!(actual.desired, expected);
+    assert!(store.mission_run("st/onboarding").unwrap().is_some());
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_assistant_asks_first_and_an_existing_setup_never_starts_it_on_its_own() {
     if fractal_daemon::test_support::supervise_test() {
         return;
