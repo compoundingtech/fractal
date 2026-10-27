@@ -1,3 +1,9 @@
 record 51e377fed90729c1ee6a2ae0833b76c5c63a7d6b typescript-client 0 host/anvil 2026-10-27T07:34:45Z
 record e6db352e4574a6bf3292835451b59fe870932e86 genie-freshness 0 host/anvil 2026-10-27T07:36:13Z
 record fe39b839b0923de8ebe5a06a9760214dfe9625fa ci-script-tests 0 host/anvil 2026-10-27T07:51:12Z
+record 0b28b2f43fa5260e5bc13cd5c8b6fb017724dbac linux-tests 0 fleet/ci 2026-10-27T07:52:31Z
+record 1eccdbdc78f87f75e19129f07d0b38c378899f84 linux-tests-shard-2 0 fleet/ci 2026-10-27T07:54:33Z
+record 305a092081cb74b4e34e20a5d415182294df3afb ci-script-tests 0 fleet/ci 2026-10-27T07:48:29Z
+record 308b29db74971a3cbc2ca9d44d43355c5978a179 linux-gate 0 fleet/ci 2026-10-27T07:55:40Z
+record 4357b47d71d2ad492e5d116ddee0a2566a321a18 linux-fleet-compat 0 fleet/ci 2026-10-27T07:45:03Z
+record ac61f27b65f312b164835e976256c61987351706 linux-clippy 0 fleet/ci 2026-10-27T07:44:07Z
