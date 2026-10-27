@@ -19,6 +19,17 @@ import unittest
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — preserve old fixtures; resolve live checkout reads.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
+
 SCRIPT = ROOT / 'scripts/evidence-verify'
 loader = importlib.machinery.SourceFileLoader('evidence_verify', str(SCRIPT))
 spec = importlib.util.spec_from_loader(loader.name, loader)
@@ -791,6 +802,34 @@ class SkipPolicy(unittest.TestCase):
         self.assertEqual(self.f.cli('--tree', self.tree, '--check', 'unit', '--keys-from', base,
                                     '--repository', 'org/repo')[0], 2)  # only with --policy-from
 
+    def test_policy_and_keys_keep_independent_pins_across_layouts(self):
+        """arn:lmig:smalltalk:2026-10-27-dot-fractal-config — no candidate or legacy trust downgrade."""
+        self.observed()
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        (self.f.repo / '.st/evidence-keys').write_text(self.f.keys.read_text())
+        (self.f.repo / '.st/evidence-skip-policy.json').write_text(policy_text())
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'old trusted keys and policy')
+        keys_base = self.f.git('rev-parse', 'HEAD')
+        (self.f.repo / '.fractal').mkdir()
+        (self.f.repo / '.fractal/evidence-skip-policy.json').write_text(policy_text())
+        (self.f.repo / '.fractal/evidence-keys').write_text('')
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'new policy and revoked keys')
+        policy_base = self.f.git('rev-parse', 'HEAD')
+        args = ('--tree', self.tree, '--check', 'unit', '--policy-from', policy_base, '--repository', 'org/repo')
+        code, out, _ = self.f.cli(*args, '--keys-from', keys_base)
+        self.assertEqual(code, 0, out)
+        code, out, _ = self.f.cli(*args, '--keys-from', policy_base)
+        self.assertEqual((code, json.loads(out)['reason']), (1, 'untrusted_signer'))
+        (self.f.repo / '.fractal/evidence-skip-policy.json').write_text('{broken')
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'malformed preferred policy')
+        code, out, _ = self.f.cli('--tree', self.tree, '--check', 'unit', '--policy-from', 'HEAD',
+                                  '--repository', 'org/repo', '--keys-from', keys_base)
+        self.assertNotEqual(code, 0, out)
+
+
 
 def two_check_policy(unit_require=None, other_require=None):
     """Two checks, `unit` and `other`, each accepting only the observed kind, with their own `require` mode."""
@@ -1325,15 +1364,15 @@ class CommittedPolicy(unittest.TestCase):
     """The policy file in this repository, parsed by the same code the gate runs."""
 
     def rules(self, check):
-        text = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        text = root_config('evidence-skip-policy.json').read_text()
         return evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')
 
     def test_the_committed_lane_file_is_valid_exists_at_head_and_matches_what_st_test_runs(self):
-        text = (ROOT / '.st/required-lanes.json').read_text()
+        text = root_config('required-lanes.json').read_text()
         loader = importlib.machinery.SourceFileLoader('st_test_script', str(ROOT / 'scripts/st-test'))
         module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(module)
-        policy = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        policy = root_config('evidence-skip-policy.json').read_text()
         for lane, command in module.LOCAL.items():
             rules = evidence_verify.lane_rules(text, lane)
             self.assertEqual(rules['argv'], command, lane)  # the lane is what the local producer runs
@@ -1346,7 +1385,7 @@ class CommittedPolicy(unittest.TestCase):
 
     def test_every_absent_path_of_the_committed_lanes_is_refused_when_it_appears_in_a_tree(self):
         """The mutation control: add one file at each path a lane looks for and does not find; the lane must be refused for that tree."""
-        doc = json.loads((ROOT / '.st/required-lanes.json').read_text())
+        doc = json.loads(root_config('required-lanes.json').read_text())
         for lane, entry in doc['lanes'].items():
             f = Fixture()
             self.addCleanup(f.tmp.cleanup)
@@ -1374,11 +1413,11 @@ class CommittedPolicy(unittest.TestCase):
                 self.assertTrue(any(name == path or name.startswith(path + '/') for name in changed), (lane, path))
 
     def test_only_the_two_locally_signable_checks_are_in_shadow_require_and_nothing_rejects_yet(self):
-        text = (ROOT / '.st/evidence-skip-policy.json').read_text()
+        text = root_config('evidence-skip-policy.json').read_text()
         modes = {check: evidence_verify.policy_rules(text, check, 'compoundingtech/fractal')['require'] for check in json.loads(text)['checks']}
         self.assertEqual(modes, {'linux-gate': 'off', 'typescript-client': 'shadow', 'genie-freshness': 'shadow', 'ci-script-tests': 'shadow', 'fractal-web': 'off',
                                  'rust-tests': 'off'})
-        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        lanes = json.loads(root_config('required-lanes.json').read_text())['lanes']
         for check, mode in modes.items():
             if mode != 'off':
                 self.assertIn(check, lanes, f'{check} requires a note, so the lane file must define its lane')
@@ -1469,7 +1508,7 @@ class CommittedPolicy(unittest.TestCase):
         self.assertEqual(found, [], 'a Rust source reads the whole tree: move that lint to scripts/ and run it from ci-genie-freshness')
 
     def test_the_host_level_is_admitted_for_exactly_the_locally_signable_checks_wrapper_kind_and_pull_requests_only(self):
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         # Skipping is on for typescript-client only, and only for pull requests (the merge queue still tests the combined tree);
         # every other check keeps enforce false until its own flip PR.
         self.assertEqual({check: entry.get('enforce', False) for check, entry in policy['checks'].items()},
@@ -1523,7 +1562,7 @@ class CommittedPolicy(unittest.TestCase):
     def test_a_queue_note_never_covers_a_pull_request_and_covers_nothing_until_its_check_admits_the_merge_queue(self):
         # Inert by construction: the level is limited to merge_group, and every check is still limited to pull requests, so the
         # narrowed list is empty. A check's own flip (its events gaining merge_group) is what lets a queue note skip, one check at a time.
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         with_queue = []
         for check, entry in policy['checks'].items():
             for kind, rule in entry['kinds'].items():

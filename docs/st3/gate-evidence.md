@@ -8,6 +8,26 @@ One immutable record represents one observation; its trust tier is explicit. The
 `review`. `produced-by` is reserved as a name for a future trusted observer's
 verified trace receipt; v1 rejects it until its predicate and verifier exist.
 
+## Evidence configuration directory bridge
+
+During `arn:lmig:smalltalk:2026-10-27-dot-fractal-config`, configuration readers
+select `.fractal/<file>` first and `.st/<file>` only when the new path is absent,
+at the same pinned revision (or the same checkout root for checkout tools).
+An unreadable or malformed new file, missing Git object, or transport failure
+does not permit falling back to the old file or to candidate trust data. If both
+files exist, the new one wins; writers update only the selected layout.
+
+The configuration remains in `.st/` in this expand stage. Both directories are
+protected equally and included in the script-test projection; sparse copies
+accept either layout without requiring both. Required lane definition paths
+still name the existing `.st/` directory: adding an absent definition would
+invalidate accepted-base evidence. Directory names remain part of signed
+projections, so moving identical bytes does not preserve path-sensitive keys.
+The bridge is removed only after the accepted-base rollout and installed-reader
+observations specified in [Q27's rollout plan](https://github.com/compoundingtech/fractal/issues/3032#issuecomment-6445632509);
+historical replay uses the tools from the historical accepted base.
+
+
 ## Record and transport
 
 The record is an in-toto v1 statement with one subject: `name` is the observed

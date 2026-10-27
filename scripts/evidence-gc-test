@@ -713,6 +713,41 @@ sys.exit({exit_code})
         self.assertEqual(result['retention']['grace_hours'], 264)
         self.assertEqual(result['reasons'].get('kept: grace'), 1, kept)
 
+    def test_new_retention_wins_and_malformed_new_does_not_fall_back(self):
+        self.world()
+        new = self.f.repo / '.fractal/evidence-retention.json'
+        new.parent.mkdir()
+        new.write_text(json.dumps({**RETENTION, 'grace_hours': 123}))
+        (self.f.repo / '.st/evidence-retention.json').write_text(json.dumps(RETENTION))
+        self.f.git('add', '-A')
+        with At(0.5):
+            self.f.git('commit', '-q', '-m', 'new retention')
+        command = [sys.executable, str(GC), '--repo', str(self.f.repo), '--main', 'main', '--as-of', str(NOW)]
+        done = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout)['retention']['grace_hours'], 123)
+        new.write_text('{')
+        self.f.git('add', '-A')
+        with At(0.4):
+            self.f.git('commit', '-q', '-m', 'malformed retention')
+        done = subprocess.run(command, capture_output=True, text=True)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn('not valid JSON', done.stderr)
+
+    def test_selected_skip_policy_malformed_or_revision_missing_fails_closed(self):
+        self.world()
+        new = self.f.repo / '.fractal/evidence-skip-policy.json'
+        new.parent.mkdir()
+        new.write_text('{')
+        self.f.git('add', '-A')
+        with At(0.5):
+            self.f.git('commit', '-q', '-m', 'malformed new policy')
+        code, _, error = self.run_gc()
+        self.assertNotEqual(code, 0)
+        self.assertIn('cannot read selected skip policy', error)
+        code, _, _ = self.run_gc('--policy-from', 'f' * 40)
+        self.assertNotEqual(code, 0)
+
     def test_a_branch_tip_protects_its_tree_until_it_is_older_than_branch_days(self):
         old, recent, pr = self.world()  # the pull request head is 30 days old
         head = self.record(pr[0], pr[1], 29)

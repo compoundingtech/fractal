@@ -17,6 +17,17 @@ sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout only.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
+
+
+
 def load(name, path):
     loader = importlib.machinery.SourceFileLoader(name, str(path))
     module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
@@ -228,13 +239,27 @@ class NoTests(unittest.TestCase):
         ws.commit()
         self.assertEqual(keys.read_inputs(str(ws.dir), 'HEAD')['no_tests'], ['a'])
 
+    def test_preferred_inputs_and_explicit_old_pin_do_not_mix(self):
+        """arn:lmig:smalltalk:2026-10-27-dot-fractal-config"""
+        ws = workspace(self)
+        ws.write('.st/rust-test-inputs.json', '{"no_tests": ["old"]}')
+        old = ws.commit()
+        ws.write('.fractal/rust-test-inputs.json', '{"no_tests": ["new"]}')
+        both = ws.commit()
+        self.assertEqual(keys.read_inputs(str(ws.dir), old)['no_tests'], ['old'])
+        self.assertEqual(keys.read_inputs(str(ws.dir), both)['no_tests'], ['new'])
+        ws.write('.fractal/rust-test-inputs.json', '{broken')
+        ws.commit()
+        with self.assertRaises(keys.Failure):
+            keys.read_inputs(str(ws.dir), 'HEAD')
+
 
 class Repository(unittest.TestCase):
     """This repository's own tree and its committed .st/rust-test-inputs.json."""
 
     @classmethod
     def setUpClass(cls):
-        cls.inputs = json.loads((ROOT / '.st/rust-test-inputs.json').read_text())
+        cls.inputs = json.loads(root_config('rust-test-inputs.json').read_text())
         cls.tree = 'HEAD^{tree}'
         cls.members, cls.patched, _ = keys.layout(ROOT, cls.tree)
 

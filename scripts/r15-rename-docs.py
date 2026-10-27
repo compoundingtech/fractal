@@ -105,7 +105,9 @@ def main():
     names = subprocess.check_output(['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
     changed = 0
     for name in names:
-        if not name or not (name.endswith('.md') or name in ('.st/risky-classes.json', '.st/crate-cut.json')):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — both tracked layouts are migration inputs.
+        if not name or not (name.endswith('.md') or name in ('.st/risky-classes.json', '.st/crate-cut.json',
+                                                            '.fractal/risky-classes.json', '.fractal/crate-cut.json')):
             continue
         path = ROOT / name
         if not path.is_file():

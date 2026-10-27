@@ -56,12 +56,116 @@ def git(repo, *args, stdin=None):
     return done.stdout.decode().strip()
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout fixtures follow the selected layout.
+def checkout_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        path = ROOT / '.st' / name
+    return path
+
+
 def apparent_gb(path):
     """Pool-cap policy fixtures count file lengths, independently of filesystem allocation and compression."""
     return sum(file.stat().st_size for file in path.rglob('*') if file.is_file()) / 1e9
 
 
 NEEDS_TREE = st_test.needs_tree
+
+
+class ConfigBridgeTest(unittest.TestCase):
+    """Real Git objects and individually copied readers, without sibling resolver imports."""
+
+    def test_extracted_readers_select_only_the_pinned_layout(self):
+        names = ('st-test', 'evidence-wrap', 'evidence-prepush', 'evidence-log', 'ci-evidence-observe',
+                 'ci-evidence-presign-notice')
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            repo = root / 'repo'
+            repo.mkdir()
+            git(repo, 'init', '-q')
+            for directory in ('.st', '.fractal'):
+                (repo / directory).mkdir()
+            modules = {}
+            for name in names:
+                target = root / name
+                shutil.copyfile(ROOT / 'scripts' / name, target)
+                loader = importlib.machinery.SourceFileLoader(name.replace('-', '_') + '_bridge', str(target))
+                module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+                loader.exec_module(module)
+                modules[name] = module
+            old = repo / '.st/required-lanes.json'
+            new = repo / '.fractal/required-lanes.json'
+            old.write_text('{"lanes":{"old":{}}}')
+            git(repo, 'add', '.')
+            git(repo, 'commit', '-qm', 'old')
+            old_revision = git(repo, 'rev-parse', 'HEAD')
+            with contextlib.chdir(repo), mock.patch.dict(os.environ, GIT_ENV, clear=True):
+                def assert_layout(revision, expected):
+                    for name, module in modules.items():
+                        with self.subTest(reader=name, layout=expected):
+                            if name == 'ci-evidence-presign-notice':
+                                self.assertEqual(set(module.lanes_at(revision)), {expected})
+                            elif name in ('evidence-log', 'ci-evidence-observe'):
+                                self.assertEqual(module.config_path(repo, revision, 'required-lanes.json'),
+                                                 f'{".st" if expected == "old" else ".fractal"}/required-lanes.json')
+                            else:
+                                self.assertEqual(module.config_path(revision, 'required-lanes.json'),
+                                                 f'{".st" if expected == "old" else ".fractal"}/required-lanes.json')
+                    self.assertEqual(modules['st-test'].lane_names(revision), {expected})
+                    executed = subprocess.run(
+                        [sys.executable, '-I', '-c',
+                         'import json,runpy,sys; m=runpy.run_path(sys.argv[1]); print(json.dumps(sorted(m["lane_names"](sys.argv[2]))))',
+                         str(root / 'st-test'), revision],
+                        cwd=repo, env=GIT_ENV, capture_output=True, text=True)
+                    self.assertEqual(executed.returncode, 0, executed.stderr)
+                    self.assertEqual(json.loads(executed.stdout), [expected])
+                assert_layout(old_revision, 'old')
+                new.write_text('{"lanes":{"new":{}}}')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'both')
+                assert_layout('HEAD', 'new')
+                assert_layout(old_revision, 'old')  # candidate new data cannot change old trust.
+                self.assertEqual(modules['st-test'].branch_point(old_revision, 'HEAD'), 'HEAD')
+                for directory, label in (('.st', 'old'), ('.fractal', 'new')):
+                    (repo / directory / 'evidence-skip-policy.json').write_text(json.dumps({'checks': {label: {}}}))
+                    (repo / directory / 'rust-test-inputs.json').write_text(json.dumps({'no_tests': [label]}))
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'both policies and no-tests lists')
+                self.assertEqual(modules['st-test'].policy_checks('HEAD'), ['new'])
+                self.assertEqual(modules['st-test'].listed_no_tests('HEAD'), ['new'])
+                old.unlink()
+                git(repo, 'add', '-u')
+                git(repo, 'commit', '-qm', 'new only')
+                assert_layout('HEAD', 'new')
+                new.write_text('{malformed')
+                old.write_text('{"lanes":{"old":{}}}')
+                (repo / '.fractal/evidence-skip-policy.json').write_text('{malformed')
+                (repo / '.fractal/rust-test-inputs.json').write_text('{malformed')
+                git(repo, 'add', '.')
+                git(repo, 'commit', '-qm', 'malformed selected config')
+                for module in (modules['st-test'], modules['ci-evidence-presign-notice']):
+                    with self.assertRaises(ValueError):
+                        (module.lane_names if hasattr(module, 'lane_names') else module.lanes_at)('HEAD')
+                with self.assertRaises(ValueError):
+                    modules['st-test'].policy_checks('HEAD')
+                with self.assertRaises(ValueError):
+                    modules['st-test'].listed_no_tests('HEAD')
+                blob = git(repo, 'rev-parse', 'HEAD:.fractal/required-lanes.json')
+                (repo / '.git/objects' / blob[:2] / blob[2:]).unlink()
+                with self.assertRaises(modules['st-test'].Failure):
+                    modules['st-test'].config_blob('HEAD', 'required-lanes.json')
+                with self.assertRaises(RuntimeError):
+                    modules['ci-evidence-presign-notice'].lanes_at('HEAD')
+                for name, module in modules.items():
+                    with self.subTest(reader=name, missing_revision=True), self.assertRaises(Exception):
+                        if name == 'ci-evidence-presign-notice':
+                            module.lanes_at('missing-revision')
+                        elif name in ('evidence-log', 'ci-evidence-observe'):
+                            module.config_path(repo, 'missing-revision', 'required-lanes.json')
+                        else:
+                            module.config_path('missing-revision', 'required-lanes.json')
 
 
 class PoolTreeTest(unittest.TestCase):
@@ -1633,7 +1737,7 @@ class StTest(unittest.TestCase):
         loader = importlib.machinery.SourceFileLoader('evidence_verify_for_web', str(ROOT / 'scripts/evidence-verify'))
         verify = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
         loader.exec_module(verify)
-        rules = verify.policy_rules((ROOT / '.st/evidence-skip-policy.json').read_text(), 'fractal-web', 'org/repo')
+        rules = verify.policy_rules(checkout_config('evidence-skip-policy.json').read_text(), 'fractal-web', 'org/repo')
         wrapper = rules['kinds']['wrapper']
         for detected in ('true', 'false'):  # covers a run whatever its own change detection said about the kit
             verify.value_checks(wrapper, st_test.WEB_INPUTS, {'kit_inputs': detected}, None)
@@ -1960,7 +2064,7 @@ class PerCrate(StTest):
             shutil.copy(ROOT / 'scripts' / script, self.work / 'scripts' / script)
         # The real rust-tests policy entry and a lane for it: the verifier then judges every note by the repository's rules.
         policy = json.loads(json.dumps(POLICY))
-        policy['checks']['rust-tests'] = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']
+        policy['checks']['rust-tests'] = json.loads(checkout_config('evidence-skip-policy.json').read_text())['checks']['rust-tests']
         (self.work / '.st/evidence-skip-policy.json').write_text(json.dumps(policy))
         (self.work / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'rust-tests': {
             'argv': ['python3', 'scripts/ci-rust-test-result'], 'definition_paths': ['.st', 'scripts'], 'tree_inputs': ['.']}}}))
@@ -2215,7 +2319,8 @@ class PerCrate(StTest):
         self.assertNotIn('ran no test', out, 'base is listed: nothing to review')
         with contextlib.chdir(self.work):
             self.assertEqual(st_test.listed_no_tests('origin/main'), ['base'])
-            self.assertEqual(st_test.listed_no_tests('origin/nope'), [])
+            with self.assertRaises(st_test.Failure):
+                st_test.listed_no_tests('origin/nope')
 
     def test_a_note_that_ran_no_test_covers_a_crate_only_when_the_base_lists_it_as_having_none(self):
         code, out, err = self.run_crates(FAKE_EMPTY='base')

@@ -72,6 +72,30 @@ EXPECTED_PROTECTED = (
     'scripts/rust-test-keys', '.st/rust-test-inputs.json', 'scripts/ci-rust-test-result',
     '.st/evidence-log-key',
 )
+EXPECTED_PROTECTED += (
+    '.fractal/evidence-skip-policy.json', '.fractal/evidence-keys', '.fractal/evidence-authors.json',
+    '.fractal/required-lanes.json', '.fractal/rust-test-inputs.json', '.fractal/evidence-log-key',
+)
+
+
+class BaseReadPermissions(unittest.TestCase):
+    def test_only_the_same_three_trust_files_are_base_only_in_either_layout(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config
+        self.assertEqual(set(gate.BASE_READ), {
+            '.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key',
+            '.fractal/evidence-keys', '.fractal/evidence-authors.json', '.fractal/evidence-log-key',
+        })
+        self.assertEqual(set(gate.PROTECTED), set(EXPECTED_PROTECTED))
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout, not the intentional legacy fixtures.
+def root_config(name):
+    path = ROOT / '.fractal' / name
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ROOT / '.st' / name
+    return path
 
 
 def command_for(check, repository=REPOSITORY):
@@ -223,6 +247,15 @@ class ManifestPrefetch(unittest.TestCase):
     """A per-crate check reads every Cargo.toml without fetching: the gate fetches the ones a blob-less clone lacks in one request."""
 
     def test_the_manifests_a_partial_clone_lacks_arrive_in_one_fetch(self):
+        self.prefetch_layout('.st')
+
+    def test_new_and_both_layouts_prefetch_only_selected_inputs(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config
+        self.prefetch_layout('.fractal')
+        self.prefetch_layout('.fractal', both=True)
+
+    def prefetch_layout(self, config_dir, both=False):
+        inputs_path = f'{config_dir}/rust-test-inputs.json'
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', GIT_AUTHOR_NAME='t',
@@ -230,11 +263,14 @@ class ManifestPrefetch(unittest.TestCase):
             git = lambda cwd, *args: subprocess.run(['git', '-C', str(cwd), *args], check=True, capture_output=True, env=env).stdout.decode()
             upstream = root / 'upstream'
             (upstream / 'crates/one').mkdir(parents=True)
-            (upstream / '.st').mkdir()
+            (upstream / config_dir).mkdir()
             (upstream / 'Cargo.toml').write_text('[workspace]\nmembers = ["crates/one"]\n')
             (upstream / 'crates/one/Cargo.toml').write_text('[package]\nname = "one"\n')
             (upstream / 'crates/one/lib.rs').write_text('// not a manifest\n')
-            (upstream / '.st/rust-test-inputs.json').write_text('{}\n')
+            (upstream / inputs_path).write_text('{}\n')
+            if both:
+                (upstream / '.st').mkdir()
+                (upstream / '.st/rust-test-inputs.json').write_text('{"legacy": true}\n')
             git(root, 'init', '-q', '-b', 'main', str(upstream))
             git(upstream, 'add', '.')
             git(upstream, 'commit', '-q', '-m', 'one')
@@ -245,7 +281,7 @@ class ManifestPrefetch(unittest.TestCase):
             base = git(clone, 'rev-parse', 'HEAD').strip()
             lacks = lambda path: subprocess.run(['git', '-C', str(clone), 'cat-file', '-e', f'HEAD:{path}'], capture_output=True,
                                                 env=dict(env, GIT_NO_LAZY_FETCH='1')).returncode != 0
-            self.assertTrue(lacks('Cargo.toml') and lacks('crates/one/Cargo.toml') and lacks('.st/rust-test-inputs.json'))
+            self.assertTrue(lacks('Cargo.toml') and lacks('crates/one/Cargo.toml') and lacks(inputs_path))
             here = os.getcwd()
             os.chdir(clone)
             try:
@@ -254,8 +290,103 @@ class ManifestPrefetch(unittest.TestCase):
                     self.assertEqual(gate.prefetch_manifests('HEAD', base), 'none')  # nothing left to fetch
             finally:
                 os.chdir(here)
-            self.assertFalse(lacks('Cargo.toml') or lacks('crates/one/Cargo.toml') or lacks('.st/rust-test-inputs.json'))
+            self.assertFalse(lacks('Cargo.toml') or lacks('crates/one/Cargo.toml') or lacks(inputs_path))
+            if both:
+                self.assertTrue(lacks('.st/rust-test-inputs.json'), 'the shadowed legacy inputs are never prefetched')
             self.assertTrue(lacks('crates/one/lib.rs'), 'only the manifests and the inputs file, never the whole tree')
+
+
+class ConfigLayoutBridge(unittest.TestCase):
+    """arn:lmig:smalltalk:2026-10-27-dot-fractal-config — real Git and individually extracted readers."""
+
+    def setUp(self):
+        self.f = fixtures.Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        here = os.getcwd()
+        os.chdir(self.f.repo)
+        self.addCleanup(os.chdir, here)
+        self.modules = {}
+        for name in ('evidence-verify', 'rust-test-keys', 'ci-evidence-gate', 'ci-evidence-signing',
+                     'ci-signed-tree', 'ci-rust-test-notes'):
+            folder = self.f.root / ('copy-' + name)
+            folder.mkdir()
+            target = folder / name
+            shutil.copyfile(ROOT / 'scripts' / name, target)
+            self.modules[name] = load('bridge_' + name.replace('-', '_'), target)
+
+    def commit(self, files):
+        for name, text in files.items():
+            path = self.f.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'layout')
+        return self.f.git('rev-parse', 'HEAD')
+
+    def selected(self, name, revision, legacy):
+        module = self.modules[name]
+        if name in ('evidence-verify', 'rust-test-keys'):
+            return module.config_path(str(self.f.repo), revision, legacy)
+        if name == 'ci-rust-test-notes':
+            return module.base_file(revision, legacy)
+        return module.config_path(revision, legacy)
+
+    def test_old_new_and_both_resolve_at_the_requested_revision_in_extracted_tools(self):
+        legacy, preferred = '.st/rust-test-inputs.json', '.fractal/rust-test-inputs.json'
+        old = self.commit({legacy: '{"no_tests": ["old"]}'})
+        both = self.commit({preferred: '{"no_tests": ["new"]}'})
+        self.f.git('rm', '-q', legacy)
+        self.f.git('commit', '-q', '-m', 'new only')
+        new = self.f.git('rev-parse', 'HEAD')
+        for name in self.modules:
+            for revision, path, content in ((old, legacy, b'{"no_tests": ["old"]}'),
+                                             (both, preferred, b'{"no_tests": ["new"]}'),
+                                             (new, preferred, b'{"no_tests": ["new"]}')):
+                with self.subTest(tool=name, revision=revision):
+                    self.assertEqual(self.selected(name, revision, legacy),
+                                     content if name == 'ci-rust-test-notes' else path)
+        verifier = self.modules['evidence-verify']
+        self.assertEqual(verifier.zero_test_crates(str(self.f.repo), old), {'old'})
+        self.assertEqual(verifier.zero_test_crates(str(self.f.repo), both), {'new'})
+        self.assertEqual(self.modules['rust-test-keys'].read_inputs(str(self.f.repo), old)['no_tests'], ['old'])
+        self.assertEqual(self.modules['ci-rust-test-notes'].no_tests(both), {'new'})
+
+    def test_new_malformed_never_downgrades_to_valid_legacy_inputs(self):
+        base = self.commit({'.st/rust-test-inputs.json': '{"no_tests": ["old"]}',
+                            '.fractal/rust-test-inputs.json': '{broken'})
+        for name, invoke in (
+            ('evidence-verify', lambda m: m.zero_test_crates(str(self.f.repo), base)),
+            ('rust-test-keys', lambda m: m.read_inputs(str(self.f.repo), base)),
+            ('ci-rust-test-notes', lambda m: m.no_tests(base)),
+        ):
+            module = self.modules[name]
+            with self.subTest(tool=name), self.assertRaises(module.Failure if hasattr(module, 'Failure') else module.Refused):
+                invoke(module)
+        for name in ('ci-evidence-gate', 'ci-evidence-signing', 'ci-signed-tree'):
+            self.assertEqual(self.selected(name, base, '.st/rust-test-inputs.json'), '.fractal/rust-test-inputs.json')
+
+    def test_missing_new_blob_and_missing_revision_never_fall_back(self):
+        base = self.commit({'.st/rust-test-inputs.json': '{"no_tests": ["old"]}',
+                            '.fractal/rust-test-inputs.json': '{"no_tests": ["missing-new-object"]}'})
+        oid = self.f.git('rev-parse', f'{base}:.fractal/rust-test-inputs.json')
+        (self.f.repo / '.git/objects' / oid[:2] / oid[2:]).unlink()
+        for name in self.modules:
+            module = self.modules[name]
+            error = module.Failure if hasattr(module, 'Failure') else module.Refused if hasattr(module, 'Refused') else RuntimeError
+            if name == 'ci-evidence-gate':
+                error = module.Fallback
+            with self.subTest(tool=name), self.assertRaises(error):
+                self.selected(name, 'f' * 40, '.st/rust-test-inputs.json')
+        for name, invoke in (
+            ('evidence-verify', lambda m: m.zero_test_crates(str(self.f.repo), base)),
+            ('rust-test-keys', lambda m: m.read_inputs(str(self.f.repo), base)),
+            ('ci-rust-test-notes', lambda m: m.no_tests(base)),
+        ):
+            module = self.modules[name]
+            with self.subTest(tool=name), self.assertRaises(module.Failure if hasattr(module, 'Failure') else module.Refused):
+                invoke(module)
+        for name in ('ci-evidence-gate', 'ci-evidence-signing', 'ci-signed-tree'):
+            self.assertEqual(self.selected(name, base, '.st/rust-test-inputs.json'), '.fractal/rust-test-inputs.json')
 
 
 class ProtectedPaths(unittest.TestCase):
@@ -737,7 +868,9 @@ class EndToEnd(unittest.TestCase):
 
     def test_a_branch_that_edits_a_protected_file_skips_on_a_host_note_for_its_head_and_runs_on_any_other(self):
         for path in ('scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
-                     '.st/required-lanes.json', '.st/rust-test-inputs.json', '.github/workflows/fleet.yml'):
+                     '.st/required-lanes.json', '.st/rust-test-inputs.json', '.github/workflows/fleet.yml',
+                     '.fractal/evidence-skip-policy.json', '.fractal/evidence-keys', '.fractal/required-lanes.json',
+                     '.fractal/rust-test-inputs.json', '.fractal/evidence-authors.json', '.fractal/evidence-log-key'):
             with self.subTest(path):
                 self.tmp_reset()
                 self.host = self.f.key('host', 'host/box')
@@ -1008,7 +1141,7 @@ class EndToEnd(unittest.TestCase):
     def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
         enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         # rust-tests (per crate, scripts/fractal-test) has a policy entry and a gate job of its own, in shadow (enforce false).
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests',)))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
@@ -1018,7 +1151,7 @@ class EndToEnd(unittest.TestCase):
     def test_the_committed_policy_skips_an_enforced_check_on_pull_requests_and_never_in_the_merge_queue(self):
         # The committed policy as it is (only sampling and inputs neutralised): an enforced check skips a pull request run on a
         # trusted note and still runs in the merge queue, which keeps testing the combined tree; a check that is not enforced never skips.
-        doc = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        doc = json.loads(root_config('evidence-skip-policy.json').read_text())
         for entry in doc['checks'].values():
             entry['sample_one_in'] = 1
             entry.pop('inputs', None)
@@ -1163,7 +1296,7 @@ class EndToEnd(unittest.TestCase):
         self.machine = self.f.key('machine', 'machine/box')
         self.stranger = self.f.key('stranger')
         (self.f.repo / 'flake.lock').write_text(LOCK)
-        base = self.commit_base(policy=enforcing(ROOT / '.st/evidence-skip-policy.json'))
+        base = self.commit_base(policy=enforcing(root_config('evidence-skip-policy.json')))
         commit, tree = self.head()
         return base, commit, tree, hashlib.sha256(LOCK.encode()).hexdigest()
 
@@ -1274,7 +1407,7 @@ class EndToEnd(unittest.TestCase):
         signs from the lane's jobs. One shard's note, even shard 1 of 2 or a pull request's only shard, never satisfies the
         check. A pull request's one-shard whole-check note covers a pull request run (it ran everything a pull request runs);
         the policy keeps it out of the merge queue with its events (pull_request only)."""
-        entry = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['fractal-web']
+        entry = json.loads(root_config('evidence-skip-policy.json').read_text())['checks']['fractal-web']
         self.assertIs(entry['enforce'], True)  # turned on for pull requests only; the merge queue keeps running it
         self.assertEqual(entry['events'], ['pull_request'])
         self.assertEqual(entry.get('require', 'off'), 'off')
@@ -1328,7 +1461,7 @@ class EndToEnd(unittest.TestCase):
         import hashlib
         # The flip this entry is for: enforce on pull requests only. The same one-shard note then skips a pull request run and
         # never a merge-queue run, which keeps running both shards of everything.
-        doc = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        doc = json.loads(root_config('evidence-skip-policy.json').read_text())
         for entry in doc['checks'].values():
             entry['sample_one_in'] = 1
             entry.pop('inputs', None)
@@ -2022,7 +2155,7 @@ class WorkflowStructure(unittest.TestCase):
                                   text=True, env=dict(env, NEEDS_JSON=json.dumps(needs_json), GITHUB_EVENT_NAME='merge_group'))
             self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
             recorded = json.loads(out.read_text())['command']
-        policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
+        policy = json.loads(root_config('evidence-skip-policy.json').read_text())
         self.assertEqual(policy['checks']['linux-gate']['kinds']['wrapper']['command'], recorded)
         self.assertEqual(GATE_ARGV, recorded)
         self.assertIn('linux-gate', names)
@@ -2046,7 +2179,7 @@ class WorkflowStructure(unittest.TestCase):
         needs = re.search(r'^    needs:\n((?:      - .*\n)+)', job, re.M).group(1)
         names = [line.strip()[2:] for line in needs.splitlines()]
         derived = ['fractal-web', 'aggregate'] + sorted(n for n in names if n == 'fractal-web' or n.startswith('fractal-web-'))
-        rule = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['fractal-web']['kinds']['wrapper']
+        rule = json.loads(root_config('evidence-skip-policy.json').read_text())['checks']['fractal-web']['kinds']['wrapper']
         self.assertEqual(rule['command'], derived)
         self.assertEqual(FRACTAL_WEB_ARGV, derived)
         self.assertIn('evidence-gate-fractal-web', names)

@@ -53,12 +53,15 @@ PROTECTED = (
     # The evidence log's key: which log heads the verifier reads at all.
     '.st/evidence-log-key',
 )
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — preserve the same protected permissions in either layout.
+PROTECTED += tuple(path.replace('.st/', '.fractal/', 1) for path in PROTECTED if path.startswith('.st/'))
 # The protected files the gate and verifier only ever read at the accepted BASE when they judge a note: the signing keys (--keys-from),
 # the author list (check_authors, from the base's ci-evidence-signing) and the evidence log's key (--log-keys-from). The copy in a head
 # tree decides nothing, so main changing one after the branch point does not make a pull request fall back to the merge tree (a key
 # rotation on main voided every head signature made before it, 2026-10-26). A note the change distrusts, a dropped key say, is still
 # refused, by the lists as they are at the base. The branch's OWN edits to them still count as protected changes (choose_tree).
 BASE_READ = ('.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key')
+BASE_READ += tuple(path.replace('.st/', '.fractal/', 1) for path in BASE_READ)
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
 # may be at most this many first-parent commits of main behind the tip GitHub merged into. Further behind, the run asks about the
@@ -118,6 +121,16 @@ def classify(code, result):
 def run(*command, stdin=None, timeout=120, env=None):
     return subprocess.run(command, input=stdin, capture_output=True, timeout=timeout, check=False,
                           env=dict(os.environ, **env) if env else None)
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for the individually extracted gate.
+def config_path(base, legacy):
+    preferred = legacy.replace('.st/', '.fractal/', 1)
+    listing = run('git', 'ls-tree', '-z', base, '--', preferred, legacy)
+    if listing.returncode != 0:
+        raise Fallback(f'could not resolve configuration at {base}')
+    names = {entry.partition(b'\t')[2].decode() for entry in listing.stdout.split(b'\0') if entry}
+    return preferred if preferred in names else legacy if legacy in names else None
 
 
 def decide(context, outcome, result, tree):
@@ -227,7 +240,10 @@ def observe(context, revision='HEAD'):
     else:
         context['notes_fetch'] = 'failed'
     for name, path in (('policy_sha256', POLICY), ('keys_sha256', KEYS)):
-        shown = run('git', 'show', f'{base}:{path}')
+        selected = config_path(base, path)
+        shown = run('git', 'show', f'{base}:{selected or path}')
+        if selected is not None and shown.returncode != 0:
+            return 'unavailable', None, f'could not read accepted configuration {selected}', None
         context[name] = hashlib.sha256(shown.stdout).hexdigest()[:16] if shown.returncode == 0 else 'none'
     script = run('git', 'show', f'{base}:{VERIFIER}')
     if script.returncode != 0:
@@ -237,7 +253,7 @@ def observe(context, revision='HEAD'):
         path = os.path.join(scratch, 'evidence-verify')
         with open(path, 'wb') as handle:
             handle.write(script.stdout)
-        if run('git', 'cat-file', '-e', f'{base}:{KEYS}').returncode == 0:
+        if config_path(base, KEYS) is not None:
             keys = ['--keys-from', base]
         else:
             # No trusted keys yet: nothing signed can be trusted, but a degraded note can still be counted.
@@ -247,7 +263,7 @@ def observe(context, revision='HEAD'):
         # The evidence log's shadow view (docs/st3/gate-evidence.md, "The evidence log"), once the base pins the log key and its
         # verifier reads it: one ref, one commit deep. It is reported on the decision line and changes no decision.
         log = []
-        if b'--log-keys-from' in script.stdout and run('git', 'cat-file', '-e', f'{base}:{LOG_KEY}').returncode == 0:
+        if b'--log-keys-from' in script.stdout and config_path(base, LOG_KEY) is not None:
             fetched = run('git', 'fetch', '--no-tags', '--depth=1', '--no-filter', '-q', 'origin', f'+{LOG_REF}:{LOG_REF}')
             context['log_fetch'] = 'ok' if fetched.returncode == 0 else 'failed'
             log = ['--log-keys-from', base]
@@ -293,8 +309,11 @@ def prefetch_manifests(revision, base):
         meta, _, name = entry.partition(b'\t')
         if name == b'Cargo.toml' or name.endswith(b'/Cargo.toml'):
             wanted.append(meta.split()[2].decode())
-    inputs = run('git', 'rev-parse', '--verify', '-q', f'{base}:{MEMBER_INPUTS}')
-    if inputs.returncode == 0:
+    selected = config_path(base, MEMBER_INPUTS)
+    if selected is not None:
+        inputs = run('git', 'rev-parse', '--verify', '-q', f'{base}:{selected}')
+        if inputs.returncode != 0:
+            return 'failed'
         wanted.append(inputs.stdout.decode().strip())
     missing = [oid for oid in wanted if OID.match(oid) and run('git', 'cat-file', '-e', oid, env={'GIT_NO_LAZY_FETCH': '1'}).returncode != 0]
     if not missing:

@@ -265,6 +265,20 @@ def git(*args, cwd=None, env=None, check=True, stdin=None):
     return done
 
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — embedded for base runners copied alone.
+def config_path(base, name):
+    for directory in ('.fractal', '.st'):
+        path = f'{directory}/{name}'
+        if git('ls-tree', '-z', base, '--', path).stdout:
+            return path
+    return None
+
+
+def config_blob(base, name):
+    path = config_path(base, name)
+    return git('show', f'{base}:{path}').stdout if path is not None else None
+
+
 def text(done):
     return done.stdout.decode().strip()
 
@@ -392,7 +406,12 @@ def branch_point(commit, base):
     base: the gate never uses such a head's tree (the lane file is one of the files that decide a skip).
     """
     point = text(git('merge-base', commit, base))
-    lanes = [git('rev-parse', '--verify', '-q', f'{at}:.st/required-lanes.json', check=False).stdout for at in (point, base)]
+    lanes = []
+    for at in (point, base):
+        path = config_path(at, 'required-lanes.json')
+        if path is not None:
+            git('show', f'{at}:{path}')  # A missing selected blob must not masquerade as absence.
+        lanes.append(text(git('rev-parse', '--verify', f'{at}:{path}')) if path is not None else None)
     return point if lanes[0] == lanes[1] else base
 
 
@@ -512,24 +531,20 @@ def edited_lanes_unsigned(base):
 
 
 def lane_names(base):
-    """The lanes the accepted base defines in .st/required-lanes.json (none when the file is absent or unreadable: then nothing changes)."""
-    done = git('show', f'{base}:.st/required-lanes.json', check=False)
-    if done.returncode != 0:
+    """The lanes defined by the accepted base; an absent historical definition names none."""
+    blob = config_blob(base, 'required-lanes.json')
+    if blob is None:
         return set()
-    try:
-        lanes = json.loads(done.stdout.decode())['lanes']
-        return set(lanes) if isinstance(lanes, dict) else set()
-    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
-        return set()
+    lanes = json.loads(blob)['lanes']
+    if not isinstance(lanes, dict):
+        raise Failure('accepted base lanes must be an object')
+    return set(lanes)
 
 
 def policy_checks(base):
-    """The checks the accepted base's skip policy names (none when it is absent or unreadable)."""
-    done = git('show', f'{base}:.st/evidence-skip-policy.json', check=False)
-    try:
-        return list(json.loads(done.stdout.decode())['checks']) if done.returncode == 0 else []
-    except (ValueError, KeyError, UnicodeDecodeError, TypeError):
-        return []
+    """The checks named by the accepted base's skip policy."""
+    blob = config_blob(base, 'evidence-skip-policy.json')
+    return list(json.loads(blob)['checks']) if blob is not None else []
 
 
 def lane_edits(verifier_path, directory, base, check, tree):
@@ -1020,7 +1035,7 @@ def repository_of(remote):
 
 
 RUST_TEST_KEYS = 'scripts/rust-test-keys'
-RUST_TEST_INPUTS = '.st/rust-test-inputs.json'
+RUST_TEST_INPUTS = 'rust-test-inputs.json'
 
 
 def only_crates(keys, names):
@@ -1042,9 +1057,12 @@ def crate_keys(base, directory, tree, scratch):
     while the base's policy does not name rust-tests, so nothing judges a note yet, are the tree's own used: the change that introduces them
     is judged by itself. Once the base's policy names it, a base without them is an error, never a fallback. Returns (keys, error)."""
     tool = Path(scratch) / 'rust-test-keys'
-    shown = git('show', f'{base}:{RUST_TEST_KEYS}', check=False)
+    shown = git('show', f'{base}:{RUST_TEST_KEYS}') if git('ls-tree', '-z', base, '--', RUST_TEST_KEYS).stdout else None
     inputs_at = base
-    if shown.returncode == 0 and git('cat-file', '-e', f'{base}:{RUST_TEST_INPUTS}', check=False).returncode == 0:
+    inputs = config_blob(base, RUST_TEST_INPUTS)
+    if inputs is not None:
+        json.loads(inputs)  # Malformed selected configuration cannot enter the historical producer bootstrap.
+    if shown is not None and inputs is not None:
         tool.write_bytes(shown.stdout)
     elif judged_by_policy(base):
         return None, f'the accepted base judges rust-tests but has no {RUST_TEST_KEYS} and {RUST_TEST_INPUTS}: only the base\'s tool and inputs may key a note'
@@ -1112,13 +1130,12 @@ def uncovered_crates(verifier, directory, tree, base, repository, lane_base, key
 
 
 def listed_no_tests(base):
-    """The crates the accepted base lists under no_tests in .st/rust-test-inputs.json (reviewed: they have no test to run); empty when unreadable."""
-    done = git('show', f'{base}:{RUST_TEST_INPUTS}', check=False)
-    try:
-        listed = json.loads(done.stdout.decode()).get('no_tests', []) if done.returncode == 0 else []
-    except (ValueError, AttributeError, UnicodeDecodeError):
-        return []
-    return [name for name in listed if isinstance(name, str)] if isinstance(listed, list) else []
+    """The crates the accepted base explicitly lists as having no tests."""
+    blob = config_blob(base, RUST_TEST_INPUTS)
+    listed = json.loads(blob).get('no_tests', []) if blob is not None else []
+    if not isinstance(listed, list) or any(not isinstance(name, str) for name in listed):
+        raise Failure('accepted base no_tests must be a list of crate names')
+    return listed
 
 
 PUSH_CHUNK = 40  # refs per `git push`: a rejected or failed ref is retried on its own, and no one request carries hundreds

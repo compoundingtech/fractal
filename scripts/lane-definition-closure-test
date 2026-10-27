@@ -73,6 +73,33 @@ SH = '#!/usr/bin/env bash\n'
 PY = '#!/usr/bin/env python3\n'
 
 
+class ConfigBridge(Fixture):
+    def test_write_targets_only_selected_layout_and_explicit_path_stays_explicit(self):
+        document = json.dumps({'lanes': {'demo': {'argv': ['bash', 'scripts/demo'], 'definition_paths': []}}})
+        self.tree({'scripts/demo': SH, '.st/required-lanes.json': document,
+                   '.fractal/required-lanes.json': document})
+        def run(*args):
+            return subprocess.run([sys.executable, str(TOOL), '--root', str(self.root), '--write', *args],
+                                  capture_output=True, text=True, env=GIT_ENV)
+        done = run()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.root / '.st/required-lanes.json').read_text(), document)
+        self.assertEqual(json.loads((self.root / '.fractal/required-lanes.json').read_text())['lanes']['demo']['definition_paths'],
+                         ['scripts/demo'])
+        done = run('--lanes', str(self.root / '.st/required-lanes.json'))
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads((self.root / '.st/required-lanes.json').read_text())['lanes']['demo']['definition_paths'],
+                         ['scripts/demo'])
+
+    def test_invalid_new_lane_file_does_not_read_or_write_old(self):
+        old = json.dumps({'lanes': {}})
+        self.tree({'.st/required-lanes.json': old, '.fractal/required-lanes.json': '{'})
+        done = subprocess.run([sys.executable, str(TOOL), '--root', str(self.root), '--write'],
+                              capture_output=True, text=True, env=GIT_ENV)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertEqual((self.root / '.st/required-lanes.json').read_text(), old)
+
+
 class ShellForms(Fixture):
     def test_each_way_a_shell_script_runs_or_reads_another(self):
         paths = self.paths(['bash', 'scripts/entry'], {
@@ -328,7 +355,7 @@ class CommandLine(Fixture):
 
 class CommittedLanes(unittest.TestCase):
     def test_every_lane_executes_and_declares_only_what_its_definition_paths_cover(self):
-        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
         repo = ldc.Repo(ROOT)
         for name, entry in sorted(lanes.items()):
             closure = ldc.lane_closure(repo, entry, name)
@@ -340,7 +367,7 @@ class CommittedLanes(unittest.TestCase):
             self.assertEqual(verdict, [], f'lane {name} declares verdict data its definition_paths do not cover')
 
     def test_the_tables_name_lanes_and_paths_that_exist(self):
-        lanes = json.loads((ROOT / '.st/required-lanes.json').read_text())['lanes']
+        lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
         self.assertLessEqual(set(ldc.EXTRA), set(lanes))
         self.assertLessEqual(set(ldc.VERDICT_DATA) | ldc.KEPT | ldc.SPARSE | ldc.HARNESS_LANES, set(lanes))
         repo = ldc.Repo(ROOT)

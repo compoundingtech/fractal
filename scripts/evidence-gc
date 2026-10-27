@@ -18,7 +18,7 @@ THE PLAN is a pure function of git data, so anyone holding the same refs can rec
                 retention.branch_days of as_of: open pull request heads and merge-queue tips are branches; and the trees of
                 main's first-parent commits within retention.main_days of as_of, main's tip always
   live keys     the input key each live tree projects to, for every check whose policy declares inputs
-  retention     `.st/evidence-retention.json` at --main (or --retention FILE): main_days, branch_days, grace_hours,
+  retention     `evidence-retention.json` at --main (.fractal first, .st only if absent; or explicit --retention FILE): main_days, branch_days, grace_hours,
                 soft_records, cap_records
   as_of         main's tip commit time (or --as-of), printed in the plan
 A tree's records are deleted together or not at all, and a live tree's never: a record of a kept tree cannot disappear, so no
@@ -100,6 +100,12 @@ def git(repo, *args, stdin=None, header=None, check=True):
     if check and done.returncode != 0:
         raise Refused(f'git {args[0]}: {done.stderr.decode(errors="replace").strip()[-300:]}')
     return done
+
+
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — pinned missing-only bridge.
+def config_path(repo, revision, path):
+    new = path.replace('.st/', '.fractal/', 1)
+    return new if git(repo, 'ls-tree', '-z', revision, '--', new).stdout else path
 
 
 def verifier_module():
@@ -231,8 +237,8 @@ def protected_keys(repo, trees, policy_text, repository):
     keys = set()
     try:
         checks = json.loads(policy_text)['checks']
-    except (ValueError, KeyError, TypeError):
-        return keys
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f'cannot read selected skip policy: {error}') from error
     for check in checks:
         if not CHECK.match(check):
             continue
@@ -556,9 +562,10 @@ def main(argv):
             with open(args.retention) as handle:
                 retention_text = handle.read()
         else:
-            shown = git(args.repo, 'show', f'{args.main}:{RETENTION_PATH}', check=False)
-            if shown.returncode != 0:
-                raise Usage(f'{args.main} has no {RETENTION_PATH}: give --retention')
+            path = config_path(args.repo, args.main, RETENTION_PATH)
+            if not git(args.repo, 'ls-tree', '-z', args.main, '--', path).stdout:
+                raise Usage(f'{args.main} has no {path}: give --retention')
+            shown = git(args.repo, 'show', f'{args.main}:{path}')
             retention_text = shown.stdout.decode()
         retention = load_retention(retention_text)
         if args.as_of is not None:
@@ -584,9 +591,11 @@ def main(argv):
         records, index = read_refs(args.repo)
         legacy_tree = note_trees(args.repo, [oid for _, oid, layout, _, _ in records if layout == 'legacy'])
         records = [(ref, oid, layout, tree or legacy_tree.get(oid), when) for ref, oid, layout, tree, when in records]
-        policy = git(args.repo, 'show', f'{args.policy_from or args.main}:.st/evidence-skip-policy.json', check=False)
-        policy_text = policy.stdout.decode() if policy.returncode == 0 else ''
-        live_keys = protected_keys(args.repo, set(live), policy_text, args.repository) if policy_text else set()
+        policy_revision = args.policy_from or args.main
+        policy_path = config_path(args.repo, policy_revision, '.st/evidence-skip-policy.json')
+        present = git(args.repo, 'ls-tree', '-z', policy_revision, '--', policy_path).stdout
+        policy_text = git(args.repo, 'show', f'{policy_revision}:{policy_path}').stdout.decode() if present else ''
+        live_keys = protected_keys(args.repo, set(live), policy_text, args.repository) if present else set()
         inputs = {'records': sorted(records), 'index': sorted(index), 'live': sorted(live.items()), 'live_keys': sorted(live_keys),
                   'retention': retention, 'as_of': as_of}
         plan = gc_plan(records, index, live, live_keys, retention, as_of)
