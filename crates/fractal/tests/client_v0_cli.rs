@@ -4722,7 +4722,7 @@ mission "orchid-actor" state="ready" {
                     String::from_utf8_lossy(&output.stderr)
                         .lines()
                         .collect::<Vec<_>>(),
-                    ["st: --as is ignored for this read; no actor is required"]
+                    ["fractal: --as is ignored for this read; no actor is required"]
                 );
                 if json {
                     let returned = value(&output);
@@ -4748,7 +4748,7 @@ mission "orchid-actor" state="ready" {
             String::from_utf8_lossy(&seat_read.stderr)
                 .lines()
                 .collect::<Vec<_>>(),
-            ["st: --as is ignored for this read; no actor is required"]
+            ["fractal: --as is ignored for this read; no actor is required"]
         );
         if command == "work" {
             assert_eq!(returned["value"], plain_json["value"]);
