@@ -562,6 +562,7 @@ impl Daemon {
             client_relay: None,
             native_session_home: Some(root.join("native")),
             planner_default: Default::default(),
+            assistant_receipts: Default::default(),
         }
     }
 

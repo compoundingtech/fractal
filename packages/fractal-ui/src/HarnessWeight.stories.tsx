@@ -25,8 +25,14 @@ export function HarnessWeightComparison({ scheme = 'dark' }: { readonly scheme?:
   </section>
 }
 
-const meta = { title: 'Fractal/Explore/Harness event weight', component: HarnessWeightComparison, excludeStories: ['HarnessWeightComparison'], parameters: { scenario: { _tag: 'contract-fixture', reason: "Compares exact local harness event rows and cards not represented by a scenario slice." }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof HarnessWeightComparison>
+const meta = { title: 'Fractal/Explore/Harness event weight', component: HarnessWeightComparison, excludeStories: ['HarnessWeightComparison', 'scenarioExemptions'], parameters: { scenario: { _tag: 'contract-fixture', reason: "Compares exact local harness event rows and cards not represented by a scenario slice." }, layout: 'fullscreen' }, args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof HarnessWeightComparison>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Dark:contract-fixture',
+  'Light:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 export const Dark: Story = {

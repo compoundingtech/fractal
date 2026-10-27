@@ -295,6 +295,7 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
         client_relay: None,
         native_session_home: None,
         planner_default: Default::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
