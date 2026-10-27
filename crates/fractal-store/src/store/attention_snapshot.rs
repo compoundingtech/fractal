@@ -29,7 +29,7 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     WHERE assignee>='person/' AND assignee<'person0'
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
-/// Stored fences only: fault revalidation must not derive queue positions or execution clocks.
+/// Only fault revalidation fences, without queue positions or execution clocks.
 struct FaultStepState {
     subject: String,
     run: String,
@@ -55,27 +55,6 @@ impl From<StepRunView> for FaultStepState {
 }
 
 impl Store {
-    fn fault_step_state(&self, subject: &str) -> Result<Option<FaultStepState>> {
-        let subject = normalize_step_run(subject);
-        Ok(self.readers.get().prepare_cached(
-            "SELECT subject, run_id, status, assignee, attempt, readiness_epoch
-             FROM step_runs WHERE subject=?1",
-        )?.query_row([subject], |row| {
-            let subject: String = row.get(0)?;
-            let generation = subject.split('/').nth(1)
-                .map(|id| format!("run-generation/{id}")).unwrap_or_default();
-            Ok(FaultStepState {
-                subject,
-                run: format!("mission-run/{}", row.get::<_, String>(1)?),
-                generation,
-                status: row.get(2)?,
-                assigned_to: row.get(3)?,
-                attempt: row.get(4)?,
-                readiness_epoch: row.get(5)?,
-            })
-        }).optional()?)
-    }
-
     fn fault_step_effective_state(&self, subject: &str) -> Result<Option<FaultStepState>> {
         let connection = self.readers.get();
         let mut step = person_work::step(&connection, &normalize_step_run(subject))?;
@@ -1320,12 +1299,7 @@ impl Store {
             } else if source.starts_with("step-run/") {
                 // A timeout fault holds while its attempt is still running past the same budget:
                 // an extension, a completion, a failure or a release ends it.
-                let current = if MEMOIZE {
-                    self.fault_step_state(source)?
-                } else {
-                    person_work::step(&connection, source)?.map(FaultStepState::from)
-                };
-                let Some(step) = current else {
+                let Some(step) = person_work::step(&connection, source)? else {
                     continue;
                 };
                 let extension =
