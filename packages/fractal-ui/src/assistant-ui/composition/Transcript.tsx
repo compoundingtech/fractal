@@ -297,36 +297,34 @@ const staticSubscription = () => () => undefined
 /** One conversation item in source order; a turn's prompt is its own row. */
 interface SourceRow { readonly item: ConversationItem; readonly turnId: string; readonly prompt: boolean }
 /**
- * The mounted source rows for a viewport start: the suffix from `startIndex`, widened so it never cuts a work-log
- * reasoning disclosure (including interleaved tools), plus the latest prompt alone when the suffix omits it, so the
- * reader keeps what they asked without the rows between it and the suffix.
+ * The mounted source rows for a viewport start: the suffix from `startIndex`, plus the earlier reasoning IDs of a
+ * crossing work-log disclosure and the latest prompt when omitted. Interleaved tools and prose outside the suffix
+ * stay deferred; completing a disclosure must not mount an unbounded work log.
  */
-function sourceWindow(rows: readonly SourceRow[], startIndex: number): { readonly start: number; readonly shown: number; readonly pinnedPrompt?: string } {
-  let start = Math.min(startIndex, rows.length)
+function sourceWindow(rows: readonly SourceRow[], startIndex: number): { readonly start: number; readonly shown: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[] } {
+  const start = Math.min(startIndex, rows.length)
+  let pinnedReasoning: readonly string[] = []
   if (start > 0 && start < rows.length) {
     const turnId = rows[start]!.turnId
     let turnStart = start
     let turnEnd = start + 1
     while (turnStart > 0 && rows[turnStart - 1]!.turnId === turnId) turnStart--
     while (turnEnd < rows.length && rows[turnEnd]!.turnId === turnId) turnEnd++
-    const turnRows = rows.slice(turnStart, turnEnd)
-    const reasoning = workLogReasoning(turnRows.map(row => row.item))
-    if (reasoning.length > 0) {
-      const first = turnStart + turnRows.findIndex(row => row.item.id === reasoning[0]!.id)
-      const last = turnStart + turnRows.findIndex(row => row.item.id === reasoning[reasoning.length - 1]!.id)
-      if (first < start && last >= start) start = first
-    }
+    const earlier = workLogReasoning(rows.slice(turnStart, start).map(row => row.item))
+    const later = workLogReasoning(rows.slice(start, turnEnd).map(row => row.item))
+    if (later.length > 0) pinnedReasoning = earlier.map(item => item.id)
   }
   let latestPrompt = rows.length - 1
   while (latestPrompt >= 0 && !rows[latestPrompt]!.prompt) latestPrompt--
   const pinnedPrompt = latestPrompt >= 0 && latestPrompt < start ? rows[latestPrompt]!.item.id : undefined
-  return { start, shown: rows.length - start + (pinnedPrompt === undefined ? 0 : 1), pinnedPrompt }
+  return { start, shown: rows.length - start + pinnedReasoning.length + (pinnedPrompt === undefined ? 0 : 1), pinnedPrompt, pinnedReasoning }
 }
 /** Turns trimmed to the mounted source rows, with work-log calls trimmed alike so hidden tool rows never mount. Whole turns keep their identity, and every turn keeps its key, so revealing history only adds rows. */
-function MountedTurns({ turns, rowIds, start, pinnedPrompt, stranded, now, tailRef, onOpenTool, onRetryRun, landmarkContext }: { readonly turns: readonly TranscriptTurn[]; readonly rowIds: readonly string[]; readonly start: number; readonly pinnedPrompt?: string; readonly stranded: ReadonlySet<string>; readonly now?: number; readonly tailRef?: React.Ref<HTMLElement>; readonly onOpenTool: TranscriptProps['onOpenTool']; readonly onRetryRun?: () => void; readonly landmarkContext?: string }) {
+function MountedTurns({ turns, rowIds, start, pinnedPrompt, pinnedReasoning, stranded, now, tailRef, onOpenTool, onRetryRun, landmarkContext }: { readonly turns: readonly TranscriptTurn[]; readonly rowIds: readonly string[]; readonly start: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[]; readonly stranded: ReadonlySet<string>; readonly now?: number; readonly tailRef?: React.Ref<HTMLElement>; readonly onOpenTool: TranscriptProps['onOpenTool']; readonly onRetryRun?: () => void; readonly landmarkContext?: string }) {
   const mounted = React.useMemo(() => {
     const ids = new Set(rowIds.slice(start))
     if (pinnedPrompt !== undefined) ids.add(pinnedPrompt)
+    for (const id of pinnedReasoning) ids.add(id)
     return turns.flatMap(turn => {
       const prompt = turn.prompt !== undefined && ids.has(turn.prompt.id) ? turn.prompt : undefined
       const items = turn.items.filter(item => ids.has(item.id))
@@ -335,7 +333,7 @@ function MountedTurns({ turns, rowIds, start, pinnedPrompt, stranded, now, tailR
       const itemIds = new Set(items.map(item => item.id))
       return [{ ...turn, prompt, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
     })
-  }, [turns, rowIds, start, pinnedPrompt])
+  }, [turns, rowIds, start, pinnedPrompt, pinnedReasoning])
   const last = turns[turns.length - 1]
   return mounted.map(turn => <PreparedTurn key={turn.id} turn={turn} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
 }
@@ -466,7 +464,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
         return <>
           {history._tag === 'HasOlder' && bound.start === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
           {committed.length === 0 ? empty : <TranscriptSearch turns={committed} rowIds={rowIds} startIndex={bound.start} revealRow={revealRow} {...stylex.props(styles.timeline)}>
-            <MountedTurns turns={committed} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
+            <MountedTurns turns={committed} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
           </TranscriptSearch>}
         </>
       }}

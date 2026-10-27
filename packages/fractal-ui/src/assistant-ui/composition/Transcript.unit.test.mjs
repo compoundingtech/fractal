@@ -264,7 +264,7 @@ test('a contiguous reasoning run cut by the six-row edge mounts whole, and only 
   assert.doesNotMatch(markup, /data-item-id="before\/9"/)
 })
 
-for (const trailingRows of [3, 6]) test(`a work-log reasoning disclosure stays whole across an interleaved tool with ${trailingRows} trailing rows`, () => {
+for (const trailingRows of [2, 3, 6]) test(`a work-log reasoning disclosure stays whole across an interleaved tool with ${trailingRows} trailing rows`, () => {
   const tool = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
   const early = range('early', 0, 2)
   const later = range('run', 0, 3)
@@ -272,12 +272,31 @@ for (const trailingRows of [3, 6]) test(`a work-log reasoning disclosure stays w
   const items = [...range('before', 0, 6).map(answerRow), ...early.map(thought), tool, ...later.map(thought), ...after.map(answerRow)]
   const markup = renderSource([sourceTurn('split-turn', items)])
   const crossesDisclosure = trailingRows < transcriptInitialSourceRowCount
-  assert.deepEqual(mountedSourceIds(markup), crossesDisclosure ? [...early, tool.id, ...later, ...after] : after)
+  const suffix = items.slice(-transcriptInitialSourceRowCount)
+  const expected = items.filter(item => suffix.includes(item) || (crossesDisclosure && item._tag === 'Reasoning')).map(item => item.id)
+  assert.deepEqual(mountedSourceIds(markup), expected)
   assert.deepEqual(renderedMessageIds(markup), after)
   assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, crossesDisclosure ? 1 : 0)
   assert.doesNotMatch(markup, /data-item-id="before\/5"/)
-  // Tools inside the whole disclosure mount; tools wholly outside the window remain deferred.
-  assert.equal(/data-tool-status=/.test(markup), crossesDisclosure)
+  // Completing a disclosure adds only thoughts; its tool mounts only when inside the six-row suffix.
+  assert.equal(/data-tool-status=/.test(markup), suffix.includes(tool))
+})
+
+for (const thoughtCount of [2, 11]) test(`a disclosure with ${thoughtCount} thoughts across 2000 tools mounts only its reasoning plus the six-row suffix`, () => {
+  const reasoning = range('large/thought', 0, thoughtCount).map(thought)
+  const tools = range('large/tool', 0, 2000).map(id => ({ _tag: 'ToolCall', id, callId: id, name: 'read', input: { path: 'large.ts' }, status: 'success', callSeen: true, at: sourceAt }))
+  const answers = range('large/answer', 0, 3).map(answerRow)
+  const items = [reasoning[0], ...tools, ...reasoning.slice(1), ...answers]
+  const markup = renderSource([sourceTurn('large-turn', items)])
+  const suffix = items.slice(-transcriptInitialSourceRowCount)
+  const expected = items.filter(item => item._tag === 'Reasoning' || suffix.includes(item)).map(item => item.id)
+  const mounted = mountedSourceIds(markup)
+  assert.deepEqual(mounted, expected)
+  assert.equal(mounted.length, thoughtCount === 2 ? 7 : 14)
+  assert.deepEqual(renderedMessageIds(markup), answers.map(item => item.id))
+  assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, 1)
+  assert.equal((markup.match(/data-tool-status=/g) ?? []).length, thoughtCount === 2 ? 2 : 0)
+  assert.doesNotMatch(markup, /data-item-id="large\/tool\/1997"/)
 })
 
 test('the newest prompt and a cut reasoning run combine without mounting the rows between them', () => {
