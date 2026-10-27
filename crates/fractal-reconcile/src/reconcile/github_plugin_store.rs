@@ -1,6 +1,7 @@
 //! The GitHub plugin's own database, `<state>/plugins/github/github.sqlite3`: the poll cursor of
-//! each observer this member polls. It never syncs and is not in the graph's backup. It is a
-//! cache that GitHub rebuilds: a member without a cursor polls once from nothing, a baseline.
+//! each observer this member polls. It never syncs and is not in the graph's backup. GitHub
+//! rebuilds what it holds: a member without a cursor reads the repository in full once, and
+//! delivers only what differs from the facts the graph already recorded.
 
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
@@ -29,7 +30,7 @@ impl GithubPluginStore {
         Self::migrate(connection)
     }
 
-    /// A database that lasts as long as this value: every restart starts without cursors.
+    /// A database that lasts as long as this value, for tests.
     pub fn memory() -> Self {
         Self::migrate(Connection::open_in_memory().expect("an in-memory database opens"))
             .expect("an in-memory database migrates")
@@ -43,10 +44,11 @@ impl GithubPluginStore {
         );
         if version < 1 {
             connection.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h8ad3192acc9b owner=fractal_reconcile::reconcile::github_plugin_store TODO=chunk-or-reference-variable-columns */
                 "CREATE TABLE IF NOT EXISTS observer_cursors(
                      observer TEXT PRIMARY KEY,
                      resource TEXT NOT NULL,
-                     cursor TEXT NOT NULL,
+                     cursor TEXT,
                      updated_at_unix_ms INTEGER NOT NULL
                  ) WITHOUT ROWID;
                  PRAGMA user_version = 1;",
@@ -55,8 +57,9 @@ impl GithubPluginStore {
         Ok(Self { connection: Mutex::new(connection) })
     }
 
-    /// The cursor `observer` last polled to on this member.
-    pub fn cursor(&self, observer: &str) -> Result<Option<String>> {
+    /// Where `observer` last polled to on this member: `None` when it never polled here (or
+    /// this database is new), `Some(None)` when its last poll here ended without a cursor.
+    pub fn cursor(&self, observer: &str) -> Result<Option<Option<String>>> {
         Ok(self
             .connection
             .lock()
@@ -69,23 +72,32 @@ impl GithubPluginStore {
             .optional()?)
     }
 
-    /// Record where `observer` polled `resource` to. No cursor forgets it, so the next poll is a
-    /// baseline.
+    /// Record where `observer` polled `resource` to. The row stays when the cursor is gone, so
+    /// this member reads its own state from then on, never a cursor in a claim.
     pub fn set_cursor(&self, observer: &str, resource: &str, cursor: Option<&str>) -> Result<()> {
-        let connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
-        match cursor {
-            Some(cursor) => connection.execute(
+        self.connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-he3683455757b owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
                 "INSERT INTO observer_cursors(observer, resource, cursor, updated_at_unix_ms)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT(observer) DO UPDATE SET
                      resource=excluded.resource, cursor=excluded.cursor,
                      updated_at_unix_ms=excluded.updated_at_unix_ms",
                 params![observer, resource, cursor, super::now_ms() as i64],
-            )?,
-            None => connection
-                .execute("DELETE FROM observer_cursors WHERE observer=?1", [observer])?,
-        };
+            )?;
         Ok(())
+    }
+
+    /// Refuse every later write, as a full disk or a read-only file does.
+    #[cfg(test)]
+    pub(crate) fn refuse_writes(&self) {
+        self.connection
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pragma_update(None, "query_only", true)
+            .unwrap();
     }
 }
 
@@ -102,10 +114,18 @@ mod tests {
         drop(first);
         assert!(state.path().join("plugins/github/github.sqlite3").is_file());
         let reopened = GithubPluginStore::open(state.path()).unwrap();
-        assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap().as_deref(), Some("c2"));
+        assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap(), Some(Some("c2".into())));
         assert_eq!(reopened.cursor("observer/github/acme/other").unwrap(), None);
         reopened.set_cursor("observer/github/acme/garden", "resource/github/acme/garden", None).unwrap();
-        assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap(), None);
+        assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap(), Some(None));
+    }
+
+    #[test]
+    fn a_database_that_cannot_open_is_an_error() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir(state.path().join("plugins")).unwrap();
+        std::fs::write(state.path().join("plugins/github"), b"not a directory").unwrap();
+        assert!(GithubPluginStore::open(state.path()).is_err());
     }
 
     #[test]
