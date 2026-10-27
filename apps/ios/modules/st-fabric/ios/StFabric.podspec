@@ -4,7 +4,7 @@ Pod::Spec.new do |s|
   s.summary = 'Opt-in fabric gateway carrier'
   s.description = 'An app-owned iroh identity and loopback byte bridge: an opt-in carrier for the paired client gateway.'
   s.author = ''
-  s.homepage = 'https://github.com/compoundingtech/smalltalk'
+  s.homepage = 'https://github.com/compoundingtech/fractal'
   s.license = 'MIT'
   s.platforms = { :ios => '16.4' }
   s.source = { git: '' }

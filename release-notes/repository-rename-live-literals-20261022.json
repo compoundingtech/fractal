@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "summary": "Use compoundingtech/fractal directly for installation, support, release tooling and repository operations",
+  "replay": { "status": "none", "detail": "none" },
+  "schema": { "status": "none", "detail": "none" },
+  "rules": { "status": "none", "detail": "none" },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Live repository URLs and GitHub command defaults use compoundingtech/fractal directly. Historical records keep their original URLs; GitHub redirects continue to serve those records. The compatibility baseline pins were already moved to the renamed repository on main. Binary names, state, API contracts and release asset names are unchanged."
+  },
+  "downtime": { "status": "none", "detail": "none" },
+  "manual": { "status": "none", "detail": "none" },
+  "recovery": { "status": "none", "detail": "none" }
+}

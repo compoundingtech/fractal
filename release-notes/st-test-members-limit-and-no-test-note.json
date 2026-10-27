@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/st-test gives the megarepo member step a time limit (ST_TEST_MEMBERS_LIMIT, default 1200 s) and a file for its output, kills what it started when the limit passes, reads its ST_TEST_SIGN_JOBS and ST_TEST_MEMBERS_LIMIT settings before the seat environment scrub removes them, and lists as 'ran no test' only the crates the base does not list under no_tests",
+  "replay": {"status": "none", "detail": "CI and local tooling only; no product code changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product contract change. No signed content changes."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

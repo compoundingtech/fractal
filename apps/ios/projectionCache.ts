@@ -1,5 +1,5 @@
-import type { Agent, Attention, Device, Launch, Mission } from '../../clients/typescript/st3-client';
-import type { KeptAttention, SessionView } from '@smalltalk/st3-views';
+import type { Agent, Arrangement, Attention, Device, Glass, Launch, Mission } from '../../clients/typescript/fractal-client';
+import type { KeptAttention, SessionView } from '@fractal/views';
 
 export type MachineView = { id: string; kind: 'machine'; name: string; state: string; occupancy: { running_runtimes: number }; capacity: { state: string }; transports: Array<{ protocol: string; status: string }> };
 // The three windows the collections socket holds, and the lists a tab loads when it opens.
@@ -15,7 +15,11 @@ const LIMITS: Record<keyof Data, number> = { attention: 50, agents: 100, mission
 const kinds: Record<keyof Data, string> = { attention: 'attention', agents: 'agent', missions: 'mission', launches: 'launch', machines: 'machine', devices: 'device', sessions: 'session' };
 const sensitiveKey = /credential|authorization|token|secret|private.?key|stream.?capability|stream.?url/i;
 
-type Cache = { version: number; gateway: string; savedAt: number; hostId: string; actor: string; storeIndex: number; truncated: Array<keyof Data>; data: Data };
+export type WorkspaceData = { glasses: Glass[]; arrangements: Arrangement[] };
+export const emptyWorkspace: WorkspaceData = { glasses: [], arrangements: [] };
+const WORKSPACE_LIMIT = 100;
+
+type Cache = { version: number; gateway: string; savedAt: number; hostId: string; actor: string; storeIndex: number; truncated: Array<keyof Data>; data: Data; workspace: WorkspaceData };
 
 function stripSensitive(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stripSensitive);
@@ -23,11 +27,11 @@ function stripSensitive(value: unknown): unknown {
   return value;
 }
 
-export function encodeProjectionCache(gateway: string, actor: string, hostId: string, storeIndex: number, data: Data, now = Date.now(), truncated: Array<keyof Data> = []): string | null {
+export function encodeProjectionCache(gateway: string, actor: string, hostId: string, storeIndex: number, data: Data, now = Date.now(), truncated: Array<keyof Data> = [], workspace: WorkspaceData = emptyWorkspace): string | null {
   if (!/^https?:\/\//.test(gateway) || !actor || !Number.isFinite(storeIndex)) return null;
   const bounded = Object.fromEntries((Object.keys(kinds) as Array<keyof Data>).map(key => [key, data[key].slice(0, LIMITS[key])])) as Data;
   const clipped = (Object.keys(kinds) as Array<keyof Data>).filter(key => data[key].length > LIMITS[key]);
-  const cache: Cache = { version: VERSION, gateway, savedAt: now, hostId, actor, storeIndex, truncated: [...new Set([...truncated, ...clipped])].filter(key => key in kinds), data: stripSensitive(bounded) as Data };
+  const cache: Cache = { version: VERSION, gateway, savedAt: now, hostId, actor, storeIndex, truncated: [...new Set([...truncated, ...clipped])].filter(key => key in kinds), data: stripSensitive(bounded) as Data, workspace: stripSensitive({ glasses: workspace.glasses.slice(0, WORKSPACE_LIMIT), arrangements: workspace.arrangements.slice(0, WORKSPACE_LIMIT) }) as WorkspaceData };
   const encoded = JSON.stringify(cache);
   return encoded.length <= MAX_BYTES ? encoded : null;
 }
@@ -43,6 +47,13 @@ export function decodeProjectionCache(encoded: string | null, gateway: string, n
   for (const key of Object.keys(kinds) as Array<keyof Data>) {
     const entries = cache.data[key];
     if (!Array.isArray(entries) || entries.length > LIMITS[key] || entries.some(item => !item || typeof item !== 'object' || item.kind !== kinds[key] || typeof item.id !== 'string')) return null;
+  }
+  // Older v4 caches have no workspace projections; keep their existing offline data.
+  if (cache.workspace === undefined) cache.workspace = { ...emptyWorkspace };
+  if (!cache.workspace || typeof cache.workspace !== 'object') return null;
+  for (const [key, kind] of [['glasses', 'glass'], ['arrangements', 'arrangement']] as const) {
+    const entries = cache.workspace[key];
+    if (!Array.isArray(entries) || entries.length > WORKSPACE_LIMIT || entries.some(item => !item || typeof item !== 'object' || item.kind !== kind || typeof item.id !== 'string')) return null;
   }
   return cache as Cache;
 }

@@ -1,0 +1,13 @@
+[Unit]
+Description=Evidence GC: delete the dead evidence trees of scripts/evidence-gc's plan, the tag protection off only around its tag deletions
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=%h/.local/bin:/run/current-system/sw/bin:/usr/bin:/bin
+ExecStart=/usr/bin/env bash %h/.local/bin/evidence-gc-timer
+# Runs after every stop, a kill included: the protection is turned on again and checked even when no finally ran.
+ExecStopPost=/usr/bin/env bash %h/.local/bin/evidence-gc-timer --relock-only
+TimeoutStartSec=1h
+Nice=10

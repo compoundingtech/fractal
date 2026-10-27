@@ -18,7 +18,7 @@ not close an unresolved delivery alert.
 
 Boots and channel reconnects hold earlier mail, including old probe messages.
 Those messages stay in the mailbox and contribute to the aged unread count
-in doctor and stui. Preview and close that backlog with the commands in
+in doctor and the terminal UI. Preview and close that backlog with the commands in
 [seat deploys](seat-deploys.md), including
 `st conversations cleanup --all --older-than 1h`. Cleanup does not count as a
 successful native probe; recovery still requires a fresh recipient read.
@@ -47,11 +47,10 @@ is a point of a series and stays in the probe's local `events.jsonl`. A send sto
 in flight once its deadline passes or it raises an alert, even while it keeps retrying,
 and that publishes at once. A heartbeat waits, for at most one deadline, until no send
 is in flight, and a report that showed a send in flight is replaced as soon as it
-resolves, so doctor never sees a stale wait as overdue. On one production fleet the probe published about 2,700 versions a day per
-node (one every 32 seconds); this bounds it at 288 heartbeats plus outcome changes.
+resolves, so doctor never sees a stale wait as overdue.
 `st doctor`
 shows each direction's latest message, measured latency or pending age, overdue
-results, missing configured source nodes, and heartbeats older than 90 seconds.
+results, missing configured source nodes, and heartbeats older than 15 minutes.
 A reported success must match the actual sender, recipient and accepted read
 claim in the graph; a document alone cannot manufacture a successful read.
 A late receipt remains visible until the next probe completes successfully.
@@ -175,6 +174,22 @@ A member shown as last seen pauses its route: the probe queues no new sends, wit
 route attention, and retains any pending message. After a new replication exchange,
 it resumes that same message with a fresh measurement window. Doctor waits for absent
 members before judging missing heartbeats or overdue routes.
+
+The private state keeps one notification episode per route until an actual read by that
+route's recipient. The episode retains its original notice key across resumed measurement
+windows, fresh probe messages, presence flaps and process replacement. Pausing withdraws
+active attention without resetting that episode or claiming delivery recovery. The same
+pending message retains an already observed deadline miss even after its measurement
+window resumes. A real recipient read clears the episode and sends one recovery intent;
+delivered, closed, a different read actor or a successful exchange cannot do so.
+
+Notice and clear request bodies are saved before posting. A lost response replays the
+same key and body; it can cause repeated attempts, but no new logical notice or recovery.
+Each episode retains at most two clear intents (pause and recovery). Migration is lazy
+for the current configured route, preserving existing saved alert bodies and attention
+IDs without scanning the journal or graph. Alerts already cleared by an older version
+cannot be reconstructed. Downgrading to an older probe may resume its old flap behavior;
+the local episode fields do not change the replicated report format or daemon schema.
 
 A direct route refused by a member's Fabric grants does not count as a delivery failure.
 While another peer is exchanging, the probe continues sending real messages to the refused

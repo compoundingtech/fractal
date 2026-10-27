@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST3_ENDPOINT:?ST3_ENDPOINT must identify the eval daemon}"
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the root mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_ENDPOINT-${ST3_ENDPOINT:?ST3_ENDPOINT must identify the eval daemon}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the root mission run}}"
 
 deadline=$((SECONDS + 600))
-subscription="subscription/${ST_MISSION_RUN}/reviews"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+subscription="subscription/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}/reviews"
 review_run=""
 
 while ((SECONDS < deadline)); do
   if [[ -z "$review_run" ]]; then
     subscription_json="$(
-      st3 --endpoint "$ST3_ENDPOINT" inspect "$subscription" --json
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      st3 --endpoint "${FRACTAL_ENDPOINT-${ST3_ENDPOINT-}}" inspect "$subscription" --json
     )"
     review_run="$(
       jq -r \
@@ -21,7 +26,8 @@ while ((SECONDS < deadline)); do
   fi
 
   if [[ -n "$review_run" ]]; then
-    run_json="$(st3 --endpoint "$ST3_ENDPOINT" inspect "$review_run" --json)"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    run_json="$(st3 --endpoint "${FRACTAL_ENDPOINT-${ST3_ENDPOINT-}}" inspect "$review_run" --json)"
     run_status="$(jq -r '.status.subjects[0].actual.status // empty' <<<"$run_json")"
     run_phase="$(jq -r '.status.subjects[0].actual.phase // empty' <<<"$run_json")"
 

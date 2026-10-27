@@ -1,0 +1,379 @@
+#!/usr/bin/env python3
+"""scripts/rust-test-keys and scripts/rust-test-inputs-scan: the per-crate keys (docs/per-crate-test-signing.md), on small
+workspaces built here and on this repository's own tree."""
+import importlib.machinery
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+sys.dont_write_bytecode = True
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(module)
+    return module
+
+
+keys = load('rust_test_keys', ROOT / 'scripts/rust-test-keys')
+scan = load('rust_test_inputs_scan', ROOT / 'scripts/rust-test-inputs-scan')
+verify = load('evidence_verify_for_keys_test', ROOT / 'scripts/evidence-verify')
+
+GIT_ENV = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', LC_ALL='C', GIT_AUTHOR_NAME='t',
+               GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+GLOBAL = ['Cargo.toml', 'Cargo.lock']
+# Every member's manifest is global: the tests run on one workspace build, so a feature one member turns on changes a shared dependency for all.
+MANIFESTS = [f'crates/{name}/Cargo.toml' for name in ('base', 'mid', 'top', 'other', 'devonly', 'targeted', 'inherits')]
+
+
+def manifest(name, deps='', dev='', build='', target='', extra=''):
+    text = f'[package]\nname = "{name}"\nversion = "0.1.0"\n{extra}\n'
+    for table, body in (('dependencies', deps), ('dev-dependencies', dev), ('build-dependencies', build)):
+        if body:
+            text += f'[{table}]\n{body}\n'
+    return text + target
+
+
+class Workspace:
+    def __init__(self, test):
+        self.dir = Path(tempfile.mkdtemp(prefix='rust-keys-'))
+        test.addCleanup(shutil.rmtree, self.dir, True)
+        self.git('init', '-q', '-b', 'main')
+
+    def git(self, *args):
+        done = subprocess.run(['git', '-C', str(self.dir), *args], capture_output=True, env=GIT_ENV)
+        assert done.returncode == 0, (args, done.stderr.decode())
+        return done.stdout.decode().strip()
+
+    def write(self, path, text):
+        full = self.dir / path
+        full.parent.mkdir(parents=True, exist_ok=True)
+        full.write_text(text)
+
+    def commit(self):
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'c', '--allow-empty')
+        return self.git('rev-parse', 'HEAD^{tree}')
+
+    def keys(self, inputs, tree=None):
+        return {name: key for name, (key, _) in keys.keys(self.dir, tree or 'HEAD^{tree}', inputs, verify.project).items()}
+
+    def paths(self, inputs):
+        return keys.declared_paths(self.dir, 'HEAD^{tree}', inputs)
+
+
+def workspace(test, root_package=False):
+    ws = Workspace(test)
+    members = ['crates/base', 'crates/mid', 'crates/top', 'crates/other', 'crates/devonly', 'crates/targeted', 'crates/inherits']
+    ws.write('Cargo.toml', ('[package]\nname = "rootpkg"\nversion = "0.1.0"\n' if root_package else '') +
+             '[workspace]\nmembers = [' + ', '.join(f'"{m}"' for m in members) + ']\n'
+             '[workspace.dependencies]\nbase = { path = "crates/base" }\n'
+             '[patch.crates-io]\npatched = { path = "vendor/patched" }\n')
+    ws.write('Cargo.lock', 'lock\n')
+    ws.write('crates/base/Cargo.toml', manifest('base'))
+    ws.write('crates/mid/Cargo.toml', manifest('mid', deps='base = { path = "../base" }'))
+    ws.write('crates/top/Cargo.toml', manifest('top', deps='mid = { path = "../mid" }'))
+    ws.write('crates/other/Cargo.toml', manifest('other'))
+    ws.write('crates/devonly/Cargo.toml', manifest('devonly', dev='other = { path = "../other" }'))
+    ws.write('crates/targeted/Cargo.toml', manifest('targeted', target='[target.\'cfg(unix)\'.build-dependencies]\nbase = { path = "../base" }\n'))
+    ws.write('crates/inherits/Cargo.toml', manifest('inherits', deps='base = { workspace = true }'))
+    for crate in ('base', 'mid', 'top', 'other', 'devonly', 'targeted', 'inherits'):
+        ws.write(f'crates/{crate}/src/lib.rs', f'// {crate}\n')
+    ws.write('vendor/patched/Cargo.toml', manifest('patched'))
+    ws.write('docs/note.md', 'one\n')
+    if root_package:
+        ws.write('src/main.rs', 'fn main() {}\n')
+        ws.write('tests/it.rs', '\n')
+    ws.commit()
+    return ws
+
+
+INPUTS = {'global': GLOBAL, 'crates': {name: {'extra': []} for name in
+                                         ('base', 'mid', 'top', 'other', 'devonly', 'targeted', 'inherits', 'rootpkg')}}
+
+
+class Closure(unittest.TestCase):
+    def test_a_crate_declares_its_own_directory_and_its_whole_dependency_closure(self):
+        paths = workspace(self).paths(INPUTS)
+        self.assertEqual(paths['top'], sorted(set(GLOBAL + MANIFESTS + ['crates/top', 'crates/mid', 'crates/base', 'vendor/patched'])))
+        self.assertEqual(paths['base'], sorted(set(GLOBAL + MANIFESTS + ['crates/base', 'vendor/patched'])))
+
+    def test_dev_build_target_specific_and_workspace_inherited_dependencies_count(self):
+        paths = workspace(self).paths(INPUTS)
+        self.assertIn('crates/other', paths['devonly'])
+        self.assertIn('crates/base', paths['targeted'])
+        self.assertIn('crates/base', paths['inherits'])
+
+    def test_a_dependency_cycle_through_a_dev_dependency_terminates(self):
+        ws = workspace(self)
+        ws.write('crates/base/Cargo.toml', manifest('base', dev='top = { path = "../top" }'))
+        ws.commit()
+        self.assertEqual(ws.paths(INPUTS)['base'], ws.paths(INPUTS)['top'])
+
+    def test_the_root_package_declares_its_sources_never_the_whole_tree(self):
+        ws = workspace(self, root_package=True)
+        paths = ws.paths(INPUTS)['rootpkg']
+        self.assertNotIn('.', paths)
+        self.assertEqual(sorted(set(paths) - set(GLOBAL) - set(MANIFESTS)), ['benches', 'build.rs', 'src', 'tests', 'vendor/patched'])
+
+    def test_patch_paths_are_global(self):
+        ws = workspace(self)
+        self.assertTrue(all('vendor/patched' in paths for paths in ws.paths(INPUTS).values()))
+
+
+class Keys(unittest.TestCase):
+    def test_a_change_inside_one_crate_moves_its_key_and_its_dependents_only(self):
+        ws = workspace(self)
+        before = ws.keys(INPUTS)
+        ws.write('crates/mid/src/lib.rs', '// changed\n')
+        ws.commit()
+        after = ws.keys(INPUTS)
+        moved = sorted(name for name in before if before[name] != after[name])
+        self.assertEqual(moved, ['mid', 'top'])  # base is below mid, nothing else depends on it
+
+    def test_a_change_to_a_leaf_dependency_moves_everything_above_it(self):
+        ws = workspace(self)
+        before = ws.keys(INPUTS)
+        ws.write('crates/base/src/lib.rs', '// changed\n')
+        ws.commit()
+        after = ws.keys(INPUTS)
+        self.assertEqual(sorted(n for n in before if before[n] != after[n]), ['base', 'inherits', 'mid', 'targeted', 'top'])
+
+    def test_a_file_outside_every_declaration_moves_no_key(self):
+        ws = workspace(self)
+        before = ws.keys(INPUTS)
+        ws.write('docs/note.md', 'two\n')
+        ws.commit()
+        self.assertEqual(ws.keys(INPUTS), before)
+
+    def test_a_global_path_moves_every_key(self):
+        ws = workspace(self)
+        before = ws.keys(INPUTS)
+        ws.write('Cargo.lock', 'new lock\n')
+        ws.commit()
+        after = ws.keys(INPUTS)
+        self.assertTrue(all(before[name] != after[name] for name in before), 'every key moves')
+
+    def test_an_extra_path_moves_only_the_crate_that_declares_it(self):
+        ws = workspace(self)
+        inputs = json.loads(json.dumps(INPUTS))
+        inputs['crates']['other']['extra'] = ['docs']
+        before = ws.keys(inputs)
+        ws.write('docs/note.md', 'two\n')
+        ws.commit()
+        after = ws.keys(inputs)
+        self.assertEqual(sorted(n for n in before if before[n] != after[n]), ['other'])  # devonly declares other's directory, not its extras
+
+    def test_a_crate_nobody_reviewed_is_keyed_by_the_whole_tree(self):
+        ws = workspace(self)
+        inputs = {'global': GLOBAL, 'crates': {}}
+        tree = ws.git('rev-parse', 'HEAD^{tree}')
+        self.assertEqual(set(ws.keys(inputs).values()), {tree})
+        paths = ws.paths(inputs)
+        self.assertTrue(all('.' in value for value in paths.values()))
+
+    def test_any_members_manifest_moves_every_key_because_features_unify_across_the_workspace_build(self):
+        ws = workspace(self)
+        before = ws.keys(INPUTS)
+        ws.write('crates/other/Cargo.toml', manifest('other', deps='serde = { version = "1", features = ["derive"] }'))
+        ws.commit()
+        after = ws.keys(INPUTS)
+        self.assertTrue(all(before[name] != after[name] for name in before), 'a feature other turns on is part of every crate\'s build')
+
+    def test_an_added_dependency_edge_moves_the_key(self):
+        ws = workspace(self)
+        before = ws.keys(INPUTS)['other']
+        ws.write('crates/other/Cargo.toml', manifest('other', deps='base = { path = "../base" }'))
+        ws.commit()
+        self.assertNotEqual(ws.keys(INPUTS)['other'], before)
+
+    def test_the_key_is_the_projection_of_exactly_the_declared_paths(self):
+        ws = workspace(self)
+        paths = ws.paths(INPUTS)['base']
+        self.assertEqual(ws.keys(INPUTS)['base'], verify.project(str(ws.dir), 'HEAD^{tree}', paths))
+
+    def test_an_unknown_crate_name_is_refused(self):
+        ws = workspace(self)
+        with self.assertRaises(keys.Failure):
+            keys.keys(ws.dir, 'HEAD^{tree}', INPUTS, verify.project, ['nope'])
+
+    def test_the_command_line_prints_a_key_per_crate_and_reads_the_inputs_from_the_named_tree(self):
+        ws = workspace(self)
+        ws.write('.st/rust-test-inputs.json', json.dumps(INPUTS))
+        ws.commit()
+        out = subprocess.run([sys.executable, str(ROOT / 'scripts/rust-test-keys'), '--repo', str(ws.dir), '--crate', 'base',
+                              '--verifier', str(ROOT / 'scripts/evidence-verify')], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertRegex(out.stdout, r'^base\t[0-9a-f]{40,64}\n$')
+
+
+class NoTests(unittest.TestCase):
+    def test_the_no_tests_list_must_be_an_array_of_crate_names(self):
+        ws = workspace(self)
+        for bad in ('"a"', '[1]', '{"a": 1}'):
+            ws.write('.st/rust-test-inputs.json', '{"global": [], "crates": {}, "no_tests": %s}' % bad)
+            ws.commit()
+            with self.assertRaises(keys.Failure, msg=bad):
+                keys.read_inputs(str(ws.dir), 'HEAD')
+        ws.write('.st/rust-test-inputs.json', '{"global": [], "crates": {}, "no_tests": ["a"]}')
+        ws.commit()
+        self.assertEqual(keys.read_inputs(str(ws.dir), 'HEAD')['no_tests'], ['a'])
+
+
+class Repository(unittest.TestCase):
+    """This repository's own tree and its committed .st/rust-test-inputs.json."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.inputs = json.loads((ROOT / '.st/rust-test-inputs.json').read_text())
+        cls.tree = 'HEAD^{tree}'
+        cls.members, cls.patched, _ = keys.layout(ROOT, cls.tree)
+
+    def test_every_workspace_crate_has_a_reviewed_entry(self):
+        self.assertEqual(sorted(set(self.members) - set(self.inputs['crates'])), [], 'a crate without an entry is keyed by the whole tree')
+        self.assertEqual(sorted(set(self.inputs['crates']) - set(self.members)), [], 'an entry for a crate that is not a workspace member')
+
+    def test_the_declared_paths_all_exist_and_the_globals_are_listed(self):
+        files = set(subprocess.run(['git', '-C', str(ROOT), 'ls-tree', '-r', '--name-only', self.tree], capture_output=True, text=True).stdout.split('\n'))
+        for path in self.inputs['global']:
+            self.assertTrue(path in files or any(f.startswith(path + '/') for f in files), f'global path {path} does not exist')
+        for name, entry in self.inputs['crates'].items():
+            for path in entry['extra']:
+                self.assertTrue(path == '.' or path in files or any(f.startswith(path.rstrip('/') + '/') for f in files), f'{name} declares {path}, which does not exist')
+
+    def test_the_member_set_is_the_one_cargo_metadata_gives(self):
+        # A parsing gap in the manifest reader would drop a crate silently; this compares it with cargo's own view (a test, not run in the gate).
+        if not shutil.which('cargo'):
+            self.skipTest('no cargo')
+        done = subprocess.run(['cargo', 'metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], cwd=ROOT, capture_output=True, text=True)
+        if done.returncode != 0:
+            self.skipTest('cargo metadata unavailable: ' + done.stderr.strip()[-120:])
+        metadata = json.loads(done.stdout)
+        ours = set(self.members)
+        theirs = {package['name'] for package in metadata['packages'] if package['id'] in set(metadata['workspace_members'])}
+        self.assertEqual(sorted(ours ^ theirs), [])
+
+    def test_the_closure_is_the_one_cargo_metadata_gives(self):
+        if not shutil.which('cargo'):
+            self.skipTest('no cargo')
+        done = subprocess.run(['cargo', 'metadata', '--locked', '--offline', '--no-deps', '--format-version', '1'], cwd=ROOT, capture_output=True, text=True)
+        if done.returncode != 0:
+            self.skipTest('cargo metadata unavailable: ' + done.stderr.strip()[-120:])
+        metadata = json.loads(done.stdout)
+        root = Path(metadata['workspace_root'])
+        by_name = {p['name']: p for p in metadata['packages']}
+        workspace_deps = (keys.manifest(ROOT, self.tree, '.').get('workspace') or {}).get('dependencies') or {}
+        cache = {}
+        for name, directory in self.members.items():
+            wanted = {os.path.relpath(Path(by_name[d]['manifest_path']).parent, root) for d in self.closure_names(by_name, name)}
+            got = keys.closure(ROOT, self.tree, directory, workspace_deps, cache)
+            self.assertEqual({d for d in got if d in {os.path.relpath(Path(p['manifest_path']).parent, root) for p in metadata['packages']}}, wanted, name)
+
+    @staticmethod
+    def closure_names(by_name, start):
+        seen, todo = {start}, [start]
+        while todo:
+            for dep in by_name[todo.pop()]['dependencies']:
+                if dep['name'] in by_name and dep['name'] not in seen:
+                    seen.add(dep['name'])
+                    todo.append(dep['name'])
+        return seen
+
+    def test_every_compile_time_include_is_inside_the_declaring_crates_paths(self):
+        # The per-crate form of the linux-gate include test (scripts/evidence-verify-test): a path a crate's sources include that its key
+        # leaves out would let a change to it reuse a pass.
+        paths = keys.declared_paths(ROOT, self.tree, self.inputs)
+        pattern = re.compile(r'include(?:_str|_bytes)?!\(\s*"([^"]+)"|#\[path\s*=\s*"([^"]+)"\]')
+        outside = []
+        for name, directory in self.members.items():
+            declared = [d.rstrip('/') for d in paths[name]]
+            if '.' in declared:
+                continue
+            sources = sorted((ROOT / directory).rglob('*.rs')) if directory != '.' else [p for d in keys.ROOT_PACKAGE_PATHS for p in sorted((ROOT / d).rglob('*.rs'))]
+            for source in sources:
+                if 'target' in source.parts:
+                    continue
+                for literal in (a or b for a, b in pattern.findall(source.read_text(errors='replace'))):
+                    target = (source.parent / literal).resolve()
+                    try:
+                        relative = target.relative_to(ROOT.resolve()).as_posix()
+                    except ValueError:
+                        continue  # OUT_DIR and generated files
+                    if not any(relative == d or relative.startswith(d + '/') for d in declared):
+                        outside.append(f'{name}: {source.relative_to(ROOT)} includes {relative}')
+        self.assertEqual(outside, [])
+
+    def test_the_committed_extras_cover_what_the_scan_finds(self):
+        committed = self.inputs
+        scanned = scan.scan(ROOT, self.tree)
+        missing = []
+        for name, entry in scanned['crates'].items():
+            have = list(committed['crates'][name]['extra']) + list(committed['global'])
+            missing += [f'{name}: {path}' for path in entry['extra'] if not scan.covered(path, have)]
+        self.assertEqual(missing, [], 'run scripts/rust-test-inputs-scan and review the difference, or declare the path')
+
+
+JUNIT = """<?xml version="1.0"?>
+<testsuites name="nextest-run">
+  <testsuite name="alpha"><testcase name="t::a" classname="alpha"></testcase><testcase name="t::b" classname="alpha"><skipped/></testcase></testsuite>
+  <testsuite name="alpha::integration"><testcase name="t::c" classname="alpha::integration"></testcase></testsuite>
+  <testsuite name="alphabet"><testcase name="t::z" classname="alphabet"><failure message="x"/></testcase></testsuite>
+  <testsuite name="beta"><testcase name="t::f" classname="beta"><flakyFailure message="x"/></testcase></testsuite>
+</testsuites>
+"""
+
+
+class Result(unittest.TestCase):
+    """scripts/ci-rust-test-result: one crate's part of a nextest JUnit report."""
+
+    def run_result(self, crate, *args):
+        directory = Path(tempfile.mkdtemp(prefix='rust-result-'))
+        self.addCleanup(shutil.rmtree, directory, True)
+        (directory / 'junit.xml').write_text(JUNIT)
+        env = dict(os.environ, RUST_TEST_JUNIT=str(directory / 'junit.xml'), RUST_TEST_CRATE=crate)
+        return subprocess.run([sys.executable, str(ROOT / 'scripts/ci-rust-test-result'), *args], capture_output=True, text=True, env=env)
+
+    def test_a_crate_gets_its_suites_and_its_integration_binaries_but_not_a_crate_with_its_name_as_a_prefix(self):
+        done = self.run_result('alpha')
+        self.assertEqual(done.returncode, 0, done.stdout)
+        self.assertIn('pass alpha t::a', done.stdout)
+        self.assertIn('pass alpha::integration t::c', done.stdout)
+        self.assertNotIn('alphabet', done.stdout)
+        self.assertIn('tests_run=2 tests_ignored=1 failed=0', done.stdout, 'the skipped test did not run, and is counted')
+
+    def test_a_failed_test_fails_the_crate(self):
+        done = self.run_result('alphabet')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn('FAIL alphabet t::z', done.stdout)
+
+    def test_a_test_that_passed_on_a_retry_passes_and_is_marked_flaky(self):
+        done = self.run_result('beta')
+        self.assertEqual(done.returncode, 0)
+        self.assertIn('flaky beta t::f', done.stdout)
+
+    def test_a_crate_without_a_suite_ran_no_test_and_the_summary_names_the_exact_list(self):
+        self.assertIn('tests_run=0 tests_ignored=0 failed=0', self.run_result('gamma').stdout)
+        first, second = (json.loads(self.run_result(crate, '--summary').stdout) for crate in ('alpha', 'beta'))
+        self.assertEqual((first['tests_run'], first['tests_ignored']), (2, 1))
+        self.assertNotEqual(first['test_list_sha256'], second['test_list_sha256'])
+        self.assertEqual(json.loads(self.run_result('alpha', '--summary').stdout), first)
+        self.assertNotEqual(first['ignored_list_sha256'], second['ignored_list_sha256'], 'the ignored names are signed too')
+
+    def test_an_unreadable_report_or_a_missing_variable_is_a_refusal_not_a_pass(self):
+        env = dict(os.environ, RUST_TEST_JUNIT='/nonexistent/junit.xml', RUST_TEST_CRATE='alpha')
+        self.assertEqual(subprocess.run([sys.executable, str(ROOT / 'scripts/ci-rust-test-result')], capture_output=True, env=env).returncode, 2)
+        env.pop('RUST_TEST_CRATE')
+        self.assertEqual(subprocess.run([sys.executable, str(ROOT / 'scripts/ci-rust-test-result')], capture_output=True, env=env).returncode, 2)
+
+
+if __name__ == '__main__':
+    unittest.main()

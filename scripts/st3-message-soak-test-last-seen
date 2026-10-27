@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 root=$(mktemp -d)
 trap 'rm -r "$root"' EXIT
@@ -15,9 +16,12 @@ exit 55
 ST
 chmod +x "$root/st"
 export TEST_CALLS="$root/unexpected"
-export ST3_BIN="$root/st" ST_AGENT=agent/fixture/monitor
-export FABRIC_BIN="$root/st" ST3_SOAK_EXAMPLE_MAC_BIN="$root/st"
-export ST3_SOAK_STATE_DIR="$root/state"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_BIN="$root/st" ST3_BIN="$root/st" FRACTAL_AGENT=agent/fixture/monitor ST_AGENT=agent/fixture/monitor
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FABRIC_BIN="$root/st" FRACTAL_SOAK_EXAMPLE_MAC_BIN="$root/st" ST3_SOAK_EXAMPLE_MAC_BIN="$root/st"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+export FRACTAL_SOAK_STATE_DIR="$root/state" ST3_SOAK_STATE_DIR="$root/state"
 set +e
 output=$(bash "$here/st3-message-soak" --once harbor-to-traveller 2>&1)
 result=$?

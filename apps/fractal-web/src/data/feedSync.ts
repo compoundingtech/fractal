@@ -1,5 +1,5 @@
-import type { SyncStatus as KitSyncStatus } from '@smalltalk/fractal-ui/assistant-ui/sync'
-import type { SyncStatus } from '@st3/sdk/effect'
+import type { SyncStatus as KitSyncStatus } from '@fractal/ui/assistant-ui/sync'
+import type { SyncStatus } from '@fractal/sdk/effect'
 import * as Equal from 'effect/Equal'
 import * as Option from 'effect/Option'
 
