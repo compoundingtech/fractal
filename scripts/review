@@ -5,7 +5,7 @@
 
 Reads git diff BASE...HEAD in the current repository (BASE defaults to origin/main, HEAD to HEAD). The deterministic risk floor
 (scripts/review-risk) and the per-file patch-ids are computed here, with no model. The agent CLI named by .st/review-harness.json
-(claude, codex or omp) reads the standard and the diff in a detached checkout of the head with read-only tools and answers the
+(claude or codex; omp is refused until it can confine its reads) reads the standard and the diff in a detached checkout of the head with read-only tools and answers the
 parts that need judgement; the script assembles the full verdict, takes risk.final as the higher of the two scores, and runs
 scripts/review-validate on it. A verdict that does not validate is not written: the review fails and nothing is signed.
 
@@ -24,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -234,8 +235,11 @@ def extract_json(text):
 
 
 # No Bash tool at all, not even read-only git: git log, show and diff take --output=PATH and write files, and merge-tree writes objects.
-READ_ONLY_CLAUDE = {"Read", "Grep", "Glob"}
-READ_ONLY_OMP = {"read", "grep", "find"}
+# The diff under review is untrusted, so the agent must not run anything, write anything or read outside the throwaway checkout:
+# a prompt injected through the diff could otherwise have it read the signing key or a token and copy it into the verdict text, which is
+# posted on a public pull request.
+CLAUDE_RULES = {f"{tool}(/{{cwd}}/**)" for tool in ("Read", "Grep", "Glob")}
+CODEX_READABLE = {":minimal", "{cwd}", "{harness_root}"}
 WIDENING = {"--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--auto-approve", "--yolo", "--full-auto",
             "--dangerously-bypass-approvals-and-sandbox"}
 
@@ -248,34 +252,94 @@ def option(command, name):
     return None
 
 
-def restriction_problem(command):
-    """Why COMMAND is not a read-only agent invocation, or None when it is.
+def config_values(command):
+    """The KEY=VALUE strings given to codex with -c / --config."""
+    return [command[index + 1] for index, part in enumerate(command[:-1]) if part in ("-c", "--config")]
 
-    The diff under review is untrusted input, so the reviewing agent must not be able to run anything or write anything. A command
-    passes when it carries one of the restrictions the supported CLIs have, with nothing that widens it: codex --sandbox read-only;
-    claude --allowedTools limited to Read, Grep and Glob (no Bash), with --permission-mode dontAsk; omp --tools limited to
-    read, grep and find, with --no-extensions.
+
+def restriction_problem(command):
+    """Why COMMAND is not a read-only, confined agent invocation, or None when it is.
+
+    A command passes when it carries one of the confinements the supported CLIs have, with nothing that widens it:
+    claude --allowedTools of exactly Read(/{cwd}/**), Grep(/{cwd}/**) and Glob(/{cwd}/**) (no Bash, no bare tool name, which would allow
+    any path), --permission-mode dontAsk and --strict-mcp-config (no MCP server adds a tool);
+    codex -c default_permissions="NAME" with -c permissions.NAME.filesystem={...} granting only "read" on ":minimal", "{cwd}" and
+    "{harness_root}" (codex's own install). omp has no way to confine its reads to a directory, so it is refused.
     """
     widening = sorted(WIDENING & set(command))
     if widening:
         return f"it carries {widening[0]}"
     if option(command, "--approval-mode") == "yolo":
         return "it carries --approval-mode yolo"
-    if "--sandbox" in command:
-        return None if option(command, "--sandbox") == "read-only" else "its --sandbox is not read-only"
     if "--allowedTools" in command:
-        outside = sorted(set(re.findall(r"Bash\([^)]*\)|\S+", option(command, "--allowedTools") or "")) - READ_ONLY_CLAUDE)
+        rules = re.findall(r"\w+\([^)]*\)|\S+", option(command, "--allowedTools") or "")
+        outside = sorted(set(rules) - CLAUDE_RULES)
         if outside:
-            return f"--allowedTools allows {outside[0]}"
+            return f"--allowedTools allows {outside[0]}; reads must be scoped to the checkout (Read(/{{cwd}}/**) and the same for Grep and Glob)"
+        if set(rules) != CLAUDE_RULES:
+            return "--allowedTools must hold Read, Grep and Glob, each scoped to /{cwd}/**"
         if option(command, "--permission-mode") != "dontAsk":
             return "claude needs --permission-mode dontAsk so that nothing outside --allowedTools is approved"
+        return None if "--strict-mcp-config" in command else "claude needs --strict-mcp-config so that no MCP server adds a tool"
+    configs = config_values(command)
+    names = [value.split("=", 1)[1].strip('"') for value in configs if value.startswith("default_permissions=")]
+    if names:
+        profile = [value for value in configs if value.startswith(f"permissions.{names[0]}.filesystem=")]
+        if len(profile) != 1:
+            return f"codex needs one permissions.{names[0]}.filesystem profile for its default_permissions"
+        entries = re.findall(r'"([^"]+)"\s*=\s*"([^"]+)"', profile[0].split("=", 1)[1])
+        if not entries or any(mode != "read" or path not in CODEX_READABLE for path, mode in entries):
+            return "the codex filesystem profile may grant only read on :minimal, {cwd} and {harness_root}"
+        if "--sandbox" in command and option(command, "--sandbox") != "read-only":
+            return "its --sandbox is not read-only"
         return None
+    if "--sandbox" in command:
+        return "codex --sandbox read-only reads the whole filesystem; give it default_permissions and a permissions.NAME.filesystem profile"
     if "--tools" in command:
-        tools = set(filter(None, (option(command, "--tools") or "").split(",")))
-        if not tools or tools - READ_ONLY_OMP:
-            return f"--tools allows {sorted(tools - READ_ONLY_OMP)[0] if tools - READ_ONLY_OMP else 'nothing'}"
-        return None if "--no-extensions" in command else "omp needs --no-extensions so that no extension adds a tool"
-    return "it has no read-only restriction (codex --sandbox read-only, claude --allowedTools, omp --tools)"
+        return "omp cannot confine its reads to the checkout, so it is refused until it can"
+    return "it has no read-only, confined invocation (claude --allowedTools Read(/{cwd}/**) ..., codex default_permissions)"
+
+
+SECRET_PATTERNS = {
+    "a private key": r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
+    "a GitHub token": r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})",
+    "an API key": r"\bsk-[A-Za-z0-9_\-]{20,}|\bAKIA[0-9A-Z]{16}\b|\bxox[abprs]-[A-Za-z0-9-]{10,}",
+    "a bearer token": r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
+}
+CREDENTIAL_FILES = (".config/gh/hosts.yml", ".codex/auth.json", ".claude/.credentials.json", ".config/st", ".ssh")
+CREDENTIAL_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "EVIDENCE_PUSH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+def credential_tokens():
+    """Long token-like strings from this account's credential files and variables: what must never reach a verdict."""
+    home = Path(os.environ.get("HOME", "") or "/nonexistent")
+    tokens = {os.environ[name] for name in CREDENTIAL_VARIABLES if len(os.environ.get(name, "")) >= 16}
+    for relative in CREDENTIAL_FILES:
+        root = home / relative
+        files = [root] if root.is_file() else [path for path in root.rglob("*") if path.is_file()] if root.is_dir() else []
+        for path in files[:200]:
+            try:
+                if path.stat().st_size > 200_000:
+                    continue
+                text = path.read_text(errors="ignore")
+            except OSError:
+                continue
+            for token in re.findall(r"[A-Za-z0-9_\-+=/]{24,}", text):
+                # The token as written and its pieces without a prefix such as gho_ or sk-: printing it without the prefix is a leak too.
+                for piece in {token, *re.split(r"[_\-]", token)}:
+                    if len(piece) >= 24 and re.search(r"\d", piece) and re.search(r"[A-Za-z]", piece):
+                        tokens.add(piece)
+    return tokens
+
+
+def secret_problem(text):
+    """What kind of secret TEXT holds, or None. Never returns the secret itself."""
+    for kind, pattern in SECRET_PATTERNS.items():
+        if re.search(pattern, text):
+            return kind
+    if any(token in text for token in credential_tokens()):
+        return "the content of one of this account's credential files"
+    return None
 
 
 def run_harness(config, name, model, prompt, cwd, timeout):
@@ -291,7 +355,9 @@ def run_harness(config, name, model, prompt, cwd, timeout):
     command = list(settings["command"])
     if model:
         command += settings.get("model_args", [])
-    command = [part.replace("{model}", model or "").replace("{cwd}", str(cwd)).replace("{out}", out_file.name) for part in command]
+    root = str(Path(shutil.which(command[0]) or command[0]).resolve().parent.parent)
+    command = [part.replace("{model}", model or "").replace("{cwd}", str(cwd)).replace("{out}", out_file.name).replace("{harness_root}", root)
+               for part in command]
     started = time.time()
     try:
         done = subprocess.run(command, cwd=cwd, input=prompt, text=True, capture_output=True, timeout=timeout)
@@ -481,6 +547,9 @@ def finish(args, repo, verdict, metrics, base, folder):
         for problem in problems:
             print(f"review: {problem}", file=sys.stderr)
         raise Failed("the verdict does not validate; nothing was written")
+    leaked = secret_problem(json.dumps(verdict))
+    if leaked:
+        raise Failed(f"the verdict holds {leaked}; nothing was written (the diff may have asked the reviewer to print it)")
     out = args.out or Path(tempfile.gettempdir()) / f"review-{verdict['head'][:12]}.json"
     out.write_text(json.dumps(verdict, indent=2) + "\n")
     Path(str(out) + ".metrics.json").write_text(json.dumps(metrics, indent=2) + "\n")

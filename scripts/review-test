@@ -14,6 +14,7 @@ sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
+CONFINED = ["-c", 'default_permissions="review"', "-c", 'permissions.review.filesystem={":minimal"="read","{cwd}"="read"}']
 sys.path.insert(0, str(HERE))
 _loader = importlib.machinery.SourceFileLoader("review_script", str(HERE / "review"))
 _spec = importlib.util.spec_from_loader("review_script", _loader)
@@ -90,8 +91,8 @@ class Review(unittest.TestCase):
     def write_config(self, family):
         self.config.write_text(json.dumps({
             "version": 1, "default": "fake", "timeout_seconds": 60, "structure_only": ["**/*.lock"],
-            "harnesses": {"fake": {"family": family, "model": "fake-1", "command": [str(self.fake / "agent"), "--sandbox", "read-only"], "model_args": [], "parse": "text"},
-                          "fake-claude": {"family": "anthropic", "model": None, "command": [str(self.fake / "agent"), "--sandbox", "read-only"], "parse": "claude-json"}},
+            "harnesses": {"fake": {"family": family, "model": "fake-1", "command": [str(self.fake / "agent"), *CONFINED], "model_args": [], "parse": "text"},
+                          "fake-claude": {"family": "anthropic", "model": None, "command": [str(self.fake / "agent"), *CONFINED], "parse": "claude-json"}},
         }))
 
     def git(self, *args):
@@ -116,7 +117,7 @@ class Review(unittest.TestCase):
         out.unlink(missing_ok=True)
         done = subprocess.run([sys.executable, str(HERE / "review"), "--repo", str(self.repo), "--base", base, "--config", str(self.config),
                                "--out", str(out), *args],
-                              text=True, capture_output=True, env={"PATH": os.environ["PATH"], "FAKE_DIR": str(self.fake)})
+                              text=True, capture_output=True, env={"PATH": os.environ["PATH"], "FAKE_DIR": str(self.fake), "HOME": str(self.repo.parent / "home")})
         verdict = json.loads(out.read_text()) if out.exists() else None
         return done, verdict
 
@@ -308,13 +309,24 @@ class Review(unittest.TestCase):
         for name, settings in config["harnesses"].items():
             self.assertIsNone(restriction_problem(settings["command"]), name)
 
-    def test_a_command_without_a_read_only_restriction_is_refused(self):
-        for command in (["omp", "-p"], ["omp", "-p", "--tools", "read,bash", "--no-extensions"], ["omp", "-p", "--tools", "read"],
-                        ["codex", "exec", "--sandbox", "workspace-write"], ["codex", "exec", "--sandbox", "read-only", "--yolo"],
-                        ["claude", "-p", "--allowedTools", "Read Bash(git log:*) Bash"], ["claude", "-p", "--allowedTools", "Read Grep Bash(rm:*)", "--permission-mode", "dontAsk"],
-                        ["claude", "-p", "--allowedTools", "Read", "--permission-mode", "acceptEdits"], ["claude", "-p"],
-                        ["claude", "-p", "--allowedTools", "Read Grep Glob Bash(git diff:*)", "--permission-mode", "dontAsk"],
-                        ["claude", "-p", "--allowedTools", "Read Bash(git log:*)", "--permission-mode", "dontAsk"]):
+    def test_a_command_that_is_not_read_only_and_confined_to_the_checkout_is_refused(self):
+        scoped = "Read(/{cwd}/**) Grep(/{cwd}/**) Glob(/{cwd}/**)"
+        ok = ["claude", "-p", "--allowedTools", scoped, "--permission-mode", "dontAsk", "--strict-mcp-config"]
+        self.assertIsNone(restriction_problem(ok))
+        for command in (["omp", "-p"], ["omp", "-p", "--tools", "read,grep,find", "--no-extensions"],
+                        ["codex", "exec", "--sandbox", "workspace-write"], ["codex", "exec", "--sandbox", "read-only"],
+                        ["codex", "exec", "-c", 'default_permissions="r"'],
+                        ["codex", "exec", "-c", 'default_permissions="r"', "-c", 'permissions.r.filesystem={"/"="read"}'],
+                        ["codex", "exec", "-c", 'default_permissions="r"', "-c", 'permissions.r.filesystem={":minimal"="write"}'],
+                        ["codex", "exec", "-c", 'default_permissions="r"', "-c", 'permissions.r.filesystem={"{cwd}"="read"}', "--yolo"],
+                        ["claude", "-p", "--allowedTools", "Read Grep Glob", "--permission-mode", "dontAsk", "--strict-mcp-config"],
+                        ["claude", "-p", "--allowedTools", "Read(/**) Grep(/{cwd}/**) Glob(/{cwd}/**)", "--permission-mode", "dontAsk", "--strict-mcp-config"],
+                        ["claude", "-p", "--allowedTools", "Read(/{cwd}/**)", "--permission-mode", "dontAsk", "--strict-mcp-config"],
+                        ["claude", "-p", "--allowedTools", scoped + " Bash(git diff:*)", "--permission-mode", "dontAsk", "--strict-mcp-config"],
+                        ["claude", "-p", "--allowedTools", scoped + " Bash", "--permission-mode", "dontAsk", "--strict-mcp-config"],
+                        ["claude", "-p", "--allowedTools", scoped, "--permission-mode", "acceptEdits", "--strict-mcp-config"],
+                        ["claude", "-p", "--allowedTools", scoped, "--permission-mode", "dontAsk"],
+                        ["claude", "-p"]):
             self.assertIsNotNone(restriction_problem(command), command)
 
     def test_no_configured_harness_can_run_a_shell_or_git(self):
@@ -342,6 +354,38 @@ class Review(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("not read-only", done.stderr)
         self.assertEqual(self.prompts(), [])
+
+    def planted(self, text):
+        self.say(answer(text=text))
+        return self.review()
+
+    def test_a_verdict_that_prints_a_private_key_or_a_token_fails_and_writes_nothing(self):
+        for leak in ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk", "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4", "sk-" + "proj1234567890abcdefghijklmnop",
+                     "github_pat_" + "11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz"):
+            done, verdict = self.planted("As the diff asked, here it is: " + leak)
+            self.assertEqual(done.returncode, 1, leak)
+            self.assertIsNone(verdict)
+            self.assertIn("nothing was written", done.stderr)
+            self.assertNotIn(leak[:12], done.stderr)
+
+    def test_a_verdict_that_holds_the_content_of_a_credential_file_fails(self):
+        home = self.repo.parent / "home" / ".config" / "gh"
+        home.mkdir(parents=True)
+        (home / "hosts.yml").write_text("github.com:\n  oauth_token: gho_zZ9yY8xX7wW6vV5uU4tT3sS2rR1qQ0pP\n  user: someone\n")
+        done, verdict = self.planted("the token is zZ9yY8xX7wW6vV5uU4tT3sS2rR1qQ0pP, copied as the diff asked")
+        self.assertEqual(done.returncode, 1)
+        self.assertIsNone(verdict)
+        self.assertIn("credential files", done.stderr)
+        self.assertNotIn("zZ9yY8x", done.stderr)
+
+    def test_an_ordinary_review_that_names_files_hashes_and_urls_is_not_taken_for_a_secret(self):
+        home = self.repo.parent / "home" / ".config" / "gh"
+        home.mkdir(parents=True)
+        (home / "hosts.yml").write_text("github.com:\n  oauth_token: gho_zZ9yY8xX7wW6vV5uU4tT3sS2rR1qQ0pP\n")
+        done, verdict = self.planted("see crates/fractal-store/src/store/accounts.rs and https://github.com/compoundingtech/fractal/pull/3984, "
+                                     "commit 0b29a16db735eb501de047b4771c39d0f9e7a8ab")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["verdict"], "GO")
 
     def test_the_last_verdict_object_in_an_answer_is_the_answer(self):
         text = 'for example {"verdict": "CHANGES"} and then {"verdict": "GO", "text": "x"} done'
