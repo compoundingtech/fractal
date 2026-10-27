@@ -10,19 +10,25 @@ const entries = (slice: Slice<'conversation'>): TimelineEntry[] => [
 ]
 
 const checkSenders = (items: readonly TimelineEntry[]): void => {
+  // Scan every entry, but aggregate failures: huge's variants contain hundreds of thousands
+  // of entries, and per-entry matcher construction costs far more than the identity checks.
+  const violations: string[] = []
   for (const item of items) {
-    expect(item.id.startsWith('timeline-entry/')).toBe(true)
+    if (!item.id.startsWith('timeline-entry/')) violations.push(`${item.id}: invalid timeline entry ID`)
     if (item.type !== 'message' || !('message_id' in item.body)) continue
     const body = item.body
-    expect(typeof body.message_id).toBe('string')
-    if (typeof body.message_id !== 'string') continue
+    if (typeof body.message_id !== 'string') {
+      violations.push(`${item.id}: message_id must be a string`)
+      continue
+    }
     if (body.from == null && body.to == null) {
-      expect(body.message_id.startsWith('message/'), `${item.id}: native header must not become graph mail`).toBe(false)
+      if (body.message_id.startsWith('message/')) violations.push(`${item.id}: native header must not become graph mail`)
     } else if (body.message_id.startsWith('message/')) {
-      expect(typeof body.from).toBe('string')
-      expect(typeof body.to).toBe('string')
+      if (typeof body.from !== 'string') violations.push(`${item.id}: graph mail must name its sender`)
+      if (typeof body.to !== 'string') violations.push(`${item.id}: graph mail must name its recipient`)
     }
   }
+  expect(violations).toEqual([])
 }
 
 for (const entry of catalog) {
