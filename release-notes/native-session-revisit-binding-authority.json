@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Rebind a revisited native session within one incarnation, and accept an incarnation-bearing session binding only from the running incarnation",
+  "summary": "Refresh revisited native session bindings under running-incarnation authority, publishing launch-fenced native runtime authority before readiness",
   "replay": {
     "status": "none",
     "detail": "No startup replay, projection rebuild or claim rewrite. Existing harness.session-file claims stay as they are and are read as before. The change applies only to new binding reports: the lifetime idempotency key per (seat, incarnation, session) is gone, so A -> B -> A appends a fresh binding for A, and only a report identical to the current latest binding (same actor and fields) is deduplicated inside the writer transaction."
