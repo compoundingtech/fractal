@@ -514,6 +514,9 @@ impl Runtime for FractalRuntime {
     }
 
     fn forget_views(&self) {
+        // Pending work names the discarded projection generation. A recent reader or a
+        // live subscriber below can request a new-generation publication after invalidation.
+        self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
         self.presented_agents.forget();
         self.forget_reductions();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
