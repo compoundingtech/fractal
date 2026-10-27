@@ -17635,7 +17635,7 @@ mission "example/zero-run" state="ready" {
 
     fn remote_child_fixture(root: &Path) -> (AppState, String, String) {
         let (mut owner, parent_id, _) =
-            conversation_first_frame_fixture(root, "child-routing-owner", 1);
+            conversation_first_frame_fixture(root, "conversation-owner", 1);
         owner.native_session_home = None;
         let (_, resolved) = resolve_conversation(&owner, &parent_id).unwrap();
         let parent = conversation_blocks::source(&owner, &parent_id, resolved.managed.as_ref()).unwrap();
@@ -17656,7 +17656,7 @@ mission "example/zero-run" state="ready" {
         let (owner, _, child_id) = remote_child_fixture(owner_root.path());
         let gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
         gateway.store.import_replication(
-            "child-routing-owner", &owner.store.export_replication(0).unwrap(),
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
         ).unwrap();
         let (resolved_id, resolved) = resolve_conversation(&gateway, &child_id).unwrap();
         assert_eq!(resolved_id, child_id);
@@ -17681,7 +17681,7 @@ mission "example/zero-run" state="ready" {
         let (owner, parent_id, child_id) = remote_child_fixture(owner_root.path());
         let mut gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
         gateway.store.import_replication(
-            "child-routing-owner", &owner.store.export_replication(0).unwrap(),
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
         ).unwrap();
         let owner_socket = owner_root.path().join("owner-st3.sock");
         let served_owner = owner_socket.clone();
@@ -17706,7 +17706,7 @@ mission "example/zero-run" state="ready" {
             open_conversation_subscription(gateway.clone(), session.clone(), request, permits).await.unwrap();
         assert_eq!(resolved_id, child_id);
         assert!(resolved.as_ref().unwrap().managed.is_none());
-        assert_eq!(remote.as_deref(), Some("host/child-routing-owner"));
+        assert_eq!(remote.as_deref(), Some("host/conversation-owner"));
         let (start, page, _) = conversation_open_value(
             &gateway, &session, &resolved_id, remote.as_deref(), resolved, 20,
         ).await.unwrap();
@@ -17728,13 +17728,20 @@ mission "example/zero-run" state="ready" {
         assert_eq!(changes["session_id"], child_id);
         assert!(!changes.to_string().contains("entry 0 "), "{changes}");
         let page = fractal_api_core::api::client_reads::client_sessions_detail(
-            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session),
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session.clone()),
             AxumPath(format!("{}/timeline", child_id.trim_start_matches("session/"))),
             Query(ClientListQuery::default()),
         ).await.unwrap().0;
         assert_eq!(page["session_id"], child_id);
         assert!(page.to_string().contains("child only"), "{page}");
         assert!(!page.to_string().contains("entry 0 "), "{page}");
+        let detail = fractal_api_core::api::client_reads::client_sessions_detail(
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session),
+            AxumPath(child_id.trim_start_matches("session/").to_owned()),
+            Query(ClientListQuery::default()),
+        ).await.unwrap().0;
+        assert_eq!(detail["id"], child_id);
+        assert_eq!(detail["managed"], false);
     }
 
     #[tokio::test]

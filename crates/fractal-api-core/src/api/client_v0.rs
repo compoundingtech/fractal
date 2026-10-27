@@ -3210,12 +3210,12 @@ pub fn timeline_first_page(
                 }
                 conversation_blocks::read(&external, session, &session_id)?
             }
-            _ if crate::subagent_sessions::child_parts(session_id).is_some() => {
-                let child = conversation_blocks::source(state, session_id, None)?;
+            _ if crate::subagent_sessions::child_parts(&session_id).is_some() => {
+                let child = conversation_blocks::source(state, &session_id, None)?;
                 if child.driver != crate::external_sessions::ExternalDriver::OpenCode {
-                    return native_slice_page(state, snapshot, session, session_id, query, &child);
+                    return native_slice_page(state, snapshot, session, &session_id, query, &child);
                 }
-                conversation_blocks::read(&child, session, session_id)?
+                conversation_blocks::read(&child, session, &session_id)?
             }
             other => external_conversation_items(other, &session_id)?,
         };
