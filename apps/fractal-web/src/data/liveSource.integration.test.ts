@@ -10,7 +10,7 @@ import type {
   TerminalScreen,
 } from '@fractal/client'
 import type { AttachmentSendRequest, MessageSendAction } from './source.ts'
-import { Effect, Layer } from 'effect'
+import { Effect, Layer, SubscriptionRef } from 'effect'
 import * as Option from 'effect/Option'
 import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, vi } from 'vitest'
@@ -28,7 +28,7 @@ const snapshot: Snapshot = {
   store_index: 1,
 }
 
-/** st's action digest: the whole request but its fence, with object keys in a stable order. */
+/** Fractal's action digest: the whole request but its fence, with object keys in a stable order. */
 const actionDigest = ({ fence: _fence, ...request }: { readonly fence?: unknown }): string =>
   JSON.stringify(request, (_key, value: unknown) =>
     value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -58,13 +58,16 @@ class Gateway {
   terminalReplacement = ''
   replaceOnAttach = false
   terminalAttachRefusal: string | undefined
+  readonly rawAttachments: Array<{ readonly path: string; readonly body: unknown }> = []
   readonly terminalInputs: unknown[] = []
   terminalAttachRetryable = false
   terminalAttachStatus = 409
   terminalAttachTransportFailure = false
   runtimesWithoutTerminal = new Set<string>()
   messageGrant: 'granted' | 'ungranted' = 'granted'
+  attachmentUploadGrant: 'granted' | 'ungranted' = 'ungranted'
   terminalInputGrant: 'granted' | 'ungranted' = 'granted'
+  terminalControlGrant: 'granted' | 'ungranted' = 'ungranted'
   transportFailure = false
   capabilityGate: Promise<void> | undefined
   capabilityFailure = false
@@ -77,11 +80,11 @@ class Gateway {
   rejectSend = false
   currentSnapshot: Snapshot | undefined = snapshot
   staleSendFence = false
-  /** Take the send, then answer st's 503 `message-send-unconfirmed` instead of its result. */
+  /** Take the send, then answer Fractal's 503 `message-send-unconfirmed` instead of its result. */
   unconfirmSend = false
   capabilityReads = 0
   readonly messageActions: MessageSendAction[] = []
-  /** st's durable answer per idempotency key, with the digest of the request that earned it. */
+  /** Fractal's durable answer per idempotency key, with the digest of the request that earned it. */
   private readonly sendReceipts = new Map<string, { readonly digest: string; readonly value: unknown }>()
   /** Resolves once the gateway has derived the send action's message identity. */
   readonly nextAction = (count = 1) =>
@@ -118,7 +121,9 @@ class Gateway {
         capabilities: [
           { id: 'work.done', state: 'granted', version: 0 },
           { id: 'message.send', state: this.messageGrant, version: 0 },
+          { id: 'control.messages', state: this.attachmentUploadGrant, version: 0 },
           { id: 'terminal.input', state: this.terminalInputGrant, version: 0 },
+          { id: 'terminal.control', state: this.terminalControlGrant, version: 0 },
         ],
         event_cursor: 'cursor/current',
         oldest_event_cursor: 'cursor/oldest',
@@ -221,7 +226,7 @@ class Gateway {
           snapshot_id: snapshot.id,
         }
         this.sendReceipts.set(action.idempotency_key, { digest: actionDigest(action), value })
-        // The send completes, but st could not confirm it within its deadline.
+        // The send completes, but Fractal could not confirm it within its deadline.
         if (this.unconfirmSend) return Response.json({
           api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
           code: 'message-send-unconfirmed', message: 'st could not confirm the send in time',
@@ -261,6 +266,19 @@ class Gateway {
       } else {
         throw new Error(`Unexpected action ${action.type}`)
       }
+    } else if (path.endsWith('/raw-attachments') && typeof init?.body === 'string') {
+      const body = JSON.parse(init.body) as { readonly runtime_incarnation: string; readonly mode: 'attach' | 'peek' }
+      this.rawAttachments.push({ path, body })
+      // A PEEK needs only `terminal.read`; limited pairings on main lack `terminal.control` for ATTACH.
+      if (body.mode === 'peek') return Response.json({
+        api_version: 'st3.client.v0', snapshot,
+        value: { terminal_id: 'terminal/example', runtime_incarnation: body.runtime_incarnation, owner_host_id: 'host/example', mode: 'peek', stream_capability: 'peek-capability' },
+      })
+      return Response.json({
+        api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
+        code: 'forbidden', message: 'This device may not control terminals', retryable: false,
+        request_id: 'request/raw-attachment', details: {},
+      }, { status: 403 })
     } else if (path === '/v1/client/usage') {
       value = { since_ms: 0, until_ms: 1000, rows: [] }
     } else {
@@ -1315,6 +1333,104 @@ describe('terminal dependent-read authority', () => {
   )
 })
 
+describe('raw terminal stream', () => {
+  it.live('requests a fresh raw attachment through the gateway and reports a refusal for the read-only fallback', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        const session = yield* live.source.terminalRaw!.open({
+          target: { terminalId: 'terminal/example', incarnation: 'incarnation-example' },
+          mode: 'attach',
+          size: { cols: 80, rows: 24 },
+          onOutput: () => {},
+          signal: new AbortController().signal,
+          isForegroundSelected: () => true,
+        })
+        yield* settle
+        expect(gateway.rawAttachments).toEqual([{
+          path: '/v1/client/terminals/example/raw-attachments',
+          body: { runtime_incarnation: 'incarnation-example', mode: 'attach' },
+        }])
+        const state = yield* SubscriptionRef.get(session.state)
+        expect(state).toMatchObject({ _tag: 'Refused', status: 403, code: 'forbidden' })
+        expect(session.send(new Uint8Array([3]))).toBe(false)
+      }).pipe(Effect.scoped),
+    ),
+  )
+
+  it.live('requests a view-only PEEK capability through the same gateway and renews its selected-use lease while foreground', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        const sockets: Array<{ readonly url: string; readonly sent: unknown[]; onopen: ((event: unknown) => void) | null }> = []
+        vi.stubGlobal('WebSocket', class {
+          binaryType = ''
+          onopen: ((event: unknown) => void) | null = null
+          onmessage = null
+          onclose = null
+          onerror = null
+          readonly sent: unknown[] = []
+          constructor(readonly url: string) {
+            sockets.push(this)
+          }
+          send(data: unknown) {
+            this.sent.push(data)
+          }
+          close() {}
+        })
+        const session = yield* live.source.terminalRaw!.open({
+          target: { terminalId: 'terminal/example', incarnation: 'incarnation-example' },
+          mode: 'peek',
+          size: { cols: 80, rows: 24 },
+          onOutput: () => {},
+          signal: new AbortController().signal,
+          isForegroundSelected: () => true,
+        })
+        yield* settle
+        expect(session.mode).toBe('peek')
+        expect(gateway.rawAttachments).toEqual([{
+          path: '/v1/client/terminals/example/raw-attachments',
+          body: { runtime_incarnation: 'incarnation-example', mode: 'peek' },
+        }])
+        expect(sockets).toHaveLength(1)
+        expect(sockets[0]!.url).toMatch(/\/v1\/client\/terminals\/example\/raw-stream\?incarnation=incarnation-example&mode=peek$/)
+        // The source forwards the pane's foreground gate: the open PEEK renews its lease as text, never as a PTY frame.
+        sockets[0]!.onopen?.({})
+        expect(sockets[0]!.sent.filter((data) => typeof data === 'string')).toEqual([JSON.stringify({ type: 'selected-use', sequence: 1 })])
+      }).pipe(Effect.scoped),
+    ),
+  )
+
+  it.live('publishes terminal.input and terminal.control separately without dropping attachment grants', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        gateway.attachmentUploadGrant = 'granted'
+        live.registry.mount(live.source.grants)
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({
+          attachmentUpload: 'granted',
+          terminalInput: 'granted',
+          terminalControl: 'ungranted',
+        })
+      }),
+    ),
+  )
+
+  it.live('publishes terminal.control when the device holds it', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        gateway.terminalControlGrant = 'granted'
+        gateway.terminalInputGrant = 'ungranted'
+        live.registry.mount(live.source.grants)
+        yield* settle
+        expect(live.registry.get(live.source.grants)).toMatchObject({
+          attachmentUpload: 'ungranted',
+          terminalInput: 'ungranted',
+          terminalControl: 'granted',
+        })
+      }),
+    ),
+  )
+})
+
 describe('terminal input', () => {
   it.live('posts typed keys as fenced terminal.input actions bound to the observed incarnation', () =>
     withGateway((live, gateway) =>
@@ -1544,7 +1660,7 @@ describe('optimistic conversation sends', () => {
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
         })
-        // st refuses the rebuilt request itself: the same key with a different action.
+        // Fractal refuses the rebuilt request itself: the same key with a different action.
         const conflict = yield* Effect.promise(() => gateway.fetch('http://gateway.example/v1/client/actions', {
           method: 'POST',
           body: JSON.stringify({ ...first, id: rebuilt.id, parameters: rebuilt.parameters }),

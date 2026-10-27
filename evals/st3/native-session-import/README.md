@@ -1,6 +1,6 @@
 # Native session import
 
-This black-box eval uses a dedicated `PTY_ROOT` and invokes `pty` directly, outside the st
+This black-box eval uses a dedicated `PTY_ROOT` and invokes `pty` directly, outside the Fractal
 runtime. For each supported interactive driver—Codex, Claude, Pi, OMP, and OpenCode—it:
 
 1. starts a fresh raw interactive harness and creates native persisted history;

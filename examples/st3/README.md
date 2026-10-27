@@ -1,7 +1,7 @@
-# st examples
+# Fractal examples
 
 Each KDL file here is a complete, runnable example. Its header comment says what it shows and the
-commands that run it. Every file passes the normative st parser in the test suite:
+commands that run it. Every file passes the normative Fractal parser in the test suite:
 
 ```sh
 cargo test -p fractal --test integration examples::
@@ -48,7 +48,7 @@ Every harness file declares the same `agent/example/worker` seat, and every miss
 assigns work to it, so the missions run with whichever harness you apply. The planner, reviewer,
 and chief seat files declare other seats, named for their roles. omp seats run best on
 `openai-codex/gpt-6-astra` (see the comment in [`seats/omp.kdl`](seats/omp.kdl));
-[Running st with omp](../../docs/st3/omp.md) lists the setup.
+[Running Fractal with omp](../../docs/st3/omp.md) lists the setup.
 
 ### Give a seat work and order it
 
@@ -61,7 +61,7 @@ and chief seat files declare other seats, named for their roles. omp seats run b
 | Start a fresh harness session for one step or every step a seat claims | [`fresh-context.kdl`](fresh-context.kdl) |
 | Run nested jobs one after another | [`queued-nested-work.kdl`](queued-nested-work.kdl) |
 | Delegate a step to an inline child mission with its own agent | [`nested-mission.kdl`](nested-mission.kdl) |
-| Fan work out to parallel mission-scoped seats, each in a worktree that st creates and removes (`checkout`) | [`fan-out.kdl`](fan-out.kdl) |
+| Fan work out to parallel mission-scoped seats, each in a worktree that Fractal creates and removes (`checkout`) | [`fan-out.kdl`](fan-out.kdl) |
 | Review independently, keep remediation reachable, and give one agent its own constraint | [`review-remediation.kdl`](review-remediation.kdl) |
 
 ### Start missions from events and time
@@ -109,7 +109,7 @@ mission's gates before you publish it with `st missions check FILE`.
 Gates run through `sh -c` with the daemon's login environment and the command recorder first on `PATH`:
 
 - Call `git` by name so its calls appear in the recorder log.
-- `${NAME}` is an st variable; write shell variables as plain `$NAME`, or `$${NAME}` for braces.
+- `${NAME}` is a Fractal variable; write shell variables as plain `$NAME`, or `$${NAME}` for braces.
 - A gate on files checks the committed, pushed tree, not an agent's working tree.
 - An exec gate exits 0 to pass and 1 for not yet; any other status breaks it and holds its step
   for a revision. Not yet checks again on its own.
@@ -128,6 +128,6 @@ the exact subcommand. Keep this failure-first shape when editing them; turning t
 field-by-field reference pages would erase their purpose.
 
 Mission goals and constraints describe the work. The skill that `st skill` prints describes how
-every agent uses st; do not copy it into a mission constraint. A harness takes no prompt.
+every agent uses Fractal; do not copy it into a mission constraint. A harness takes no prompt.
 
 Keep durable seat and mission KDL in a Git repository, even when a planner authored it.

@@ -708,6 +708,7 @@ mod tests {
             crate::external_sessions::TimelineOrder::Sequence,
             None,
             10,
+            true,
         )
         .unwrap();
         let item = page
@@ -2217,6 +2218,7 @@ mod tests {
                     crate::external_sessions::TimelineOrder::Sequence,
                     None,
                     10,
+                    true,
                 )
             })
         };

@@ -69,13 +69,13 @@ with tempfile.TemporaryDirectory() as scratch:
     output.unlink()
     assert run(one, github_output=False) == 'nextest flaky: 1\n'
     assert not output.exists() and artifact.exists()
-    # st-test's linux-gate (CI_TEST_FLAKY): the tests' names for the note's flaky_tests, one per line, an empty file for none.
+    # fractal-test's linux-gate (CI_TEST_FLAKY): the tests' names for the note's flaky_tests, one per line, an empty file for none.
     names = scratch / 'flaky-names.txt'
     run(several + ['   FLAKY 2/3 [  11.707s] (2139/9040) fractal::integration ui_open::a_seat'], names=names)
     assert names.read_text().splitlines() == ['fractal::integration ui_open::a_seat', 'garden a', 'garden b', 'garden c'], names.read_text()
     run(log('2 tests run: 2 passed, 0 skipped'), names=names)
     assert names.read_text() == '', 'none: an empty file'
-print('passed: step output, local runs, the artifact file and the names for st-test')
+print('passed: step output, local runs, the artifact file and the names for fractal-test')
 
 # Workspace CI uploads the count from the four test lanes only, named per lane, kept a day.
 workflow = (ROOT / '.github/workflows/fleet.yml').read_text()

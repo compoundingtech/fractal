@@ -1,4 +1,4 @@
-// What a new shell is called, as stui names one (crates/fractal-tui/src/ui/screens.rs random_name), and
+// What a new shell is called, as the Fractal terminal UI names one (crates/fractal-tui/src/ui/screens.rs random_name), and
 // how a checkout reads. The new-agent form is gone from both (Nathan, 2026-10-07).
 
 import type { AgentCheckout } from '../../clients/typescript/fractal-client';
