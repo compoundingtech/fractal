@@ -2199,6 +2199,23 @@ fn codex_launch_outcome(outcome: Result<()>, ready: bool) -> Result<()> {
     }
 }
 
+fn codex_completion_ready(ready: bool, state_dir: &Path, prior: Option<&Vec<u8>>) -> bool {
+    ready || codex_bound_thread(state_dir, prior).is_some()
+}
+
+#[test]
+fn codex_bind_then_immediate_clean_exit_before_tick_is_not_launch_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("binding.json");
+    let prior = br#"{"threadId":"previous"}"#.to_vec();
+    fs::write(&path, &prior).unwrap();
+    assert!(!codex_completion_ready(false, root.path(), Some(&prior)));
+    // The binding lands and the provider returns before the timer can set ready.
+    fs::write(&path, br#"{"threadId":"current","runtimeIncarnation":"new"}"#).unwrap();
+    assert!(codex_launch_outcome(Ok(()),
+        codex_completion_ready(false, root.path(), Some(&prior))).is_ok());
+}
+
 #[test]
 fn codex_launch_clean_exit_before_ready_is_a_failure() {
     let error = codex_launch_outcome(Ok(()), false).unwrap_err();
@@ -2353,10 +2370,15 @@ async fn drive_codex_native(
                     completion_announced = false;
                     continue;
                 }
+                // A fast session can bind and exit between timer ticks. Its durable
+                // current-attempt binding proves readiness even if no tick published it.
+                loop_state.ready = codex_completion_ready(
+                    loop_state.ready, &state_dir, prior_binding.as_ref(),
+                );
                 // A resume that ended before its thread bound was refused by Codex itself, such
                 // as a thread with no rollout. The wrapper can end cleanly and leave the reason in
                 // its harness record. The refusal goes first, so nothing after it can delay it.
-                if reported_session.is_none() && fractal_daemon::native_resume::requested().is_some() {
+                if !loop_state.ready && reported_session.is_none() && fractal_daemon::native_resume::requested().is_some() {
                     let reason = match &outcome {
                         Err(error) => format!("{error:#}"),
                         Ok(()) => fractal_drivers::harness_state::read(&harness_state_path, None)
@@ -2368,7 +2390,7 @@ async fn drive_codex_native(
                         reason: reason.chars().take(2_000).collect(),
                     };
                     let _ = refuse_native_resume(client, subject, &incarnation, "codex", refusal).await;
-                } else if reported_session.is_none()
+                } else if !loop_state.ready && reported_session.is_none()
                     && let Some(thread) = &continued
                 {
                     // The next relaunch starts a new thread instead of trying this one again.

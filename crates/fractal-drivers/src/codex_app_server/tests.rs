@@ -16,6 +16,22 @@ fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
 }
 
 #[test]
+fn launch_diagnostic_bounds_lossy_utf8_at_a_character_boundary() {
+    let multibyte = "é".repeat(6_000);
+    let tail = diagnostic_output_tail(multibyte.as_bytes());
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.ends_with('é'));
+    assert!(tail.chars().all(|c| c == 'é'));
+
+    let mut invalid = vec![0xff; 8 * 1024];
+    invalid.extend_from_slice("final é".as_bytes());
+    let tail = diagnostic_output_tail(&invalid);
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.contains('\u{fffd}'));
+    assert!(tail.ends_with("final é"));
+}
+
+#[test]
 fn protocol_schema_gate_accepts_codex_0164_error_union() {
     let mut schemas = compatible_protocol_schemas();
     let error = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo").unwrap();
