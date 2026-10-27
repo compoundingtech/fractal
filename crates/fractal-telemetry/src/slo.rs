@@ -70,11 +70,20 @@ pub struct Transaction {
     pub max_ms: u64,
 }
 
+/// The member's CPU: its daemon process and every replication worker process beside it, over
+/// closed UTC minutes. See `smallclaims::windows::cpu_minutes` for what makes a minute idle.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cpu {
     pub about: String,
+    /// The most cores the member may use over the hour.
     pub max_cores: f64,
+    /// The most cores the member may use over the hour's idle minutes, on average.
+    pub idle_max_cores: f64,
+    /// The idle minutes an hour needs before the idle target judges it; with fewer it is unknown.
+    pub idle_min_minutes: u64,
+    /// The bound daemon_load holds the daemon to under its synthetic load in CI.
+    pub load_max_cores: f64,
 }
 
 /// Projection divergences, counted fleet-wide from their open faults. A projection is a pure
@@ -201,9 +210,17 @@ pub fn parse(text: &str) -> Result<Targets> {
         "the statement targets are inconsistent"
     );
     ensure!(targets.transaction.max_ms > 0, "the transaction target is zero");
+    let cpu = &targets.cpu;
     ensure!(
-        targets.cpu.max_cores.is_finite() && targets.cpu.max_cores > 0.0,
-        "the CPU target is not a positive number of cores"
+        [cpu.max_cores, cpu.idle_max_cores, cpu.load_max_cores]
+            .iter()
+            .all(|cores| cores.is_finite() && *cores > 0.0),
+        "the CPU targets are not positive numbers of cores"
+    );
+    ensure!(cpu.idle_max_cores <= cpu.max_cores, "the idle CPU target is above the member's");
+    ensure!(
+        (1..=smallclaims::windows::cpu_minutes::MINUTES).contains(&cpu.idle_min_minutes),
+        "the idle CPU target's minimum is not between 1 and 60 minutes"
     );
     ensure!(
         [targets.database.max_live_gb, targets.database.max_growth_mb_per_day]
@@ -398,7 +415,8 @@ pub fn database_size() -> Option<DatabaseSize> {
     DATABASE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
-/// The store's windows and the CPU's, and the store's size, with their targets.
+/// The store's windows and the member's CPU minutes (`CpuMinutes::report`), and the store's size,
+/// with their targets.
 pub fn store_report(cpu: Value) -> Vec<Value> {
     let targets = targets();
     let series = |work| smallclaims::windows::store_series(work).snapshot(std::time::Instant::now());
@@ -419,12 +437,7 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "writer_hold": series(StoreWork::WriterHold),
         }),
         writer_hold_row(),
-        json!({
-            "name": "cpu",
-            "about": targets.cpu.about,
-            "max_cores": targets.cpu.max_cores,
-            "windows": cpu,
-        }),
+        cpu_row(cpu),
         json!({
             "name": "database",
             "about": targets.database.about,
@@ -433,6 +446,64 @@ pub fn store_report(cpu: Value) -> Vec<Value> {
             "size": database_size().map_or(Value::Null, |size| json!(size)),
         }),
     ]
+}
+
+/// The CPU row: the targets beside the minutes' `windows`, `minutes` and `idle`.
+fn cpu_row(minutes: Value) -> Value {
+    let targets = targets();
+    let mut row = json!({
+        "name": "cpu",
+        "about": targets.cpu.about,
+        "max_cores": targets.cpu.max_cores,
+        "idle_max_cores": targets.cpu.idle_max_cores,
+        "idle_min_minutes": targets.cpu.idle_min_minutes,
+    });
+    if let (Value::Object(row), Value::Object(minutes)) = (&mut row, minutes) {
+        row.extend(minutes);
+    }
+    row
+}
+
+/// How the member's CPU fares against its two targets; a `None` is unknown, never met.
+#[derive(Debug, PartialEq)]
+pub struct CpuVerdict {
+    /// Cores over the hour, when every one of its minutes is held with its CPU known.
+    pub hour: Option<f64>,
+    pub hour_met: Option<bool>,
+    /// Closed minutes the hour holds, of 60.
+    pub minutes: u64,
+    pub idle_minutes: u64,
+    /// Cores over the idle minutes, when the hour is whole and holds enough of them.
+    pub idle: Option<f64>,
+    pub idle_met: Option<bool>,
+}
+
+/// Judge the CPU row: the hour against `max_cores`; the idle minutes against `idle_max_cores`
+/// only when the hour is whole (the daemon has been up all of it) and holds at least
+/// `idle_min_minutes` of them.
+pub fn cpu_verdict(row: &Value) -> CpuVerdict {
+    let max = row["max_cores"].as_f64().unwrap_or_default();
+    let idle_max = row["idle_max_cores"].as_f64().unwrap_or_default();
+    let needed = row["idle_min_minutes"].as_u64().unwrap_or(u64::MAX);
+    let hour = row["windows"]["1h"]["cores"].as_f64();
+    let minutes = row["minutes"].as_u64().unwrap_or_default();
+    let idle_minutes = row["idle"]["minutes"].as_u64().unwrap_or_default();
+    let idle = row["idle"]["cores"]
+        .as_f64()
+        .filter(|_| minutes >= smallclaims::windows::cpu_minutes::MINUTES && idle_minutes >= needed);
+    CpuVerdict {
+        hour,
+        hour_met: hour.map(|cores| cores <= max),
+        minutes,
+        idle_minutes,
+        idle,
+        idle_met: idle.map(|cores| cores <= idle_max),
+    }
+}
+
+/// `n` cores, as a target or a reading says it.
+pub fn cores(n: f64) -> String {
+    format!("{n} core{}", if n <= 1.0 { "" } else { "s" })
 }
 
 /// Open read snapshots reported beside the writer's holds.
@@ -592,22 +663,7 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
                     ));
                 }
             }
-            "cpu" => {
-                let max = target["max_cores"].as_f64().unwrap_or_default();
-                let cores = |w: &str| target["windows"][w]["cores"].as_f64().unwrap_or_default();
-                lines.push((
-                    format!("slo/{name}"),
-                    status(WINDOWS.iter().all(|w| cores(w) <= max)),
-                    format!(
-                        "≤ {max} cores under load, near zero idle: {}",
-                        WINDOWS
-                            .iter()
-                            .map(|w| format!("{w} {:.2} cores", cores(w)))
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    ),
-                ));
-            }
+            "cpu" => lines.extend(cpu_lines(target)),
             "database" => lines.push(database_line(target)),
             "writer-hold" => lines.push(writer_hold_line(target)),
             _ => {
@@ -651,6 +707,51 @@ pub fn doctor_lines(report: &Value) -> Vec<(String, &'static str, String)> {
         ));
     }
     lines
+}
+
+/// `st doctor`'s two CPU lines: the member over the hour, and over the hour's idle minutes. Each
+/// says PASS, MISS or UNKNOWN; an unknown one is `info`, never `pass`.
+fn cpu_lines(target: &Value) -> [(String, &'static str, String); 2] {
+    let verdict = cpu_verdict(target);
+    let word = |met: Option<bool>| match met {
+        Some(true) => "PASS",
+        Some(false) => "MISS",
+        None => "UNKNOWN",
+    };
+    let status = |met: Option<bool>| if met == Some(true) { "pass" } else { "info" };
+    let max = target["max_cores"].as_f64().unwrap_or_default();
+    let windows = WINDOWS
+        .iter()
+        .map(|w| {
+            let window = &target["windows"][*w];
+            window["cores"].as_f64().map_or_else(
+                || format!("{w} unknown ({} minutes known)", window["minutes"].as_u64().unwrap_or_default()),
+                |cores| format!("{w} {cores:.2} cores"),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let idle_max = target["idle_max_cores"].as_f64().unwrap_or_default();
+    let needed = target["idle_min_minutes"].as_u64().unwrap_or_default();
+    let idle = match verdict.idle {
+        Some(cores) => format!("{cores:.2} cores over {} idle minutes", verdict.idle_minutes),
+        None if verdict.minutes < smallclaims::windows::cpu_minutes::MINUTES => {
+            format!("the hour holds {} of 60 minutes, {} idle", verdict.minutes, verdict.idle_minutes)
+        }
+        None => format!("{} idle minutes, fewer than {needed}", verdict.idle_minutes),
+    };
+    [
+        (
+            "slo/cpu".into(),
+            status(verdict.hour_met),
+            format!("{}: ≤ {} over the hour, daemon and replication workers: {windows}", word(verdict.hour_met), cores(max)),
+        ),
+        (
+            "slo/cpu/idle".into(),
+            status(verdict.idle_met),
+            format!("{}: ≤ {} over the hour's idle minutes: {idle}", word(verdict.idle_met), cores(idle_max)),
+        ),
+    ]
 }
 
 /// `st doctor`'s line for open projection divergences: met while there are no more open than the
@@ -744,7 +845,10 @@ mod tests {
         assert_eq!(attach.p99_ms, 200);
         assert_eq!((targets.statement.p99_ms, targets.statement.max_ms), (10, 100));
         assert_eq!(targets.transaction.max_ms, 300);
-        assert_eq!(targets.cpu.max_cores, 2.0);
+        assert_eq!(
+            (targets.cpu.max_cores, targets.cpu.idle_max_cores, targets.cpu.idle_min_minutes, targets.cpu.load_max_cores),
+            (1.0, 0.5, 10, 2.0)
+        );
         assert_eq!((targets.database.max_live_gb, targets.database.max_growth_mb_per_day), (8.0, 300.0));
         assert!(targets.for_path("GET /v1/health").is_none());
         let durations = targets
@@ -867,7 +971,21 @@ mod tests {
     fn a_broken_targets_file_is_refused_not_defaulted() {
         let without_cpu = SOURCE.split("[cpu]").next().unwrap();
         assert!(parse(without_cpu).is_err());
-        assert!(parse(&SOURCE.replace("max_cores = 2.0", "max_cores = -1.0")).is_err());
+        for (from, to) in [
+            ("\nmax_cores = 1.0", "\nmax_cores = -1.0"),
+            ("\nmax_cores = 1.0", "\nmax_cores = 0.4"),
+            ("idle_max_cores = 0.5", "idle_max_cores = 0.0"),
+            ("idle_max_cores = 0.5", "idle_max_cores = nan"),
+            ("load_max_cores = 2.0", "load_max_cores = inf"),
+            ("idle_min_minutes = 10", "idle_min_minutes = 0"),
+            ("idle_min_minutes = 10", "idle_min_minutes = 61"),
+            ("idle_min_minutes = 10", "idle_min_minutes = 10.5"),
+            ("load_max_cores = 2.0\n", ""),
+            ("idle_max_cores = 0.5\n", ""),
+        ] {
+            assert!(SOURCE.contains(from), "{from}");
+            assert!(parse(&SOURCE.replace(from, to)).is_err(), "{to}");
+        }
         assert!(parse(SOURCE.split("[database]").next().unwrap()).is_err());
         assert!(parse(&SOURCE.replace("max_live_gb = 8.0", "max_live_gb = 0.0")).is_err());
         assert!(parse(&SOURCE.replace("p99_ms = 10\n", "p99_ms = 10\ntypo = 1\n")).is_err());
@@ -920,6 +1038,44 @@ mod tests {
         assert!(verdict(&windows(0), false).met);
         assert!(verdict(&windows(0), true).message.contains("1m p99 2 ms, max 3 ms, 0.0% over of 100"));
     }
+    #[test]
+    fn the_cpu_lines_say_pass_miss_or_unknown_for_the_hour_and_its_idle_minutes() {
+        let row = |hour: Option<f64>, minutes: u64, idle_minutes: u64, idle: Option<f64>| {
+            cpu_row(json!({
+                "windows": {"1m": {"cores": 0.25, "minutes": 1}, "5m": {"cores": 0.2, "minutes": 5},
+                    "1h": {"cores": hour, "minutes": minutes}},
+                "minutes": minutes,
+                "idle": {"minutes": idle_minutes, "cores": idle, "not_idle": {}},
+            }))
+        };
+        let [hour, idle] = cpu_lines(&row(Some(0.4), 60, 24, Some(0.12)));
+        assert_eq!((hour.0.as_str(), hour.1), ("slo/cpu", "pass"));
+        assert_eq!(
+            hour.2,
+            "PASS: ≤ 1 core over the hour, daemon and replication workers: 1m 0.25 cores · 5m 0.20 cores · 1h 0.40 cores"
+        );
+        assert_eq!((idle.0.as_str(), idle.1), ("slo/cpu/idle", "pass"));
+        assert_eq!(idle.2, "PASS: ≤ 0.5 core over the hour's idle minutes: 0.12 cores over 24 idle minutes");
+        let [hour, idle] = cpu_lines(&row(Some(1.3), 60, 24, Some(0.7)));
+        assert_eq!((hour.1, idle.1), ("info", "info"));
+        assert!(hour.2.starts_with("MISS: ") && idle.2.starts_with("MISS: "), "{hour:?} {idle:?}");
+        // Too few idle minutes judge nothing, however low their CPU.
+        let [_, idle] = cpu_lines(&row(Some(0.4), 60, 9, Some(0.01)));
+        assert_eq!(idle.1, "info");
+        assert_eq!(idle.2, "UNKNOWN: ≤ 0.5 core over the hour's idle minutes: 9 idle minutes, fewer than 10");
+        // A daemon up less than the hour knows neither.
+        let [hour, idle] = cpu_lines(&row(None, 42, 30, Some(0.01)));
+        assert_eq!((hour.1, idle.1), ("info", "info"));
+        assert!(hour.2.starts_with("UNKNOWN: ") && hour.2.ends_with("1h unknown (42 minutes known)"), "{}", hour.2);
+        assert_eq!(idle.2, "UNKNOWN: ≤ 0.5 core over the hour's idle minutes: the hour holds 42 of 60 minutes, 30 idle");
+        assert_eq!(
+            cpu_verdict(&row(None, 42, 30, Some(0.01))),
+            CpuVerdict { hour: None, hour_met: None, minutes: 42, idle_minutes: 30, idle: None, idle_met: None }
+        );
+        let lines = doctor_lines(&json!({"targets": [row(Some(0.4), 60, 24, Some(0.12))], "paths": []}));
+        assert_eq!(lines.iter().map(|line| line.0.as_str()).collect::<Vec<_>>(), ["slo/cpu", "slo/cpu/idle"]);
+    }
+
     #[test]
     fn client_share_doctor_uses_declared_minimum_and_empty_population_is_info() {
         let window=json!({"count":10000,"foreground_ms":10000,"live_ms":9500,"over_target":500,"over_target_share":0.05});

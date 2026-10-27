@@ -14,7 +14,7 @@
 
 [[latency]]
 name = "person-read"
-about = "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, documents"
+about = "Reads a person waits on: agents list, missions list, open a conversation, conversation changes, work list, Now, what a run waits on, documents"
 p99_ms = 300
 # The same reads through this daemon from another machine that owns them.
 remote_p99_ms = 300
@@ -40,6 +40,8 @@ paths = [
   "GET /v1/client/now",
   "GET /v1/client/attention",
   "stream attention",
+  # Why a run is stuck
+  "GET /v1/mission-runs/{run}/waiting-on",
   # Documents
   "GET /v1/client/documents/content",
   "GET /v1/documents",
@@ -102,9 +104,18 @@ max_ms = 100
 about = "Any transaction, read or write, and any hold of the store's writer"
 max_ms = 300
 
+# The member's CPU is its daemon process and every replication worker process beside it, all
+# their work included (maintenance, heartbeat, anti-entropy, replication), over closed UTC
+# minutes. An idle minute is one known to be idle: no seat on this member working, no daemon
+# start, deploy or replication catch-up in it, and every figure known. An hour with fewer than
+# `idle_min_minutes` idle minutes, or that the daemon was not up for all of, is unknown.
 [cpu]
-about = "Daemon CPU: near zero when idle, at most 2 cores under daemon_load"
-max_cores = 2.0
+about = "Member CPU, the daemon and its replication workers: at most 1 core over the hour, and 0.5 core over the hour's idle minutes"
+max_cores = 1.0
+idle_max_cores = 0.5
+idle_min_minutes = 10
+# daemon_load's bound in CI under its synthetic load, which is not the production target.
+load_max_cores = 2.0
 
 [stalled]
 about = "Runs with a stalled step: held, no progress past the run's stalled-after and 30 minutes after its holder's fault, and no declared wait"

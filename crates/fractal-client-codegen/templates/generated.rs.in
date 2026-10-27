@@ -2523,6 +2523,10 @@ impl TimelineBody {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TimelineMessageBody {
     pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipients: Option<Vec<String>>,
     #[serde(default)]
     pub reply_to: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

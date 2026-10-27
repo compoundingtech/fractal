@@ -3074,11 +3074,13 @@ export type TimelineErrorBody = {
 export type TimelineMessageBody = {
   assistant_grant_id?: string;
   attachments?: Array<Attachment>;
+  author?: ActorRef;
   blocks?: Array<TimelineBlock>;
   body_bytes?: number;
   from?: SenderRef;
   message_id: string;
   provenance?: MessageProvenance;
+  recipients?: Array<ParticipantRef>;
   reply_to?: string | null;
   sender_class?: "external-assistant";
   tags?: Array<string>;
