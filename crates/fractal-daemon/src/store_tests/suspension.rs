@@ -100,7 +100,7 @@ fn a_move_survives_a_crash_after_placement_and_a_later_label_change() {
         .unwrap()
         .unwrap()
         .0;
-    let kdl = crate::graph::render_agent_desired_kdl(&desired.desired).unwrap();
+    let kdl = crate::graph::render_agent_desired_kdl(&desired.desired, &std::collections::BTreeMap::new()).unwrap();
     assert!(
         crate::parse_intent(&kdl, "jade")
             .unwrap()

@@ -322,6 +322,30 @@ is omitted when the agent's driver does not report subagents, or by an older dae
 field means not reported, while an empty list means the driver reports no running subagents.
 Claude, Codex, and OMP report subagents; Pi and OpenCode do not.
 
+### Declared resources
+
+An agent's or mission's `resources` lists the resources its current declaration names, in authored
+order: each has its `name`, ordinary resource `subject`, authored `kind` (`uri` or `subject`),
+URI `resolution`, and nullable `reason`. A mission's list comes from its current published
+revision. The owner stores typed edges, while the shared smallclaims subject stores the immutable
+URI. Its ID is `resource/uri/` followed by the lowercase hex SHA-256 of the exact URI's bytes;
+different owners naming that URI resolve to the same subject.
+
+The list is read-only; change it by reapplying the seat declaration or publishing a new mission
+revision (see [declared resources](../../site/reference/configuration.md#declared-resources)). Removing an edge does
+not delete its subject or other owners' references. A URI edge has `resolution: "resolved"` and
+a string `uri` when its locator is available, or `resolution: "unresolved"` and no `uri` while
+the URI declaration is unavailable locally. Explicit subject edges have `resolution: "not-applicable"`
+and no `uri`: they need no URI locator, and this state does not assert subject existence.
+A daemon older than the field omits it; clients read a missing list as empty.
+
+These declared references are distinct from `GET /v1/client/resources`, which lists resource
+observations. Declaring a URI does not fetch it, create an observation, or start an observer.
+
+`GET /v1/resource-references/{subject}` on the privileged local API returns the declarations
+that reference that ordinary resource subject, without scanning all declarations. This is not a
+paired-client route and does not grant ownership or make a shared URI target eligible for cleanup.
+
 ### Native harness inventory
 
 `GET /v1/client/harness-inventory/{agent}` uses `read.projections` and requires

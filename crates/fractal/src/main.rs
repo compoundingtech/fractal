@@ -2230,6 +2230,9 @@ struct SubjectShowArgs {
     /// Print the current managed agent declaration as canonical KDL v2.
     #[arg(long)]
     kdl: bool,
+    /// Show the agents and missions that name this resource.
+    #[arg(long, conflicts_with = "kdl")]
+    references: bool,
     /// Include literal environment values in the KDL output.
     #[arg(long, requires = "kdl")]
     show_env_values: bool,
@@ -10275,6 +10278,27 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&result, json_output)
         }
         SubjectCommand::Show(args) => {
+            if args.references {
+                let references: Vec<Value> = client
+                    .get(&format!("/v1/resource-references/{}", args.subject))
+                    .await?;
+                if json_output {
+                    println!("{}", serde_json::to_string_pretty(&references)?);
+                } else {
+                    for reference in references {
+                        print!(
+                            "{} · {}",
+                            reference["owner"].as_str().unwrap_or_default(),
+                            reference["name"].as_str().unwrap_or_default(),
+                        );
+                        if let Some(reason) = reference["reason"].as_str() {
+                            print!(" · {reason}");
+                        }
+                        println!();
+                    }
+                }
+                return Ok(());
+            }
             if args.subject.starts_with("custom/") && !args.kdl
                 && let Ok(result) = client
                     .get::<Value>(&format!(
@@ -10301,7 +10325,20 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                 if !args.show_env_values {
                     fractal_daemon::graph::redact_agent_env_values(&mut desired);
                 }
-                print!("{}", fractal_daemon::graph::render_agent_desired_kdl(&desired)?);
+                let mut uris = BTreeMap::new();
+                for reference in fractal_daemon::graph::declared_resources(&desired) {
+                    let status = status_for(client, &reference.subject).await?;
+                    if let Some(uri) = status
+                        .subjects
+                        .iter()
+                        .find(|subject| subject.subject == reference.subject)
+                        .and_then(|subject| subject.desired.as_ref())
+                        .and_then(fractal_daemon::graph::declared_uri)
+                    {
+                        uris.insert(reference.subject, uri.to_owned());
+                    }
+                }
+                print!("{}", fractal_daemon::graph::render_agent_desired_kdl(&desired, &uris)?);
                 Ok(())
             } else {
                 run_inspect(
@@ -12229,46 +12266,6 @@ fn parse_agent_start_identity(identity: &str) -> Result<String, String> {
     Ok(identity.strip_prefix("agent/").unwrap_or(identity).into())
 }
 
-fn declaration_node(value: &Value) -> Result<KdlNode> {
-    let mut node = KdlNode::new(value["name"].as_str().context("declaration has no name")?);
-    if let Some(arguments) = value["arguments"].as_array() {
-        for argument in arguments {
-            node.entries_mut()
-                .push(KdlEntry::new(declaration_value(argument)?));
-        }
-    }
-    if let Some(properties) = value["properties"].as_object() {
-        for (name, value) in properties {
-            node.entries_mut()
-                .push(KdlEntry::new_prop(name.as_str(), declaration_value(value)?));
-        }
-    }
-    if let Some(children) = value["children"].as_array() {
-        let mut body = KdlDocument::new();
-        for child in children {
-            body.nodes_mut().push(declaration_node(child)?);
-        }
-        node.set_children(body);
-    }
-    Ok(node)
-}
-
-fn declaration_value(value: &Value) -> Result<kdl::KdlValue> {
-    Ok(match value {
-        Value::String(value) => kdl::KdlValue::String(value.clone()),
-        Value::Bool(value) => kdl::KdlValue::Bool(*value),
-        Value::Null => kdl::KdlValue::Null,
-        Value::Number(value) => {
-            if let Some(integer) = value.as_i64() {
-                kdl::KdlValue::Integer(integer.into())
-            } else {
-                kdl::KdlValue::Float(value.as_f64().context("invalid declaration number")?)
-            }
-        }
-        _ => anyhow::bail!("invalid declaration value: {value}"),
-    })
-}
-
 fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
     if let Some(current) = body
         .nodes_mut()
@@ -12284,9 +12281,10 @@ fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
 fn agent_start_document(
     args: &AgentStartArgs,
     existing: Option<&fractal_daemon::model::DesiredSubject>,
+    uris: &BTreeMap<String, String>,
 ) -> Result<String> {
     let mut agent = match existing {
-        Some(existing) => declaration_node(&existing.desired)?,
+        Some(existing) => fractal_daemon::graph::render_agent_node(&existing.desired, uris)?,
         None => kdl_node("agent", [args.identity.as_str()]),
     };
     let mut body = agent.children_mut().take().unwrap_or_default();
