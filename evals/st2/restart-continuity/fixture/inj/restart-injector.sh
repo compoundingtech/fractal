@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
 ledger="$CATALOG/worker"
-bus="${ST_ROOT:-$CATALOG}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+bus="${FRACTAL_ROOT-${ST_ROOT:-$CATALOG}}"
 state="$CATALOG/.stev"
 stamp="$state/restart.done"
 log="$state/restart.log"

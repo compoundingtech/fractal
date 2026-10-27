@@ -30,7 +30,7 @@ interface Scenario {
   readonly roster: 'full' | 'none'
   /** The host can move the active session while the draft is open. */
   readonly sessionControl?: boolean
-  /** Limits the fixture adapter declares; absent means st's defaults. */
+  /** Limits the fixture adapter declares; absent means Fractal's defaults. */
   readonly imagePolicy?: ComposerImagePolicy
   readonly reply?: boolean
   readonly subject?: boolean
@@ -417,9 +417,9 @@ export const DeclaredImageLimits: Story = {
     await userEvent.click(within(root).getByRole('button', { name: 'Remove two.jpg' }))
     await waitFor(() => expect(tray(root)).toHaveAccessibleName('Images, 1 of 2'))
     pasteFiles(field, [imageFile('six.png', 'image/png', 6 * 1024 * 1024), imageFile('loop.gif', 'image/gif')])
-    await waitFor(() => expect(within(root).getByRole('alert')).toHaveTextContent('six.png is 6.0 MB; st takes images up to 5 MB. loop.gif is image/gif; st takes PNG or JPEG.'))
+    await waitFor(() => expect(within(root).getByRole('alert')).toHaveTextContent('six.png is 6.0 MB; Fractal takes images up to 5 MB. loop.gif is image/gif; Fractal takes PNG or JPEG.'))
     await expect(tray(root)).toHaveAccessibleName('Images, 1 of 2')
-    // The st default (four images, 10 MB) never leaks into the copy when the adapter declares less.
+    // The Fractal default (four images, 10 MB) never leaks into the copy when the adapter declares less.
     await expect(root.textContent ?? '').not.toMatch(/10 MB|at most 4/)
     await sound(canvasElement)
   },
@@ -497,7 +497,7 @@ export const ImageTray: Story = {
     await waitFor(() => expect(tray(root)).toHaveAccessibleName('Images, 3 of 4'))
     await expect(document.activeElement).toBe(field)
     pasteFiles(field, [imageFile('large.png', 'image/png', composerImagePolicy.maxBytes + 1024 * 1024), imageFile('scan.bmp', 'image/bmp')])
-    await waitFor(() => expect(within(root).getByRole('alert')).toHaveTextContent('large.png is 11.0 MB; st takes images up to 10 MB. scan.bmp is image/bmp; st takes PNG, JPEG, GIF or WebP.'))
+    await waitFor(() => expect(within(root).getByRole('alert')).toHaveTextContent('large.png is 11.0 MB; Fractal takes images up to 10 MB. scan.bmp is image/bmp; Fractal takes PNG, JPEG, GIF or WebP.'))
     await expect(tray(root)).toHaveAccessibleName('Images, 3 of 4')
     pasteFiles(field, [imageFile('fifth.png')])
     await waitFor(() => expect(tray(root)).toHaveAccessibleName('Images, 4 of 4'))

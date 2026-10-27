@@ -83,8 +83,8 @@ export function screenComposerImages(files: readonly File[], retained: number, p
   const reasons: string[] = []
   for (const file of files) {
     const name = file.name === '' ? 'That file' : file.name
-    if (!(policy.mediaTypes as readonly string[]).includes(file.type)) { reasons.push(`${name} ${file.type === '' ? 'has no file type' : `is ${file.type}`}; st takes ${describeImageTypes(policy)}.`); continue }
-    if (file.size > policy.maxBytes) { reasons.push(`${name} is ${formatImageSize(file.size)}; st takes images up to ${formatImageLimit(policy.maxBytes)}.`); continue }
+    if (!(policy.mediaTypes as readonly string[]).includes(file.type)) { reasons.push(`${name} ${file.type === '' ? 'has no file type' : `is ${file.type}`}; Fractal takes ${describeImageTypes(policy)}.`); continue }
+    if (file.size > policy.maxBytes) { reasons.push(`${name} is ${formatImageSize(file.size)}; Fractal takes images up to ${formatImageLimit(policy.maxBytes)}.`); continue }
     if (retained + accepted.length >= policy.maxCount) { reasons.push(`A message carries at most ${describeImageCount(policy.maxCount)}.`); continue }
     accepted.push(file)
   }

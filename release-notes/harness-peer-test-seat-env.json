@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The harness-peer binding test no longer fails when run from an agent seat, whose FRACTAL_AGENT conflicted with the test fixture's identity",
+  "replay": {"status": "none", "detail": "Test-only change."},
+  "schema": {"status": "none", "detail": "Test-only change."},
+  "rules": {"status": "none", "detail": "Test-only change."},
+  "compatibility": {"status": "none", "detail": "Test-only change; no product behaviour changes."},
+  "downtime": {"status": "none", "detail": "None."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Nothing stored changes."}
+}

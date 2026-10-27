@@ -511,6 +511,7 @@ fn a_binding_with_a_trailing_line_comment_is_removable_and_updatable() {
     );
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
     let _guard = OBSERVE_ENV_LOCK
@@ -542,14 +543,14 @@ fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
             "Initialize the catalog generation.",
         ],
     );
-    let old_generation = st2::resource_observe::catalog_generation(&root)
+    let old_generation = fractal_legacy_runner::resource_observe::catalog_generation(&root)
         .unwrap()
         .expect("mediated edit initialized catalog generation");
 
     let previous_state = std::env::var_os("XDG_STATE_HOME");
     unsafe { std::env::set_var("XDG_STATE_HOME", &state) };
-    st2::event::publish_owner_binding_for_test(&root, "h").unwrap();
-    let scope = st2::park::SupervisorScope::current(&root, "h").unwrap();
+    fractal_legacy_runner::event::publish_owner_binding_for_test(&root, "h").unwrap();
+    let scope = fractal_legacy_runner::park::SupervisorScope::current(&root, "h").unwrap();
     let request_dir = scope.park_dir().parent().unwrap().join("observe-requests");
     match previous_state {
         Some(value) => unsafe { std::env::set_var("XDG_STATE_HOME", value) },
@@ -626,7 +627,7 @@ fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
         serde_json::json!(old_generation),
         "request generation must come from the validated old binding snapshot"
     );
-    let replacement_generation = st2::resource_observe::catalog_generation(&root)
+    let replacement_generation = fractal_legacy_runner::resource_observe::catalog_generation(&root)
         .unwrap()
         .unwrap();
     assert!(
@@ -636,6 +637,7 @@ fn refresh_binding_validation_and_generation_share_one_catalog_snapshot() {
     assert!(spec(&root).contains("https://example.test/replacement"));
 }
 
+#[cfg_attr(not(debug_assertions), ignore = "needs a debug-assertions build: the ST2_TEST_* fault and pause seams exist only with debug assertions")]
 #[test]
 fn refresh_cli_reports_exact_receipts_and_wait_expiry_keeps_the_request() {
     let _guard = OBSERVE_ENV_LOCK
@@ -656,8 +658,8 @@ fn refresh_cli_reports_exact_receipts_and_wait_expiry_keeps_the_request() {
 
     let previous_state = std::env::var_os("XDG_STATE_HOME");
     unsafe { std::env::set_var("XDG_STATE_HOME", &state) };
-    st2::event::publish_owner_binding_for_test(&root, "h").unwrap();
-    let scope = st2::park::SupervisorScope::current(&root, "h").unwrap();
+    fractal_legacy_runner::event::publish_owner_binding_for_test(&root, "h").unwrap();
+    let scope = fractal_legacy_runner::park::SupervisorScope::current(&root, "h").unwrap();
     let scope_root = scope.park_dir().parent().unwrap().to_path_buf();
     match previous_state {
         Some(value) => unsafe { std::env::set_var("XDG_STATE_HOME", value) },

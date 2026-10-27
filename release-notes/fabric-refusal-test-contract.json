@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The Fabric refusal-probe test asserts the documented normal-backoff contract instead of a pre-#3442 cooldown",
+  "replay": {"status": "none", "detail": "Test only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No product behaviour change."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

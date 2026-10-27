@@ -5,6 +5,7 @@ import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
 import { SidebarToolbar } from './Toolbar.tsx'
 import { matchesRow, type SidebarRow } from './filter.ts'
+import type { ShowRow } from './show.ts'
 import { defaultFilters, type SidebarFilters } from './state.ts'
 import { dailyDriver } from '../fixtures/layouts.ts'
 
@@ -12,29 +13,50 @@ vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, define
 
 afterEach(() => vi.unstubAllGlobals())
 
-it('ANDs the host menu with typed facets, counts them, and resets facets while preserving bare text and sort', async () => {
+it('writes Show menu choices into the query, ANDs them with typed facets, counts them, and resets facets while preserving bare text and sort', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  // React Aria uses CSS.escape for generated collection keys; jsdom does not supply it.
+  vi.stubGlobal('CSS', { escape: (value: string) => Array.from(value, char => /[a-zA-Z_-]/.test(char) ? char : `\\${char.codePointAt(0)?.toString(16)} `).join('') })
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler machine:dev3 HOST:dev', sort: 'name' }
+  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler machine:host-a HOST:host', sort: 'name' }
+  const showRows: readonly ShowRow[] = [{ host: 'host-a', asking: false, others: true }, { host: 'host-b', asking: true, others: true }]
   const update = (value: SidebarFilters) => { filters = value; render() }
-  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['dev3', 'dev5']} />)
-  const row: SidebarRow = { workspace: { id: 'agent/compiler', title: 'Compiler', host: 'dev3', layout: dailyDriver, unread: [], notifications: [] }, agent: undefined, status: 'idle', needsMe: false }
+  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['host-a', 'host-b']} showRows={showRows} />)
+  const row: SidebarRow = { workspace: { id: 'agent/compiler', title: 'Compiler', host: 'host-a', layout: dailyDriver, unread: [], notifications: [] }, agent: undefined, status: 'idle', needsMe: false, asking: false }
+  const item = (name: string) => document.body.querySelector<HTMLElement>(`[role="menuitemcheckbox"][aria-label="${name}"]`)
   try {
     await act(async () => render())
-    const filterButton = host.querySelector<HTMLButtonElement>('button[aria-label="Filter agents · 2 active"]')!
-    expect(filterButton).not.toBeNull()
+    const search = host.querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
+    expect(search.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use is:asking for agents waiting for an answer, repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
+    expect(host.querySelector('button[aria-label="Filter agents · 2 active"]')).not.toBeNull()
+    const trigger = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('Show'))!
+    expect(trigger.textContent).toContain(', 2 active')
+    await act(async () => trigger.click())
+    // Typed facets check their entries; an unobserved typed machine stays listed so it can be cleared.
+    expect(item('host-a, 1')?.getAttribute('aria-checked')).toBe('true')
+    expect(item('host, 2')?.getAttribute('aria-checked')).toBe('true')
+    expect(item('host-b, 1')?.getAttribute('aria-checked')).toBe('false')
+    expect(item('Waiting for answer, 0')?.getAttribute('aria-checked')).toBe('false')
+
+    await act(async () => item('host-b, 1')!.click())
+    expect(filters.query).toBe('machine:host-a,host,host-b compiler')
+    expect(matchesRow({ row, filters })).toBe(true)
+    expect(item('Waiting for answer, 1')).not.toBeNull()
+
+    await act(async () => item('Waiting for answer, 1')!.click())
+    expect(filters.query).toBe('is:asking machine:host-a,host,host-b compiler')
+    expect(matchesRow({ row, filters })).toBe(false)
+    expect(matchesRow({ row: { ...row, asking: true }, filters })).toBe(true)
+    expect(host.querySelector('button[aria-label="Filter agents · 2 active"]')).not.toBeNull()
+
+    await act(async () => item('Waiting for answer, 1')!.click())
+    expect(filters.query).toBe('machine:host-a,host,host-b compiler')
+
+    const filterButton = host.querySelector<HTMLButtonElement>('button[aria-label="Filter agents · 1 active"]')!
     await act(async () => filterButton.click())
-    const menu = document.body.querySelector<HTMLSelectElement>('select[aria-label="Filter by host"]')!
-    expect(menu).not.toBeNull()
-    await act(async () => { menu.value = 'dev5'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
-    expect(filters.host).toBe('dev5')
-    expect(matchesRow({ row, filters, context: '' })).toBe(false)
-    expect(host.querySelector('button[aria-label="Filter agents · 3 active"]')).not.toBeNull()
-    await act(async () => { menu.value = 'dev3'; menu.dispatchEvent(new Event('change', { bubbles: true })) })
-    expect(matchesRow({ row, filters, context: '' })).toBe(true)
     const reset = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Reset filters')!
     await act(async () => reset.click())
     expect(filters).toEqual({ ...defaultFilters, query: 'compiler', sort: 'name' })

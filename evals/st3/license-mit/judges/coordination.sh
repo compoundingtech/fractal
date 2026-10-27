@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}"
-supervisor="agent/$ST_MISSION_RUN/lmc.sup"
-worker="agent/$ST_MISSION_RUN/lmc.worker"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the judged mission run}}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+supervisor="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/lmc.sup"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+worker="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/lmc.worker"
 
 messages_to() {
   local recipient=$1

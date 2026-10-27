@@ -1,20 +1,14 @@
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ThreadHeader } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { ResourceCardV1, ResourceChipV1, type ResourceData, type ResourceFile } from '@smalltalk/fractal-ui/assistant-ui/resources'
-import { SyncLine } from '@smalltalk/fractal-ui/assistant-ui/sync'
+import { ThreadHeader } from '@fractal/ui/assistant-ui/shell'
+import { ResourceCardV1, ResourceChipV1, type ResourceData, type ResourceFile } from '@fractal/ui/assistant-ui/resources'
+import { SyncLine } from '@fractal/ui/assistant-ui/sync'
 import type { Agent } from '../data/source.ts'
 import { sidebarRow } from './sidebarRow.ts'
 
 // Match the app's node-rendering lane: exercise semantic DOM without the CSS compiler.
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
-  props: () => ({}),
-}))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const unknown = { _tag: 'Unknown' } as const
 const file: ResourceFile = { path: 'captured/file.ts', added: unknown, removed: unknown, lines: unknown }
@@ -27,11 +21,14 @@ const header = {
 const agent: Agent = { ref: 'agent/fixture/readonly', terminal: '', name: 'Reported name', lifecycle: unknown, host: 'Reported host', connected: true, activity: 'idle', status: 'idle', usage: unknown, checkout: unknown, workspace: unknown, startedAt: unknown, endedAt: unknown, blockedOn: unknown, ask: unknown, lastActivityAt: unknown }
 
 describe('resource card seam', () => {
-  it('keeps unknown counts explicit instead of rendering zero', () => {
-    const card = renderToStaticMarkup(createElement(ResourceCardV1, { resource }))
-    expect(card).toMatch(/Changed files · count unknown/)
-    expect(card).not.toMatch(/\+0|−0|0 changed/)
-    expect(renderToStaticMarkup(createElement(ResourceCardV1, { resource: { ...resource, files: [] } }))).not.toMatch(/\+0|−0/)
+  it('omits unreported counts instead of rendering zero or literal unknown metadata', () => {
+    for (const files of [[file], []]) {
+      const card = renderToStaticMarkup(createElement(ResourceCardV1, { resource: { ...resource, files } }))
+      // The kit names an uncounted diff by its painted label alone; a missing count is omitted, never invented.
+      expect(card).toContain('>Changed files</span>')
+      expect(card).not.toMatch(/\d+ changed files?/)
+      expect(card).not.toMatch(/unknown|\+0|−0|0 changed/i)
+    }
   })
   it('renders a reported zero as zero', () => {
     const zero: ResourceFile = { ...file, added: { _tag: 'Known', value: 0 }, removed: { _tag: 'Known', value: 0 }, lines: { _tag: 'Known', value: [] } }
@@ -55,15 +52,14 @@ describe('thread header seam', () => {
     expect(bound).not.toMatch(/Needs you/)
   })
   it.each([
-    ['waiting', 'Native waiting for tool response', false],
-    ['errored', 'Native tool execution errored', false],
-    ['working', 'Native working before connection loss', true],
-  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale) => {
-    const row = sidebarRow({ agent: { ...agent, activity, status: reported }, stale, now: 2000 })
+    ['waiting', 'Native waiting for tool response', false, 'Needs you'],
+    ['errored', 'Native tool execution errored', false, 'Stale observation'],
+    ['working', 'Native working before connection loss', true, 'Last verified · Working'],
+  ] as const)('sanitizes unrecognized %s status labels through the roster projection', (activity, reported, stale, canonical) => {
+    const row = sidebarRow({ agent: { ...agent, activity, status: reported }, stale })
     const output = renderToStaticMarkup(createElement(ThreadHeader, { ...header, status: row.status, statusLabel: row.statusLabel, statusSince: row.statusSince, freshness: row.freshness, now: 2000 }))
-    const expected = stale ? 'Last verified · Not observed' : 'Not observed'
-    expect(output).toContain(`aria-label="${expected}; Status boundary unavailable; ${row.freshness} observation"`)
-    expect(output).not.toMatch(/Needs you|aria-label="Stale observation;/)
+    expect(output).toContain(`aria-label="${canonical}; Status boundary unavailable; ${row.freshness} observation${stale ? '; last-observed snapshot' : ''}"`)
+    expect(output).not.toContain(reported)
   })
 })
 

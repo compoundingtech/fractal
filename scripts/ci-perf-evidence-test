@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -12,7 +13,7 @@ with tempfile.TemporaryDirectory(prefix='perf evidence ') as scratch:
     tools = base / 'tools'
     tools.mkdir()
     cargo = tools / 'cargo'
-    cargo.write_text('''#!/usr/bin/env python3
+    cargo.write_text('#!' + sys.executable + '''
 import json, os, pathlib, sys
 root = pathlib.Path(os.environ['RUNNER_TEMP'])
 with (root / 'calls.jsonl').open('a') as output:
@@ -61,11 +62,14 @@ else:
         assert (temp / 'perf/cost.time').read_text().split()[1] == str(link_exit)
         assert ('failed' if link_exit else 'passed') in summary.read_text()
 
-# Bind the evidence parent to the real uploader and test harness contracts.
-workflow = (ROOT / '.github/workflows/fleet.yml').read_text().split('  perf-cost:', 1)[1]
-upload = workflow.split('name: perf-cost-logs', 1)[0].rsplit('uses: actions/upload-artifact@v4', 1)[1]
-assert 'if: always()' in upload
-assert '${{ runner.temp }}/perf/' in workflow.split('name: perf-cost-logs', 1)[1].split('- name:', 1)[0]
-fixture = (ROOT / 'crates/st3/tests/messaging_faults.rs').read_text()
+# Bind the evidence parent to the real uploaders and test harness contracts: the cost check runs in the
+# daily long lanes and in Main upkeep, not on pull requests.
+assert '  perf-cost:' not in (ROOT / '.github/workflows/fleet.yml').read_text()
+for path, logs in (('daily-long.yml', 'daily-perf-cost-logs'), ('main-upkeep.yml', 'perf-cost-logs')):
+    workflow = (ROOT / '.github/workflows' / path).read_text().split('  perf-cost:', 1)[1]
+    upload = workflow.split(f'name: {logs}\n', 1)[0].rsplit('uses: actions/upload-artifact@v4', 1)[1]
+    assert 'if: always()' in upload, path
+    assert '${{ runner.temp }}/perf/' in workflow.split(f'name: {logs}\n', 1)[1].split('- name:', 1)[0], path
+fixture = (ROOT / 'crates/fractal/tests/messaging_faults.rs').read_text()
 assert 'ST3_MESSAGING_FAULTS_EVIDENCE' in fixture and 'output_root.take().unwrap().keep()' in fixture
 print('Perf evidence controls passed: explicit parent, absent CI_RUN_ID, failure retained, no retry, status preserved')

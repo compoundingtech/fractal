@@ -3,7 +3,8 @@ import * as stylex from '@stylexjs/stylex'
 import { useAui, useAuiState } from '@assistant-ui/react'
 import { Button, FileTrigger, Focusable, Input, Menu, MenuItem, MenuTrigger, Popover, TextField, Tooltip, TooltipTrigger } from 'react-aria-components'
 import { Icon } from '../composition/Icons'
-import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
 import {
   describeImageCount, describeImageTypes, formatImageLimit, formatImageSize, screenComposerImages,
   type ComposerImagePolicy,
@@ -52,11 +53,12 @@ export function useComposerImageIntake(retainedImages: number, disabled: boolean
 
 export function ComposerAttachImage({ compact = false }: { readonly compact?: boolean }) {
   const intake = React.useContext(ComposerImageIntakeContext)
+  const narrow = React.useContext(NarrowLayoutContext)
   if (intake === undefined || !intake.available) return null
   const { policy } = intake
   return <TooltipTrigger delay={150} closeDelay={0}>
     <FileTrigger acceptedFileTypes={[...policy.mediaTypes]} allowsMultiple={policy.maxCount > 1} onSelect={list => { if (list !== null) intake.add([...list]) }}>
-      <Button aria-label="Attach image" isDisabled={intake.disabled} {...stylex.props(styles.iconButton, compact && styles.iconCompact)}><Icon name="attach" /></Button>
+      <Button aria-label="Attach image" isDisabled={intake.disabled} {...stylex.props(styles.iconButton, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="attach" /></Button>
     </FileTrigger>
     <Tooltip {...stylex.props(styles.tooltip)}>Attach up to {describeImageCount(policy.maxCount)} ({describeImageTypes(policy)}), {formatImageLimit(policy.maxBytes)} each</Tooltip>
   </TooltipTrigger>
@@ -197,14 +199,16 @@ const styles = stylex.create({
     borderRadius: r.control, backgroundColor: surface.controlFill, color: text.fg,
     paddingBlock: s.xs, paddingInline: s.md, fontFamily: t.fontSans, fontSize: t.metaSize,
     cursor: { default: 'pointer', ':disabled': 'not-allowed' }, opacity: { default: 1, ':disabled': 0.64 },
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
   iconCompact: { paddingInline: s.xs },
+  // Narrow hosts: an icon-only control is never narrower than it is tall.
+  touchControl: { minWidth: g.touchTarget },
   tooltip: { width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, boxSizing: 'border-box', padding: s.sm, borderRadius: r.sm, backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   recipient: {
     display: 'inline-flex', alignItems: 'center', gap: s.xs, minWidth: 0, maxWidth: g.crumbMax, flexShrink: 1, minHeight: g.controlMd,
     fontFamily: t.fontSans, fontSize: t.metaSize, color: text.fg, whiteSpace: 'nowrap', borderRadius: r.control,
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
   recipientButton: { borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.controlBorder, backgroundColor: surface.controlFill, paddingInline: s.sm, cursor: 'pointer' },
   recipientCompact: { fontSize: t.denseSize },
@@ -225,7 +229,7 @@ const styles = stylex.create({
     backgroundColor: surface.controlFill, color: text.fg, fontFamily: t.fontSans, fontSize: t.metaSize,
     cursor: { default: 'pointer', ':disabled': 'not-allowed' }, opacity: { default: 1, ':disabled': 0.64 },
     ':hover': { backgroundColor: surface.rowHover },
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
   chip: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, paddingBlock: s.xs, paddingInline: s.sm, borderRadius: r.md, backgroundColor: surface.rowActive, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   chipText: { flex: '1 1 0', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: text.fgSoft },

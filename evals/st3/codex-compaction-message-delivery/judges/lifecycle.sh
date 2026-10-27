@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 test -s controller-state.json
 test -s compact-control.json
 
@@ -12,7 +14,8 @@ jq -e '
   and .compaction.trigger == "manual"
 ' controller-state.json >/dev/null
 
-agent="agent/$ST_MISSION_RUN/compact.codex"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+agent="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/compact.codex"
 for stage in anchor steer post_compact; do
   subject="$(jq -er --arg stage "$stage" '.messages[$stage]' controller-state.json)"
   st3 trace show "$subject" --json --limit 100 \
