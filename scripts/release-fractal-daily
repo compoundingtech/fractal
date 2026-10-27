@@ -2,11 +2,11 @@
 """Publish a release from the archives main already built, when main changed since the last one.
 
 Every main commit runs "Fractal tag release", which builds, tests and verifies both archives and
-uploads them as the `smalltalk-release` artifact. This takes the newest commit whose run succeeded,
+uploads them as the `fractal-release` artifact. This takes the newest commit whose run succeeded,
 re-verifies its checksums and sources, tags that exact commit and publishes the same bytes. Nothing
 is rebuilt, so a release is always an archive a main run has already proven.
 
-Usage: scripts/release-smalltalk-daily [--dry-run] [--tag TAG]
+Usage: scripts/release-fractal-daily [--dry-run] [--tag TAG]
 Environment: GH_TOKEN and GH_REPO (as for gh). Run from a full-history checkout with tags.
 Needs contents: write and actions: read to publish verified artifacts. Baseline PRs use a separate job.
 """
@@ -21,7 +21,7 @@ import tempfile
 
 from release_notes import FIELDS, ImpactError, render
 
-WORKFLOW = 'release-smalltalk.yml'
+WORKFLOW = 'release-fractal.yml'
 SEMVER = re.compile(r'v(\d+)\.(\d+)\.(\d+)')
 # Stay below GitHub's 125000-character release-body limit.
 RELEASE_BODY_LIMIT = 120000
@@ -65,13 +65,26 @@ def run(*cmd, cwd=None):
 
 
 def say(message):
-    print(f'release-smalltalk-daily: {message}', flush=True)
+    print(f'release-fractal-daily: {message}', flush=True)
 
 
 def newest_verified_main_run():
     rows = json.loads(run('gh', 'run', 'list', '--workflow', WORKFLOW, '--branch', 'main', '--event', 'push',
                           '--status', 'success', '--limit', '1', '--json', 'databaseId,headSha'))
     return (rows[0]['databaseId'], rows[0]['headSha']) if rows else (None, None)
+
+
+def download_release(run_id, repository, dist):
+    # arn:lmig:smalltalk:2026-10-26-release-artifact-name
+    # Accept successful pre-rename runs until their 7-day artifacts expire; sunset 2026-11-01.
+    artifacts = json.loads(run('gh', 'api', f'repos/{repository}/actions/runs/{run_id}/artifacts',
+                               '--paginate', '--slurp'))
+    names = {artifact['name'] for page in artifacts for artifact in page['artifacts']
+             if not artifact['expired']}
+    name = next((name for name in ('fractal-release', 'smalltalk-release') if name in names), None)
+    if name is None:
+        raise CommandFailed(f'run {run_id} has no unexpired release artifact')
+    run('gh', 'run', 'download', str(run_id), '--name', name, '--dir', str(dist))
 
 
 def latest_release_tag():
@@ -183,10 +196,10 @@ def main():
     say(f'releasing {tag} from {sha} (run {run_id}), previous release {previous} at {since}')
 
     dist = pathlib.Path(tempfile.mkdtemp(prefix='fractal-release-'))
-    run('gh', 'run', 'download', str(run_id), '--name', 'smalltalk-release', '--dir', str(dist))
+    download_release(run_id, os.environ.get('GH_REPO', 'compoundingtech/fractal'), dist)
     # The same checks the tag workflow makes, so the bytes are proven before they are published.
     run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
-    say(run('python3', str(repo / 'scripts/release-smalltalk-manifest.py'), sha, cwd=dist))
+    say(run('python3', str(repo / 'scripts/release-fractal-manifest.py'), sha, cwd=dist))
 
     notes = dist / 'RELEASE-NOTES.md'
     notes.write_text(rendered)

@@ -8127,6 +8127,12 @@ fn doctor_report_with_operation_drift(
         }),
     }
     checks.push(first_readiness_scheduler_check(&state.store, &state.node));
+    if state.fleet_id.is_some() {
+        checks.push(crate::replication_worker_build::check(
+            &state.state_dir,
+            fractal_drivers::version::build_commit(),
+        ));
+    }
     match state.store.idempotency_conflicts(5) {
         Ok((0, _)) => checks.push(DoctorCheck {
             name: "idempotency-keys".into(),
