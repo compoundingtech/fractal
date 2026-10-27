@@ -16469,18 +16469,42 @@ impl PiFamilyReports {
         // It stays pending and goes again with the next report. A session is reported only once
         // its transcript exists, because only then can a resume find it: pi writes nothing until
         // its first turn.
-        let resumable = |native: &str| {
-            std::env::var_os(fractal_drivers::driver_paths::SESSION_DIR_ENV).is_none_or(|dir| {
-                fractal_daemon::native_resume::pi_family_transcript(
-                    &PathBuf::from(dir).join("provider-sessions"),
-                    native,
-                )
-                .is_some()
-            })
-        };
-        if let Some((native, path)) = self.native_session.clone()
-            && resumable(&native)
-        {
+        if let Some((native, path)) = self.native_session.clone() {
+            let path = match path {
+                Some(path) => {
+                    // A reported external path is authoritative: never substitute a managed
+                    // transcript with the same ID when this exact file fails verification.
+                    let Some(path) = fractal_daemon::native_resume::pi_family_reported_transcript(
+                        Path::new(&path),
+                        &native,
+                    ) else {
+                        return Ok(());
+                    };
+                    Some(path)
+                }
+                None => {
+                    let recovered = (driver == "omp").then(|| {
+                        fractal_daemon::omp_process_transcript(
+                            subject,
+                            incarnation,
+                            &native,
+                            std::env::var("ST3_ACCOUNT").ok().as_deref(),
+                        )
+                    }).flatten();
+                    if recovered.is_none()
+                        && std::env::var_os(fractal_drivers::driver_paths::SESSION_DIR_ENV)
+                            .is_some_and(|dir| {
+                                fractal_daemon::native_resume::pi_family_transcript(
+                                    &PathBuf::from(dir).join("provider-sessions"),
+                                    &native,
+                                ).is_none()
+                            })
+                    {
+                        return Ok(());
+                    }
+                    recovered
+                }
+            };
             let reported: Result<ClaimRecord> = client
                 .post(
                     "/v1/agents/native-session",

@@ -1623,6 +1623,67 @@ fn pi_family_channel_logs_unhandled_frames_without_claiming_or_panicking() {
 }
 
 #[tokio::test]
+async fn pi_family_publication_verifies_the_exact_external_frame_path() {
+    use axum::{Json, Router, routing::post};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
+    let client = Client::new(Endpoint::Unix(socket.clone()));
+    let store = std::sync::Arc::new(
+        Store::open(&root.path().join("graph.db"), "test").unwrap(),
+    );
+    let graph = store.clone();
+    let app = Router::new().route("/v1/agents/native-session", post(move |Json(report): Json<Value>| {
+        let store = graph.clone();
+        async move {
+            assert_eq!(report["subject"], "agent/external");
+            assert_eq!(report["actor"], "agent/external");
+            assert_eq!(report["incarnation_id"], "external-incarnation");
+            assert_eq!(report["session_id"], "external-native");
+            let record = store.append_claim(&ClaimInput {
+                subject: "agent/external".into(),
+                kind: "harness.session-file".into(),
+                actor: Some("agent/external".into()),
+                fields: BTreeMap::from([("path".into(), report["path"].clone())]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            Json(json!({"api_version":"st3.v1", "value":record}))
+        }
+    }));
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let selected = root.path().join("arbitrary-external-name.jsonl");
+    // A sibling with the same native ID must never rescue the reported file.
+    fs::write(root.path().join("fallback_external-native.jsonl"),
+        "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    let mut pending = PiFamilyReports {
+        native_session: Some(("external-native".into(), Some(selected.to_string_lossy().into_owned()))),
+        ..Default::default()
+    };
+    for content in [None, Some("{}\n"), Some("{\"type\":\"session\",\"id\":\"foreign\"}\n")] {
+        if let Some(content) = content { fs::write(&selected, content).unwrap(); }
+        pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+            .await.unwrap();
+        assert!(pending.native_session.is_some());
+        assert!(store.claims_for("agent/external", Some("harness.session-file")).unwrap().is_empty());
+    }
+    fs::write(&selected, "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+        .await.unwrap();
+    assert!(pending.native_session.is_none());
+    let claim = store.latest_claim("agent/external", Some("harness.session-file")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["path"], json!(fs::canonicalize(selected).unwrap()));
+    server.abort();
+}
+
+#[tokio::test]
 async fn native_mailbox_replays_delivered_unread_but_never_queues_read_or_closed_mail()
 {
     // The two providers share this pump but load their own native receipt ledgers.

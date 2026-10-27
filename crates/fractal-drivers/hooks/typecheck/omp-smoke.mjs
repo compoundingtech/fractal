@@ -726,7 +726,7 @@ const subCtx = {
   ...fullCtx,
   isIdle: () => false,
   agent: { kind: "sub", id: "0-Review", name: "task", depth: 1, parentId: "Main" },
-  sessionManager: { getSessionId: () => "session-subagent", getEntries: () => [] },
+  sessionManager: { getSessionId: () => "session-subagent", getSessionFile: () => undefined, getEntries: () => [] },
 };
 const pidsBeforeSubagent = fs.readFileSync(pidPath, "utf8");
 const framesBeforeSubagent = readFrames().length;
