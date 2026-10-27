@@ -233,8 +233,8 @@ public struct ScenarioReader: Sendable {
     }
 }
 
-private struct ScenarioClock {
-    private let pattern = try! NSRegularExpression(pattern: #"^([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})$"#)
+struct ScenarioClock {
+    private let pattern = try! NSRegularExpression(pattern: #"^([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})\z"#)
 
     func parse(_ text: String, pointer: String) throws -> Int64 {
         let range = NSRange(text.startIndex..., in: text)
@@ -257,7 +257,7 @@ private struct ScenarioClock {
         case 4, 6, 9, 11: monthDays = 30
         default: monthDays = 31
         }
-        guard year >= 1, (1...12).contains(month), (1...monthDays).contains(day),
+        guard (1...12).contains(month), (1...monthDays).contains(day),
               hour < 24, minute < 60, second < 60 else {
             throw ScenarioError.invalidTime(pointer: pointer)
         }
@@ -308,7 +308,7 @@ private struct ScenarioClock {
 
     private func daysSinceEpoch(year: Int64, month: Int64, day: Int64) -> Int64 {
         let year = year - (month <= 2 ? 1 : 0)
-        let era = year / 400
+        let era = (year >= 0 ? year : year - 399) / 400
         let yearOfEra = year - era * 400
         let marchMonth = month + (month > 2 ? -3 : 9)
         let dayOfYear = (153 * marchMonth + 2) / 5 + day - 1
