@@ -12,6 +12,10 @@ fn native_peer_process() -> std::process::Child {
         .env_remove(fractal_drivers::driver_paths::AGENT_DIR_ENV)
         .env_remove(fractal_drivers::driver_paths::SESSION_DIR_ENV)
         .env_remove(fractal_drivers::driver_paths::IDENTITY_ENV)
+        .env_remove("FRACTAL_DRIVER_ROOT")
+        .env_remove("FRACTAL_DRIVER_AGENT_DIR")
+        .env_remove("FRACTAL_DRIVER_SESSION_DIR")
+        .env_remove("FRACTAL_DRIVER_IDENTITY")
         .spawn().unwrap()
 }
 
@@ -22,6 +26,7 @@ struct NativeReplay {
     peer: NativeDeliveryPeer,
     agent_dir: std::path::PathBuf,
     process: std::process::Child,
+    _listener: std::os::unix::net::UnixListener,
 }
 
 impl NativeReplay {
@@ -41,13 +46,19 @@ impl NativeReplay {
         let pid = process.id();
         let stamp = "2026-10-12T00:00:00.000Z";
         let incarnation = format!("{pid}:{stamp}");
+        let process_token = fractal_runtime::process_start_token(pid).unwrap();
+        let daemon_start_token = pty_core::registry::read_process_start_token(pid as i32).unwrap();
+        let boot_id = pty_core::boot::read_boot_identity().unwrap();
         // A registry entry for the isolated live process exercises production
         // ancestry, process birth and provider admission without a PTY launch.
         std::fs::create_dir_all(&state.pty_root).unwrap();
         std::fs::write(state.pty_root.join(format!("{}.pid", member.runtime_id)), pid.to_string()).unwrap();
-        std::fs::write(state.pty_root.join(format!("{}.sock", member.runtime_id)), "").unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(
+            state.pty_root.join(format!("{}.sock", member.runtime_id)),
+        ).unwrap();
         std::fs::write(state.pty_root.join(format!("{}.json", member.runtime_id)),
-            json!({"createdAt":stamp,"tags":{"st3.subject":subject}}).to_string()).unwrap();
+            json!({"daemonPid":pid,"daemonStartToken":daemon_start_token,"daemonBootId":boot_id,
+                "createdAt":stamp,"tags":{"st3.subject":subject}}).to_string()).unwrap();
         state.store.append_claim(&ClaimInput {
             subject: subject.clone(), kind: "runtime.observed".into(), actor: Some(subject.clone()),
             fields: serde_json::from_value(json!({"status":"running","host":"node",
@@ -59,11 +70,11 @@ impl NativeReplay {
         let sequence = harness_state::claim(&agent_dir, name, "codex", "replay-session").unwrap();
         let peer = NativeDeliveryPeer { agent: subject.clone(), transport: "app-server", pid, archives_inbox: false };
         let owner = crate::mailbox::Authority { provider: "codex".into(), session: "replay-session".into(),
-            sequence, pid, process_token: fractal_runtime::process_start_token(pid).unwrap() };
+            sequence, pid, process_token };
         let fence = state.store.bind_mailbox_with_lease(
             &Fence::new(&subject, &incarnation, "delivery"), Some(&owner),
         ).unwrap();
-        Self { root, state, fence, peer, agent_dir, process }
+        Self { root, state, fence, peer, agent_dir, process, _listener }
     }
 
     async fn stream(&self) -> ControlledStream {
@@ -91,7 +102,19 @@ impl NativeReplay {
         };
         self.send_report(stream, &nonce, 1).await;
         let inputs = authority::replay_proof_inputs(&self.state, &self.fence, &self.peer).unwrap();
-        assert!(inputs.failure.is_none(), "consuming replay must repair the pending loss");
+        if inputs.failure.is_some() {
+            let error = authority::repair_proven(
+                &self.state,
+                &self.fence,
+                &self.peer,
+                &self.report(Some(&nonce)),
+            )
+            .unwrap_err();
+            panic!(
+                "consuming replay must repair the pending loss: {:?}; repair error {}: {}",
+                inputs.failure, error.code, error
+            );
+        }
         (nonce, inputs)
     }
 
