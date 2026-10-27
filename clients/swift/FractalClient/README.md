@@ -101,7 +101,9 @@ committed slice JSON file, checks index coverage, and decodes state and timeline
 New slice/event shapes and undeclared future resource/entry kinds fail instead of being skipped.
 Strict slices additionally validate their complete state/timeline root once, checking wire
 object keys and known enum cases against the committed client schema. This includes standalone
-timeline, server-failure and resync error codes; no decoded-type switch can omit a field.
+timeline, server-failure and resync error codes, valid RFC 3339 timestamp instants, safe-integer
+duration bounds, and the year-9999 upper bound for epoch milliseconds. Composed presentation
+fields remain valid; no decoded-type switch can omit a field.
 Permissive Codable decoding alone is not strict validation. Deliberately tolerant slices
 continue to decode their original contaminated values.
 Run `swift test --package-path clients/swift/FractalClient --filter ScenariosTests` from the

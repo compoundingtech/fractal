@@ -233,7 +233,7 @@ public struct ScenarioReader: Sendable {
     }
 }
 
-private struct ScenarioClock {
+struct ScenarioClock {
     private let pattern = try! NSRegularExpression(pattern: #"^([0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2})(?:\.([0-9]+))?([Zz]|[+-][0-9]{2}:[0-9]{2})$"#)
 
     func parse(_ text: String, pointer: String) throws -> Int64 {
@@ -257,7 +257,7 @@ private struct ScenarioClock {
         case 4, 6, 9, 11: monthDays = 30
         default: monthDays = 31
         }
-        guard year >= 1, (1...12).contains(month), (1...monthDays).contains(day),
+        guard (1...12).contains(month), (1...monthDays).contains(day),
               hour < 24, minute < 60, second < 60 else {
             throw ScenarioError.invalidTime(pointer: pointer)
         }
