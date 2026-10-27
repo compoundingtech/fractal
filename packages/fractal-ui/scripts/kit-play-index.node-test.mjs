@@ -137,16 +137,22 @@ const focusReturnId = 'fractal-narrow-layout--drawer-focus-return'
 const nativeOverlayId = 'fractal-ui-sidebar-milestone-agent-row--native-overlays-themed'
 const aliasIds = [
   'fractal-ui-transcript--no-green-all-states-light',
-  'fractal-ui-composer--footer-width-budget-light',
+  'fractal-ui-composer--footer-width-budget-narrow-light',
+  'fractal-ui-composer--footer-width-budget-medium-light',
+  'fractal-ui-composer--footer-width-budget-wide-light',
 ]
 const baseIds = [
   'fractal-ui-transcript--no-green-all-states',
-  'fractal-ui-composer--footer-width-budget',
+  'fractal-ui-composer--footer-width-budget-narrow',
+  'fractal-ui-composer--footer-width-budget-medium',
+  'fractal-ui-composer--footer-width-budget-wide',
 ]
 test('the strict case set measures the filter once, keeps functional corners, and omits only the scheme aliases', () => {
   assert.deepEqual([...FULL_CASE_OVERRIDES], [
     ['fractal-ui-transcript--no-green-all-states-light', []],
-    ['fractal-ui-composer--footer-width-budget-light', []],
+    ['fractal-ui-composer--footer-width-budget-narrow-light', []],
+    ['fractal-ui-composer--footer-width-budget-medium-light', []],
+    ['fractal-ui-composer--footer-width-budget-wide-light', []],
     ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
     [nativeOverlayId, [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]],
     [freezeId, [['dark', 1100], ['light', 1100]]],
@@ -174,6 +180,18 @@ test('the strict case set measures the filter once, keeps functional corners, an
   assert.deepEqual(commit.ids, [functionalId])
   assert.deepEqual(commit.omittedStories, aliasIds)
 })
+test('all footer widths retain both browser widths per commit and all schemes at merge', () => {
+  const footerIds = baseIds.filter(id => id.startsWith('fractal-ui-composer--'))
+  assert.equal(footerIds.length, 3)
+  for (const id of footerIds) {
+    assert.ok(BOTH_WIDTHS.includes(id))
+    assert.deepEqual(commitSetCases([id], { mergeOnlyIds: [], bothWidthsIds: [id] }).cases, [
+      { id, scheme: 'dark', width: 440 }, { id, scheme: 'dark', width: 1440 },
+    ])
+    assert.equal(fullCases([id]).length, 4)
+  }
+})
+
 test('the intermediate-width resize regression runs at its declared real viewport in both gate sets', () => {
   const expected = [{ id: freezeId, scheme: 'dark', width: 1100 }, { id: freezeId, scheme: 'light', width: 1100 }]
   assert.deepEqual(fullCases([freezeId]), expected)
@@ -283,8 +301,8 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     })
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
-    assert.equal(receipt.expectedCases, 29)
-    assert.equal(receipt.omitted.cases, 15)
+    assert.equal(receipt.expectedCases, 37)
+    assert.equal(receipt.omitted.cases, 23)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
     assert.match(receipt.fatalError, /must-not-import-browser-for-case-contract/)
