@@ -6189,72 +6189,8 @@ pub fn start_agent_roster(state: &AppState) {
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
-            let mut admission = store.admit_agent_resources("refresher").await;
             let first = std::mem::take(&mut head);
-            if !first {
-                record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
-            }
-            let reader = store.clone();
-            let mut warm_attributes = None;
-            if first {
-                // Warm without admission: nothing is published, and no reader folds.
-                drop(admission);
-                let reader = store.clone();
-                let submitted = crate::otel::export_enabled().then(Instant::now);
-                match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
-                    roster_worker(true, submitted, None, || {
-                        let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
-                        (result, crate::otel::take_roster_attributes())
-                    })
-                })).await {
-                    Ok((result, attributes)) => {
-                        warm_attributes = attributes;
-                        if let Err(error) = result {
-                            eprintln!("st3: agents roster warm-up failed: {error:#}");
-                        }
-                    }
-                    Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
-                }
-                admission = store.admit_agent_resources("refresher").await;
-            }
-            let submitted = crate::otel::export_enabled().then(Instant::now);
-            let refreshed = tokio::task::spawn_blocking(move || roster_worker(true, submitted, warm_attributes, || {
-                let _admission = admission;
-                _admission.enter_worker();
-                // The first fold publishes only what windows and first pages show; the rest
-                // follows at once.
-                crate::task_cpu::performance_blocking("published_list.agents", || if first {
-                    reader.answer_agent_roster_requests(|| {
-                        reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
-                    })
-                } else {
-                    // Nothing published to start from: every card folds again from the log.
-                    let before = reader
-                        .published_agent_roster(u64::MAX, false)
-                        .map(|(cut, _, _)| cut);
-                    let cold = before.is_none();
-                    let folded = Instant::now();
-                    let refreshed = reader.answer_agent_roster_requests(|| {
-                        refresh_agent_roster(&reader, false)?;
-                        if reader.take_agent_roster_history_request() {
-                            refresh_agent_roster(&reader, true)?;
-                        }
-                        Ok(())
-                    });
-                    if let (Some(before), Some((cut, _, at))) =
-                        (before, reader.published_agent_roster(u64::MAX, false))
-                    {
-                        record_publish_latency(&reader, "agents", before, cut, at);
-                    }
-                    record_roster_stage(if cold {
-                        request_latency::RosterStage::RefreshCold
-                    } else {
-                        request_latency::RosterStage::Refresh
-                    }, folded.elapsed());
-                    refreshed
-                })
-            }))
-            .await;
+            let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => eprintln!("st3: agents roster refresh failed: {error:#}"),
@@ -6280,6 +6216,82 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// One owner iteration, including both queues that can outlive its readers.
+async fn refresh_agent_roster_admitted(
+    store: Arc<Store>,
+    first: bool,
+) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
+    let mut admission = store.admit_agent_resources("refresher").await;
+    if !first {
+        if !store.agents_publication_demand() {
+            return Ok(Ok(()));
+        }
+        record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
+    }
+    let reader = Arc::clone(&store);
+    let mut warm_attributes = None;
+    if first {
+        // Warm without admission: nothing is published, and no reader folds.
+        drop(admission);
+        let reader = Arc::clone(&store);
+        let submitted = crate::otel::export_enabled().then(Instant::now);
+        match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
+            roster_worker(true, submitted, None, || {
+                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                (result, crate::otel::take_roster_attributes())
+            })
+        })).await {
+            Ok((result, attributes)) => {
+                warm_attributes = attributes;
+                if let Err(error) = result {
+                    eprintln!("st3: agents roster warm-up failed: {error:#}");
+                }
+            }
+            Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
+        }
+        admission = store.admit_agent_resources("refresher").await;
+    }
+    let submitted = crate::otel::export_enabled().then(Instant::now);
+    tokio::task::spawn_blocking(move || {
+        // The blocking pool is another queue: losing demand there must also avoid a fold.
+        if !first && !reader.agents_publication_demand() {
+            return Ok(());
+        }
+        roster_worker(true, submitted, warm_attributes, || {
+            let _admission = admission;
+            _admission.enter_worker();
+            // Startup publishes a bounded head; complete presentation follows on demand.
+            crate::task_cpu::performance_blocking("published_list.agents", || if first {
+                reader.answer_agent_roster_requests(|| {
+                    reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
+                })
+            } else {
+                let before = reader.published_agent_roster(u64::MAX, false).map(|(cut, _, _)| cut);
+                let cold = before.is_none();
+                let folded = Instant::now();
+                let refreshed = reader.answer_agent_roster_requests(|| {
+                    refresh_agent_roster(&reader, false)?;
+                    if reader.take_agent_roster_history_request() {
+                        refresh_agent_roster(&reader, true)?;
+                    }
+                    Ok(())
+                });
+                if let (Some(before), Some((cut, _, at))) =
+                    (before, reader.published_agent_roster(u64::MAX, false))
+                {
+                    record_publish_latency(&reader, "agents", before, cut, at);
+                }
+                record_roster_stage(if cold {
+                    request_latency::RosterStage::RefreshCold
+                } else {
+                    request_latency::RosterStage::Refresh
+                }, folded.elapsed());
+                refreshed
+            })
+        })
+    }).await
 }
 
 async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {

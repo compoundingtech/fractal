@@ -712,7 +712,7 @@ impl FractalRuntime {
             && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64)
     }
 
-    fn wake_read_roster(&self) {
+    pub fn wake_read_roster(&self) {
         if let Some(wake) = self.agent_roster_refresh.get().filter(|_| self.agents_publication_demand()) {
             let _ = self.agent_roster_requested_at.compare_exchange(
                 0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
