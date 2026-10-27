@@ -121,3 +121,13 @@ fn scenarios_invalid_instants_name_the_pointer() {
         assert!(error.to_string().contains("/at"), "{error:#}");
     }
 }
+
+#[test]
+fn scenarios_rebase_accepts_lowercase_rfc3339_separators() {
+    let times: Vec<TimePointer> = serde_json::from_value(serde_json::json!([
+        { "pointer": "/at", "codec": "timestamp" }
+    ])).unwrap();
+    let mut input = serde_json::json!({ "at": "2030-01-01t11:59:00.250999z" });
+    scenarios::rebase(&mut input, &times, "2030-01-01t12:00:00.000z", 1_893_499_201_500).unwrap();
+    assert_eq!(input["at"], "2030-01-01T11:59:01.750Z");
+}
