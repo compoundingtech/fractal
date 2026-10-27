@@ -202,6 +202,23 @@ mod tests {
         assert_eq!(demo.world.agents.items().len(), 4);
         assert_eq!(demo.world.devices.items().len(), 2);
         assert_eq!(demo.world.missions.items().len(), 1);
+        let mission = &demo.world.missions.items()[0];
+        assert_eq!(mission.word, Word::Stalled);
+        assert_eq!(mission.agents.len(), 3);
+        let steps: Vec<_> = mission.steps.iter().map(|step| {
+            (step.name.as_str(), step.state, step.owner.as_deref())
+        }).collect();
+        assert_eq!(steps, [
+            ("step-1", StepState::Done, Some("Atlas Builder")),
+            ("step-2", StepState::Working, Some("Atlas Migrator")),
+            ("step-5", StepState::Ready, Some("Atlas Migrator")),
+            ("step-3", StepState::Waiting, Some("Atlas Builder")),
+            ("step-4", StepState::Pending, Some("Atlas Reviewer")),
+        ]);
+        let conversation = demo.world.conversations["agent/example/atlas/builder"].ready().unwrap();
+        assert!(conversation.iter().any(|entry| matches!(&entry.body, Body::User(text) if text.contains("worker typecheck"))));
+        assert!(conversation.iter().any(|entry| matches!(&entry.body, Body::Assistant(text) if text.contains("asked Robin"))));
+        assert!(!conversation.iter().any(|entry| matches!(&entry.body, Body::Mail { from, .. } if from == "Fractal")));
         // Like the live TUI, Now shows the selected person's attention, not Ada's.
         assert_eq!(demo.world.attention.items().len(), 1);
         assert_eq!(demo.world.conversations.len(), 2);
@@ -209,3 +226,4 @@ mod tests {
         assert!(screen.lines.iter().any(|line| line.text.contains("typecheck")));
     }
 }
+

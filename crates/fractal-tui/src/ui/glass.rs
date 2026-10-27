@@ -4271,9 +4271,9 @@ pub(crate) fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
 
 /// The glasses capability version st grants this stui. From version 2 (#958) a split carries its
 /// ratio; an older st is never sent one.
-static GLASSES_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static GLASSES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub fn set_glasses_version(version: u32) {
+pub fn set_glasses_version(version: u64) {
     GLASSES_VERSION.store(version, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -5026,7 +5026,7 @@ mod tests {
     }
 
     #[test]
-    fn a_glass_opens_on_home_with_the_status_line_and_plain_stui_has_neither() {
+    fn a_glass_opens_on_home_with_the_status_line_and_plain_tui_has_neither() {
         let ui = glass();
         let shown = screen(&ui);
         let first = shown.lines().next().unwrap();
@@ -7997,7 +7997,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell,
             title: "shell".into(),
@@ -8007,7 +8007,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,
@@ -8090,7 +8090,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell.clone(),
             title: "shell".into(),
@@ -8100,7 +8100,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,

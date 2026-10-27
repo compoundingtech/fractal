@@ -5212,7 +5212,9 @@ mod tests {
         let timed =
             timeline_slice(&session, TimelineOrder::TimestampSequence, None, usize::MAX).unwrap();
         assert_ne!(sequence.items, timed.items);
-        assert_eq!(timed.items[0]["timestamp"], stamps[0]);
+        // Numeric chronology selects 10:00Z, not the lexically larger 10:30+02:00.
+        // Preserve the exact source spelling rather than normalizing the output.
+        assert_eq!(timed.items[0]["timestamp"], stamps[2]);
     }
 
     #[test]

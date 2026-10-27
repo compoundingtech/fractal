@@ -24,7 +24,7 @@ import { AgentActions, agentActions } from './AgentActions.tsx'
 const keys = (state: string, activity: 'working' | 'idle' = 'idle') => agentActions({ state, activity }).map((row) => row.key)
 
 describe('agentActions', () => {
-  it('offers what stui offers for the seat\'s state, in its order', () => {
+  it('offers what the Fractal terminal UI offers for the seat\'s state, in its order', () => {
     expect(keys('running', 'working')).toEqual(['interrupt', 'restart', 'suspend', 'retire', 'copy'])
     expect(keys('running')).toEqual(['restart', 'suspend', 'retire', 'copy'])
     expect(keys('starting')).toEqual(['restart', 'suspend', 'retire', 'copy'])
@@ -51,7 +51,7 @@ describe('gatewayAgentControls', () => {
     return { calls, client, port: gatewayAgentControls(client as unknown as FractalClient) }
   }
 
-  it('restarts as a stop and then a start, each fenced on the declaration st selects then', async () => {
+  it('restarts as a stop and then a start, each fenced on the declaration Fractal selects then', async () => {
     const { calls, port } = fake()
     expect(await port.control('agent/example/atlas', 'restart')).toEqual({ _tag: 'Sent' })
     expect(calls.map(([name, input]) => [name, input.fence, input.parameters])).toEqual([

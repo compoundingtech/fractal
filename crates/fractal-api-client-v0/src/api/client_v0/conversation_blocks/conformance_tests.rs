@@ -51,7 +51,7 @@ fn every_native_reader_output_conforms_to_client_v0_timeline_entry() {
             exported.extend(prepared);
             conform(&validator, &read(&native, &session, &native.id).unwrap());
             for order in [TimelineOrder::Sequence, TimelineOrder::TimestampSequence] {
-                conform(&validator, &read_slice(&native, &session, &native.id, order, None, usize::MAX).unwrap().items);
+                conform(&validator, &read_slice(&native, &session, &native.id, order, None, usize::MAX, true).unwrap().items);
             }
             for entry in &normalized {
                 if let Some(locator) = entry.get("_source") {
