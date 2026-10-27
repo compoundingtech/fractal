@@ -7279,11 +7279,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .context("rollout disappeared before account selection")?;
             anyhow::ensure!(
                 operation.id == *id
-                    && operation.native_account.as_deref()
-                        == launch_member
-                            .environment
-                            .get("ST3_ACCOUNT")
-                            .map(String::as_str),
+                    && (operation.old_member.driver != member.driver
+                        || operation.native_account.as_deref()
+                            == launch_member
+                                .environment
+                                .get("ST3_ACCOUNT")
+                                .map(String::as_str)),
                 "strict rollout cannot carry a conversation between native login accounts"
             );
         }

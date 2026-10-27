@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Owned-set rollouts that change an agent's harness start a fresh native session on the replacement provider instead of trying to resume the previous provider's conversation.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "No wire changes. Cross-provider rollouts verify the replacement provider's own incarnation-bound session. Same-provider rollouts retain exact native-session and login-account continuity checks." },
+  "downtime": { "status": "none", "detail": "Rollouts retain the existing drain and fenced-stop sequence." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "The predecessor session snapshot remains available as history; it is not supplied to a different provider." }
+}

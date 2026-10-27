@@ -481,6 +481,75 @@ fn rollout_drains_then_resumes_once_across_disk_reopens() {
 }
 
 #[test]
+fn rollout_provider_switch_starts_fresh_and_verifies_the_replacement_provider() {
+    for reported_provider in ["codex", "claude"] {
+        let mut seat = Seat::new();
+        // Switching back to a provider must not revive its older conversation either.
+        seat.append("harness.session-file", json!({
+            "harness":"codex", "session_id":"historical-codex", "incarnation_id":"historical",
+            "path":"/codex/historical.jsonl"
+        }));
+        seat.append("harness.session-file", json!({
+            "harness":"claude", "session_id":"native-one", "incarnation_id":"original-1",
+            "path":"/claude/original.jsonl", "account_ref":"claude-login"
+        }));
+        let source = seat.source("replacement-model", "")
+            .replace("harness \"claude\"", "harness \"codex\"");
+        seat.publish_source(2, &source, Some(Policy::when_idle(1_800_000, false)), false);
+        seat.step();
+        assert_eq!(seat.operation().phase, "draining");
+        seat.ack();
+        seat.busy(false);
+        seat.step();
+        assert_eq!(seat.operation().phase, "stopping");
+        seat.reopen();
+        seat.step();
+        assert_eq!(*seat.runtime.stops.lock().unwrap(), ["original-1"]);
+        seat.step();
+        assert_eq!(seat.operation().phase, "starting");
+        seat.reopen();
+        seat.step();
+        assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1, "{:?}", seat.operation().reason);
+        let launch = seat.runtime.starts.lock().unwrap()[0].clone();
+        assert_eq!(launch.driver.as_deref(), Some("codex"));
+        for selector in [
+            crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV,
+            crate::suspension::CONTINUE_PATH_ENV, rollout::RESUME_PATH_ENV,
+        ] {
+            assert!(!launch.environment.contains_key(selector), "carried {selector} across providers");
+        }
+        // The old snapshot remains historical evidence, not the replacement's launch selector.
+        assert_eq!(seat.operation().native_session_id.as_deref(), Some("native-one"));
+        assert_eq!(seat.operation().native_account.as_deref(), Some("claude-login"));
+        seat.reopen();
+        seat.step();
+        assert_eq!(seat.operation().phase, "verifying");
+        seat.step();
+        assert_eq!(seat.operation().phase, "verifying", "absence is not a native binding");
+        seat.append("harness.session-file", json!({
+            "harness":reported_provider, "session_id":"replacement-native",
+            "incarnation_id":"replacement-1", "path":"/replacement/native.jsonl"
+        }));
+        seat.append("harness.observed", json!({
+            "driver":reported_provider, "state":"idle", "incarnation_id":"replacement-1",
+            "quiescent":true, "blocking":[]
+        }));
+        seat.step();
+        let expected = if reported_provider == "codex" { "running" } else { "failed" };
+        assert_eq!(seat.operation().phase, expected, "{:?}", seat.operation().reason);
+        seat.reopen();
+        seat.step();
+        assert_eq!(seat.operation().phase, expected);
+        assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+        assert_eq!(
+            seat.runtime.stops.lock().unwrap().len(),
+            if reported_provider == "codex" { 1 } else { 2 },
+            "a valid Codex binding must not stop its replacement; a Claude binding cannot qualify it",
+        );
+    }
+}
+
+#[test]
 fn rollout_wrong_incarnation_never_terminates_its_successor() {
     let seat = Seat::new();
     seat.publish(
