@@ -351,7 +351,7 @@ fn tier(id: &str) -> Option<Tier> {
 fn who(actor: &fractal_client::AttentionActor) -> String {
     if actor.label == "st" {
         "Fractal".into()
-    } else if actor.id.starts_with("agent/") {
+    } else if actor.id.starts_with("agent/") && actor.label != actor.id {
         format!("{} · {}", actor.label, actor.id)
     } else {
         actor.label.clone()
@@ -1047,6 +1047,22 @@ pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_labels_show_fallback_ids_only_once() {
+        for id in ["agent/example/unnamed", "person/ada"] {
+            let actor = fractal_client::AttentionActor {
+                id: id.into(),
+                label: id.into(),
+            };
+            assert_eq!(who(&actor), id);
+        }
+        let named = fractal_client::AttentionActor {
+            id: "agent/example/maintainer".into(),
+            label: "Maintainer".into(),
+        };
+        assert_eq!(who(&named), "Maintainer · agent/example/maintainer");
+    }
 
     #[test]
     fn human_presentation_accepts_current_and_older_shared_model_wording() {
