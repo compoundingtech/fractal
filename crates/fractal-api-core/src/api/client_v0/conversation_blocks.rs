@@ -513,6 +513,8 @@ pub struct PreparedSlice {
     pub generation: u64,
 }
 
+/// Read a bounded source slice with optional display preparation. Replay extents only
+/// inspect identity, sequence and echo correlation; they must not expand display bodies.
 pub fn read_slice(
     source: &ExternalSession,
     session: &ClientSession,
@@ -520,6 +522,7 @@ pub fn read_slice(
     order: crate::external_sessions::TimelineOrder,
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
+    prepare_display: bool,
 ) -> Result<PreparedSlice, ApiError> {
     let queue = crate::profile::span("conversation/native-fold-queue");
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
@@ -534,9 +537,11 @@ pub fn read_slice(
         .slice(source, order, before, limit)
         .map_err(ApiError::internal)?;
     drop(fold);
-    let _preparation = crate::profile::span("conversation/native-display-preparation");
-    for item in &mut slice.items {
-        prepare_one(source, session, session_id, &basis, item)?;
+    if prepare_display {
+        let _preparation = crate::profile::span("conversation/native-display-preparation");
+        for item in &mut slice.items {
+            prepare_one(source, session, session_id, &basis, item)?;
+        }
     }
     if basis != self::basis(source)? {
         return Err(invalidated());
