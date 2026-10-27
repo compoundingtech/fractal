@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, writeFile, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { test } from 'node:test'
 import { generateWorld } from './world.mjs'
@@ -81,6 +81,7 @@ test('binary assets require a listed path and an exact reviewed hash', async () 
 
 test('Git-ignored build output is skipped, but tracked and non-ignored controls still fail', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'synthetic-gitignore-'))
+  const aliases = await mkdtemp(join(tmpdir(), 'synthetic-alias-'))
   const git = (...args) => {
     const result = spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8' })
     assert.equal(result.status, 0, result.stderr)
@@ -99,12 +100,20 @@ test('Git-ignored build output is skipped, but tracked and non-ignored controls 
     const untracked = join(dir, 'untracked.txt')
     await writeFile(untracked, denied)
     assert.deepEqual(await scanFiles([dir]), [{ file: untracked, line: 1 }])
-    // Even a tracked file in an ignored directory must never be exempted.
+    // Git reports the resolved top level; a root reached through a symlinked ancestor directory
+    // (macOS temporary directories are one) must not skip every entry.
+    const parent = join(aliases, 'parent')
+    await symlink(dirname(dir), parent)
+    const alias = join(parent, basename(dir))
+    assert.deepEqual(await scanFiles([alias]), [{ file: join(alias, 'untracked.txt'), line: 1 }])
+    // Even a tracked (indexed) file in an ignored directory must never be exempted.
     git('add', '--force', 'storybook-static/generated.js')
-    git('-c', 'user.name=schickling-assistant', '-c', 'user.email=261620128+schickling-assistant@users.noreply.github.com', '-c', 'rerere.enabled=false', 'commit', '--quiet', '-m', 'Track privacy control')
     assert.deepEqual(await scanFiles([dir]), [
       { file: ignored, line: 1 }, { file: untracked, line: 1 },
     ])
     assert.deepEqual(await scanFiles([ignored]), [{ file: ignored, line: 1 }])
-  } finally { await rm(dir, { recursive: true, force: true }) }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+    await rm(aliases, { recursive: true, force: true })
+  }
 })

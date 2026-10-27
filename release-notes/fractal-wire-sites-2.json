@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Accept Fractal transport names in the remaining client and replay receivers without switching senders",
+  "replay": {"status": "none", "detail": "No persisted claim replay changes. The TypeScript scenario replay transport accepts both client protocol and capability spellings."},
+  "schema": {"status": "changed", "detail": "Public client JSON Schema version fields admit the deployed st3 names and Fractal aliases; generated receiver types follow the schema. No database, claim schema or data rewrite changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, digest, signature-domain or signed peer-envelope changes. st3-replication-v1, st3-member-v1 and signed peer st3.v1 remain unchanged."},
+  "compatibility": {"status": "changed", "detail": "Client response validators, legacy terminal protocol selection and local bridge transport labels accept Fractal aliases. Permissive Rust and Swift string decoding remains permissive. All sender constants and defaults retain their deployed st3 spelling; future WebSocket senders must offer both protocols, Fractal first, so servers select only an offered name."},
+  "downtime": {"status": "none", "detail": "Receiver-only expansion requires no downtime or coordinated restart and remains compatible with old clients and peers."},
+  "manual": {"status": "none", "detail": "No re-pairing or operator action required. Bridge arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both sunsets 60 days after the first release shipping it; senders switch only after every member accepts the aliases."},
+  "recovery": {"status": "none", "detail": "No persisted state changes or sender cutover; previous release rollback remains available."}
+}

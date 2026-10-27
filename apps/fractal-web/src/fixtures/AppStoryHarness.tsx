@@ -1,55 +1,29 @@
 import * as React from 'react'
-import * as stylex from '@stylexjs/stylex'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
-import { Schema } from 'effect'
-import { assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@smalltalk/fractal-ui/assistant-ui/shell'
-import { colorVars, typeVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DataSourceProvider } from '../data/react.tsx'
-import { persistedAtom } from '../state/persistence.ts'
-import { setTheme } from '../ui-compat/foundations.ts'
-import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
-import { createAppStoryFixture, type AppStoryFixture, type AppStoryState as StoryState } from './storybookScenarios.ts'
+import { createAppStoryFixture, type AppStoryFixture, type AppStoryState } from './appStoryStates.ts'
 
-export interface AppStoryArgs { readonly scheme: 'light' | 'dark'; readonly width: 600 | 1440; readonly state: StoryState }
-
-/** Reset the production persistence boundary without importing App/liveRuntime.
- * Each specimen has its own source and registry; no session adoption leaks. */
-export const prepareAppStory = (scheme: AppStoryArgs['scheme']): void => {
-  setTheme(scheme)
-  // Preserve Storybook's iframe pathname and id/refId/args/globals query.
-  // Only `open` belongs to the app router; dropping it selects the thread.
-  const url = new URL(window.location.href)
-  url.searchParams.delete('open')
-  window.history.replaceState(window.history.state, '', url)
-  const registry = AtomRegistry.make()
-  registry.set(persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' }), scheme)
-  registry.set(persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' }), '')
-  registry.set(persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false }), false)
-  registry.dispose()
+export interface AppStoryArgs {
+  readonly state: AppStoryState
+  readonly scheme: 'dark' | 'light'
 }
 
-const Specimen = ({ state, scheme, width, children }: AppStoryArgs & {
+interface SpecimenProps {
+  readonly state: AppStoryState
   readonly children: (fixture: AppStoryFixture) => React.ReactNode
-}) => {
+}
+
+const Specimen = ({ state, children }: SpecimenProps) => {
   const [fixture] = React.useState(() => createAppStoryFixture(state))
   const [registry] = React.useState(() => AtomRegistry.make())
-  React.useLayoutEffect(() => () => registry.dispose(), [registry])
-  return <section data-app-state={state} aria-label={`${state} · ${scheme} · ${width}`} style={{ width, flexShrink: 0 }}>
-    <h2>{state} · {scheme} · {width}px</h2>
-    {/* Same theme roots as LiveAgentWorkspace, for the standalone pane too. */}
-    <div data-scheme={scheme} {...stylex.props(styles.frame, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-      <DataSourceProvider source={fixture.source} registry={registry}>{children(fixture)}</DataSourceProvider>
-    </div>
-  </section>
+  return <div data-app-state={state} style={{ display: 'contents' }}>
+    <DataSourceProvider source={fixture.source} registry={registry}>{children(fixture)}</DataSourceProvider>
+  </div>
 }
 
-/** One production boundary per document keeps its landmarks unambiguous. */
-export const AppStoryState = ({ renderSurface, ...args }: AppStoryArgs & {
-  readonly renderSurface: (fixture: AppStoryFixture) => React.ReactNode
-}) => <main aria-label="Production app state" style={{ padding: 16 }}>
-  <Specimen key={`${args.state}.${args.scheme}.${args.width}`} {...args}>{renderSurface}</Specimen>
-</main>
-
-const styles = stylex.create({
-  frame: { display: 'flex', flexDirection: 'column', height: '100dvh', minHeight: 600, minWidth: 0, overflow: 'hidden', backgroundColor: colorVars.canvas, color: colorVars.fg, fontFamily: typeVars.fontSans, fontSize: typeVars.uiSize },
-})
+/**
+ * Exactly one production boundary per story document, over its own fixture source and registry;
+ * changing the state control remounts it. The marker carries the state for the play assertion
+ * and is never evidence by itself.
+ */
+export const AppStorySpecimen = (props: SpecimenProps) => <Specimen key={props.state} {...props} />

@@ -24,7 +24,7 @@ use std::os::unix::fs::{PermissionsExt as _, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
-const PAYLOAD: &str = include_str!("../crates/st-drivers/tests/fixtures/harness-context/claude-statusline-mid-session.json");
+const PAYLOAD: &str = include_str!("../crates/fractal-drivers/tests/fixtures/harness-context/claude-statusline-mid-session.json");
 
 struct Seat {
     _tmp: tempfile::TempDir,
@@ -101,7 +101,7 @@ impl Seat {
     }
 
     fn tee_as(&self, identity: &str, overrides: &[(&str, &str)]) -> Output {
-        let script = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("crates/st-drivers/hooks/claude-statusline.sh");
+        let script = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("crates/fractal-drivers/hooks/claude-statusline.sh");
         let path = format!(
             "{}:{}",
             self.bin.display(),
@@ -375,7 +375,7 @@ fn without_st2_on_path_the_script_drains_stdin_and_renders_nothing() {
     // seconds. The PATH keeps the shell's own utilities and drops only `st2`, which is the shape
     // of that failure; a PATH with nothing on it would be testing the harness, not the tee.
     let path = which_dirs(&["bash", "cat"]);
-    let script = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("crates/st-drivers/hooks/claude-statusline.sh");
+    let script = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("crates/fractal-drivers/hooks/claude-statusline.sh");
     assert!(
         which("st2", &path).is_none(),
         "the fallback PATH must not carry an st2"
@@ -506,7 +506,7 @@ fn a_recording_render_is_also_free_of_the_collector() {
 
 #[test]
 fn the_rendered_registration_names_the_chaining_tee_and_carries_the_whole_slot() {
-    let registration = st2::hooks::claude_settings_registration();
+    let registration = fractal_legacy_runner::hooks::claude_settings_registration();
     let slot = &registration["statusLine"];
 
     // The slot is single-valued: what st2 writes here is the only command Claude runs, so it must
@@ -520,7 +520,7 @@ fn the_rendered_registration_names_the_chaining_tee_and_carries_the_whole_slot()
 
 #[test]
 fn both_pre_compact_commands_are_registered_and_post_compact_joins_them() {
-    let registration = st2::hooks::claude_settings_registration();
+    let registration = fractal_legacy_runner::hooks::claude_settings_registration();
     let pre = registration["hooks"]["PreCompact"][0]["hooks"]
         .as_array()
         .expect("PreCompact carries a hook list");

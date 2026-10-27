@@ -3,8 +3,8 @@
  * switch's trace (through the SDK's `st3.follow.subscribe` child), and the switch root completes
  * only after the frame is observed and the transcript paint is reported.
  */
-import type { CollectionSocket, Snapshot } from '@smalltalk/st3-client'
-import { FIRST_FRAME_SPAN, FOLLOW_SUBSCRIBE_SPAN, St3, St3Live } from '@st3/sdk/effect'
+import type { CollectionSocket, Snapshot } from '@fractal/client'
+import { FIRST_FRAME_SPAN, FOLLOW_SUBSCRIBE_SPAN, St3, St3Live } from '@fractal/sdk/effect'
 import * as Effect from 'effect/Effect'
 import * as Option from 'effect/Option'
 import * as Stream from 'effect/Stream'

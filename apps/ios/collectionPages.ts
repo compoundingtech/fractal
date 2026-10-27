@@ -1,4 +1,4 @@
-import type { Page, Snapshot } from '../../clients/typescript/st3-client';
+import type { Page, Snapshot } from '../../clients/typescript/fractal-client';
 
 function isSnapshotChurn(error: unknown): boolean {
   return typeof error === 'object' && error !== null && 'response' in error

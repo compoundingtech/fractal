@@ -1,10 +1,10 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, extname, join, resolve } from 'node:path'
+import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as ts from 'typescript'
-import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
+import { storyGlobs } from '../../../../packages/fractal-ui/.storybook/stories.ts'
 
 const web = dirname(fileURLToPath(import.meta.url))
 const kit = resolve(web, '../../../../packages/fractal-ui')
@@ -45,13 +45,13 @@ const eagerGraph = (entry: string, includeLazy = false) => {
     }
     for (const specifier of specifiers) {
       dependencies.add(specifier)
-      // Lazy terminal modules import emitted font/WASM assets, not TS surfaces.
+      // Lazily loaded modules import emitted assets (`?url` fonts, JSON word lists), not TS surfaces.
       // Keep the established eager traversal semantics unchanged.
-      if (includeLazy && (specifier.endsWith('?url') || /\.(?:woff2?|ttf|wasm)$/.test(specifier))) continue
+      if (includeLazy && (specifier.includes('?') || /\.(?:json|woff2?|ttf|wasm)$/.test(specifier))) continue
       let local: string | undefined
       if (specifier.startsWith('.')) local = resolve(dirname(file), specifier)
-      else if (specifier === '@smalltalk/fractal-ui' || specifier.startsWith('@smalltalk/fractal-ui/')) {
-        const key = specifier === '@smalltalk/fractal-ui' ? '.' : `.${specifier.slice('@smalltalk/fractal-ui'.length)}`
+      else if (specifier === '@fractal/ui' || specifier.startsWith('@fractal/ui/')) {
+        const key = specifier === '@fractal/ui' ? '.' : `.${specifier.slice('@fractal/ui'.length)}`
         const target = kitPackage.exports[key]
         if (target === undefined) throw new Error(`Missing kit export ${specifier}`)
         local = resolve(kit, target)
@@ -77,6 +77,9 @@ describe('conversation eager graph boundary', () => {
     expect(graph.dependencies.some(specifier => /^(?:refractor|react-markdown)(?:\/|$)/.test(specifier))).toBe(false)
     expect(graph.dependencies).not.toContain('@assistant-ui/react')
     expect(graph.files).toContain(resolve(web, 'ConversationPaneFallback.tsx'))
+    expect(graph.files).not.toContain(resolve(web, 'ChangesInspector.tsx'))
+    expect(graph.files).not.toContain(resolve(web, 'capturedChanges.ts'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
   })
 
   it('still reaches the real heavy composition through the on-demand pane', () => {
@@ -88,19 +91,25 @@ describe('conversation eager graph boundary', () => {
     expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
     expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
   })
+
+  it('reaches the real diff viewer only through the on-demand Changes inspector', () => {
+    const graph = eagerGraph(resolve(web, 'ChangesInspector.tsx'))
+    expect(graph.files).toContain(resolve(web, 'capturedChanges.ts'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/DiffPanel.tsx'))
+    expect(graph.files).toContain(resolve(kit, 'src/assistant-ui/composition/Markdown.tsx'))
+    expect(graph.dependencies.some(specifier => /^refractor(?:\/|$)/.test(specifier))).toBe(true)
+    expect(graph.files).not.toContain(resolve(web, 'ConversationPane.tsx'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/index.ts'))
+    expect(graph.files).not.toContain(resolve(kit, 'src/assistant-ui/workbench/Workbench.tsx'))
+  })
 })
 
-interface AppStoryException {
-  readonly book: string
-  readonly title: string
-  readonly classification: string
-  readonly owner: string
-  readonly reason: string
-}
+/** A story titled `Fractal/App/<Module>` is a production module suite: its meta.component names that module. */
+const moduleSuiteTitle = /^Fractal\/App\/([A-Z][A-Za-z0-9]*)$/
 
-/** Resolve the primary component identity from imports/meta and require an
- * actual JSX mount. A local clone resolves to the story itself; React.lazy
- * resolves its literal import target, never to a misleading local alias. */
+/** Resolve a module suite's component identity from imports/meta and require an actual JSX mount.
+ * A local clone resolves to the story itself; React.lazy resolves its literal import target,
+ * never to a misleading local alias. Other `Fractal/App/` titles are not module suites. */
 const storySurface = (file: string) => {
   const source = ts.createSourceFile(file, readFileSync(file, 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
   const imports = new Map<string, string>()
@@ -119,10 +128,15 @@ const storySurface = (file: string) => {
     }
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined)
       variables.set(node.name.text, node.initializer)
-    if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) {
-      if (node.name.text === 'title' && ts.isStringLiteral(node.initializer) && node.initializer.text.startsWith('Fractal/App/'))
-        title = node.initializer.text
-      if (node.name.text === 'component') component = node.initializer
+    // Only the meta object's own `component`, never a nested docs description of the same name.
+    if (ts.isObjectLiteralExpression(node)) {
+      const members = new Map(node.properties.flatMap(member =>
+        ts.isPropertyAssignment(member) && ts.isIdentifier(member.name) ? [[member.name.text, member.initializer] as const] : []))
+      const value = members.get('title')
+      if (value !== undefined && ts.isStringLiteral(value) && moduleSuiteTitle.test(value.text)) {
+        title = value.text
+        component = members.get('component')
+      }
     }
     if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && ts.isIdentifier(node.tagName))
       mounted.add(node.tagName.text)
@@ -157,23 +171,20 @@ const storySurface = (file: string) => {
     }
     return file
   }
-  return { title, module: identity(component.text) }
+  const module = identity(component.text)
+  if (basename(module, extname(module)) !== moduleSuiteTitle.exec(title)?.[1])
+    throw new Error(`${title}: meta.component resolves to another module: ${module}`)
+  return { title, module }
 }
 
-/** Bidirectional module coverage for the decided App boundaries in this slice.
- * The lazy-inclusive production graph proves on-demand panes are reachable;
- * the inventory does not turn every kit leaf into an App suite requirement. */
-const assertAppStoryCoverage = ({
-  entry, stories, required, exceptions = [],
-}: {
+/** Bidirectional module coverage: every module suite mounts a module of the lazy-inclusive
+ * production graph, and every required production surface has a configured module suite.
+ * The production graph proves on-demand panes are reachable without evaluating them. */
+const assertAppStoryCoverage = ({ entry, stories, required }: {
   readonly entry: string
   readonly stories: readonly string[]
   readonly required: readonly string[]
-  readonly exceptions?: readonly AppStoryException[]
 }) => {
-  for (const row of exceptions)
-    if (row.book === 'app' && (!row.classification || !row.owner || !row.reason))
-      throw new Error(`Incomplete App exception: ${row.title}`)
   const production = new Set(eagerGraph(entry, true).files)
   for (const file of required)
     if (!production.has(file)) throw new Error(`Required App surface is not production-mounted: ${file}`)
@@ -181,60 +192,53 @@ const assertAppStoryCoverage = ({
   for (const file of stories) {
     const surface = storySurface(file)
     if (surface === undefined) continue
-    const exception = exceptions.find(row => row.book === 'app' && row.title === surface.title)
-    if (exception !== undefined) {
-      if (!exception.classification || !exception.owner || !exception.reason)
-        throw new Error(`Incomplete App exception: ${surface.title}`)
-      continue
-    }
     if (!production.has(surface.module))
       throw new Error(`Storied App surface is not production-mounted: ${surface.title} -> ${surface.module}`)
     storied.add(surface.module)
   }
-  for (const file of required) {
-    const waived = exceptions.some(row => row.book === 'app' && row.title === `Fractal/App/${basename(file, '.tsx')}`)
-    if (!storied.has(file) && !waived) throw new Error(`Production App surface has no canonical story: ${file}`)
-  }
+  for (const file of required)
+    if (!storied.has(file)) throw new Error(`Production App surface has no canonical story: ${file}`)
 }
 
 describe('lazy-inclusive canonical App story identity', () => {
   it('covers the required production surfaces in both directions without changing the eager proof', () => {
-    const manifest = resolve(kit, 'storybook-manifest.json')
-    const exceptions = existsSync(manifest)
-      ? Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Struct({
-          version: Schema.Literal(1),
-          exceptions: Schema.Array(Schema.Struct({
-            book: Schema.String, title: Schema.String, classification: Schema.String,
-            owner: Schema.String, reason: Schema.String,
-          })),
-        })))(readFileSync(manifest, 'utf8')).exceptions
-      : []
-    const appSrc = resolve(web, '..')
-    const stories = readdirSync(appSrc, { recursive: true, encoding: 'utf8' }).filter(file => file.endsWith('.stories.tsx')).map(file => resolve(appSrc, file))
+    // Kit Storybook loads app stories only by explicit file entries; those are the deployed suites.
+    const app = resolve(web, '../..')
+    const stories = storyGlobs.map(glob => resolve(kit, '.storybook', glob)).filter(file => file.startsWith(`${app}${sep}`))
+    expect(stories.filter(file => /[*?[\]{}]/.test(file)), 'App story entries must name files').toEqual([])
     const required = [resolve(web, 'LiveAgentWorkspace.tsx'), resolve(web, 'ConversationPane.tsx')]
-    assertAppStoryCoverage({ entry: resolve(web, 'main.tsx'), stories, required, exceptions })
-    expect(eagerGraph(resolve(web, 'main.tsx'), true).files).toContain(resolve(web, 'ConversationPane.tsx'))
+    assertAppStoryCoverage({ entry: resolve(web, 'main.tsx'), stories, required })
+    expect(stories).toContain(resolve(web, 'LiveAgentWorkspace.stories.tsx'))
+    expect(stories).toContain(resolve(web, 'ConversationPane.stories.tsx'))
   })
 
-  it.each(['local', 'lazy'] as const)('rejects a planted %s ConversationPane copy', mode => {
+  it.each(['local', 'lazy', 'other'] as const)('rejects a planted %s ConversationPane identity', mode => {
     const dir = mkdtempSync(join(tmpdir(), 'fractal-app-identity-'))
     try {
       const pane = join(dir, 'ConversationPane.tsx')
       const entry = join(dir, 'App.tsx')
       const story = join(dir, 'ConversationPane.stories.tsx')
       writeFileSync(pane, 'export const ConversationPane = () => <div data-testid="transcript-scroll" />')
-      writeFileSync(entry, "import { ConversationPane } from './ConversationPane.tsx'; export const App = () => <ConversationPane />")
-      const canonical = "import { ConversationPane } from './ConversationPane.tsx'; const meta = { title: 'Fractal/App/ConversationPane', component: ConversationPane, render: () => <ConversationPane /> }; export default meta"
+      writeFileSync(join(dir, 'Other.tsx'), 'export const Other = () => <div />')
+      writeFileSync(entry, "import { ConversationPane } from './ConversationPane.tsx'; import { Other } from './Other.tsx'; export const App = () => <><ConversationPane /><Other /></>")
+      const canonical = "import { ConversationPane } from './ConversationPane.tsx'; const meta = { title: 'Fractal/App/ConversationPane', component: ConversationPane, parameters: { docs: { description: { component: 'Pane' } } }, render: () => <ConversationPane /> }; export default meta"
       writeFileSync(story, canonical)
       const args = { entry, stories: [story], required: [pane] }
       expect(() => assertAppStoryCoverage(args)).not.toThrow()
-      if (mode === 'local')
+      if (mode === 'local') {
         writeFileSync(story, canonical.replace("import { ConversationPane } from './ConversationPane.tsx';", 'const ConversationPane = () => <div data-testid="transcript-scroll" />;'))
-      else {
+        expect(() => assertAppStoryCoverage(args)).toThrow('meta.component resolves to another module')
+      } else if (mode === 'lazy') {
         writeFileSync(join(dir, 'ConversationPaneCopy.tsx'), 'export const ConversationPane = () => <div data-testid="transcript-scroll" />')
         writeFileSync(story, canonical.replace("import { ConversationPane } from './ConversationPane.tsx';", "import * as React from 'react'; const ConversationPane = React.lazy(() => import('./ConversationPaneCopy.tsx').then(module => ({ default: module.ConversationPane })));"))
+        expect(() => assertAppStoryCoverage(args)).toThrow('meta.component resolves to another module')
+        // A copy under the canonical module name is still outside the production graph.
+        writeFileSync(story, canonical.replace("import { ConversationPane } from './ConversationPane.tsx';", "import * as React from 'react'; const ConversationPane = React.lazy(() => import('./copy/ConversationPane.tsx'));"))
+        expect(() => assertAppStoryCoverage(args)).toThrow(`Storied App surface is not production-mounted: Fractal/App/ConversationPane -> ${join(dir, 'copy', 'ConversationPane.tsx')}`)
+      } else {
+        writeFileSync(story, canonical.replace("import { ConversationPane } from './ConversationPane.tsx';", "import { Other as ConversationPane } from './Other.tsx';"))
+        expect(() => assertAppStoryCoverage(args)).toThrow('meta.component resolves to another module')
       }
-      expect(() => assertAppStoryCoverage(args)).toThrow('Storied App surface is not production-mounted')
       writeFileSync(story, canonical)
       expect(() => assertAppStoryCoverage({ ...args, stories: [] })).toThrow('Production App surface has no canonical story')
     } finally { rmSync(dir, { recursive: true, force: true }) }

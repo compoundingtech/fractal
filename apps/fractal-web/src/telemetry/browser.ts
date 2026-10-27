@@ -1,5 +1,5 @@
 /**
- * wf browser telemetry (`service.name = webfractal-web`).
+ * wf browser telemetry (`service.name = fractal-web`).
  *
  * One Effect `Tracer` serves both kinds of spans:
  * - Effect spans (SDK `st3.*`, app `wf.*` effects) flow through it as usual.
@@ -12,7 +12,9 @@
  * The tracer is teed into an in-memory `SpanRing` for the dev perf panel and, when an OTLP URL is
  * given, exported as OTLP/JSON via `fetch` directly to that explicitly configured endpoint.
  */
-import { Context, Deferred, Effect, Exit, FiberSet, Layer, Option, Scope, Tracer } from 'effect'
+import { CollectionName } from '@fractal/client/schema'
+import { normalizeDecodePath } from '@fractal/sdk/effect'
+import { Context, Deferred, Effect, Exit, FiberSet, Layer, Option, Schema, Scope, Tracer } from 'effect'
 import * as FetchHttpClient from 'effect/http/FetchHttpClient'
 import * as OtlpExporter from 'effect/observability/OtlpExporter'
 import * as OtlpSerialization from 'effect/observability/OtlpSerialization'
@@ -22,9 +24,10 @@ import { buildIdentity, deploymentId } from 'virtual:build-identity'
 
 import { makeSpanRing, type SpanRing } from './spanRing.ts'
 import { afterNextPaint, makeUxTelemetry, uxAttributeNames, uxSpanNames, type UxTelemetry } from './ux.ts'
+import { inputPaintAttributeNames, inputPaintSpanName, installInputPaint } from './inputPaint.ts'
 
 /** OpenTelemetry resource identity for browser spans emitted by wf. */
-export const serviceName = 'webfractal-web'
+export const serviceName = 'fractal-web'
 
 /**
  * Event types that start a user interaction. React Aria selects on press start (pointerdown) for
@@ -41,7 +44,7 @@ export interface TelemetryOptions {
   readonly otlpTracesUrl: string | undefined
   /** Low-cardinality resource attributes, e.g. `{ 'wf.lab.contender': 'atom' }`. */
   readonly resourceAttributes: Readonly<Record<string, string | number>>
-  /** Production omits script names and strips SDK events, failure details and unknown spans. */
+  /** Production exports allowlisted spans and sanitized decode diagnostics, never failure details. */
   readonly production?: boolean
 }
 
@@ -55,6 +58,10 @@ export interface Telemetry {
   readonly onCommit: React.ProfilerOnRenderCallback
   /** Installs event listeners and PerformanceObservers; returns the uninstaller. */
   readonly install: () => () => void
+  /** Call immediately after createRoot, before rendering; removes the completion root on cleanup. */
+  readonly registerReactRoot: (root: Element) => () => void
+  /** Portal hosts are completion roots and cheap child-list commit signals, never whole-page roots. */
+  readonly registerPortalHost: (host: Element) => () => void
 }
 
 interface PendingInteraction {
@@ -103,10 +110,12 @@ const interactionTarget = (target: EventTarget | null): string => {
 
 const exportedSpanNames: Readonly<Record<string, true>> = {
   ...Object.fromEntries(uxSpanNames.map((name) => [name, true as const])),
+  [inputPaintSpanName]: true,
   'st3.follow.subscribe': true,
   'st3.capabilities': true,
   'st3.socket.probe': true,
   'st3.socket.create': true,
+  'st3.resource.decode': true,
   'wf.ui.interaction': true,
   'wf.main.long_frame': true,
   'wf.page.vitals': true,
@@ -115,6 +124,7 @@ const exportedSpanNames: Readonly<Record<string, true>> = {
 }
 const exportedAttributes: Readonly<Record<string, true>> = {
   ...Object.fromEntries(uxAttributeNames.map((name) => [name, true as const])),
+  ...Object.fromEntries(inputPaintAttributeNames.map((name) => [name, true as const])),
   'span.label': true,
   'wf.ux.early': true,
   'wf.interaction.type': true,
@@ -128,6 +138,21 @@ const exportedAttributes: Readonly<Record<string, true>> = {
   'wf.vitals.long_frames': true,
   'wf.vitals.inp_ms': true,
   'wf.vitals.lcp_ms': true,
+}
+
+const isDecodeResource = Schema.is(CollectionName)
+/** Decode diagnostics carry schema coordinates and counters, never identities or failure text. */
+const isDecodeAttribute = (key: string, value: unknown): boolean => {
+  switch (key) {
+    case 'resource': return isDecodeResource(value)
+    case 'path': return typeof value === 'string' && normalizeDecodePath(value) === value
+    case 'tag': return value === 'Rejected' || value === 'Degraded'
+    case 'count':
+    case 'rejectedCount':
+    case 'degradedCount':
+      return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    default: return false
+  }
 }
 
 /** Long Animation Frames API (Chromium); not in TypeScript's DOM lib yet. */
@@ -172,6 +197,9 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
   let flushRequested = false
   let shutdownRequested = false
   let closeExporter: (() => void) | undefined
+  let uninstallInputPaint: (() => void) | undefined
+  const reactRoots = new Map<Element, number>()
+  const overlayHosts = new Map<Element, number>()
 
   /** Replay only pre-exporter spans, retaining the IDs already propagated to the SDK/gateway. */
   const exportEarlySpan = ({ span, events }: EarlySpanCapture, target: Tracer.Tracer) => {
@@ -206,9 +234,10 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
         return Tracer.nativeTracer.span(spanOptions)
       if (exporter !== undefined) return exporter.span(spanOptions)
       const span = Tracer.nativeTracer.span(spanOptions)
-      // Tracer.Span exposes event(), not an events read model. Capture through that public API;
-      // production replaces it with a no-op in the tee, so it needs no event buffer at all.
-      const events: Array<Parameters<Tracer.Span['event']>> | undefined = options.production ? undefined : []
+      // Only decode diagnostics retain production events; the tee sanitizes them before capture.
+      // Tracer.Span exposes event(), not an events read model, so capture through its public API.
+      const events: Array<Parameters<Tracer.Span['event']>> | undefined =
+        !options.production || spanOptions.name === 'st3.resource.decode' ? [] : undefined
       if (events !== undefined) {
         span.event = (...event) => {
           if (events.length < 64) events.push(event)
@@ -243,15 +272,22 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
               } : spanOptions)
         if (options.production) {
           const attribute = span.attribute.bind(span)
+          const event = span.event.bind(span)
           // SDK labels are fixed operation names, never a resource ref supplied by the caller.
           if (span.name.startsWith('st3.') && Object.hasOwn(exportedSpanNames, span.name))
             attribute('span.label', span.name.slice(4))
           Object.assign(span, {
             attribute: (key: string, value: unknown) => {
-              if (Object.hasOwn(exportedAttributes, key) && !span.name.startsWith('st3.'))
+              if (span.name === 'st3.resource.decode' ? isDecodeAttribute(key, value)
+                : Object.hasOwn(exportedAttributes, key) && !span.name.startsWith('st3.'))
                 attribute(key, value)
             },
-            event: () => {},
+            event: (name: string, at: bigint, attributes?: Record<string, unknown>) => {
+              if (span.name === 'st3.resource.decode' && name === 'st3.resource.decode_failure')
+                event(name, at, Object.fromEntries(
+                  Object.entries(attributes ?? {}).filter(([key, value]) => isDecodeAttribute(key, value)),
+                ))
+            },
             addLinks: () => {},
           })
         }
@@ -352,6 +388,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
               Effect.forkIn(scope),
             )
             yield* Effect.addFinalizer(() => {
+              uninstallInputPaint?.()
               ux?.dispose()
               disposed = true
               shutdownRequested = true
@@ -482,6 +519,10 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
   const install = () => {
     if (uninstall !== undefined) return uninstall
+    uninstallInputPaint = otlpTracesUrl === undefined ? undefined : installInputPaint({
+      emit, reactRoots: { [Symbol.iterator]: () => reactRoots.keys() },
+      overlayHosts: { [Symbol.iterator]: () => overlayHosts.keys() },
+    })
     for (const type of interactionEvents)
       window.addEventListener(type, onInteraction, { capture: true })
 
@@ -597,6 +638,7 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
 
     uninstall = () => {
       uninstall = undefined
+      uninstallInputPaint?.()
       for (const timer of timers.values()) clearTimeout(timer)
       ux?.dispose()
       disposed = true
@@ -618,5 +660,25 @@ export const makeTelemetry = (options: TelemetryOptions): Telemetry => {
     return uninstall
   }
 
-  return { ring, layer, onCommit, install, get ux() { return getUx() } }
+  const register = (roots: Map<Element, number>, root: Element): (() => void) => {
+    if (otlpTracesUrl === undefined) return () => {}
+    roots.set(root, (roots.get(root) ?? 0) + 1)
+    let registered = true
+    return () => {
+      if (!registered) return
+      registered = false
+      const count = roots.get(root)
+      if (count === 1) roots.delete(root)
+      else if (count !== undefined) roots.set(root, count - 1)
+    }
+  }
+  return {
+    ring, layer, onCommit, install, get ux() { return getUx() },
+    registerReactRoot: (root) => register(reactRoots, root),
+    registerPortalHost: (host) => {
+      const unregisterRoot = register(reactRoots, host)
+      const unregisterHost = register(overlayHosts, host)
+      return () => { unregisterRoot(); unregisterHost() }
+    },
+  }
 }

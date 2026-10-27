@@ -4,9 +4,9 @@ import { gatewayFetch } from './gatewayFetch.ts';
 // A proxy failure (for example Tailscale Serve's empty 502) must read as a gateway failure,
 // not as "JSON Parse error: Unexpected end of input".
 const empty502 = gatewayFetch(async () => new Response('', { status: 502 }));
-await assert.rejects(empty502('https://gateway.example/v1/client/work?limit=30'), /gateway returned HTTP 502 with no st response for \/v1\/client\/work/);
+await assert.rejects(empty502('https://gateway.example/v1/client/work?limit=30'), /gateway returned HTTP 502 with no Fractal response for \/v1\/client\/work/);
 const html = gatewayFetch(async () => new Response('<html>Bad Gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }));
-await assert.rejects(html('https://gateway.example/v1/client/agents'), /gateway returned HTTP 502 with no st response/);
+await assert.rejects(html('https://gateway.example/v1/client/agents'), /gateway returned HTTP 502 with no Fractal response/);
 
 // st JSON responses, including st error envelopes, pass through untouched.
 const body = JSON.stringify({ api_version: 'st3.client.v0', value: { ok: true } });

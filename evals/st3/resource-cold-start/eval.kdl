@@ -41,7 +41,7 @@ version 2
       title "The cold-start transition is valid"
       agentless
       depends-on { step "delivery" completed }
-      gate "the resource claim precedes one Small Talk action" {
+      gate "the resource claim precedes one Fractal action" {
         exec "bash ./judge.sh"
         host "local"
         workspace "${ST_WORKSPACE}/fixture"

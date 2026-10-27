@@ -1,6 +1,6 @@
-import type { AppStoryState } from './storybookScenarios.ts'
+import type { AppStoryState } from './appStoryStates.ts'
 
-/** Used by both CSF plays and the planted stub control. A harness label is never
+/** Used by both story plays and the planted stub control. A harness marker is never
  * evidence: the selected state must contain the real transcript and composer. */
 export const assertProductionAppState = (canvas: HTMLElement, state: AppStoryState, workspace: boolean): void => {
   if (canvas.querySelectorAll('[data-app-state]').length !== 1)

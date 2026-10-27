@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { parseFabricProofLink } from './fabricProof.ts';
 import { normalizeGatewayUrl } from './gatewayUrl.ts';
 
-const base = 'com.compoundingtech.smalltalk.starter://fabric-proof?node=' + 'ab'.repeat(32) + '&service=demo-client%2F0';
+const base = 'com.compoundingtech.fractal.starter://fabric-proof?node=' + 'ab'.repeat(32) + '&service=demo-client%2F0';
 assert.deepEqual(parseFabricProofLink(base), { node: 'ab'.repeat(32), service: 'demo-client/0' });
 assert.equal(parseFabricProofLink(base.replace('starter:', 'other:')), null);
 assert.equal(parseFabricProofLink(base + '&id=pairing/demo'), null);
