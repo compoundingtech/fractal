@@ -3721,8 +3721,7 @@ mod mission_golden {
         }
         if std::env::var_os("STUI_UPDATE_GOLDEN").is_some() {
             std::fs::write(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/mission-stories.golden"),
+                test_env!("CARGO_MANIFEST_DIR", "/tests/fixtures/mission-stories.golden"),
                 &actual,
             )
             .unwrap();

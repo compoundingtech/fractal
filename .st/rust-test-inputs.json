@@ -360,6 +360,7 @@
   },
   "fractal-tui": {
    "extra": [
+    "clients",
     "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json",
     "fixtures/clients",
