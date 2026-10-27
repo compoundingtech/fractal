@@ -267,7 +267,8 @@ pub(crate) mod tests {
         let usage = report.spenders.iter().find(|usage| usage.spender == "fixture/app-rejection-accounting").unwrap();
         assert_eq!((usage.sent, usage.refused), (3, 3), "initial app401, reloaded app401 and PAT401 each count exactly once");
         assert_eq!(count(owner, "github-ledger", "401"), 1);
-        assert!(auth.used_fallback());
+        assert!(!crate::github_http::read_response_cacheable(&response));
+        assert!(!auth.used_fallback(), "request fallback must not mutate the batch");
         assert_eq!(calls.lock().len(), 3);
         assert_eq!(calls.lock()[2].0, "Bearer fixture-pat");
         crate::github_http::send(client.post(format!("{}/repos/{owner}/repo/issues", server.base)), &auth).await.unwrap();

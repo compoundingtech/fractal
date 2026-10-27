@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::github_http::GithubAuth;
 use super::{
     GITHUB_AUTH_REMEDY, GithubListing, ObservationRequest, ProviderObservation, github_cache_for,
-    github_client, github_graphql, github_json, github_listing,
+    github_client, github_graphql_with_cache_eligibility, github_json, github_listing,
 };
 
 /// The data types a repository observer can emit.
@@ -1849,6 +1849,7 @@ async fn open_pull_requests(
     let mut page_size = PULL_REQUEST_PAGE_SIZE;
     let mut failed_size_ceiling = PULL_REQUEST_PAGE_SIZE + 1;
     let mut calls = 0;
+    let mut cacheable = true;
     loop {
         anyhow::ensure!(
             nodes.len() < OPEN_PULL_REQUEST_LIMIT,
@@ -1861,7 +1862,7 @@ async fn open_pull_requests(
             );
             calls += 1;
             tracing::debug!(owner, repository, page_size, "reading GitHub pull request page");
-            match github_graphql(
+            match github_graphql_with_cache_eligibility(
                 client,
                 api_base,
                 &read_token,
@@ -1870,7 +1871,10 @@ async fn open_pull_requests(
             )
             .await
             {
-                Ok(data) => data,
+                Ok((data, request_cacheable)) => {
+                    cacheable &= request_cacheable;
+                    data
+                }
                 Err(error)
                     if page_size > 1
                         && error.to_string().contains(
@@ -1914,7 +1918,8 @@ async fn open_pull_requests(
                 Some(false) => (&issue_token, RESOLVED_ISSUES),
                 None => (&read_token, RESOLVED_ITEMS),
             };
-            let resolved_data = github_graphql(client, api_base, auth, query, json!({"ids": ids})).await?;
+            let (resolved_data, request_cacheable) = github_graphql_with_cache_eligibility(client, api_base, auth, query, json!({"ids": ids})).await?;
+            cacheable &= request_cacheable;
             resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
         }
         identities_read = identities.len().min(identities_read + 100).min(1000);
@@ -1990,7 +1995,7 @@ async fn open_pull_requests(
     open.sort_by_key(|facts| facts.get("number").and_then(Value::as_u64));
     let open = Arc::new(open);
     let resolved = Arc::new(resolved);
-    if !read_token.used_fallback() && !issue_token.used_fallback() { pull_request_checks()
+    if cacheable { pull_request_checks()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(
@@ -2443,6 +2448,11 @@ mod tests {
             assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "legacy/build" && check["conclusion"] == "failure"));
             assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "lint"));
         }
+        let reused = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), false, false,
+            &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(reused.identities_read, 0, "intentional PAT status reads must preserve the GraphQL detail cache");
+        assert!(Arc::ptr_eq(&details.open, &reused.open));
         let requests = requests.lock();
         assert_eq!(requests.len(), 4, "one PR query, two separately authorized identity queries, one PAT status read");
         assert_eq!(requests.iter().filter(|(_, path, _)| path.contains("/status")).count(), 1);

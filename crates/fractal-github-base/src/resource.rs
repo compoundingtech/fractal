@@ -776,6 +776,7 @@ async fn github_json(
     }
     let response = crate::github_http::send_read(request, token).await?;
     let response = github_response(response).await?;
+    let cacheable = crate::github_http::read_response_cacheable(&response);
     if response.status() == reqwest::StatusCode::NOT_MODIFIED {
         let payload = cached
             .as_mut()
@@ -795,7 +796,7 @@ async fn github_json(
         next,
         checked_at: Instant::now(),
     };
-    if token.used_fallback() {
+    if !cacheable {
         *cached = None;
     } else {
         *cached = Some(payload.clone());
@@ -898,19 +899,20 @@ async fn github_listing_at_field(
 
 /// Ask GitHub's GraphQL API one query. GraphQL has its own hourly budget, reports a refusal in a
 /// successful response, and has no conditional request.
-async fn github_graphql(
+async fn github_graphql_with_cache_eligibility(
     client: &reqwest::Client,
     api_base: &str,
     token: &GithubAuth,
     query: &str,
     variables: Value,
-) -> Result<Value> {
+) -> Result<(Value, bool)> {
     let request = client
         .post(format!("{api_base}/graphql"))
         .header("Accept", "application/vnd.github+json")
         .json(&json!({"query": query, "variables": variables}));
     let response = crate::github_http::send_read(request, token).await?;
     let response = github_response(response).await?;
+    let cacheable = crate::github_http::read_response_cacheable(&response);
     let headers = response.headers().clone();
     let body = response.json::<Value>().await?;
     if let Some(errors) = body
@@ -937,10 +939,11 @@ async fn github_graphql(
             .unwrap_or("an unnamed error");
         bail!("GitHub GraphQL refused the query: {message}");
     }
-    body.get("data")
+    let data = body.get("data")
         .filter(|data| !data.is_null())
         .cloned()
-        .context("the GitHub GraphQL response has no data")
+        .context("the GitHub GraphQL response has no data")?;
+    Ok((data, cacheable))
 }
 
 pub use crate::github_http::GITHUB_AUTH_REMEDY;
@@ -1350,6 +1353,7 @@ mod tests {
                 "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 "HTTP/1.1 200 OK\r\nETag: \"pat-b\"\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
+                "HTTP/1.1 200 OK\r\nETag: \"unrelated-app\"\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}",
             ] {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
@@ -1367,14 +1371,21 @@ mod tests {
         let client = github_client();
         github_json(&client, url.clone(), &auth, Duration::ZERO).await.unwrap();
         github_json(&client, url.clone(), &auth, Duration::ZERO).await.unwrap();
+        let unrelated = format!("{url}/pulls");
+        github_json(&client, unrelated.clone(), &auth, Duration::from_secs(60)).await.unwrap();
+        github_json(&client, unrelated.clone(), &auth, Duration::from_secs(60)).await.unwrap();
         let requests = server.await.unwrap();
         assert!(requests[1].contains("if-none-match: \"app-a\""));
         assert!(requests[2..].iter().all(|request| !request.contains("if-none-match:")));
         assert!(requests[2..4].iter().all(|request| request.contains("authorization: bearer fixture-b")));
         assert!(requests[4].contains("authorization: bearer fixture-pat"));
-        assert!(auth.used_fallback());
+        assert!(!auth.used_fallback(), "fallback state belongs to the request, not its enclosing batch");
         let entry = github_cache().lock().await.get(&format!("{} {url}", auth.cache_principal())).unwrap().clone();
         assert!(entry.lock().await.is_none(), "PAT response must not populate A's installation cache");
+        let entry = github_cache().lock().await.get(&format!("{} {unrelated}", auth.cache_principal())).unwrap().clone();
+        assert!(entry.lock().await.is_some(), "one request's fallback must not disable another request's cache");
+        assert_eq!(requests.len(), 6);
+        assert!(requests[5].contains("authorization: bearer fixture-a"));
     }
 
     #[tokio::test]

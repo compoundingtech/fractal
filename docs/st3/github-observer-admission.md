@@ -299,6 +299,10 @@ Same-origin numeric `/repositories/ID` redirect hops retain the selected
 installation. Other hops carry their effective source forward, strip validators
 on principal changes, and aggregate fallback/cache-ineligibility across the
 whole chain; a final PAT body is never cached under an earlier installation.
+Cache eligibility belongs to one HTTP request and its redirect chain, not the
+enclosing read batch. Intentional PAT status reads retain their own PAT cache
+and do not disable the GraphQL detail cache. Detail-cache admission aggregates
+only the explicit eligibility results of the GraphQL requests it contains.
 
 Local fixture tests cover supplied-root reads, endpoint selection, no-root PAT,
 rotation, expiry, invalid/unreadable/missing sources and reason counts,401 reload

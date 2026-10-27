@@ -427,6 +427,21 @@ impl GithubAuth {
     pub fn used_fallback(&self) -> bool {
         matches!(self, Self::Read { source, .. } if source.used_fallback.load(std::sync::atomic::Ordering::Relaxed))
     }
+
+    fn request_scope(&self) -> Self {
+        let mut auth = self.clone();
+        if let Self::Read { source, .. } = &mut auth {
+            source.used_fallback = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        }
+        auth
+    }
+}
+
+#[derive(Clone)]
+struct ReadCacheEligibility(bool);
+
+pub fn read_response_cacheable(response: &reqwest::Response) -> bool {
+    response.extensions().get::<ReadCacheEligibility>().is_none_or(|state| state.0)
 }
 
 pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
@@ -441,16 +456,12 @@ pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
         }
         if let GithubAuth::Read { source, .. } = auth {
             app_read::fallback(&source.owner, &source.app, "unroutable");
-            source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         return auth.pat().clone();
     };
     if statuses {
         if matches!(auth, GithubAuth::Read { .. }) || SOURCE.get().is_some_and(|config| config.github.app_token_root.is_some()) {
             app_read::fallback(owner, app, "statuses");
-        }
-        if let GithubAuth::Read { source, .. } = auth {
-            source.used_fallback.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         return auth.pat().clone();
     }
@@ -467,7 +478,10 @@ pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> R
         request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD) {
         return send(request, auth).await;
     }
-    send_selected_read(request, &mut auth.clone()).await
+    let request_auth = auth.request_scope();
+    let mut response = send_selected_read(request, &mut request_auth.clone()).await?;
+    response.extensions_mut().insert(ReadCacheEligibility(!request_auth.used_fallback()));
+    Ok(response)
 }
 
 async fn send_selected_read(request: reqwest::RequestBuilder, auth: &mut GithubAuth) -> Result<reqwest::Response> {
@@ -496,6 +510,16 @@ async fn send_selected_read(request: reqwest::RequestBuilder, auth: &mut GithubA
 /// Send reads with separately admitted same-origin redirect hops. App reads retain
 /// their bounded credential replay; mutations are sent exactly once using the PAT.
 pub async fn send(
+    request: reqwest::RequestBuilder,
+    auth: &GithubAuth,
+) -> Result<reqwest::Response> {
+    let request_auth = auth.request_scope();
+    let mut response = send_redirected(request, &request_auth).await?;
+    response.extensions_mut().insert(ReadCacheEligibility(!request_auth.used_fallback()));
+    Ok(response)
+}
+
+async fn send_redirected(
     request: reqwest::RequestBuilder,
     auth: &GithubAuth,
 ) -> Result<reqwest::Response> {
