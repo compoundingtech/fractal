@@ -2,6 +2,10 @@
 //!
 //! Every name is made up. The world moves: one agent streams a reply, a tool runs and
 //! finishes, a message arrives, so the scrolling and "new below" behaviour can be felt.
+//!
+//! `world()` also supplies the shared client contract fixture. Its serialized prose,
+//! recorded commands and sender labels retain their contract spelling; product
+//! branding belongs in rendering, not in these values or arbitrary conversation text.
 
 use super::view::*;
 use std::collections::BTreeMap;
@@ -877,6 +881,7 @@ fn step(
         state,
         owner: owner.map(s),
         owner_id: None,
+        owner_is_system: false,
         note: note.map(s),
         after: after.iter().map(|name| s(name)).collect(),
         age: s(age),

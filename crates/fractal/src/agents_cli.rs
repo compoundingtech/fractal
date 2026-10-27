@@ -264,9 +264,7 @@ pub(super) async fn run_agents(
         }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         AgentsCommand::Apply(args) => {
-            eprintln!(
-                "st: agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"
-            );
+            crate::stderr_message("st", format_args!("agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"));
             let client = cli_client(endpoint);
             if !args.dry_run {
                 let (kdl, source_name) = read_intent(Some(&args.file))?;
@@ -844,9 +842,7 @@ async fn run_agent_new(
             Err(error)
                 if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
-                eprintln!(
-                    "st: the daemon is older than this st and cannot check which providers are installed; creating the seat anyway"
-                );
+                crate::stderr_message("st", format_args!("the daemon is older than this {} and cannot check which providers are installed; creating the seat anyway", ClientMessage::for_output(false).product_name()));
             }
             Err(error) => return Err(error),
         }

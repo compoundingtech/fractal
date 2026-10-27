@@ -255,9 +255,9 @@ pub fn steps(
             width: inner as u16,
             hit: Intent::ToggleStep(key),
         });
-        let owner = match &step.owner {
+        let owner = match step.human_owner() {
             Some(_) if identities => step.owner_identity().unwrap_or_default(),
-            Some(name) => name.clone(),
+            Some(name) => name.to_owned(),
             None => NOBODY.into(),
         };
         let owner_padding = owner_column.saturating_sub(text::width(&owner));
@@ -366,7 +366,7 @@ const NOBODY: &str = "nobody";
 
 /// How wide a step's owner reads, with or without its agent id.
 fn owner_width(step: &fractal_ui_model::missions::Step, identity: bool) -> usize {
-    match (&step.owner, &step.owner_id) {
+    match (step.human_owner(), &step.owner_id) {
         (Some(name), Some(id)) if identity => {
             text::width(name) + text::width(" · ") + text::width(id)
         }
@@ -430,6 +430,7 @@ mod tests {
             state,
             owner: Some(owner.into()),
             owner_id: owner_id.map(str::to_owned),
+            owner_is_system: false,
             note: None,
             after: vec![],
             age: "4m".into(),

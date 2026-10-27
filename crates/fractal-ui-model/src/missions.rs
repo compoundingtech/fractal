@@ -107,11 +107,14 @@ pub struct Step {
     pub seat: Option<String>,
     pub name: String,
     pub state: StepState,
-    /// Who holds the step as a person reads it: "you", a name, or "Fractal" for agentless work.
+    /// The owner's name, or the stable "st" system value; human_owner supplies product wording.
     pub owner: Option<String>,
     /// The agent id beside an agent owner's name; a pane too narrow for it shows the name alone.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
+    /// Rendering-only ownership identity; excluded from the serialized view.
+    #[serde(skip)]
+    pub owner_is_system: bool,
     pub note: Option<String>,
     pub after: Vec<String>,
     pub age: String,
@@ -123,12 +126,17 @@ pub struct Step {
 }
 
 impl Step {
-    /// The owner with its agent id beside it (`Maintainer · agent/…`), its whole identity.
+    /// The rendered owner with its agent id beside it, when the owner is an agent.
     pub fn owner_identity(&self) -> Option<String> {
-        self.owner.as_ref().map(|name| match &self.owner_id {
+        self.human_owner().map(|name| match &self.owner_id {
             Some(id) => format!("{name} · {id}"),
-            None => name.clone(),
+            None => name.to_owned(),
         })
+    }
+
+    /// Human-only ownership text; the serialized `owner` remains unchanged.
+    pub fn human_owner(&self) -> Option<&str> {
+        if self.owner_is_system { Some("Fractal") } else { self.owner.as_deref() }
     }
 }
 
@@ -335,7 +343,7 @@ fn owner_text(owner: &Actor, reader: &str) -> Option<(String, Option<String>)> {
         Actor::Person { person, .. } if person == reader => Some(("you".into(), None)),
         Actor::Person { label, .. } => Some((label.clone(), None)),
         Actor::Agent { agent, label } => Some((label.clone(), Some(agent.clone()))),
-        Actor::St => Some(("Fractal".into(), None)),
+        Actor::St => Some(("st".into(), None)),
         Actor::Nobody => None,
     }
 }
@@ -399,6 +407,7 @@ pub fn adapt<'a>(
                         state: shown.map_or(StepState::Unknown, |shown| shown.word),
                         owner,
                         owner_id,
+                        owner_is_system: shown.is_some_and(|shown| matches!(shown.owner, Actor::St)),
                         note: shown.and_then(|shown| shown.note.clone()),
                         after: vec![],
                         age: display.age(&step.since, now),

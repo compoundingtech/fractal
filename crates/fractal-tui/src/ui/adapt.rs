@@ -129,6 +129,37 @@ pub fn offline_grace() -> std::time::Duration {
     })
 }
 
+/// Render shared presentation prose without changing its serialized spelling.
+pub(super) fn human_presentation(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match text {
+        "a step is ready; st has not said which agent takes it" => {
+            Cow::Borrowed("a step is ready; Fractal has not said which agent takes it")
+        }
+        "st keeps this open and starts other missions when something happens" => {
+            Cow::Borrowed("Fractal keeps this open and starts other missions when something happens")
+        }
+        "st does not say: an older st, or one that has not read its agents yet" => {
+            Cow::Borrowed("Fractal does not say: an older version, or one that has not read its agents yet")
+        }
+        "st names a card this client does not know: answer it with st alerts." => {
+            Cow::Borrowed("Fractal names a card this client does not know: answer it with fractal alerts.")
+        }
+        "st does not say what this is: this host's st is older, or has not presented it yet. Answer it with st alerts." => {
+            Cow::Borrowed("Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts.")
+        }
+        _ => {
+            if let Some(reason) = text.strip_prefix("Its st channel is not attached, so its mail is held") {
+                Cow::Owned(format!("Its Fractal channel is not attached, so its mail is held{reason}"))
+            } else if let Some(state) = text.strip_suffix(" · st does not say") {
+                Cow::Owned(format!("{state} · Fractal does not say"))
+            } else {
+                Cow::Borrowed(text)
+            }
+        }
+    }
+}
+
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let restarting = extras
         .offline_since
@@ -1018,6 +1049,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn human_presentation_keeps_shared_model_spelling_out_of_the_terminal() {
+        let word = fractal_ui_model::missions::Word::Watching;
+        assert_eq!(word.explain(), "st keeps this open and starts other missions when something happens");
+        assert_eq!(
+            human_presentation(word.explain()),
+            "Fractal keeps this open and starts other missions when something happens"
+        );
+        assert_eq!(human_presentation("st"), "st");
+        assert_eq!(human_presentation("blocked · st does not say"), "blocked · Fractal does not say");
+        assert_eq!(
+            human_presentation("Its st channel is not attached, so its mail is held (reason)"),
+            "Its Fractal channel is not attached, so its mail is held (reason)"
+        );
+        // User-authored text and stable IDs are not product presentation.
+        assert_eq!(human_presentation("please run st"), "please run st");
+        assert_eq!(human_presentation("agent/st/assistant"), "agent/st/assistant");
+    }
+
+    #[test]
     fn retired_agent_card_shows_pending_mail_custodian_in_plain_words() {
         let mut model = Model::default();
         model.agents = window(vec![serde_json::json!({
@@ -1785,6 +1835,19 @@ mod tests {
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
         assert_eq!(preview.agents.len(), 1);
+    }
+
+    #[test]
+    fn an_agent_named_st_keeps_its_launch_assignment_label() {
+        let normalized = json!({
+            "goals": [],
+            "display_order": ["scan"],
+            "steps": {
+                "scan": {"path": "scan", "work_selector": {"kind": "assigned", "agent": "agent/st"}, "dependencies": [], "gates": []}
+            }
+        });
+        let preview = preview("audit", &normalized);
+        assert_eq!(preview.steps[0].assignee, "st");
     }
 
     #[test]
@@ -2666,7 +2729,7 @@ mod tests {
         assert!(!subagents[0].age.is_empty());
         assert!(
             subagents[1].age.is_empty(),
-            "st did not say when it started"
+            "Fractal did not say when it started"
         );
     }
 
