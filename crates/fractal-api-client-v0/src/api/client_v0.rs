@@ -4457,7 +4457,7 @@ fn native_replay_extent(
     let limit = if mark.is_some() { CLIENT_MAX_PAGE_ITEMS + 1 } else { 1 };
     let (tail, suppressed) = canonical_native_slice(
         state, snapshot, source, session, session_id, &messages,
-        crate::external_sessions::TimelineOrder::Sequence, None, limit, managed,
+        crate::external_sessions::TimelineOrder::Sequence, None, limit, managed, false,
     )?;
     if source.driver != crate::external_sessions::ExternalDriver::OpenCode
         && tail.generation != generation
@@ -4514,7 +4514,7 @@ fn conversation_first_page_at_generation(
                     let messages = native_session_messages(state, snapshot, session, session_id, managed)?;
                     let (head, suppressed) = canonical_native_slice(
                         state, snapshot, source, session, session_id, &messages,
-                        crate::external_sessions::TimelineOrder::Sequence, None, 1, managed,
+                        crate::external_sessions::TimelineOrder::Sequence, None, 1, managed, false,
                     )?;
                     Some(head.items.iter().filter_map(native_entry_sequence).max().unwrap_or(0)
                         .max(suppressed))

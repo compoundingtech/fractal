@@ -157,14 +157,17 @@ fn timeline_instant(timestamp: &str) -> Option<DateTime<Utc>> {
         .map(|instant| instant.with_timezone(&Utc))
 }
 
+type PreparedTimelinePosition<'a> = (Option<DateTime<Utc>>, u64, u8, &'a str);
+type ChronologicalEntryKey = (Option<DateTime<Utc>>, u64, u8, String);
+
 fn prepared_timeline_position<'a>(
     position: (&str, u64, u8, &'a str),
     order: TimelineOrder,
-) -> (Option<DateTime<Utc>>, u64, u8, &'a str) {
+) -> PreparedTimelinePosition<'a> {
     match order {
         TimelineOrder::Sequence => (None, position.1, position.2, position.3),
         TimelineOrder::TimestampSequence => {
-            (timeline_instant(position.0), position.1, 0, position.3)
+            (timeline_instant(position.0), position.1, position.2, position.3)
         }
     }
 }
@@ -389,7 +392,7 @@ pub struct LineTimelineFold {
     consumed: u64,
     observed_len: u64,
     lines: VecDeque<FoldedLine>,
-    entries: BTreeMap<(Option<DateTime<Utc>>, u64, String), (usize, usize)>,
+    entries: BTreeMap<ChronologicalEntryKey, (usize, usize)>,
     sequence_entries: BTreeMap<(u64, u8, String), (usize, usize)>,
     emitting_lines: BTreeSet<usize>,
     next_line_number: usize,
@@ -545,12 +548,13 @@ impl LineTimelineFold {
                     (
                         timeline_instant(&key.timestamp),
                         key.sequence,
+                        key.rank,
                         key.id.clone(),
                     )
                 });
                 let committed = self
                     .entries
-                    .range::<(Option<DateTime<Utc>>, u64, String), _>((
+                    .range::<ChronologicalEntryKey, _>((
                         Unbounded,
                         upper.as_ref().map_or(Unbounded, Excluded),
                     ))
@@ -617,7 +621,7 @@ impl LineTimelineFold {
             self.sequence_entries
                 .remove(&(key.sequence, key.rank, key.id.clone()));
             self.entries
-                .remove(&(timeline_instant(&key.timestamp), key.sequence, key.id));
+                .remove(&(timeline_instant(&key.timestamp), key.sequence, key.rank, key.id));
         }
     }
 
@@ -771,7 +775,7 @@ impl LineTimelineFold {
                 self.sequence_entries
                     .remove(&(key.sequence, key.rank, key.id.clone()));
                 self.entries
-                    .remove(&(timeline_instant(&key.timestamp), key.sequence, key.id));
+                    .remove(&(timeline_instant(&key.timestamp), key.sequence, key.rank, key.id));
             }
             line.normalize(session.driver, sequence, &last_timestamp, line.number)?;
             if line.items.is_empty() {
@@ -788,7 +792,7 @@ impl LineTimelineFold {
                     (line.number, item_index),
                 );
                 self.entries.insert(
-                    (timeline_instant(&key.timestamp), key.sequence, key.id),
+                    (timeline_instant(&key.timestamp), key.sequence, key.rank, key.id),
                     (line.number, item_index),
                 );
             }
@@ -2501,7 +2505,7 @@ use super::*;
 
     #[test]
     fn chronology_compares_numeric_instants_then_source_sequence_and_id() {
-        // Keep this fixture aligned with fractal-views/tests/sessionView.test.mjs.
+        // Equal instants and sequences retain native/graph rank before the stable ID.
         let mut positions = [
             ("2026-10-04T21:40:19.000000200Z", 7, 0, "native/z"),
             ("2026-10-04T16:40:19.0000002-05:00", 7, 1, "graph/a"),
@@ -2514,14 +2518,18 @@ use super::*;
         });
         assert_eq!(
             positions.map(|position| position.3),
-            ["graph/zero", "native/early", "native/tie", "graph/a", "native/z"],
+            ["graph/zero", "native/early", "native/tie", "native/z", "graph/a"],
         );
         let native = ("2026-10-04T21:40:19Z", 7, 0, "z");
         let graph = ("2026-10-04T23:40:19.000+02:00", 7, 1, "a");
-        assert!(compare_timeline_positions(native, graph, TimelineOrder::TimestampSequence).is_gt());
+        assert!(compare_timeline_positions(native, graph, TimelineOrder::TimestampSequence).is_lt());
         assert!(compare_timeline_positions(native, graph, TimelineOrder::Sequence).is_lt());
         let same_id = (graph.0, graph.1, graph.2, native.3);
-        assert!(compare_timeline_positions(native, same_id, TimelineOrder::TimestampSequence).is_eq());
+        assert!(compare_timeline_positions(native, same_id, TimelineOrder::TimestampSequence).is_lt());
+        let native_earlier_id = (native.0, native.1, native.2, "a");
+        assert!(compare_timeline_positions(
+            native_earlier_id, native, TimelineOrder::TimestampSequence,
+        ).is_lt());
         assert!(compare_timeline_positions(
             ("", 9999, 0, "missing"),
             native,

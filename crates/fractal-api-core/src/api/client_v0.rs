@@ -2388,7 +2388,7 @@ pub fn native_slice_page_at_generation(
     };
     drop(preparation);
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, true,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2404,7 +2404,7 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS, managed,
+                None, CLIENT_MAX_PAGE_ITEMS, managed, true,
             )?.0)
         } else {
             None
@@ -2526,9 +2526,10 @@ pub fn canonical_native_slice(
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
     managed: Option<&super::ManagedSessionOwner>,
+    prepare_display: bool,
 ) -> Result<(conversation_blocks::PreparedSlice, u64), ApiError> {
     let mut slice = conversation_blocks::read_slice(
-        source, session, session_id, order, before, limit,
+        source, session, session_id, order, before, limit, prepare_display,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
     let mut scanned = slice.items.len();
@@ -2548,6 +2549,7 @@ pub fn canonical_native_slice(
         let mut next = conversation_blocks::read_slice(
             source, session, session_id, order, boundary.as_ref(),
             (limit - slice.items.len()).min(budget),
+            prepare_display,
         )?;
         scanned += next.items.len();
         if next.basis != slice.basis || next.generation != slice.generation {
@@ -2576,7 +2578,6 @@ pub const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
 /// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
 /// that keeps its identity and place, so the page it is on still opens and continues past it.
-
 pub fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
     item["type"] = json!("error");
     item["role"] = json!("system");
@@ -3199,6 +3200,8 @@ pub fn timeline_first_page(
     timeline_first_page_with_extent(state, snapshot, session, session_id, query, native_read_error, managed, None)
 }
 
+pub type TimelineExtentVisitor<'a> = &'a mut dyn FnMut(&[Value]);
+
 /// Capture the complete bounded stored projection beside its display window for replay loss checks.
 #[allow(clippy::too_many_arguments)]
 pub fn timeline_first_page_with_extent(
@@ -3209,7 +3212,7 @@ pub fn timeline_first_page_with_extent(
     query: &ClientListQuery,
     native_read_error: Option<ApiError>,
     managed: Option<&super::ManagedSessionOwner>,
-    extent: Option<&mut dyn FnMut(&[Value])>,
+    extent: Option<TimelineExtentVisitor<'_>>,
 ) -> Result<Json<Value>, ApiError> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
