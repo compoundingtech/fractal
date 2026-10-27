@@ -7,7 +7,7 @@
  */
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { createPortal } from 'react-dom'
+import { RegisteredPortal } from '../taste/PortalContainer'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import { interactionVars as interaction, surfaceVars as surface, textVars as ink, borderVars as border, statusVars as tone, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, elevationVars as elevation } from '../composition-tokens.stylex'
 import { Icon } from './Icons'
@@ -72,7 +72,7 @@ export function ErrorOverlay({ id, title, detail, rawDetail, command, onRetry, o
     {onOpenOutput !== undefined && <Button onPress={onOpenOutput} {...stylex.props(styles.action)}>Open output</Button>}
     <Button aria-label={`Dismiss: ${title}`} onPress={() => setDismissedId(id)} {...stylex.props(styles.close)}><Icon name="x" size={12} /></Button>
   </div>
-  return host === null || host.lane || host.layer === null ? banner : createPortal(banner, host.layer)
+  return host === null || host.lane || host.layer === null ? banner : <RegisteredPortal container={host.layer}>{banner}</RegisteredPortal>
 }
 
 const styles = stylex.create({

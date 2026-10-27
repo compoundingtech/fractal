@@ -1,4 +1,5 @@
-import type * as St3 from '@smalltalk/st3-client/schema'
+import type * as St3 from '@fractal/client/schema'
+import type { DecodedAgent } from '@fractal/sdk/effect'
 import { DateTime, Option } from 'effect'
 import { describe, expect, it } from 'vitest'
 
@@ -32,14 +33,14 @@ const mission = (steps: readonly ReturnType<typeof step>[], fields: Record<strin
     ...fields,
   }) as unknown as St3.Mission
 
-const agent = (fields: Record<string, unknown> = {}): St3.Agent =>
-  ({ id: 'agent/example/builder', name: 'builder', state: 'running', fault: Option.none(), next_work_id: Option.none(), upcoming_work_ids: [], current_work: [], ...fields }) as unknown as St3.Agent
+const agent = (fields: Record<string, unknown> = {}): DecodedAgent =>
+  ({ id: 'agent/example/builder', name: 'builder', state: 'running', fault: Option.none(), next_work_id: Option.none(), upcoming_work_ids: [], current_work: [], ...fields }) as unknown as DecodedAgent
 
-const word = (m: St3.Mission, agents: readonly St3.Agent[] = [agent()], attention: readonly St3.Attention[] = []) =>
+const word = (m: St3.Mission, agents: readonly DecodedAgent[] = [agent()], attention: readonly St3.Attention[] = []) =>
   presentMission({ mission: m, agents, attention }).word
 
 describe('presentMission', () => {
-  it('follows st3-ui-model\'s precedence, first match wins', () => {
+  it('follows fractal-ui-model\'s precedence, first match wins', () => {
     const gate = { attention_kind: 'human-gate', state: 'open', mission_id: 'mission/example/nightly', source_id: 'step-run/example/review' } as unknown as St3.Attention
     expect(word(mission([step('build', 'claimed')]), [agent()], [gate])).toBe('decision')
     expect(word(mission([], { runs: [], run_details: [] }))).toBe('not_started')
@@ -78,8 +79,9 @@ describe('presentMission', () => {
       attention: [gated],
     })
     expect(presented.steps.map((each) => [each.path, each.word, each.owner.label])).toEqual([
-      ['fetch', 'done', 'st'], ['review', 'needs_you', 'you'], ['build', 'working', 'builder'], ['deploy', 'waiting', 'builder'],
+      ['fetch', 'done', 'Fractal'], ['review', 'needs_you', 'you'], ['build', 'working', 'builder'], ['deploy', 'waiting', 'builder'],
     ])
+    expect(presented.steps[0]?.owner).toEqual({ kind: 'st', label: 'Fractal' })
     expect(presented.progress).toEqual({ done: 1, total: 4 })
     expect(presented.last_progress).toBe('linking')
     expect(presented.who).toEqual({ kind: 'agent', agent: 'agent/example/builder', label: 'builder' })

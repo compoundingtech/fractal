@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Message page selectors preserve canonical sender, recipient, and closed-state ordering after a claim's earliest duplicate replica record is deleted",
+  "replay": {"status": "none", "detail": "No claim or replay change; selector rebuilds use the stored canonical claim position before surviving wire positions."},
+  "schema": {"status": "none", "detail": "No schema change; uses the existing keyed claim_positions lookup."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No wire change; bounded message selectors now use the same position precedence as the canonical message-body fold."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

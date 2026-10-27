@@ -2,7 +2,35 @@
 
 Status: assistant pairing, grant management, bounded reads, and explicitly scoped native writes are implemented. This document does not authorize live grant issuance or adapter deployment. The standalone ChatGPT adapter uses caller-bound grants; the original proof-gated read mode remains available. Coordinated kill requirements below remain a separate activation gate.
 
-The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p st3-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
+The normative wire contract is [`client-v0.schema.json`](client-v0/schemas/client-v0.schema.json), [`operations.json`](client-v0/schemas/operations.json), and the [fixtures](client-v0/fixtures). Regenerate Rust, Swift, and TypeScript clients with `cargo run -p fractal-client-codegen`; do not edit generated clients. Existing person pairing retains its wire shape and historical person claims. Assistant capability discovery must fail closed on older servers, never fall back to a person credential or broad limited person grant.
+
+## Adapter call diagnostics
+
+`fractal-chatgpt` emits one structured `tracing` completion event per dispatched tool
+call, including local validation failures and cancellation when its future is
+dropped. Capture is off by default. Operators may opt in with
+`RUST_LOG=fractal_chatgpt::call=info` on the adapter process; records go to stderr,
+never the MCP stdio output or the default user answer. Only the adapter call
+target is admitted, even with a broader `RUST_LOG` setting. This does not enable
+daemon OTLP export; configure the daemon's existing trace export separately.
+
+Fields are `tool` (closed published name or `unknown`), `outcome`
+(`success`, `error`, `cancelled`), `code` (adapter-selected code, never a raw
+daemon error), monotonic `duration_ms`, optional `daemon_request_id` (only a
+`request/<UUID>` from the daemon envelope), and optional `response_bytes`
+(exact buffered HTTP response body length, not MCP framing or a token count).
+Duration covers validation and gateway dispatch/body decoding, not subsequent
+MCP delivery. Cancellation before an envelope is decoded has no daemon ID;
+it does not prove a proposed write was rolled back. Hard process termination
+cannot emit a completion event.
+
+No arguments, message/alert content, credentials, handles, raw request/response,
+arbitrary error messages, or caller-chosen action IDs are logged. Byte counts
+reuse the existing JSON decoder's response buffer, without a second serialization.
+Daemon request IDs can join existing `st.request.id` server evidence when that
+capture is enabled. Browser read/send matching and page/budget efficiency
+acceptance remain separate rollout evidence; instrumentation does not authorize
+new production writes or grant changes. Refs #3336, #2172, #3257.
 
 ## Trust boundaries and residual risk
 
@@ -100,7 +128,7 @@ Assistant identifier disclosure remains restricted to nonempty ASCII tokens of a
 
 Mission cursors bind the store claim cut and inspect at most 513 intervening claim headers. Changed mission inputs or more than 512 intervening claims return `page-cursor-expired`, since an updated mission can move across the mutable sort key; unrelated read-authorization receipts do not themselves invalidate a continuation. Clients restart rather than silently losing that mission. Mission metadata selects the latest live run, falling back to the latest terminal run, independently of the native three-run preview. Summary agent-state counts apply the same scalar delivery-presence assessment as agent pages; rich attention and exact-alert content retain update-type request payloads.
 
-Mission claim invalidation uses the canonical subject families from `st3_schema::registry()`, not substring matching; the projection fence below can additionally expire a cursor:
+Mission claim invalidation uses the canonical subject families from `fractal_schema::registry()`, not substring matching; the projection fence below can additionally expire a cursor:
 
 | Source input | Cursor treatment |
 | --- | --- |
@@ -131,11 +159,48 @@ Query parameters are scalar strings; duplicates, unknown names, and any `person`
 | `summary` | `max_response_bytes` | `AssistantSummary`: `kind`, `as_of`, `counts` only |
 | `attention`, `missions`, `agents` | `cursor`, `limit`, `max_response_bytes` | `AssistantAttentionPage`, `AssistantMissionPage`, `AssistantAgentPage`: the native page shape with collection `assistant.<route>` and empty `filters` |
 | `conversation-content` | `agent_id`, `session_id`, `reference`, `revision`, `start`, `end`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-conversation-content"` |
+| `conversations` | `cursor`, `limit`, `max_response_bytes` | Allowlisted conversation metadata, current session IDs and bounded read handles |
+| `conversation-detail` | `agent_id`, `max_response_bytes` | Current conversation identity and a bounded timeline preview |
+| `conversation-timeline` | `agent_id`, optional `session_id`, `cursor`, `limit`, `max_response_bytes` | Allowlisted timeline items, bounded text snippets and exact content read ranges |
+| `conversation-search` | `text`, optional `agent_id`, `cursor`, `limit`, `max_response_bytes` | Safe-text search hits with bounded snippets and current conversation identities |
 | `terminal-content` | `agent_id`, `terminal_id`, `incarnation_id`, `screen_revision`, `max_response_bytes` | `AssistantContentPage` with `kind: "assistant-terminal-content"` |
 
 Every read carries `x-st3-scg-read-authorization`: unpadded base64url JSON `ScgReadAuthorization { payload, signature }`. The closed payload contains `issuer`, `identity: "chatgpt"`, `assistant_id: "assistant/chatgpt"`, `grant_id`, `policy_revision`, `key_id`, `approval_id`, `execution_id`, `projection` (the route suffix), `parameters` (every decoded query parameter, cursor and range included), `max_response_bytes`, `request_digest`, `expires_at_unix_ms`, and `nonce`. `signature` is unpadded base64url Ed25519 over the UTF-8 bytes `st3.scg-read.v1\n` followed by the canonical JSON payload: recursively sorted object keys, compact, integers only. `request_digest` is lowercase hexadecimal SHA-256 of canonical `{"method":"GET","path":<exact path>,"parameters":<decoded map>}`. st consumes the nonce atomically before returning private bytes; a replayed, expired, mismatched, or attestor-unverifiable proof is denied and discloses nothing. Generated clients never sign, retry, or widen the budget: they send exactly one request and reject a proof whose projection, parameters, or budget differ from the call.
 
 The response budget covers the entire JSON envelope. Without a query budget, the proof must name the pinned default (4096 unless lowered); an explicit `max_response_bytes` must equal the proof value. Neither may exceed the pinned maximum (16384 unless lowered). Assistant list pages return the largest ordered prefix of whole items that fits, up to `limit`; `page.next_cursor` resumes after the last returned item in the same cached snapshot. The cursor retains the requested item limit, so page lengths may vary with item sizes. If not even one item and its envelope fit, the read fails with 413 `response-budget-exceeded` naming that item's ID. Other responses or native source records over budget also fail with 413 `response-budget-exceeded`; non-UTF-8 content fails with 422 `content-not-text`. A forged, expired, or changed conversation reference returns 410 `conversation-content-invalidated`; a conversation revision mismatch, a session that is not the agent's current session, or a terminal incarnation/screen mismatch returns 409 `stale-fence`.
+
+The MCP adapter advertises exactly eleven canonical tools:
+`fractal_alerts_list`, `fractal_alert_get`, `fractal_alert_answer`,
+`fractal_missions_list`, `fractal_agents_list`, `fractal_conversations_list`,
+`fractal_conversation_detail`, `fractal_conversation_timeline`,
+`fractal_conversation_search`, `fractal_conversation_read`, and `fractal_message_send`.
+The corresponding `st_*` names are deprecated, callable aliases for the adapter's
+0.1.0 release only and are removed in `fractal-chatgpt` 0.2.0. They are hidden from
+`tools/list` so refreshed clients discover only canonical names while Johannes's
+ChatGPT connector can still call its cached names. Refresh that connector before
+0.2.0. Description cross-references use canonical names; all other wording and input
+constraints remain unchanged.
+
+The four conversation discovery tools use only `read.assistant.conversation`; they do
+not require mission, agent, work or new scopes. `fractal_conversations_list` returns the
+agent and current session identifiers for `fractal_conversation_timeline`. Copy an item's
+`read` object (`agent_id`, `session_id`, `reference`, `revision`, `start`, `end`)
+directly into `fractal_conversation_read`, rather than synthesizing native references or
+guessing a byte range. Discovery cursors and issued content handles are bound to the
+authenticated grant and its effective policy revision; another grant cannot reuse
+them. Timeline and search pages default to 10 items and accept at most 50.
+The entire discovery continuation is authenticated, including its pinned snapshot,
+expiry and keyset; editing and re-encoding a cursor cannot transplant its grant
+binding. A detail preview's `page.next_cursor` continues through
+`fractal_conversation_timeline` with the returned agent and session IDs. Discovery keeps
+its pinned metadata rows when an agent restarts; a no-longer-current session has
+`read: null` rather than an invalid content handle or a failed page.
+
+Conversation DTOs disclose only allowlisted identifiers, timestamps, role/type
+metadata, bounded chat text and content references. Native tool bodies, diagnostic
+records, attachments, paths and environments are excluded. The discovery/readback
+surface does not add sender or recipient fields. Content remains untrusted external
+data, and these reads confer no write authority or deployment/activation permission.
 
 ### Read trust
 
@@ -170,3 +235,260 @@ SCG kill must deny catalog paths, cancel pending approvals/read grants/queued in
 Acceptance starts an approved bounded read, pending read/send cards, a queued approved send, and a paused pre-commit send; kills; then probes old bearers/proofs, fresh pairing, direct endpoints, late approval, and restart of all components. Assert no disclosure or append after the kill linearization point, durable denial/audit, and terminal denial of pending/queued subjects.
 
 Code merge, provider consent, and ambient tunnel access do not silently authorize live activation. The coordinated kill test must pass on the exact candidate revisions before live assistant issuance; activation also requires a recorded caller-binding/disclosure policy decision and supported plan/client feasibility. Write enablement requires explicit write scopes and the native action/recipient-trust acceptance above, not recipient allowlist population or a read-hinted workaround.
+
+## E. Remote access over OAuth
+
+Status: specification, not implemented or authorization to expose an adapter.
+OAuth is a front door to the existing assistant grant, not a separate identity
+or permission system. This section builds on A–D and the caller-bound grant
+contract; it does not relax their disclosure, write, or activation gates.
+
+**Guiding principle — operator-owned public access.** Fractal operates no
+centralized hosted authorization service. Early adopters configure their own
+public ingress using Tailscale, Cloudflare or another provider. This avoids
+project obligations to preserve a hosted service through breaking changes or
+infrastructure migrations, and does not require users to entrust sensitive
+hosted data to the project. Fractal supplies composable local serving and
+explicit URL configuration primitives, independent of the ingress provider.
+Authority: Johannes, Q45 (on3kc3), via Compounding Manager.
+
+### Components and boundaries
+
+```text
+MCP client (ChatGPT) -- bearer --> OpenAI tunnel --> adapter /mcp
+        |                                           | resource server
+        | discover, authorize, exchange code        | caller bearer per request
+        v                                           v
+Public HTTPS hostname                         fractal daemon
+  /authorize, /token, metadata --------------> single grant authority
+        |
+        +-- browser: pairing code + requested scopes
+                         |
+Owning person -- trusted CLI/stui --> typed client API approve/deny
+```
+
+The adapter is the OAuth resource server. `/mcp` remains on the OpenAI tunnel;
+the separate public HTTPS hostname exposes authorization, token exchange and
+discovery metadata, not the daemon client API or a second public MCP endpoint.
+The authorization server runs inside the fractal daemon/adapter deployment,
+not an external IdP. The daemon alone owns pending requests, consent decisions,
+grant issuance, token digests, refresh eligibility and revocation. Adapter
+transport handling cannot manufacture an approved grant.
+
+Remote mode holds no long-lived adapter grant credential: it forwards each
+caller's bearer to the daemon. `--credential-file` remains a stdio/loopback
+mode, never a fallback when remote authentication fails. Tunnel possession,
+including an API key in the same OpenAI organization, is not authorization.
+
+### Operator-owned ingress
+
+The daemon/adapter serves `/authorize`, `/token`,
+`/.well-known/oauth-authorization-server` and
+`/.well-known/oauth-protected-resource` on a local listener. The operator
+configures two independent values: the public HTTPS issuer URL for that
+listener's ingress, and the canonical MCP resource URI on the OpenAI tunnel.
+The authorization-server metadata and authorization-response `iss` derive
+only from the configured issuer; resource metadata and token audience binding
+derive only from the configured resource URI. Verification compares those
+configured identities, never values inferred from request `Host` or forwarded
+headers. Ingress forwards traffic; it is not the grant or identity authority.
+
+Only the authorization/token endpoints and both metadata documents are
+published through this ingress. The daemon client API and `/mcp` are excluded;
+the latter remains on the OpenAI tunnel. The local serving boundary, configured
+issuer and configured resource URI are the same primitives for every provider.
+
+Example recipes, subject to the activation gates below:
+
+- **Tailscale Funnel:** enable HTTPS/Funnel for the operator's chosen node and
+  publish the local authorization listener through Funnel. Configure the
+  resulting public HTTPS origin as the issuer URL and the existing tunnel MCP
+  URI as the resource URI. Forward the four authorization/discovery paths only;
+  keep other daemon routes off that listener. No Tailscale identity replaces
+  the owning-person approval step.
+- **Cloudflare Tunnel:** create an operator-owned tunnel and public DNS route
+  for the chosen authorization hostname. Route the four authorization/discovery
+  paths to the local listener and reject unmatched paths. Configure that public
+  HTTPS origin as the issuer URL and the existing tunnel MCP URI as the resource
+  URI. Browser authorization and public-client token exchange must remain
+  reachable without a separate interactive ingress login.
+
+Neither provider is required; any HTTPS ingress preserving these boundaries
+can use the same primitives. The owner dogfoods this composition in their
+dotfiles, using operator-owned ingress configuration rather than a hosted
+project service.
+
+### Discovery and authorization-code flow
+
+Use OAuth authorization code with PKCE `S256` (RFC 6749 and
+[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636)), following the
+[MCP authorization profile](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)
+and [ChatGPT authentication requirements](https://developers.openai.com/apps-sdk/build/auth).
+The OAuth 2.1 profile excludes implicit and password grants.
+
+| Surface | Endpoint / behavior | Standard |
+| --- | --- | --- |
+| Resource server | Unauthenticated `/mcp` returns `401` with `WWW-Authenticate: Bearer resource_metadata="…"` pointing to its protected-resource metadata | [RFC 6750](https://www.rfc-editor.org/rfc/rfc6750), [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) |
+| Resource metadata | `/.well-known/oauth-protected-resource` describes this MCP resource and its authorization server; published metadata is reachable through the tunnel resource and public metadata surface | RFC 9728 |
+| Authorization-server metadata | Public `/.well-known/oauth-authorization-server` publishes the issuer, `/authorize`, `/token`, supported scopes and `S256` | [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) |
+| Authorization | Public `/authorize` validates the allowlisted client, redirect URI, scopes, `resource`, state and PKCE challenge, then creates a pending daemon request | RFC 6749, RFC 7636, [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707) |
+| Authorization response | After owner approval, redirect to the validated client URI with a short-lived, single-use code, client state and the authorization-server `iss` | [RFC 9207](https://www.rfc-editor.org/rfc/rfc9207) |
+| Token exchange / refresh | Public `/token` binds code redemption to the client, redirect URI, resource and PKCE verifier; refresh remains bound to the same grant | RFC 6749, RFC 7636, RFC 8707 |
+
+The RFC 8414 authorization-server metadata advertises this complete contract,
+using the operator-configured public HTTPS issuer:
+
+| Field | Value |
+| --- | --- |
+| `issuer` | The authorization server's public HTTPS issuer identifier |
+| `authorization_endpoint` | Absolute public HTTPS URL for `/authorize` |
+| `token_endpoint` | Absolute public HTTPS URL for `/token` |
+| `code_challenge_methods_supported` | `["S256"]` |
+| `client_id_metadata_document_supported` | `true` |
+| `token_endpoint_auth_methods_supported` | `["none"]` (public clients using PKCE) |
+| `authorization_response_iss_parameter_supported` | `true` (RFC 9207) |
+| `grant_types_supported` | `["authorization_code", "refresh_token"]` |
+| `response_types_supported` | `["code"]` |
+| `scopes_supported` | The supported assistant read and explicit native write scopes |
+
+The RFC 9728 protected-resource metadata advertises:
+
+| Field | Value |
+| --- | --- |
+| `resource` | This MCP resource's absolute HTTPS identity on the OpenAI tunnel |
+| `authorization_servers` | Array containing the authorization server's issuer identifier |
+| `scopes_supported` | The assistant scopes accepted by this MCP resource |
+| `bearer_methods_supported` | `["header"]` (`Authorization: Bearer`, not query/body credentials) |
+
+```text
+1. Client -> /mcp: no bearer
+   /mcp -> Client: 401 + protected-resource metadata location
+2. Client -> metadata: resource identity, issuer, endpoints, scopes, S256
+3. Client -> /authorize: client_id, redirect_uri, scope, resource,
+                        state, code_challenge, code_challenge_method=S256
+4. Daemon: pending request; browser displays pairing code and requested scopes
+5. Owner -> trusted surface -> client API -> daemon: approve or deny request
+6. If approved: /authorize -> client redirect: code, state, iss
+7. Client -> /token: code, redirect_uri, resource, code_verifier
+   Daemon -> Client: opaque access bearer, expires_in, granted scope, refresh token
+8. Client -> tunnel /mcp: Authorization: Bearer <access token>
+   Adapter -> daemon session(): bearer and this MCP resource identity
+```
+
+Denial never issues a code or token. A pairing code identifies the pending
+request, not a credential or proof of owner consent. Code redemption cannot
+change its approved principal, scopes or resource.
+
+### Surface-independent owner approval
+
+The daemon represents authorization as a pending request, independent of the
+browser, CLI or stui. Its review data binds request ID, owning person, OAuth
+client identity, assistant principal, redirect URI, resource, requested scopes
+and expiry. The trusted surface displays that data before consent.
+
+The client API exposes a typed operation with the semantic signature
+`decideAuthorization(request_id, decision: Approve | Deny) -> AuthorizationDecision`.
+This is a specification signature, not an existing wire operation. The daemon
+authenticates the caller as the configured owning person on a trusted surface,
+checks the request is pending and unexpired, and atomically records its
+terminal decision. An assistant, external MCP caller, public authorization
+page, or possession of the pairing code cannot approve. A decision cannot
+broaden the displayed request; a changed request needs new consent.
+
+The fractal CLI and stui are the first callers, using the existing pairing
+ceremony. Web and iOS clients can call the same typed operation once they meet
+the same owner/trusted-surface requirements; approval logic does not live in
+CLI commands, stui widgets or an OAuth callback.
+
+### Tokens, grants and checks at use
+
+Each authorization creates one assistant grant, as pairing does. An access
+token maps to exactly that grant: it is an opaque bearer of 32 random bytes,
+with only its SHA-256 digest stored by the daemon. Refresh credentials likewise
+use digest-only daemon storage; neither raw token belongs in logs or model
+context. Refresh does not create an independent source of authority.
+
+Scopes are the existing `read.assistant.*` scopes and explicitly selected
+native write scopes from C. The four minimal reads remain mandatory:
+`read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`
+and `read.assistant.agents`. The first release includes reads plus the existing
+explicit write scopes, but OAuth consent neither implicitly enables writes nor
+replaces the R1 freeze.
+
+Access tokens live for at most one hour, capped by grant expiry. Refresh is
+valid only until that grant expires, at most 30 days, follows the existing
+renewal authority rules, and cannot revive an expired, revoked or disabled
+grant or broaden its scopes. Existing grant revocation invalidates access and
+refresh use immediately; token expiry is not a revocation delay.
+
+For public clients, rotate the refresh token on every successful use, as
+required by OAuth 2.1 and [RFC 9700](https://www.rfc-editor.org/rfc/rfc9700).
+The daemon atomically consumes the old refresh token and issues its replacement.
+Retain rotated-token digests for reuse detection: presenting an already-rotated
+refresh token revokes the entire token family, meaning its grant, through the
+existing grant revoke. No access or refresh credential in that family remains
+usable after revocation.
+
+Access and refresh credentials have distinct token types and distinct digest
+namespaces. A refresh token is never accepted as a bearer at use; an access
+token is never accepted as a credential at `/token`. Type checks precede
+credential lookup, so a digest match cannot cross the boundary.
+Sender-constrained tokens (DPoP) are not chosen because rotation and reuse
+detection provide the public-client refresh replay protection without an
+additional proof-of-possession protocol.
+
+The daemon's `session()` checks the bearer at every use, including refresh
+authorization as applicable. Alongside issuer, origin, owner/actor binding,
+expiry, revocation, scopes and the stored signature verdict, it requires the
+token's stored resource audience to equal this MCP resource's identity
+([RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)). The adapter supplies its
+configured resource identity, not a caller-selected substitute. A bearer for
+another resource fails closed even if its grant scopes otherwise match.
+The authorization server binds the validated `resource` to this audience;
+an opaque bearer does not need a readable JWT `aud` claim.
+
+### Client registration and principal mapping
+
+Use Client ID Metadata Documents (CIMD) with an explicit allowlist, initially
+ChatGPT's metadata URL. There is no open Dynamic Client Registration (DCR)
+endpoint. A client-provided URL alone is not registration or authority; its
+metadata and redirect URIs must pass the allowlist policy before a pending
+request can be approved.
+
+| Allowed client | Grant principal |
+| --- | --- |
+| ChatGPT | `assistant/chatgpt` |
+| Other explicitly admitted MCP clients | `assistant/mcp`, as specified by [#3531](https://github.com/compoundingtech/fractal/pull/3531) |
+
+The daemon selects the principal from the admitted client, never from a
+caller-supplied actor. Each grant gets the existing
+`<assistant-principal>/session/<grant>` session actor. An allowlisted OAuth
+client is not a person and does not inherit person authority.
+
+### Preconditions and activation order
+
+```text
+R1 option A -> bearer check at use -> OAuth -> non-loopback exposure
+```
+
+1. Deploy and verify R1 option A: keyed issuers for all four assistant claim
+   kinds ([#3326](https://github.com/compoundingtech/fractal/issues/3326),
+   [#3324](https://github.com/compoundingtech/fractal/pull/3324)).
+2. Enforce the bearer check at use in `session()`: stored signature verdict,
+   authorized issuer/owner and the resource audience, not just a digest lookup.
+3. Enable OAuth issuance against that verified grant authority.
+4. Only then permit non-loopback exposure, subject also to D's activation and
+   coordinated-kill acceptance gates.
+
+The Q32 grant-write freeze remains in force until R1 is deployed and verified;
+OAuth issuance writes the same begun/granted claims and cannot bypass it.
+Native assistant writes remain frozen until R1 as well. This spec or its merge
+does not authorize live issuance, writes or public deployment.
+
+### Open questions
+
+- **DQ-E2 CIMD pinning:** what exact ChatGPT metadata URL is allowlisted, and
+  how are URL/content changes and redirect-URI updates pinned and reviewed?
+- **DQ-E3 Source admission:** does the R1 keyed-writer requirement also apply
+  under `AdmissionAuthority::Source`? Resolve the admission contract before
+  treating that path as satisfying the R1 gate.

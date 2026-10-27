@@ -86,14 +86,14 @@ mod tests {
         assert_eq!(
             resolve(
                 "CARGO_MANIFEST_DIR",
-                "/build/crates/st3",
+                "/build/crates/fractal",
                 Some("/build"),
                 Some("/consumer"),
                 None,
                 true
             )
             .unwrap(),
-            "/consumer/crates/st3"
+            "/consumer/crates/fractal"
         );
     }
 

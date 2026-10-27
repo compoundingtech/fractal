@@ -134,11 +134,11 @@ observers and schedules.
 
 ## Tests
 
-- `crates/st3-kernel/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
+- `crates/fractal-kernel/src/lane.rs` unit tests cover the replay: join order, rejoin, moves in every
   placement, and marks and approvals that belong to one membership.
-- `crates/st3/tests/client_v0_cli.rs` declares a lane, lets the reconciler write it for a run, and
+- `crates/fractal/tests/client_v0_cli.rs` declares a lane, lets the reconciler write it for a run, and
   drives it through the CLI: join by prefix, a harness joining as its own seat, show, move, mark,
   approve by the approver only, leave, rejoin, the lane in `missions show` and `missions tree`,
   and a lane that closes with its run.
-- `crates/st3/tests/client_v0_contract.rs` checks the `lanes` collection, `lanes.get`, and the
+- `crates/fractal/tests/client_v0_contract.rs` checks the `lanes` collection, `lanes.get`, and the
   lane actions, including the approver check.

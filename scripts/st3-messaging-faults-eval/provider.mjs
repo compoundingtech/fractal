@@ -4,22 +4,28 @@ import fs from 'node:fs';
 import http from 'node:http';
 import childProcess from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+import { identityEnv } from '../fractal-env.mjs';
 
 if (process.argv.includes('--version')) {
   console.log('omp v18.4.4');
   process.exit(0);
 }
-if (process.env.ST_ADMISSION_TRACE) {
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if (process.env.FRACTAL_ADMISSION_TRACE ?? process.env.ST_ADMISSION_TRACE) {
   const { admit } = await import('../st3-boot-canaries/admission-omp.mjs');
   await admit();
 } else {
 const directory = process.cwd();
 // Exercise the actual previous-release channel with today's daemon/driver/extension.
 if (process.env.FAULT_OLD_CHANNEL_BIN) {
-  process.env.ST_OMP_CHANNEL_BIN = process.env.FAULT_OLD_CHANNEL_BIN;
+  // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+  process.env.FRACTAL_OMP_CHANNEL_BIN = process.env.ST_OMP_CHANNEL_BIN = process.env.FAULT_OLD_CHANNEL_BIN;
 }
-const actor = process.env.ST_AGENT;
-const endpoint = process.env.ST3_ENDPOINT;
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+const actor = identityEnv('FRACTAL_AGENT', 'ST_AGENT');
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+const endpoint = process.env.FRACTAL_ENDPOINT ?? process.env.ST3_ENDPOINT;
 const events = new Map();
 const record = (value) => fs.appendFileSync(`${directory}/receipts.jsonl`,
   JSON.stringify({ at_unix_ms: Date.now(), pid: process.pid, ...value }) + '\n');
@@ -32,7 +38,9 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 const pendingFrames = [];
 const children = new Set();
 const killChannel = (child) => {
-  if (!child.pid) return; // spawn can fail before assigning a PID
+  // An exit/close callback means libuv already reaped it: that group number
+  // may belong to another process. The fixture guardian owns orphan cleanup.
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
   try { process.kill(-child.pid, 'SIGKILL'); } catch (error) {
     if (error.code !== 'ESRCH') throw error;
   }
@@ -49,12 +57,12 @@ childProcess.spawn = (...args) => {
   if (args[0] === process.env.FAULT_OLD_CHANNEL_BIN) {
     // Hold the release channel on its own installed path until the eval advances
     // that path to the candidate. Its real ReplacementWatch owns the reexec.
-    args[2].env = { ...args[2].env, ST3_BIN: process.env.FAULT_OLD_CHANNEL_BIN };
+    // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+    args[2].env = { ...args[2].env, FRACTAL_BIN: process.env.FAULT_OLD_CHANNEL_BIN, ST3_BIN: process.env.FAULT_OLD_CHANNEL_BIN };
   }
   const child = spawn(...args);
   children.add(child);
   child.on('close', () => {
-    killChannel(child);
     children.delete(child);
   });
   let partial = '';

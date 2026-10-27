@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep daily release bodies within GitHub's limit and attach complete release notes",
+  "replay": {"status": "none", "detail": "Release tooling only; no runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change."},
+  "downtime": {"status": "none", "detail": "No additional service interruption introduced."},
+  "manual": {"status": "none", "detail": "No runtime upgrade action required. Daily releases always attach complete RELEASE-NOTES.md and UPGRADE-IMPACT.json. Oversized bodies show classification counts and bounded one-line upgrade summaries with PR/source links, prioritizing manual actions and breaking changes, then report omitted items. The full upgrade guide remains in the attached notes. Dry runs report body sizing."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}

@@ -1,5 +1,5 @@
 // What the iOS feed builds from each captured case: the view model the app's Conversation screen
-// draws (`conversationEntries` from @smalltalk/st3-views), and which image view each entry gets.
+// draws (`conversationEntries` from @fractal/views), and which image view each entry gets.
 //
 // Usage (from the repository root):
 //   node --experimental-transform-types scripts/conversation-images-audit/ios-views.mjs [FIXTURE_DIR]
@@ -10,7 +10,7 @@
 // ConversationImageView; this prints that decision for every entry that carries an image.
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { conversationEntries } from '../../clients/typescript/st3-views/index.ts';
+import { conversationEntries } from '../../clients/typescript/fractal-views/index.ts';
 
 const dir = process.argv[2] ?? 'fixtures/clients/conversation-images';
 const names = new Map([['person/ada', 'you'], ['agent/example/gardener', 'Gardener']]);

@@ -15,7 +15,7 @@ import sys
 NAME = re.compile(r"Smalltalk|SmallTalk")
 ALLOW = ("*.md",)
 SKIP_FILES = (
-    ".changelog/*", "release-notes/*", ".experiments/*", "*/.experiments/*", "crates/st3/*",
+    ".changelog/*", "release-notes/*", ".experiments/*", "*/.experiments/*", "crates/fractal/*",
     "CHANGELOG*", "*/CHANGELOG*", "snapshots/*", "*/snapshots/*", "*.snap",
     "fixtures/*", "*/fixtures/*", "onboarding-fixtures/*", "*/onboarding-fixtures/*", "*fixture*.json",
     "*.lock", "pnpm-lock.yaml", "*.svg", "*.png", "*.ico",
@@ -46,7 +46,7 @@ CAPITAL = re.compile(r"(?<![\w])(?:Smalltalk|SmallTalk)(?![\w])")
 
 # These descriptions are wire compatibility content, not presentation-only prose.
 DISPLAY_EXCEPTIONS = {
-    "crates/st3-schema/src/lib.rs": (
+    "crates/fractal-schema/src/lib.rs": (
         "A Small Talk message.",
         "hashed into the claim registry digest; changing it changes compatibility_digest",
     ),
@@ -60,30 +60,30 @@ DISPLAY_EXCEPTIONS = {
 # names/IDs, stored-state fixtures and source identifiers outside this allowlist.
 # Each entry is (review area, path, old literals); only the brand inside changes.
 DISPLAY_RULES = (
-    ("CLI", "crates/st3/src/doctor_cli.rs", (
+    ("CLI", "crates/fractal/src/doctor_cli.rs", (
         "build Smalltalk from source", "open Smalltalk,",
     )),
-    ("CLI", "crates/st3/src/main.rs", ("folded tools, Small Talk.",)),
-    ("CLI", "crates/st3/src/setup.rs", (
+    ("CLI", "crates/fractal/src/main.rs", ("folded tools, Small Talk.",)),
+    ("CLI", "crates/fractal/src/setup.rs", (
         "built-in Smalltalk Assistant", "Welcome to Smalltalk.",
     )),
-    ("CLI", "crates/st3/src/onboarding.rs", (
+    ("CLI", "crates/fractal/src/onboarding.rs", (
         "Smalltalk Assistant", "accomplish in Smalltalk today?",
     )),
-    ("CLI", "crates/st3/src/builtins/assistant.kdl", ("Smalltalk Assistant",)),
-    ("CLI", "crates/st3/src/builtins/onboarding.kdl", (
+    ("CLI", "crates/fractal/src/builtins/assistant.kdl", ("Smalltalk Assistant",)),
+    ("CLI", "crates/fractal/src/builtins/onboarding.kdl", (
         "Smalltalk Assistant", "do in Smalltalk and", "accomplish in Smalltalk today",
     )),
     ("CLI", "docs/st3/onboarding-guide.md", ("accomplish in Smalltalk today?",)),
     ("CLI", "docs/st3/action-coverage.json", ("folded tools, Small Talk.",)),
-    ("TUI", "crates/stui/src/ui/checklist.rs", (
+    ("TUI", "crates/fractal-tui/src/ui/checklist.rs", (
         "Smalltalk setup", "Smalltalk runs your AI agents", "Smalltalk Assistant",
     )),
-    ("TUI", "crates/stui/src/ui/live.rs", ("Smalltalk Assistant",)),
-    ("TUI", "crates/stui/src/ui/mod.rs", ("a Small Talk message",)),
-    ("TUI", "crates/st3-conversation-ui/src/adapt.rs", ('"Small Talk"',)),
-    ("TUI tests", "crates/st3/tests/setup.rs", ("Smalltalk setup",)),
-    ("TS shared", "clients/typescript/st3-views/conversationView.ts", ("'Small Talk'",)),
+    ("TUI", "crates/fractal-tui/src/ui/live.rs", ("Smalltalk Assistant",)),
+    ("TUI", "crates/fractal-tui/src/ui/mod.rs", ("a Small Talk message",)),
+    ("TUI", "crates/fractal-conversation-ui/src/adapt.rs", ('"Small Talk"',)),
+    ("TUI tests", "crates/fractal/tests/setup.rs", ("Smalltalk setup",)),
+    ("TS shared", "clients/typescript/fractal-views/conversationView.ts", ("'Small Talk'",)),
     ("Web", "apps/fractal-web/src/conversation/semantics.ts", ("'Small Talk'",)),
     ("iOS", "apps/ios/app.config.js", ("'Smalltalk'", "'Smalltalk Dev'")),
     ("iOS tests", "apps/ios/appConfig.test.mjs", (

@@ -1,12 +1,13 @@
 // Project decoded st3 conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineEntry } from '@smalltalk/st3-client/schema'
-import type { ConversationChunk, UnrecognizedEntry } from '@st3/sdk/effect'
+import { TimelineEntryId, Timestamp, type TimelineEntry } from '@fractal/client/schema'
+import type { ConversationChunk, UnrecognizedEntry } from '@fractal/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
 import type { ConversationItem, ToolCallItem, ToolResult } from './model.ts'
 import { contentEvent, proseItem, withoutShownDeliveries } from './semantics.ts'
+import { q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 
 /**
  * Fixture-only D08 proposal, not part of the st3 wire contract.
@@ -76,7 +77,7 @@ const joinResult = ({
 /**
  * st's native-transcript reader (`external_sessions.rs` `push_message`) emits a `message` entry
  * carrying only the harness's own message id before each transcript message's parts. It is a turn
- * header, not a Small Talk delivery (those always name `from`/`to`), so it renders nothing; the
+ * header, not a Fractal delivery (those always name `from`/`to`), so it renders nothing; the
  * parts after it carry the content.
  */
 const isTurnHeader = (entry: Entry) =>
@@ -131,8 +132,8 @@ const unrecognizedOmpItem = (
 
 /**
  * String convention emitted by st's external_sessions.rs `push_native_block`, matching the
- * reasoning-label semantics in st3-conversation-ui/src/adapt.rs. No duration is available.
- * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/smalltalk/issues/2010
+ * reasoning-label semantics in fractal-conversation-ui/src/adapt.rs. No duration is available.
+ * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/fractal/issues/2010
  */
 const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): ConversationItem | undefined => {
   const prefix = '[reasoning]\n'
@@ -181,6 +182,10 @@ const itemOf = ({
       if (internal !== undefined) return internal
       const reasoning = parseNativeReasoning(entry)
       if (reasoning !== undefined) return reasoning
+      const notice = entry.body.media_type === 'text/plain' && entry.role === 'system' && entry.final
+        ? q101OmpEnvelopeStopgap({ id: entry.id, role: entry.role, text: entry.body.text ?? '', at: entryTimestamp(entry) })
+        : undefined
+      if (notice !== undefined) return notice
       const event = contentEvent({
         id: entry.id,
         text: entry.body.text ?? '',

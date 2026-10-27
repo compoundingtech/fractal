@@ -2,7 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { afterEach, expect, it, vi } from 'vitest'
-import type * as Native from '@smalltalk/st3-client/schema'
+import type * as Native from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
 vi.mock('@stylexjs/stylex', () => ({
@@ -71,7 +71,7 @@ it('confirms an answer before it sends it, and sends it once', async () => {
   await act(async () => button(container, 'Send')!.click())
   expect(onAct).toHaveBeenCalledTimes(1)
   expect(onAct.mock.calls[0]).toEqual([alert, { type: 'work.done', summary: 'Merge', answer: { id: 'merge' } }])
-  expect(container.querySelector('[role="status"]')?.textContent).toBe('Answered. The alert clears once st records it.')
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Answered. The alert clears once Fractal records it.')
 })
 
 it('drops a pending confirmation when the alert is replaced, and keeps the person\'s words', async () => {

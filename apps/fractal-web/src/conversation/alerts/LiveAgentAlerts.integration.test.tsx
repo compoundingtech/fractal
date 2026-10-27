@@ -2,7 +2,7 @@
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { expect, it, vi } from 'vitest'
-import type * as Native from '@smalltalk/st3-client/schema'
+import type * as Native from '@fractal/client/schema'
 import { DateTime } from 'effect'
 
 const data = vi.hoisted(() => ({ attention: [] as unknown[], act: vi.fn() }))
@@ -39,7 +39,7 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   const cancel = vi.fn()
   const ux = { beginAlertAnswer: vi.fn(() => ({ landed, cancel })) } as unknown as UxTelemetry
   data.attention = [ask('attention/one'), ask('attention/two')]
-  data.act.mockResolvedValueOnce({ _tag: 'Refused', detail: 'st no longer offers this answer here.' }).mockResolvedValueOnce({ _tag: 'Sent' })
+  data.act.mockResolvedValueOnce({ _tag: 'Refused', detail: 'Fractal no longer offers this answer here.' }).mockResolvedValueOnce({ _tag: 'Sent' })
   const container = document.createElement('div')
   document.body.append(container)
   const root = createRoot(container)
@@ -49,7 +49,7 @@ it('times each answered alert until the strip no longer shows it, and drops refu
 
   await click(container, 'Yes')
   await click(container, 'Send')
-  expect(container.querySelector('[role="status"]')?.textContent).toBe('st no longer offers this answer here.')
+  expect(container.querySelector('[role="status"]')?.textContent).toBe('Fractal no longer offers this answer here.')
   expect(cancel).toHaveBeenCalledOnce()
 
   await click(container, 'Yes')
