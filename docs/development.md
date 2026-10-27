@@ -319,6 +319,38 @@ stage `main` using the same Cloudflare account and remote state.
 These instructions describe the deployment configuration, not evidence of a
 successful live deployment or a recorded approval for public hosting.
 
+### Production app stories
+
+The kit Storybook loads app stories only by the explicit file entries in
+`packages/fractal-ui/.storybook/stories.ts`. A story titled `Fractal/App/<Module>` is a
+production module suite: its `meta.component` is that app module, imported from its
+production file and mounted by the story. `Fractal/App/LiveAgentWorkspace` and
+`Fractal/App/ConversationPane` mount the real modules under `DataSourceProvider` over
+`fixtureSource` feeds of the deterministic fixture world (`src/fixtures/appStoryStates.ts`);
+they never start the live runtime or contact a gateway. Each suite has one story per state,
+dark and light: loading, empty, populated, failed tool, offline (stale feeds, reconnecting
+socket, browser offline), unavailable and the streaming repair session. Each story mounts
+exactly one production boundary; its play waits for the real transcript, composer and, for the
+workspace, the workspace root, then marks the canvas `data-proof="passed"`. The responsive
+phone layout stays in `Fractal/Narrow layout`.
+
+`LiveAgentWorkspace.graph.integration.test.ts` keeps the eager startup boundary and adds a
+lazy-inclusive identity check: it follows literal `import()` edges from `main.tsx` without
+evaluating modules, resolves every configured module suite's `meta.component` through imports,
+aliases and `React.lazy`, and requires both directions: each suite mounts a module of that
+production graph whose name matches its title, and `LiveAgentWorkspace.tsx` and
+`ConversationPane.tsx` each have a configured suite. Planted story-local, lazily imported,
+renamed and missing suites must fail. `appStoryAssertions.unit.test.ts` is the negative
+control for the play assertion: a stubbed production module or a gallery of boundaries fails.
+
+The synthetic-fixture privacy scanner
+(`apps/fractal-web/scripts/synthetic-fixtures/scan.mjs`) scans a root inside Git by its
+publication inputs, `git ls-files --cached --others --exclude-standard`: committed and
+untracked non-ignored files, including tracked files under an ignored directory. Git-ignored
+build output such as `storybook-static` or installed dependencies is not a publication input.
+Roots outside Git are scanned in full, and a root reached through a symlinked directory is
+matched by its resolved path. This adds no filename, vendor or content-hash exemptions.
+
 ## Continuous integration
 
 Workspace CI runs on pull requests and merge groups. The four required checks are `linux-gate`,
