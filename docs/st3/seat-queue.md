@@ -186,7 +186,7 @@ still read from the current store; no queue cache is introduced.
   time, followed the chief's move, passed over a head run waiting on a gate and returned to it
   once ready, kept each held claim, and got no terminal input. Run reports are in
   `evals/fractal/seat-queue/reports/`.
-  `scripts/st3-seat-queue-eval/report` drafts a run's report from the evidence the runner keeps.
+  `scripts/fractal-seat-queue-eval/report` drafts a run's report from the evidence the runner keeps.
 
 ## Limits
 
