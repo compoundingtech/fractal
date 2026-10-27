@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { ActionSheetIOS, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
 import { useFocusEffect } from '@react-navigation/native';
@@ -37,8 +37,8 @@ const RULES: ConversationRules = rules;
 const c = tokenColor;
 
 const empty: Conversation<TimelineEntry> = { entries: [], hasOlder: false, newestSequence: -1, historyVersion: 0, older: { paged: false, start: false, loading: false } };
-// `unconfirmed` is the exact request Fractal may have taken and has not confirmed, to send again unchanged.
-type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number };
+// Keep both the original member binding and local images for an explicit new send.
+type Pending = { id: string; text: string; at: string; failed?: string; unconfirmed?: MessageRequest; resending?: boolean; images?: number; pickedImages?: Picked[] };
 type Row = { kind: 'entry'; entry: ConversationEntry } | Exclude<SimpleRow, { kind: 'entry' }> | { kind: 'pending'; pending: Pending } | { kind: 'older' };
 
 function nowClock() {
@@ -55,6 +55,10 @@ export function ConversationScreen(props: RootScreen<'Conversation'>) {
 function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const { target, sessionId } = route.params;
   const { data, feed, caps, status, historicalSessions, conversationCache, draftCache, draftsReady, saveDrafts, actions, simpleOn } = useStore();
+  // Native alert callbacks outlive the render that opened them. A new send must
+  // use the selection at confirmation time, not the alert's captured client.
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
   const session = [...data.sessions, ...historicalSessions].find(candidate => candidate.id === (sessionId ?? target));
   // A running session Fractal manages belongs to its agent: name it, and send to it, as the agent.
   const agent = data.agents.find(candidate => candidate.id === target)
@@ -277,7 +281,7 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     const text = (spoken ?? draft).trim();
     const sending = images;
     if (!agent || (!text && !sending.length)) return;
-    const item: Pending = { id: `pending-${Date.now()}`, text, at: nowClock(), ...(sending.length ? { images: sending.length } : {}) };
+    const item: Pending = { id: `pending-${Date.now()}`, text, at: nowClock(), pickedImages: sending, ...(sending.length ? { images: sending.length } : {}) };
     setPending(previous => [...previous, item]);
     // The words sent from dictation include what was in the box, so it empties either way; a send that
     // does not go puts the text back, and one that Fractal acknowledged leaves it empty.
@@ -308,11 +312,25 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     }
     settle(item.id, sent);
   }
-  // An unconfirmed message goes again as the same request, so Fractal keeps at most one of it.
-  async function sendAgain(item: Pending) {
-    if (!item.unconfirmed || item.resending) return;
-    setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
-    settle(item.id, await actions.resend(item.unconfirmed));
+  function sendAgain(item: Pending) {
+    const bound = item.unconfirmed;
+    if (!bound || item.resending) return;
+    Alert.alert('Message unconfirmed', `${bound.member} may already have accepted this message. Retry only contacts that original connection. Sending as new uses the current member and a new key, and may create a duplicate.`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Retry original', onPress: async () => {
+        setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
+        settle(item.id, await actions.resend(bound));
+      } },
+      { text: 'Send as new', style: 'destructive', onPress: async () => {
+        setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: true } : candidate));
+        const parameters = bound.request.parameters;
+        const sent = await actionsRef.current.send(parameters.to, parameters.content, parameters.session_id, parameters.tags, item.pickedImages);
+        if (sent.how === 'failed') {
+          setPending(previous => previous.map(candidate => candidate.id === item.id ? { ...candidate, resending: false } : candidate));
+          setSendIssue(`Not sent: ${sent.error}`);
+        } else settle(item.id, sent);
+      } },
+    ]);
   }
   // A sent message waits to show up in the conversation; one Fractal has not confirmed keeps its request.
   function settle(id: string, sent: Sent) {
@@ -519,7 +537,7 @@ const PendingView = memo(function PendingView({ pending, canSend, onSendAgain }:
   return <View style={[styles.entry, styles.barred, { borderLeftColor: paint(c(tone ?? rule.sending_edge)) }]}>
     <T color={c(tone ?? rule.sending.color)}>{label}<T dim>  {pending.at}{pending.images ? `  🖼 ${pending.images}` : ''}</T></T>
     <Markdown selectable={false} text={pending.text} color={c(rule.text)} />
-    {pending.unconfirmed ? <Button label="Send again" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
+    {pending.unconfirmed ? <Button label="Resolve unconfirmed" color={c(rule.unconfirmed)} disabled={!canSend || pending.resending} onPress={() => onSendAgain(pending)} /> : null}
   </View>;
 });
 

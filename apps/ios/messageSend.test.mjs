@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
-import { resendMessage, sendMessage } from './messageSend.ts';
+import { resendBoundMessage, sendBoundMessage, resendMessage, sendMessage } from './messageSend.ts';
 
 const refused = (code, status, details = {}, retryable = false) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable, details }, status);
 // Fractal could not confirm the send in time; it may still complete.
@@ -110,4 +110,44 @@ test('only a refusal that applied nothing builds a request with a fresh id', asy
   assert.equal(failed.error.response.code, 'forbidden');
   assert.equal(forbidden.log.built, 1);
   assert.equal(forbidden.log.sent.length, 1);
+});
+
+for (const present of [true, false]) {
+  test(`member change never rebinds an unconfirmed request (original ${present ? 'present' : 'gone'})`, async () => {
+    const original = world([unconfirmed(), unconfirmed(), 'ok']);
+    const replacement = world(['ok']);
+    let current = original;
+    const first = await sendBoundMessage('member/A', current.ports);
+    assert.equal(first.how, 'unconfirmed');
+    current = replacement;
+    if (!present) original.ports.fence = async () => { throw new TypeError('original member gone'); };
+    const outcome = await resendBoundMessage(first.request);
+    assert.equal(outcome.how, present ? 'sent' : 'unconfirmed');
+    assert.equal(current.log.sent.length, 0, 'replacement never receives the old key');
+    assert.equal(original.log.sent.length, present ? 3 : 2);
+    if (present) {
+      assert.equal(original.log.sent[2].idempotency_key, original.log.sent[0].idempotency_key);
+    } else {
+      assert.equal(outcome.request, first.request, 'the original binding stays unconfirmed');
+    }
+  });
+}
+
+test('automatic repeat stays on the original member if selection changes during the wait', async () => {
+  const original = world([unconfirmed(), 'ok']);
+  const replacement = world(['ok']);
+  let current = original;
+  original.ports.wait = async () => { current = replacement; };
+  assert.deepEqual(await sendBoundMessage('member/A', current.ports), { how: 'sent' });
+  assert.equal(original.log.sent.length, 2);
+  assert.equal(current.log.sent.length, 0);
+});
+
+test('a person can send as new with a new key after an unconfirmed send', async () => {
+  const original = world([unconfirmed()]);
+  const first = await sendBoundMessage('member/A', original.ports);
+  const replacement = world(['ok']);
+  await replacement.ports.build(); // Each world starts its fake ID counter at zero.
+  assert.deepEqual(await sendBoundMessage('member/B', replacement.ports), { how: 'sent' });
+  assert.notEqual(replacement.log.sent[0].idempotency_key, first.request.request.idempotency_key);
 });

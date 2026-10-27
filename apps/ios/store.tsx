@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { resendMessage, sendMessage, type SendOutcome } from './messageSend';
+import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
@@ -46,8 +46,8 @@ import { nativePushPorts, pushWrite } from './pushNative';
 export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
-/** A message.send request as sent, kept whole so an unconfirmed one can be sent again unchanged. */
-export type MessageRequest = Parameters<FractalClient['messageSend']>[0];
+/** The exact request and its original member's transport; never rebound on failover. */
+export type MessageRequest = BoundMessage<Parameters<FractalClient['messageSend']>[0]>;
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
@@ -978,6 +978,13 @@ function useAppStore(proof?: FabricProfile) {
     async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
       if (!client || !uploader) return { how: 'failed', error: 'not connected' };
       if (status !== 'online' || (proof && !proof.ready)) return { how: 'failed', error: 'offline' };
+      const signingProfile = signingKeyRef.current;
+      // A closed loopback listener's port may be reused by a later dial. Never use
+      // that address after its original carrier snapshot has been replaced.
+      const originalFabric = selected.route.kind === 'fabric' ? carrier.snapshot : null;
+      const originalAvailable = () => {
+        if (originalFabric && carrier.snapshot !== originalFabric) throw new TypeError('Original member connection is no longer available');
+      };
       // Images are kept on this member first; the message names them, and Fractal fetches each from
       // here for a reader on another machine (docs/st3/attachments.md).
       const attachments: AttachmentInput[] = [];
@@ -994,14 +1001,15 @@ function useAppStore(proof?: FabricProfile) {
       // The first try goes on the snapshot a window frame already brought, with no capabilities read;
       // each try after Fractal said the last applied nothing reads a fresh one.
       const fences = sendFences(lastSnapshot.current, fence);
-      const outcome = await sendMessage<MessageRequest>({
+      const outcome = await sendBoundMessage(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
         build: async () => {
           const id = actionId();
           const unsigned = { to, content, ...(sessionId ? { session_id: sessionId } : {}), ...(tags?.length ? { tags } : {}), ...(attachments.length ? { attachments } : {}) };
-          const parameters = proof ? unsigned : await signMessage(id, unsigned, signingKeyRef.current);
+          const parameters = proof ? unsigned : await signMessage(id, unsigned, signingProfile);
           return { id, idempotency_key: id, fence: await fences(), parameters };
         },
-        send: request => client.messageSend(request),
+        fence: async () => { originalAvailable(); return fence(); },
+        send: request => { originalAvailable(); return client.messageSend(request); },
         wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
       });
       if (outcome.how !== 'sent') { proof?.record(outcome.how === 'unconfirmed' ? 'message-unconfirmed' : 'message-failed', { elapsedMs: performance.now() - began }); return sentAs(outcome); }
@@ -1010,15 +1018,9 @@ function useAppStore(proof?: FabricProfile) {
       if (!proof) observations.observe('ios-message-ack', performance.now() - began);
       return outcome;
     },
-    /** Send an unconfirmed message again as the same request (id, key, signature and nonce), freshly fenced. */
+    /** Retry only through the transport captured by the original send. Fabric listeners are per-dial. */
     async resend(request: MessageRequest): Promise<Sent> {
-      // Offline it stays as it was, ready to send again.
-      if (!client || status !== 'online' || (proof && !proof.ready)) return { how: 'unconfirmed', request };
-      return sentAs(await resendMessage<MessageRequest>({
-        fence: sendFences(lastSnapshot.current, fence),
-        send: next => client.messageSend(next),
-        wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
-      }, request));
+      return sentAs(await resendBoundMessage(request));
     },
     /** A plain shell, named as the Fractal terminal UI names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {

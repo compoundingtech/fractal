@@ -1,15 +1,5 @@
-// A message Fractal may have taken stays that one message until Fractal says what became of it.
-//
-// A message is sent once with its own id and key, signed with a fresh nonce. When Fractal's reply is
-// lost, or Fractal says it may still complete (`applied: "unknown"`, as `message-send-unconfirmed` does
-// when it cannot confirm in time), the identical request is sent again: Fractal returns its first answer
-// and never records a second message. If Fractal still has not said, the send is unconfirmed and the
-// app keeps the exact request, so the person can send it again: the same id, key and parameters
-// (signature and nonce included) under a fresh fence. A request rebuilt with a new id could be a
-// second message; a changed one under the same key is refused (`idempotency-conflict`).
-//
-// Only a refusal that guarantees nothing was applied (a stale fence, `rate-limited`,
-// `applied: "none"`) is tried again with a new request.
+// Receipts are daemon-local. A lost reply may only be retried on the original
+// member, using its captured transport and fence reader, never the current client.
 import { notApplied, outcomeUnknown } from '../../clients/typescript/fractal-client';
 
 export type SendPorts<R> = {
@@ -22,6 +12,27 @@ export type SendOutcome<R> =
   /** Fractal may have taken it and has not said: `request` is what to send again, unchanged but for its fence. */
   | { how: 'unconfirmed'; request: R }
   | { how: 'failed'; error: unknown };
+
+export type BoundMessage<R extends { fence: unknown }> = {
+  member: string;
+  request: R;
+  ports: SendPorts<R> & { fence(): Promise<R['fence']> };
+};
+
+export async function sendBoundMessage<R extends { fence: unknown }>(
+  member: string, ports: SendPorts<R> & { build(): Promise<R>; fence(): Promise<R['fence']> },
+): Promise<SendOutcome<BoundMessage<R>>> {
+  return bindOutcome(await sendMessage(ports), member, ports);
+}
+
+export async function resendBoundMessage<R extends { fence: unknown }>(bound: BoundMessage<R>): Promise<SendOutcome<BoundMessage<R>>> {
+  const outcome = await resendMessage(bound.ports, bound.request);
+  return outcome.how === 'sent' ? outcome : { how: 'unconfirmed', request: bound };
+}
+
+function bindOutcome<R extends { fence: unknown }>(outcome: SendOutcome<R>, member: string, ports: BoundMessage<R>['ports']): SendOutcome<BoundMessage<R>> {
+  return outcome.how === 'unconfirmed' ? { how: 'unconfirmed', request: { member, request: outcome.request, ports } } : outcome;
+}
 
 /** How many requests refusals that applied nothing may cost before the refusal is shown. */
 export const SEND_TRIES = 8;
