@@ -217,6 +217,14 @@ export type UnsupportedItem = Extract<ConversationItem, { _tag: 'Unsupported' }>
 export type SendState =
   | { readonly _tag: 'Sent' }
   | { readonly _tag: 'Pending' }
-  | { readonly _tag: 'Failed'; readonly reason: { readonly _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }; readonly detail?: string }
+  | {
+      readonly _tag: 'Failed'
+      readonly reason: { readonly _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }
+      readonly detail?: string
+      /** Full native error code, preserved for diagnosis. */
+      readonly code?: string
+      /** Source-controlled retry policy; when present it decides whether Retry appears. */
+      readonly retryable?: boolean
+    }
   /** Fractal may have taken the send and has not confirmed it yet; sending it again is safe. */
   | { readonly _tag: 'Unconfirmed'; readonly detail?: string }
