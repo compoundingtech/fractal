@@ -251,13 +251,38 @@ function ComposerSendStory({ scheme, scenario: name }: { readonly scheme: Scheme
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Composer send',
   component: ComposerSendStory,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Composer send surface: recipient readout and selection, reply chip, optional subject, image tray, availability recovery and per-row send state. The story plays the host: uploads, retries, recovery and delivery move only through fixture callbacks; the kit makes no network calls.' } } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Host-controlled recipient, upload, recovery and delivery callbacks isolate the composer send contracts without network transport.' }, layout: 'fullscreen', docs: { description: { component: 'Composer send surface: recipient readout and selection, reply chip, optional subject, image tray, availability recovery and per-row send state. The story plays the host: uploads, retries, recovery and delivery move only through fixture callbacks; the kit makes no network calls.' } } },
   args: { scheme: 'dark', scenario: 'recipient' },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, scenario: { options: Object.keys(scenarios), control: 'select' } },
 } satisfies Meta<typeof ComposerSendStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'DeclaredImageLimits:contract-fixture',
+  'ImageRetry:contract-fixture',
+  'ImageTray:contract-fixture',
+  'ImageTrayLight:contract-fixture',
+  'KeyboardSend:contract-fixture',
+  'KeyboardSendLight:contract-fixture',
+  'MentionKeepsRecipient:contract-fixture',
+  'MissingGrant:contract-fixture',
+  'OfflineRecovery:contract-fixture',
+  'OfflineRecoveryLight:contract-fixture',
+  'RecipientReadout:contract-fixture',
+  'RecipientSelection:contract-fixture',
+  'RecipientSelectionLight:contract-fixture',
+  'ReplyAndSubject:contract-fixture',
+  'ReplyAndSubjectLight:contract-fixture',
+  'RevokedRecovery:contract-fixture',
+  'RevokedRecoveryLight:contract-fixture',
+  'SendStates:contract-fixture',
+  'SendStatesLight:contract-fixture',
+  'Unavailable:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 /* Play helpers. Every assertion after an interaction waits for the re-render. */

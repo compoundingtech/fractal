@@ -489,6 +489,8 @@ The shared diff tint assertion identifies a token through its causal effect on b
 
 `Transcript` and `EmbraceThread` render `Sending…` and `Sent` under user prompts. A `Failed` send state may carry `code` and `retryable`; Retry appears only for retryable failures, and only while `sendAvailability` is absent or `Ready`. The `Composer send` stories play the host for each case.
 
+Composer-send stories declare `contract-fixture` ownership and a sorted co-located exemption list: their upload, recipient and recovery transitions are controlled host fixtures, not scenario-world observations.
+
 ## Clean-room note
 
 The original kit's behavior references are listed below. The gated workbench/composer additions reuse our independently authored internal review route at `98a270d4e58a44e4c4625cf1956ad09dbabfc1a7`, with the reviewed tint cutover from `35b6922a1559b4b3bcd78b672cb6b707c5d1e108`; their host/runtime boundaries are adapted to this kit as described above. This provenance is not a claim that the later additions were authored without consulting our own source.
