@@ -688,7 +688,7 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       const word = chip!.querySelector<HTMLElement>('[data-count-word]')!
       const compact = getComputedStyle(word).position === 'absolute'
       const nameWidth = row.querySelector('[data-row-column="name"]')!.getBoundingClientRect().width
-      await expect(compact, `${where}: count word ${compact ? 'compacted' : 'painted'} on a ${nameWidth}px name column`).toBe(host.dataset.countHost !== 'desktop-320')
+      if (host.dataset.countHost !== 'phone-320') await expect(compact, `${where}: desktop count word mode`).toBe(host.dataset.width === '240')
       await expect(compact, `${where}: compact mode disagrees with the 192px name threshold (name ${nameWidth}px)`).toBe(nameWidth < 192)
       if (compact) {
         await expect(word.getBoundingClientRect().width, `${where}: compact word still painted`).toBeLessThanOrEqual(1)
@@ -790,7 +790,7 @@ const unreportedReason = 'The number of subagents isn’t reported.'
  */
 const expectExplained = async (trigger: HTMLElement, root: HTMLElement, text: string, light: boolean, where: string) => {
   await userEvent.hover(trigger)
-  const hovered = await within(document.body).findByRole('tooltip')
+  const hovered = await within(document.body).findByRole('tooltip').catch(error => { throw new Error(`${where}: hover did not disclose ${text}`, { cause: error }) })
   await expect(hovered, `${where}: hover tooltip`).toHaveTextContent(text)
   await expect(root.contains(hovered), `${where}: tooltip outside the themed root`).toBe(true)
   await expect(paintedLuminance(hovered) > 0.5, `${where}: tooltip surface not inverted`).toBe(!light)
@@ -798,12 +798,12 @@ const expectExplained = async (trigger: HTMLElement, root: HTMLElement, text: st
   await userEvent.unhover(trigger)
   await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
   // Keyboard modality, then focus: the same explanation opens without a pointer.
-  const active = document.activeElement as HTMLElement | null
-  active?.blur()
-  await userEvent.keyboard('{Escape}')
   trigger.focus()
+  await userEvent.tab({ shift: true })
+  await userEvent.tab()
   await expect(trigger).toHaveFocus()
-  await expect(await within(document.body).findByRole('tooltip'), `${where}: focus tooltip`).toHaveTextContent(text)
+  const focused = await within(document.body).findByRole('tooltip').catch(error => { throw new Error(`${where}: keyboard focus did not disclose ${text}`, { cause: error }) })
+  await expect(focused, `${where}: focus tooltip`).toHaveTextContent(text)
   trigger.blur()
   await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
 }
