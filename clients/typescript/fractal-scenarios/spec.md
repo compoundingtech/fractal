@@ -779,7 +779,7 @@ replay.actions  // actions the client submitted, in order, for test assertions
   `ActionResult` and an operation that completes; a world may declare a different answer per
   action. Replay does not simulate the effects of actions.
   The complete modeled route set is listed below. An unmodelled route or route shape returns
-  an `ErrorEnvelope` with code `unsupported-capability` and HTTP 405, never an empty successful
+  an `ErrorEnvelope` with code `unsupported-capability` and HTTP 501, never an empty successful
   page or the resource at a recognized parent path.
 - **Inventories:** session and device list/detail reads use `roster.state.sessions` and
   `roster.state.devices`; launch and variant reads use `details.state.launches` and

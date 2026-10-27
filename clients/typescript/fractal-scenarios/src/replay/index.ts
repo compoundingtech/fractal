@@ -656,7 +656,7 @@ export const createReplay = (world: World, { clock }: { readonly clock: Clock })
       route === 'arrangements' && (parts.length === 1 || parts.length === 3) ||
       route === 'terminals' && parts.length === 3 && parts[2] === 'screen' ||
       timelineRoute || variantsRoute)
-    if (!supported && recordedRequest === undefined) return json(errorEnvelope('unsupported-capability', 'Route not supported by this world'), 405)
+    if (!supported && recordedRequest === undefined) return json(errorEnvelope('unsupported-capability', 'Route not supported by this world'), 501)
     const inventoryRoute = !timelineRoute && ['sessions', 'devices', 'launches'].includes(route)
     /** Arrangements and inventories are synthetic read-only overlays, never attributed to recorded transport. */
     if (route === 'actions' && req.method === 'POST') {

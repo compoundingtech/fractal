@@ -926,7 +926,7 @@ describe('HTTP reads and actions', () => {
     const body: unknown = await response.json()
     expect(body).toMatchObject({ value: { kind: 'timeline-page' } })
     const unsupported = await h.replay.fetch(new URL(`${captured.path}/child`, 'http://scenario.invalid'))
-    expect(unsupported.status).toBe(405)
+    expect(unsupported.status).toBe(501)
     expect(decodeUnknownSync(ErrorEnvelope, 'strict')(await unsupported.json()).code).toBe('unsupported-capability')
   })
 
@@ -1085,7 +1085,7 @@ describe('HTTP reads and actions', () => {
       'variants', 'variants/launch-variant%2Fabsent',
     ]) {
       const response = await h.replay.fetch(`http://scenario.invalid/v1/client/${path}`)
-      expect(response.status, path).toBe(405)
+      expect(response.status, path).toBe(501)
       expect(decodeUnknownSync(ErrorEnvelope, 'strict')(await response.json()))
         .toMatchObject({ code: 'unsupported-capability', retryable: false })
     }
