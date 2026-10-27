@@ -27,6 +27,7 @@ fn authorize(request: &Request, peer: Option<&NativeDeliveryPeer>) -> Result<(),
 pub(super) async fn ingest(
     State(state): State<AppState>,
     peer: Option<Extension<NativeDeliveryPeer>>,
+    local: Option<Extension<crate::api::LocalPeer>>,
     Json(request): Json<Request>,
 ) -> Result<Json<Value>, ApiError> {
     authorize(&request, peer.as_ref().map(|peer| &peer.0)).map_err(ApiError::bad)?;
@@ -34,6 +35,12 @@ pub(super) async fn ingest(
         return Err(ApiError::bad(St3Error::new("unsupported-capability", "OMP question ingestion is disabled")));
     }
     let peer = peer.expect("authorize requires the native driver").0;
+    let connector = local.and_then(|local| {
+        local.0.peer_process.filter(|connector| connector.pid() == local.0.pid)
+    }).ok_or_else(|| ApiError::bad(refused(
+        "question observations require a kernel connector generation witness",
+    )))?;
+    validate_connector(&connector, &peer).map_err(ApiError::bad)?;
     let fence = Fence::new(&request.agent, &request.runtime_incarnation, "questions");
     let admission = fractal_drivers::harness_state::record_lock_admission(
         &authority::source_agent_dir(&state, &fence),
@@ -64,11 +71,22 @@ pub(super) async fn ingest(
                 return Err(refused("question observation belongs to another native session"));
             }
             validate()?;
+            validate_connector(&connector, &peer)?;
             apply(&checked.store, &request)
         })
     }).await?;
     if changed { signal_local_change(&state); }
     Ok(Json(json!({"question": id})))
+}
+
+fn validate_connector(
+    connector: &fractal_runtime::PeerProcessIdentity,
+    peer: &NativeDeliveryPeer,
+) -> Result<(), St3Error> {
+    if connector.pid() != peer.pid {
+        return Err(refused("question caller differs from the kernel connector"));
+    }
+    connector.validate().map_err(|_| refused("question connector generation is no longer live"))
 }
 
 fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
@@ -109,7 +127,7 @@ fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use fractal_schema::harness_questions::{Question, native_id_digest};
 
@@ -119,6 +137,33 @@ mod tests {
                 session: "native-session".into(), questions: vec![Question {
                     id: "q0".into(), options: 2, multi: false, required: true,
                 }] } }
+    }
+
+    pub(in crate::api::mailbox) fn assert_forged_binding_cannot_write(
+        peer: &NativeDeliveryPeer,
+        admit: impl Fn() -> Result<(), St3Error>,
+    ) {
+        let store = Store::open_memory("forged-question-driver").unwrap();
+        let mut frame = request();
+        apply(&store, &frame).unwrap();
+        // All request binding fields are real. Only the kernel process generation
+        // distinguishes this attacker from the managed wrapper it impersonates.
+        authorize(&frame, Some(peer)).unwrap();
+        let index = store.index().unwrap();
+        for close in [false, true] {
+            frame.event = if close {
+                Observation::Closed { session: "native-session".into(),
+                    native_id: native_id_digest("PRIVATE_NATIVE_CALL"),
+                    status: CloseStatus::AnsweredElsewhere }
+            } else {
+                Observation::Open { session: "native-session".into(),
+                    native_id: native_id_digest("another-call"),
+                    questions: vec![Question { id: "q0".into(), options: 2,
+                        multi: false, required: true }] }
+            };
+            assert!(admit().and_then(|()| apply(&store, &frame)).is_err());
+            assert_eq!(store.index().unwrap(), index, "forged open/close wrote a claim");
+        }
     }
 
     #[test]
