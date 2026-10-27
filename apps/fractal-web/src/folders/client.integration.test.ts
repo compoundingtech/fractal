@@ -16,6 +16,14 @@ it('uses real generated SDK arrangements routes, explicit owner and action reque
     expect(gateway.calls.every((call) => call.url.startsWith('/v1/client/'))).toBe(true)
   } finally { await gateway.close() }
 })
+it('accepts arrangements capability v2 while reading legacy v1 layouts', async () => {
+  const gateway = await createTestGateway()
+  gateway.state.capabilityVersion = 2
+  try {
+    await expect(gateway.client.discover()).resolves.toMatchObject({ value: { capabilities: [{ id: 'arrangements', state: 'granted', version: 2 }] } })
+    await expect(gateway.client.read()).resolves.toMatchObject({ value: { body: { version: 1 } } })
+  } finally { await gateway.close() }
+})
 it('refuses missing arrangements grants before any arrangement read or mutation', async () => {
   const gateway = await createTestGateway()
   gateway.state.capability = false

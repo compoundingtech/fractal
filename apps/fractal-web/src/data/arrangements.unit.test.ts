@@ -357,6 +357,20 @@ describe('sidebarWinner', () => {
     expect(sidebarWinner([arrangement(2, 'Sidebar')], owner)?.id).toBe(arrangement(2).id)
   })
 
+  it('ignores v2 layouts at both the reserved subject and a lower-id Sidebar candidate', () => {
+    const reserved = arrangement(1, 'Archive')
+    const named = arrangement(2, 'Sidebar')
+    const v2 = (item: Arrangement): Arrangement => ({
+      ...item,
+      body: { version: 2, name: item.body.name, folders: item.body.folders },
+    })
+    const legacy = arrangement(3, 'Sidebar')
+    const rows = [v2(reserved), v2(named), legacy]
+    expect(sidebarCandidates(rows, owner)).toEqual([legacy])
+    expect(sidebarWinner(rows, owner)).toEqual(legacy)
+    expect(sidebarWinner([v2(reserved), v2(named)], owner)).toBeUndefined()
+  })
+
   it('selects the lowest UUIDv7 among exact-name live person-owned legacy candidates', () => {
     const candidates = [arrangement(0x10, 'Sidebar'), arrangement(9, 'Sidebar')]
     const foreign = { ...arrangement(2, 'Sidebar'), owner: 'person/other', id: `arrangement/person/other/${uuid(2)}` }

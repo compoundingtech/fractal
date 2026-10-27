@@ -124,10 +124,10 @@ describe('read-only sidebar arrangements', () => {
     expect(discovery.capabilities).toContainEqual({ id: 'arrangements', version: 1, state: 'ungranted' })
     expect(discovery.capabilities).toContainEqual({ id: 'read.arrangements', version: 0, state: 'ungranted' })
     expect(discovery.capabilities.some((row) => row.id === 'arrangements' && row.version === 1 && row.state === 'granted')).toBe(false)
-    // Same guard as fractal-web requireArrangements: feature id, exact version and granted state.
+    // Same guard as fractal-web requireArrangements: feature id, compatible version and granted state.
     const requireArrangements = () => {
-      if (!discovery.capabilities.some((row) => row.id === 'arrangements' && row.version === 1 && row.state === 'granted')) {
-        throw new TypeError('Granted arrangements capability version 1 is required; older pairings may need renewal')
+      if (!discovery.capabilities.some((row) => row.id === 'arrangements' && (row.version === 1 || row.version === 2) && row.state === 'granted')) {
+        throw new TypeError('Granted arrangements capability version 1 or 2 is required; older pairings may need renewal')
       }
     }
     expect(requireArrangements).toThrow(TypeError)

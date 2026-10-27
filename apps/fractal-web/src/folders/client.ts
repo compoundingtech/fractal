@@ -24,8 +24,8 @@ export const selectionParts = ({ owner, subject }: Selection): { person: string;
   return { person: owner.slice('person/'.length), uuid: match[2] }
 }
 export const requireArrangements = (capabilities: Capabilities): void => {
-  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && item.version === 1))
-    throw new TypeError('Granted arrangements capability version 1 is required; older pairings may need renewal')
+  if (!capabilities.capabilities.some((item) => item.id === 'arrangements' && item.state === 'granted' && (item.version === 1 || item.version === 2)))
+    throw new TypeError('Granted arrangements capability version 1 or 2 is required; older pairings may need renewal')
 }
 
 /** Online only: immutable action IDs/keys belong to the caller, not a hidden retry queue. */
