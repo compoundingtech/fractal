@@ -62,6 +62,7 @@ test('an unconfirmed send reads as not confirmed yet with Send again, never as a
   assert.match(markup, /role="status"/)
   assert.match(markup, /Not confirmed yet/)
   assert.match(markup, /Send again/)
+  assert.doesNotMatch(markup, />Sent</)
   assert.doesNotMatch(markup, /send-failure|Couldn&#x27;t send|Couldn't send|role="alert"/)
   // Without a retry handler there is no action to offer.
   const bare = renderToStaticMarkup(React.createElement(SendUnconfirmed, { state: { _tag: 'Unconfirmed' } }))
