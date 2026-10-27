@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 
 // The per-commit play set (KIT_PLAY_SET=commit). Pull requests run it; merge groups and manual runs
-// run every story in all four cases with axe (KIT_PLAY_SET=all), so nothing here leaves the merge gate.
+// run the full strict case set with axe (KIT_PLAY_SET=all), including the explicit overrides below.
 //
 // It starts from the stories tagged `critical` and narrows them in two ways, which is what makes it
 // fit the per-commit budget (about 60 s on the 4-vCPU runner; the critical set took about 185 s):
@@ -20,8 +20,35 @@ export const MERGE_ONLY = [
   'fractal-ui-transcript--no-green-all-states',
   // 10 s of case time: renders a hundred agents; a render-cost check rather than a contract.
   'fractal-ui-sidebar-roster--hundred-agent-render',
+  // Attachment contract probes are batched in --contract to avoid 24 separate page bootstraps per commit.
+  // Keep individual state/phone/key-depth stories in the full merge matrix; --loaded still checks both widths.
+  'fractal-app-transcript-images--assistant-image',
+  'fractal-app-transcript-images--assistant-image-phone',
+  'fractal-app-transcript-images--decode-failed',
+  'fractal-app-transcript-images--decode-failed-phone',
+  'fractal-app-transcript-images--failed',
+  'fractal-app-transcript-images--failed-phone',
+  'fractal-app-transcript-images--keyboard-failed',
+  'fractal-app-transcript-images--keyboard-failed-phone',
+  'fractal-app-transcript-images--keyboard-loaded',
+  'fractal-app-transcript-images--keyboard-loaded-phone',
+  'fractal-app-transcript-images--keyboard-navigate-away',
+  'fractal-app-transcript-images--keyboard-navigate-away-phone',
+  'fractal-app-transcript-images--keyboard-unauthorized',
+  'fractal-app-transcript-images--keyboard-unauthorized-phone',
+  'fractal-app-transcript-images--loaded-phone',
+  'fractal-app-transcript-images--loading',
+  'fractal-app-transcript-images--loading-phone',
+  'fractal-app-transcript-images--mailbox-image',
+  'fractal-app-transcript-images--mailbox-image-phone',
+  'fractal-app-transcript-images--unauthorized',
+  'fractal-app-transcript-images--unauthorized-phone',
+  'fractal-app-transcript-images--unavailable',
+  'fractal-app-transcript-images--unavailable-phone',
 ]
 export const BOTH_WIDTHS = [
+  'fractal-app-composer-images--several-images',
+  'fractal-app-transcript-images--loaded',
   'fractal-ui-composer--footer-width-budget',
   'fractal-ui-composer--kit-label-resize',
   'fractal-ui-composer--layout-shapes',
@@ -29,23 +56,60 @@ export const BOTH_WIDTHS = [
   'fractal-ui-transcript-composer--host-width',
   'fractal-ui-transcript-composer--reading-column',
   'fractal-ui-workbench--all-states',
+  'fractal-narrow-layout--decode-stale-sidebar-hosts',
 ]
 
 const FULL = [['dark', 440], ['dark', 1440], ['light', 440], ['light', 1440]]
+
+// Scheme-only aliases remain available in Storybook; the gate already overrides their scheme.
+// The filter benchmark itself renders 240/440 × dark/light probes, so repeat its measurements
+// in only one outer browser case. FilterBehavior retains functional coverage in all four cases.
+export const KIT_CASE_OVERRIDES = new Map([
+  ['fractal-ui-transcript--no-green-all-states-light', []],
+  ['fractal-ui-composer--footer-width-budget-light', []],
+  ['fractal-ui-sidebar-tree--filter-keystroke-to-paint', [['dark', 1440]]],
+  // Portal theme inheritance must run in light as well as dark on every commit.
+  ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],
+])
+export const APP_CASE_OVERRIDES = new Map([
+  // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
+  ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
+  // Drawer density follows pointer input on both sides of the actual dock breakpoint.
+  ['fractal-narrow-layout--breakpoint-density', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
+  ['fractal-narrow-layout--breakpoint-density-coarse', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
+  // Pointer and Escape dismissal restore the opening trigger in tablet and phone drawers.
+  ['fractal-narrow-layout--drawer-focus-return', [['dark', 899], ['light', 440]]],
+])
+// The production build includes both inventories; every named story remains required.
+export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])
+
+// Validate against the complete index before selecting tags or shards, so stale policy cannot
+// silently remove coverage. An omitted scheme alias must share its kept base story's source.
+export function validateCaseOverrides(entries, overrides = FULL_CASE_OVERRIDES) {
+  const stories = new Map(Object.values(entries).filter(entry => entry.type === 'story').map(entry => [entry.id, entry]))
+  for (const [id, cases] of overrides) {
+    if (!stories.has(id)) throw new Error(`The strict case policy names ${id}, which is not a known story`)
+    if (cases.length !== 0) continue
+    const baseId = id.endsWith('-light') ? id.slice(0, -6) : undefined
+    if (!baseId || !stories.has(baseId) || overrides.get(baseId)?.length === 0 || stories.get(baseId).importPath !== stories.get(id).importPath) {
+      throw new Error(`The strict case policy omits ${id}, which is not a scheme alias of a kept story`)
+    }
+  }
+}
 
 // A stable pick of one corner pair, independent of the other stories in the set.
 export const diagonalCase = id => FULL[createHash('sha256').update(id).digest()[0] % 2 === 0 ? 0 : 3]
 
 // The cases of the per-commit set for the critical story ids, plus what the set leaves out.
-export function commitSetCases(criticalIds, { mergeOnlyIds = MERGE_ONLY, bothWidthsIds = BOTH_WIDTHS } = {}) {
+export function commitSetCases(criticalIds, { mergeOnlyIds = MERGE_ONLY, bothWidthsIds = BOTH_WIDTHS, overrides = FULL_CASE_OVERRIDES } = {}) {
   const critical = new Set(criticalIds)
   for (const id of [...mergeOnlyIds, ...bothWidthsIds]) {
     if (!critical.has(id)) throw new Error(`The per-commit set names ${id}, which is not a critical story`)
   }
   const mergeOnly = new Set(mergeOnlyIds), bothWidths = new Set(bothWidthsIds)
-  const ids = criticalIds.filter(id => !mergeOnly.has(id))
-  const cases = ids.flatMap(id => (bothWidths.has(id) ? [FULL[0], FULL[1]] : [diagonalCase(id)]).map(([scheme, width]) => ({ id, scheme, width })))
-  return { ids, cases, omittedStories: [...mergeOnlyIds], omittedCases: criticalIds.length * 4 - cases.length }
+  const ids = criticalIds.filter(id => !mergeOnly.has(id) && overrides.get(id)?.length !== 0)
+  const cases = ids.flatMap(id => (overrides.get(id) ?? (bothWidths.has(id) ? [FULL[0], FULL[1]] : [diagonalCase(id)])).map(([scheme, width]) => ({ id, scheme, width })))
+  return { ids, cases, omittedStories: criticalIds.filter(id => mergeOnly.has(id) || overrides.get(id)?.length === 0), omittedCases: criticalIds.length * 4 - cases.length }
 }
 
-export const fullCases = ids => ids.flatMap(id => FULL.map(([scheme, width]) => ({ id, scheme, width })))
+export const fullCases = (ids, overrides = FULL_CASE_OVERRIDES) => ids.flatMap(id => (overrides.get(id) ?? FULL).map(([scheme, width]) => ({ id, scheme, width })))

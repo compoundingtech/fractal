@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use st2::host_lock::process_alive;
+use fractal_legacy_runner::host_lock::process_alive;
 
 const HOST: &str = "nomadtest";
 // `exec` so `sh -c` replaces itself with sleep (dash otherwise FORKS a bare command, leaving the real
@@ -458,7 +458,7 @@ fn pty_gate(test: &str) -> bool {
 fn scope_gate(test: &str) -> bool {
     let runtime_dir_valid =
         std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|path| Path::new(&path).is_dir());
-    if runtime_dir_valid && st2::isolate::mode() == st2::isolate::Isolation::Scope {
+    if runtime_dir_valid && fractal_legacy_runner::isolate::mode() == fractal_legacy_runner::isolate::Isolation::Scope {
         return true;
     }
     assert!(
@@ -563,8 +563,8 @@ fn managed_agent_color_contract_crosses_systemd_scope() {
         return;
     }
     assert_eq!(
-        st2::isolate::mode(),
-        st2::isolate::Isolation::Scope,
+        fractal_legacy_runner::isolate::mode(),
+        fractal_legacy_runner::isolate::Isolation::Scope,
         "the NO_COLOR integration must exercise systemd-run, not degraded pass-through"
     );
     assert_managed_agent_color_contract("scope");

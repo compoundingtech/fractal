@@ -1,4 +1,4 @@
-import type { PtySize, PtyTarget } from '@st3/sdk/effect'
+import type { PtySize, PtyTarget } from '@fractal/sdk/effect'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 
@@ -25,6 +25,10 @@ import { TerminalHistory } from './TerminalHistory.tsx'
 import { TerminalPane, type PaneState } from './TerminalPane.tsx'
 import { TerminalResize } from './TerminalResize.tsx'
 import { useGatewayTyping, useStandaloneEncoder } from './terminalTyping.ts'
+import { terminalFontsReady } from './terminalFonts.ts'
+
+/** Warm the terminal's owned faces without pulling fonts into the eager workspace graph. */
+export const prepareTerminal = terminalFontsReady
 
 /** A terminal source publishes a human reason; a blank or placeholder detail falls back to fixed copy. */
 export const terminalUnobservedCopy = (feed: UnobservedFeed): string => {

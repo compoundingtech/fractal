@@ -4,7 +4,7 @@
  * Ghostty encoder and travel as DATA frames on the raw PTY socket; nothing here queues or replays.
  */
 
-import type { TerminalModes } from '@smalltalk/st3-client/schema'
+import type { TerminalModes } from '@fractal/client/schema'
 
 import type { BrowserTerminalKey, TerminalKeyEncoder } from './ghosttyKeyboard.ts'
 

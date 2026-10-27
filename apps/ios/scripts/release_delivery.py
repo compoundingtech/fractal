@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-BUNDLE_ID = "com.compoundingtech.smalltalk"
+BUNDLE_ID = "com.compoundingtech.fractal"
 
 
 def run(argv, *, cwd=None, capture=False, env=None, timeout=None):
@@ -120,14 +120,16 @@ def build_identity(args):
 
     The worker derives finer cache keys from these; the reconciler compares
     this digest so a changed toolchain or inherited public environment never
-    trusts an artifact built from other inputs. The worker overrides
-    EXPO_PUBLIC_ST3_BUILD from the revision, so an inherited value is not one.
+    trusts an artifact built from other inputs. The worker overrides both
+    EXPO_PUBLIC_FRACTAL_BUILD and EXPO_PUBLIC_ST3_BUILD from the revision, so
+    neither inherited value is an input.
     """
     identity = {
         "developer_dir": args.developer_dir,
         "tools": {name: shutil.which(name) for name in ("node", "pnpm", "pod")},
         "env": {key: value for key, value in sorted(os.environ.items())
-                if key.startswith("EXPO_PUBLIC_") and key != "EXPO_PUBLIC_ST3_BUILD"},
+                if key.startswith("EXPO_PUBLIC_")
+                and key not in ("EXPO_PUBLIC_FRACTAL_BUILD", "EXPO_PUBLIC_ST3_BUILD")},
         "pinned": DAILY_BUILD_ENV,
     }
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -142,6 +144,7 @@ def build_release(args):
     inputs = json.loads(inputs_file.read_text()) if inputs_file.exists() else {}
     env = os.environ.copy()
     env.update(DAILY_BUILD_ENV, DEVELOPER_DIR=args.developer_dir,
+               EXPO_PUBLIC_FRACTAL_BUILD=args.commit[:12],
                EXPO_PUBLIC_ST3_BUILD=args.commit[:12], CI="1",
                LANG="en_US.UTF-8", LC_ALL="en_US.UTF-8")
     # Metro inlines EXPO_PUBLIC_* values when it transforms each module, and
@@ -224,7 +227,10 @@ def build_release(args):
          "CODE_SIGN_STYLE=Automatic", f"DEVELOPMENT_TEAM={args.team}",
          "CODE_SIGN_IDENTITY=Apple Development", "-allowProvisioningUpdates", "build"],
         cwd=app, env=env)
-    apps = list((derived / "Build/Products/Release-iphoneos").glob("*.app"))
+    # DerivedData survives native identity changes. Select only the current Expo
+    # product; unrelated products from earlier generated workspaces may remain.
+    # Bundle ID, native commit and embedded JS stamp are still verified below.
+    apps = list((derived / "Build/Products/Release-iphoneos").glob(f"{workspace.stem}.app"))
     if len(apps) != 1:
         raise ValueError("Expected one successful Release app")
     with (apps[0] / "Info.plist").open("rb") as file:
@@ -456,7 +462,7 @@ class Delivery:
                 self.persist()
             # Xcode 27 exposes executable/PID, not foreground status. Conservatively
             # treat a running daily app as active, but stop deferring at 40 minutes.
-            running = any("/smalltalk.app/" in process.get("executable", "").lower() for process in processes)
+            running = any("/fractal.app/" in process.get("executable", "").lower() for process in processes)
             if running and time.time() - pending["since"] < self.args.max_deferral:
                 self.record("install_deferred", commit=pending["commit"], reason="daily_app_running")
                 return

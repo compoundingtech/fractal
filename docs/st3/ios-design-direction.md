@@ -1,6 +1,6 @@
 # iPhone design direction
 
-The iPhone app follows system typography, appearance and navigation. The web supplies information structure: agent identity and status, conversations with disclosed work, and related resources. This direction for [#2784](https://github.com/compoundingtech/smalltalk/issues/2784) was confirmed on 2026-10-14. Merge it before rebuilding screens.
+The iPhone app follows system typography, appearance and navigation. The web supplies information structure: agent identity and status, conversations with disclosed work, and related resources. This direction for [#2784](https://github.com/compoundingtech/fractal/issues/2784) was confirmed on 2026-10-14. Merge it before rebuilding screens.
 
 ## Shared rules and surface ownership
 
@@ -26,13 +26,13 @@ For [Now], use an inset grouped list: connection and freshness notice, nonzero a
 
 The badge and heading count only open alerts for the paired person. Updates ask nothing; messages stay in conversations. Preserve closed items until cleared and explicit Mark read for updates. Pick the phone's rule over web Sidebar's local ReadInbox-on-open to preserve deliberate acknowledgment: opening never reads an update or resolves a request ([Now], [homeView], [web Sidebar]).
 
-Keep alerts answerable above their conversation ([Alerts], [Conversation], [#1959](https://github.com/compoundingtech/smalltalk/issues/1959)), with disclosure and existing capability-gated actions. Preserve full pending-call context before Allow. Coordinate [#2783](https://github.com/compoundingtech/smalltalk/issues/2783) on IDs, count and destination: future push opens detail after sync, showing closed if resolved; notification contents never authorize answers. APNs and Release alert links are separate work.
+Keep alerts answerable above their conversation ([Alerts], [Conversation], [#1959](https://github.com/compoundingtech/fractal/issues/1959)), with disclosure and existing capability-gated actions. Preserve full pending-call context before Allow. Coordinate [#2783](https://github.com/compoundingtech/fractal/issues/2783) on IDs, count and destination: future push opens detail after sync, showing closed if resolved; notification contents never authorize answers. APNs and Release alert links are separate work.
 
 ## Screen slice order
 
 After merge: **Home and alert detail → Agents → Conversation and alert strip → Missions → Fleet → Terminal → Resources and Spaces polish**. Each gets a small PR with before/after screenshots attached using invented data. Home establishes reusable text, color and list primitives. Verify light/dark, large text, VoiceOver, back navigation, live/offline/error states and unchanged actions. Coordinate Home and alerts with #2783 and #1959; keep updates reactive and fix local defects at their cause.
 
-[st3-views]: ../../clients/typescript/st3-views/README.md
+[st3-views]: ../../clients/typescript/fractal-views/README.md
 [packages/fractal-ui]: ../../packages/fractal-ui/README.md
 [LiveAgentWorkspace]: ../../apps/fractal-web/src/web/LiveAgentWorkspace.tsx
 [ConversationPane]: ../../apps/fractal-web/src/web/ConversationPane.tsx
@@ -42,7 +42,7 @@ After merge: **Home and alert detail → Agents → Conversation and alert strip
 [ui]: ../../apps/ios/ui.tsx
 [theme]: ../../apps/ios/theme.ts
 [Now]: ../../apps/ios/screens/Now.tsx
-[homeView]: ../../clients/typescript/st3-views/homeView.ts
+[homeView]: ../../clients/typescript/fractal-views/homeView.ts
 [web Sidebar]: ../../apps/fractal-web/src/shell/Sidebar.tsx
 [Alerts]: ../../apps/ios/screens/Alerts.tsx
 [Conversation]: ../../apps/ios/screens/Conversation.tsx

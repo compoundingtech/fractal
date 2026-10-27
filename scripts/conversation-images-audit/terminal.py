@@ -174,6 +174,7 @@ def main():
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    os.waitpid(pid, 0)  # Reap only after the final signal reserves this child's PID.
     raw = bytes(raw)
     (out / "raw.bin").write_bytes(raw)
     text = screen(raw, args.cols, args.rows)

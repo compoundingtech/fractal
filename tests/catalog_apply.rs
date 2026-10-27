@@ -114,7 +114,7 @@ fn raw_snapshot(catalog: &Path, output: &Path) -> Output {
 }
 
 fn prepared_root_sha256(catalog: &Path, prepared: &Path) -> String {
-    st2::catalog_transaction::digest_prepared(catalog, prepared)
+    fractal_legacy_runner::catalog_transaction::digest_prepared(catalog, prepared)
         .map(|digest| digest.root_sha256)
         // Negative apply fixtures deliberately cannot be digested. A well-formed mismatch lets
         // the apply command itself reach and report the more specific structural rejection.
@@ -978,7 +978,7 @@ fn bootstrap_replay_validates_the_same_catalog_capability_it_locked() {
         .success()
     );
 
-    let incumbent_lock = st2::CatalogLock::exclusive(&target).unwrap();
+    let incumbent_lock = fractal_legacy_runner::CatalogLock::exclusive(&target).unwrap();
     let attempt = temp.path().join("replay-lock-attempt");
     let mut child = st2();
     child
@@ -1214,10 +1214,10 @@ fn paused_catalog_child_is_reaped_when_test_unwinds() {
 
     let child_pid = child_pid.get();
     let deadline = Instant::now() + Duration::from_secs(2);
-    while st2::host_lock::process_alive(child_pid) && Instant::now() < deadline {
+    while fractal_legacy_runner::host_lock::process_alive(child_pid) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(2));
     }
-    let survived = st2::host_lock::process_alive(child_pid);
+    let survived = fractal_legacy_runner::host_lock::process_alive(child_pid);
     if survived {
         unsafe {
             libc::kill(child_pid, libc::SIGKILL);
@@ -1459,7 +1459,7 @@ fn relative_profile_modules_reject_unsafe_missing_and_unprojected_inputs() {
     )
     .unwrap();
     assert!(
-        st2::validate::validate(&missing)
+        fractal_legacy_runner::validate::validate(&missing)
             .issues
             .iter()
             .any(|issue| issue.code == "profile-module")
@@ -1667,7 +1667,7 @@ fn prepared_profile_bundle_applies_and_loads_from_live_catalog() {
         fs::read(catalog.join("resolvers/goal.wasm")).unwrap(),
         fs::read(demo_wasm_src()).unwrap()
     );
-    let registry = st2::catalog::declared_profiles(&catalog).unwrap();
+    let registry = fractal_legacy_runner::catalog::declared_profiles(&catalog).unwrap();
     assert_eq!(
         registry.get("dev.example.goal").unwrap().module(),
         Some(catalog.join("resolvers/goal.wasm").as_path())
@@ -2052,7 +2052,7 @@ profile "dev.example.observe" {{
 "#
     );
     fs::write(catalog.join("catalog.kdl"), &legacy_config).unwrap();
-    let legacy_error = st2::catalog::load(&catalog).unwrap_err();
+    let legacy_error = fractal_legacy_runner::catalog::load(&catalog).unwrap_err();
     assert!(
         legacy_error
             .to_string()
@@ -2140,7 +2140,7 @@ profile "dev.example.observe" {{
         fs::read_to_string(agent.join(".workspace/session.txt")).unwrap(),
         "preserve live workspace"
     );
-    let applied = st2::catalog::load(&catalog).unwrap();
+    let applied = fractal_legacy_runner::catalog::load(&catalog).unwrap();
     assert_eq!(applied.pty_root.as_deref(), Some(pty_root));
     assert_eq!(
         applied.profiles[0]

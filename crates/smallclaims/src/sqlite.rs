@@ -30,6 +30,23 @@ mod read_admission_tests;
 use transaction_finalizer::TransactionFinalizers;
 pub use transaction_finalizer::WriterTransaction;
 
+/// Aggregate-only samples for the isolated, serial benchmark process.
+#[cfg(feature = "transport-bench")]
+pub mod transport_bench {
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    static SAMPLES: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
+
+    pub(super) fn record(duration: Duration) {
+        SAMPLES.lock().expect("benchmark sample mutex").push(duration);
+    }
+
+    pub fn take() -> Vec<Duration> {
+        std::mem::take(&mut *SAMPLES.lock().expect("benchmark sample mutex"))
+    }
+}
+
 pub(crate) mod writer_observer;
 pub use writer_observer::WriterObserver;
 
@@ -566,6 +583,16 @@ impl WriterConnection {
         self.finalizers.install(prepare, finalize)
     }
 
+    /// Graph-owned maintenance shares the managed outer boundary without consuming
+    /// the independently installed source adapter's prepare/finalize slot.
+    pub(crate) fn install_runtime_finalizer(
+        &self,
+        callback: impl Fn(&Transaction<'_>) -> Result<()> + Send + Sync + 'static,
+    ) -> Result<()> {
+        let _writer = self.write_fence();
+        self.finalizers.install_runtime(callback)
+    }
+
     pub fn send(&self, mut job: WriterJob) {
         if let (Some(writer), WriterJob::Batched { wait, .. }) = (&self.telemetry, &mut job) {
             *wait = Some(crate::profile::writer_waiting_for(wait.take(), writer.holder(),
@@ -1018,6 +1045,8 @@ fn run_write_batch(
         drop(transaction_timer);
         // Observe COMMIT before post-commit callbacks can unwind; no changed-row or ACK claim.
         if committed.is_ok() {
+            #[cfg(feature = "transport-bench")]
+            transport_bench::record(started.elapsed());
             crate::profile::managed_commit_succeeded();
         }
         telemetry::METRICS.batch.record(started.elapsed().as_secs_f64(), telemetry::SQLITE.as_slice());
@@ -1415,7 +1444,7 @@ impl ReadPool {
                         budget.check()?;
                         unreachable!("cancellation completes only for an expired budget");
                     }
-                    _ = tokio::time::sleep(budget.remaining()) => {
+                    _ = budget.deadline_elapsed() => {
                         budget.cancel();
                         budget.check()?;
                         unreachable!("the budget deadline elapsed");
@@ -1486,7 +1515,7 @@ impl ReadPool {
             }
             crate::read_budget::check()?;
             if let Some(budget) = &budget {
-                std::thread::park_timeout(budget.remaining());
+                budget.park();
             } else {
                 std::thread::park();
             }
@@ -2887,26 +2916,52 @@ mod read_cancellation_tests {
 
     #[test]
     fn cancellation_stops_live_sql_and_the_reader_is_clean_for_another_request() {
+        for budget in [
+            ReadBudget::new("/sql", Duration::from_secs(30)),
+            ReadBudget::cancellable("/stream"),
+        ] {
+            let (_directory, pool) = pool();
+            let worker_budget = budget.clone();
+            let worker_pool = pool.clone();
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                read_budget::with(Some(worker_budget), || worker_pool.request_read(|| {
+                    let reader = worker_pool.get();
+                    started_tx.send(()).unwrap();
+                    reader.query_row("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0))
+                }))
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            budget.cancel();
+            let error = worker.join().unwrap().unwrap().unwrap_err();
+            assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted));
+            assert_eq!(pool.usage().idle, 1);
+            let reader = pool.get();
+            assert!(reader.is_autocommit());
+            assert_eq!(reader.query_row("SELECT value FROM data", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_cancellation_withdraws_a_queued_reader_without_a_deadline_timer() {
         let (_directory, pool) = pool();
-        let budget = ReadBudget::new("/sql", Duration::from_secs(30));
+        let mut held = Vec::new();
+        while let Some(permit) = pool.try_admit_read() {
+            held.push(permit);
+        }
+        let budget = ReadBudget::cancellable("/stream");
         let worker_budget = budget.clone();
-        let worker_pool = pool.clone();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let worker = std::thread::spawn(move || {
-            read_budget::with(Some(worker_budget), || worker_pool.request_read(|| {
-                let reader = worker_pool.get();
-                started_tx.send(()).unwrap();
-                reader.query_row("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000000000) SELECT sum(x) FROM n", [], |row| row.get::<_, i64>(0))
-            }))
+        let waiting_pool = pool.clone();
+        let worker = tokio::spawn(async move {
+            waiting_pool.admit_read(Some(worker_budget)).await
         });
-        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        tokio::task::yield_now().await;
         budget.cancel();
-        let error = worker.join().unwrap().unwrap().unwrap_err();
-        assert!(matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::OperationInterrupted));
-        assert_eq!(pool.usage().idle, 1);
-        let reader = pool.get();
-        assert!(reader.is_autocommit());
-        assert_eq!(reader.query_row("SELECT value FROM data", [], |row| row.get::<_, i64>(0)).unwrap(), 1);
+        let result = tokio::time::timeout(Duration::from_secs(2), worker)
+            .await.unwrap().unwrap();
+        assert_eq!(result.err().unwrap().downcast_ref::<crate::error::Error>().unwrap().code, "read-deadline");
+        drop(held);
+        assert!(pool.try_admit_read().is_some());
     }
 
     #[test]

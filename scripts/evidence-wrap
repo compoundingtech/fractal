@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one check once on this machine and ask the signer to record it as an evidence note.
 
-  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--push origin] -- COMMAND...
+  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--input NAME=VALUE]... [--input-file NAME=PATH]... [--push origin] -- COMMAND...
 
 Run it from a clean checkout of the exact commit you are about to push. It runs COMMAND once
 (output streams to your terminal), then sends the signer the facts it measured: the commit,
@@ -9,11 +9,13 @@ the command, its exit code, the sha256 of its exact output and an environment fi
 (flake.lock, the dev shell derivation, this script's own bytes, the system, the attempt). The
 signer (scripts/evidence-sign, behind a sekrets grant; this script never sees the key)
 recomputes the tree and flake.lock itself and signs. A failing command is recorded too: a
-failure is a record, not a missing record.
+failure is a record, not a missing record. COMMAND keeps the caller's environment; the signer is
+started without the loader and interpreter variables it refuses (LD_*, DYLD_*, PYTHON*,
+GLIBC_TUNABLES, GCONV_PATH, NLSPATH) and with a fixed PATH.
 
-The note is imported as refs/notes/evidence/<record> in this checkout. With --push REMOTE it
-is also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it
-only helps when the commit you push has the tree CI will test (a branch current with main).
+The note is imported as refs/tags/evidence/<tree>/<record> in this checkout and, while gates on older bases
+read only notes, as refs/notes/evidence/<tree>/<record> naming the same record. With --push REMOTE both are
+also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it only helps when the commit you push has the tree CI will test (a branch current with main).
 
 With --aggregate FILE nothing is run: FILE is JSON {"command": [...], "exit_code": N, "output": ANY,
 "inputs": {name: string}} written by a job that summarizes other jobs (an aggregate gate). The
@@ -27,12 +29,17 @@ publish. A job on a shallow checkout uses this, because the server refuses a pus
 In --aggregate mode a dirty workspace does not stop the signature (the job has already run its
 tests); it is recorded as the input workspace_clean instead.
 
+--input-file NAME=PATH records an input the command itself reports, read after it ends: the sorted, distinct non-empty lines of
+PATH joined by commas (a count and digest past 500 characters), or 'none' when PATH is missing or empty. st-test uses it for env_skips, the tests that skipped because this
+host cannot run them (CI_TEST_ENV_SKIPS), so the note says which tests did not run here.
+
 With EVIDENCE_PUSH_TOKEN set, --push uses it as an HTTP authorization header (never printed).
 
 With --lanes-from BASE the check is held to its lane in .st/required-lanes.json at BASE (the accepted base): the command must be the
-lane's argv, every file at or below the lane's definition paths must be identical in this tree and at BASE (otherwise nothing is signed:
-the change edits the scripts that decide what the check runs, so CI runs the check), and the note records lane_definition_sha256, the
-digest the verifier recomputes from BASE. It is the producer half of `evidence-verify --lanes-from`.
+lane's argv, and the note records lane_definition_sha256, the digest of the lane as THIS tree defines it (the base's argv and paths, this
+tree's bytes at those paths). For a tree that leaves the lane alone that is the digest the verifier recomputes from BASE; for a tree that
+edits its lane it is the edited definition's, which only a level whose policy says by_level lane "tree" accepts (our hosts, since
+2026-10-26: a lane edit is signed like any other change). It is the producer half of `evidence-verify --lanes-from`.
 
 Take this script from the accepted base (main), not from the change under test.
 """
@@ -44,6 +51,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 
@@ -51,10 +60,31 @@ sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_SIGNER = ['st', 'sekrets', '--', 'evidence-sign']
+# What would make the loader or the interpreter load code into the signer, which refuses to start with any of them
+# set (scripts/evidence-sign REFUSED_ENVIRONMENT; the refusal stays, it is the signer's tripwire). Some hosts preload
+# a library into every process (hetz2: jemalloc), so the signer is started without these, and with a fixed PATH: its
+# program is resolved first, with the caller's.
+LOADER_PREFIXES = ('LD_', 'DYLD_', 'PYTHON')
+LOADER_VARIABLES = ('GLIBC_TUNABLES', 'GCONV_PATH', 'NLSPATH')
+SIGNER_PATH = '/run/current-system/sw/bin:/usr/bin:/bin'
 
 
 class Failure(Exception):
     pass
+
+
+def signer_launch(argv, environ=None):
+    """(argv, env) that start the signer: the program as an absolute path, the caller's environment without any
+    loader or interpreter variable, and SIGNER_PATH as PATH."""
+    environ = os.environ if environ is None else environ
+    if not argv or not all(isinstance(a, str) for a in argv):
+        raise Failure('--signer must be a JSON array of strings')
+    program = argv[0] if '/' in argv[0] else shutil.which(argv[0], path=environ.get('PATH', ''))
+    if not program:
+        raise Failure(f'the signer {argv[0]!r} is not on PATH')
+    env = {k: v for k, v in environ.items() if not k.startswith(LOADER_PREFIXES) and k not in LOADER_VARIABLES}
+    env['PATH'] = SIGNER_PATH
+    return [os.path.abspath(program), *argv[1:]], env
 
 
 def git(*args, stdin=None, check=True, env_extra=None):
@@ -85,6 +115,11 @@ def tracked_dirty():
     return changed or ('index flags hide changes: ' + ', '.join(hidden[:3]) if hidden else '')
 
 
+# The inputs this script sets itself; --input may not name them.
+WRAP_INPUTS = frozenset({'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt', 'lane_definition_sha256',
+                         'workspace_clean', 'untracked_files'})
+
+
 def toolchain_digest(override):
     if override:
         return override
@@ -108,8 +143,12 @@ def run_command(command):
     return process.wait(), digest.hexdigest()
 
 
+# st-test reads this from the base's copy: a base whose wrapper signs a tree that edits its lane (it no longer reports such a check as "not signed").
+SIGNS_LANE_EDITS = True
+
+
 def lane_inputs(verifier_path, base, check, tree, command):
-    """The lane definition digest for `check`, after refusing a command that is not the lane's argv and a tree that edits its own lane."""
+    """The digest of `check`'s lane as `tree` defines it, after refusing a command that is not the lane's argv."""
     loader = importlib.machinery.SourceFileLoader('evidence_verify_for_wrap', verifier_path)
     verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(verifier)
@@ -125,9 +164,9 @@ def lane_inputs(verifier_path, base, check, tree, command):
     if command != rules['argv']:
         raise Failure(f'the command is not the argv of lane {check} at {base}; nothing was signed')
     if definition['changed']:
-        raise Failure(f'this tree changes the definition of lane {check} relative to {base} ({", ".join(definition["changed"][:5])}); '
-                      'nothing was signed and CI will run the check')
-    return definition['sha256']
+        print(f'evidence-wrap: this tree edits lane {check} ({", ".join(definition["changed"][:5])}); the note carries the edited definition\'s digest',
+              file=sys.stderr)
+    return definition['tree_sha256']
 
 
 def main(argv):
@@ -145,6 +184,10 @@ def main(argv):
     parser.add_argument('--lanes-from', metavar='COMMIT',
                         help='hold the check to its lane in .st/required-lanes.json at this accepted base and record the lane definition digest')
     parser.add_argument('--aggregate', metavar='FILE', help='record the facts in FILE instead of running a command')
+    parser.add_argument('--input', action='append', default=[], metavar='NAME=VALUE',
+                        help='record one more input the command depends on (a name this script does not set itself; repeatable)')
+    parser.add_argument('--input-file', action='append', default=[], metavar='NAME=PATH',
+                        help='record one more input read from PATH after the command ends (its distinct lines, comma-joined; repeatable)')
     parser.add_argument('--out', metavar='DIR', help='write the pack and a summary here instead of importing and pushing')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -171,9 +214,24 @@ def main(argv):
             'system': f'{system[1]}-{system[0]}'.lower() if len(system) == 2 else 'unknown',
             'attempt': args.attempt,
         }
+        for item in args.input:
+            name, sep, value = item.partition('=')
+            if not sep or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not value or name in inputs or name in WRAP_INPUTS:
+                raise Failure(f'--input {item!r}: NAME=VALUE with a lower-case name this script does not set itself, and a value')
+            if name == 'source_inputs' and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value):
+                raise Failure('--input source_inputs must be a git tree id')
+            inputs[name] = value
+        reported = {}
+        for item in args.input_file:
+            name, sep, path = item.partition('=')
+            if not sep or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not path or name in inputs or name in WRAP_INPUTS or name in reported:
+                raise Failure(f'--input-file {item!r}: NAME=PATH with a lower-case name this script does not set itself, and a path')
+            reported[name] = Path(path)
+        if args.aggregate and reported:
+            raise Failure('--input-file is for a command this script runs, not --aggregate')
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
-            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs'}
+            known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs', 'runner'}
             if set(facts) - known or not {'command', 'exit_code'} <= set(facts) or ('output' in facts) == ('output_sha256' in facts):
                 raise Failure('--aggregate FILE must hold command, exit_code, exactly one of output or output_sha256, and optionally inputs')
             command, exit_code = facts['command'], facts['exit_code']
@@ -192,12 +250,19 @@ def main(argv):
             if args.lanes_from:
                 inputs['lane_definition_sha256'] = lane_inputs(args.verifier, args.lanes_from, args.check, tree, command)
             exit_code, output_sha256 = run_command(command)
+            for name, path in reported.items():
+                lines = path.read_text().splitlines() if path.exists() else []
+                value = ','.join(sorted({line.strip() for line in lines if line.strip()})) or 'none'
+                # The signer takes inputs of at most 500 characters: a longer list is recorded as its count and digest.
+                inputs[name] = value if len(value) <= 500 else f'{value.count(",") + 1} entries, sha256 {hashlib.sha256(value.encode()).hexdigest()}'
         if git('rev-parse', 'HEAD').stdout.decode().strip() != commit or (tracked_dirty() if args.aggregate else dirty()):
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
                    'output_sha256': output_sha256, 'change_id': args.change_id or f'local:{commit}', 'inputs': inputs}
-        signer = json.loads(args.signer)
-        done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300)
+        if args.aggregate and facts.get('runner'):
+            request['runner'] = facts['runner']
+        signer, signer_env = signer_launch(json.loads(args.signer))
+        done = subprocess.run(signer, input=json.dumps(request).encode(), capture_output=True, timeout=300, env=signer_env)
         if done.returncode != 0:
             raise Failure('the signer refused: ' + done.stderr.decode(errors='replace').strip()[-500:])
         answer = json.loads(done.stdout)
@@ -213,10 +278,17 @@ def main(argv):
             print(json.dumps(summary, indent=2), file=sys.stderr)
             return 0 if exit_code == 0 else exit_code
         git('index-pack', '--stdin', stdin=base64.b64decode(answer['object_pack_base64'], validate=True))
-        ref = f'refs/notes/evidence/{record}'
-        if not git('for-each-ref', '--format=%(objectname)', ref).stdout.strip():
-            git('update-ref', ref, record, '0' * len(record))
-        result = {'record': record, 'ref': ref, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
+        ref, tag = f'refs/notes/evidence/{tree}/{record}', f'refs/tags/evidence/{tree}/{record}'
+        indexes = []
+        key = inputs.get('source_inputs')
+        if key is not None:
+            # A record that signs the input key it was measured for is also indexed under it, as the CI signer's records are
+            # (docs/per-crate-test-signing.md): another tree with the same key finds it by one prefix.
+            indexes = [f'refs/tags/evidence/input/{args.check}/{key}/{record}', f'refs/notes/evidence-input/{args.check}/{key}/{record}']
+        for name in (tag, ref, *indexes):
+            if not git('for-each-ref', '--format=%(objectname)', name).stdout.strip():
+                git('update-ref', name, record, '0' * len(record))
+        result = {'record': record, 'ref': ref, 'tag': tag, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
                   'verified': False, 'pushed': False}
         if exit_code == 0 and Path(args.verifier).exists():
             keys = ['--keys', args.keys] if args.keys else None
@@ -227,8 +299,12 @@ def main(argv):
                     path.write_bytes(shown.stdout)
                     keys = ['--keys', str(path)]
             if keys:
+                # A per-crate record (one crate, one input key) is checked as that crate's: the tree's newest record of the check may be
+                # another crate's, and once one crate's failed record is on the tree it answered "not verified" for every crate signed after.
+                crate = inputs.get('crate', '')
+                per_crate = ['--crate-key', f'{crate}={key}'] if key is not None and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', crate) else []
                 checked = subprocess.run([sys.executable, args.verifier, '--repo', '.', '--tree', tree,
-                                          '--check', args.check, *keys], capture_output=True)
+                                          '--check', args.check, *keys, *per_crate], capture_output=True)
                 result['verified'] = checked.returncode == 0
                 if checked.returncode != 0:
                     result['verification'] = checked.stdout.decode(errors='replace')[-500:]
@@ -242,7 +318,7 @@ def main(argv):
                 header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
                 extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader',
                          'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
-            pushed = git('push', '--quiet', args.push, f'{ref}:{ref}', check=False, env_extra=extra)
+            pushed = git('push', '--quiet', args.push, f'{tag}:{tag}', f'{ref}:{ref}', *(f'{name}:{name}' for name in indexes), check=False, env_extra=extra)
             if pushed.returncode != 0:
                 text = pushed.stderr.decode(errors='replace').replace(token, '***') if token else pushed.stderr.decode(errors='replace')
                 raise Failure(f'push failed: {text.strip()[-500:]}')

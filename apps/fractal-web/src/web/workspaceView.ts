@@ -63,3 +63,12 @@ export const retainPane = ({ panes, ref, name, limit }: {
   return next.filter(pane => pane !== evicted)
 }
 
+/** All in-app workspace navigation keeps the dev replay signal visible for reload/early connect. */
+export const workspaceHref = (ref: string, pane: string, search: string): string => {
+  const path = `/w/${ref.split('/').map(encodeURIComponent).join('/')}?open=${encodeURIComponent(pane)}`
+  if (import.meta.env.DEV) {
+    const scenario = new URLSearchParams(search).get('scenario')
+    if (scenario !== null) return `${path}&scenario=${encodeURIComponent(scenario)}`
+  }
+  return path
+}

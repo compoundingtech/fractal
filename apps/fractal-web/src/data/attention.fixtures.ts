@@ -1,4 +1,4 @@
-import { Attention, decodeUnknownSync, type AttentionEncoded } from '@smalltalk/st3-client/schema'
+import { Attention, decodeUnknownSync, type AttentionEncoded } from '@fractal/client/schema'
 
 // Synthetic wire-contract table: keep all cases here so misc's planned shared request
 // fixtures can replace this module without changing predicate, filter or badge tests.

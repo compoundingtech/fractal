@@ -10,6 +10,7 @@
           "fault": null,
           "goal": "Cut over to the new store once a person approves.",
           "harness_state": "idle, waiting for review",
+          "mail_custody": null,
           "model": "claude-sonnet-5-5",
           "next": "Move the atlas store › cleanup",
           "next_mission": "mission/fleet/atlas/store-move",
@@ -57,6 +58,7 @@
           "fault": null,
           "goal": "Draft the pricing page and get feedback.",
           "harness_state": "idle, waiting for feedback",
+          "mail_custody": null,
           "model": "claude-sonnet-5-5",
           "next": "A new pricing page › publish",
           "next_mission": "mission/fleet/atlas/store-move",
@@ -86,6 +88,7 @@
           "fault": "401 Unauthorized: the API key expired at 08:40.",
           "goal": "Tag this week's release.",
           "harness_state": "exited 4 times in 10 minutes",
+          "mail_custody": null,
           "model": "gpt-5.5-codex",
           "next": "Weekly release › publish",
           "next_mission": "mission/fleet/release/weekly",
@@ -115,6 +118,7 @@
           "fault": null,
           "goal": "Keep Robin's fleet moving; answer questions.",
           "harness_state": "working",
+          "mail_custody": null,
           "model": "claude-sonnet-5-5",
           "next": null,
           "next_mission": null,
@@ -148,6 +152,7 @@
           "fault": null,
           "goal": "Review pull request #218.",
           "harness_state": "working",
+          "mail_custody": null,
           "model": "claude-sonnet-5-5",
           "next": "Review harbor #218 › route",
           "next_mission": "mission/fleet/atlas/store-move",
@@ -177,6 +182,7 @@
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "mail_custody": null,
           "model": null,
           "next": null,
           "next_mission": null,
@@ -206,6 +212,7 @@
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "mail_custody": null,
           "model": null,
           "next": null,
           "next_mission": null,
@@ -235,6 +242,7 @@
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "mail_custody": null,
           "model": null,
           "next": null,
           "next_mission": null,
@@ -264,6 +272,7 @@
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "mail_custody": null,
           "model": null,
           "next": null,
           "next_mission": null,
@@ -293,6 +302,7 @@
           "fault": null,
           "goal": null,
           "harness_state": null,
+          "mail_custody": null,
           "model": null,
           "next": null,
           "next_mission": null,
@@ -469,7 +479,7 @@
           "fix": "Its API key expired at 08:40. Renew the key, then restart the seat.",
           "kind": "fault",
           "source": "seat release-captain on harbor",
-          "what": "Release Captain exited 4 times in 10 minutes and st stopped restarting it."
+          "what": "Release Captain exited 4 times in 10 minutes and Fractal stopped restarting it."
         },
         "mission": "mission/fleet/release/weekly",
         "raised_by": null,
@@ -803,7 +813,7 @@
                 "mission/fleet/harbor/nightly     done     4/4"
               ],
               "state": "ok",
-              "title": "$ st missions ls --since 22:00"
+              "title": "$ fractal missions ls --since 22:00"
             }
           },
           "id": "c3"
@@ -863,7 +873,7 @@
               "body": "release-captain on harbor exited 4 times in 10 minutes. Restarts are paused until a person acts.",
               "delivered": false,
               "dictated": false,
-              "from": "st",
+              "from": "Fractal",
               "subject": "Seat release-captain stopped restarting",
               "to": "Chief of Staff"
             }
@@ -1052,7 +1062,7 @@
     },
     "session/unmanaged-1": {
       "state": "failed",
-      "value": "This codex process was found running on lark, but st cannot tell which session file it writes, so there is no conversation to show. Start it through st to see it here."
+      "value": "This codex process was found running on lark, but Fractal cannot tell which session file it writes, so there is no conversation to show. Start it through fractal to see it here."
     }
   },
   "devices": {

@@ -1,4 +1,4 @@
-import type { PtyState } from '@st3/sdk/effect'
+import type { PtyState } from '@fractal/sdk/effect'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {

@@ -37,7 +37,7 @@ export const rosterFolders: readonly RosterFolder[] = [
   { id: 'fractal-web', label: 'fractal-web', rows: [
     agent({
       id: 'metric-track', ref: mainAgentRef, title: 'Align the sidebar metric track', description: 'Re-running row fitting checks', status: 'working', statusLabel: 'Working', host: 'build-2',
-      model: 'model-a', statusSince: milestoneNow - 412_000, lastActivityAt: milestoneNow - 8_000, unread: 2, needsMe: false,
+      model: 'model-a', statusSince: milestoneNow - 412_000, lastActivityAt: milestoneNow - 28_000, unread: 2, needsMe: false,
       usage: { _tag: 'Known', scope: 'lifetime-incl-subagents', usd: 3.42, tokens: 1_180_000 }, duration: { _tag: 'Known', scope: 'lifetime', ms: 2_460_000 },
       lastTurn: { _tag: 'Known', kind: 'turn-completed', at: milestoneNow - 95_000 }, branch: 'feat/metric-track', children: [reviewer, checker],
     }),
@@ -55,12 +55,12 @@ export const rosterFolders: readonly RosterFolder[] = [
   ] },
   { id: 'release', label: 'release', rows: [
     agent({
-      id: 'release-notes', title: 'Draft release notes', description: 'Collecting merged entries', status: 'working', statusLabel: 'Working', host: 'build-3',
+      id: 'release-notes', title: 'Draft release notes', description: 'Collecting merged entries', status: 'working', statusLabel: 'Working', host: 'build-1',
       statusSince: milestoneNow - 64_000, usage: { _tag: 'Known', scope: 'lifetime-incl-subagents', usd: 0.37, tokens: 88_000 },
-      duration: { _tag: 'Known', scope: 'lifetime', ms: 310_000 }, lastTurn: { _tag: 'Known', kind: 'activity', at: milestoneNow - 12_000 },
+      duration: { _tag: 'Known', scope: 'lifetime', ms: 310_000 }, lastTurn: { _tag: 'Known', kind: 'activity', at: milestoneNow - 32_000 },
     }),
     agent({
-      id: 'flaky-gate', title: 'Fix flaky interaction gate', status: 'stale', statusLabel: 'Stale observation', host: 'build-4', freshness: 'stale',
+      id: 'flaky-gate', title: 'Fix flaky interaction gate', status: 'stale', statusLabel: 'Stale observation', host: 'build-2', freshness: 'stale',
       statusSince: milestoneNow - 3_100_000, usage: { _tag: 'Known', scope: 'lifetime-incl-subagents', usd: 2.15, tokens: 760_000 },
       lastTurn: { _tag: 'Known', kind: 'turn-completed', at: milestoneNow - 3_100_000 },
     }),

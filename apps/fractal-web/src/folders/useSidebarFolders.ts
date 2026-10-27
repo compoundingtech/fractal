@@ -38,7 +38,10 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   const currentRoster = React.useRef(roster)
   currentRoster.current = roster
   // Arrangement identity is independent of query and clock presentation.
-  const orderingTree = React.useMemo(() => sidebarTree(sidebarProjection({ ...snapshot.doc, roster }), roster, new Map(collapsedIds.map(id => [id, true]))), [snapshot.doc, roster, collapsedIds])
+  const orderingTree = React.useMemo(() => sidebarTree(sidebarProjection({ ...snapshot.doc, roster }), roster, new Map([
+    ...roster.filter(seat => collapsedIds.includes(`wf/expanded/${seat.id}`)).map(seat => [seat.id, false] as const),
+    ...collapsedIds.map(id => [id, true] as const),
+  ])), [snapshot.doc, roster, collapsedIds])
   return React.useMemo(() => {
   const currentDoc = (): FolderDoc => registry.get(source).doc
   const ready = (): boolean => {
@@ -109,6 +112,13 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
       // Search reveals descendants temporarily, without changing the saved working layout.
       if (query.trim() !== '') return
       const ids = registry.get(collapseAtom).filter(folder => folder !== id)
+      // Parent seats default collapsed; store an explicit expanded override separately.
+      if (currentRoster.current.some(seat => seat.id === id)) {
+        const marker = `wf/expanded/${id}`
+        const next = ids.filter(value => value !== marker)
+        setCollapsedIds(collapsed ? next : [...next, marker])
+        return
+      }
       setCollapsedIds(collapsed ? [...ids, id] : ids)
     },
   }

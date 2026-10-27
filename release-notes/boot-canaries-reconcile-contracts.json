@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add per-PR reconcile contract tests on the fake runtime for what the restart, daemon-restart and concurrent boot canaries prove: a restart continues the recorded native session as a new incarnation, a predecessor still observed running after a daemon reopen is replaced exactly once, and five simultaneous starts get distinct incarnations without a crash-loop park.",
+  "replay": {"status": "none", "detail": "Test-only change; no replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "No runtime compatibility change."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted runtime state or recovery change."}
+}

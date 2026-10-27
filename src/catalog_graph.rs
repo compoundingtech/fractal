@@ -265,7 +265,7 @@ pub fn snapshot(root: &Path, this_host: &str) -> Result<CatalogGraph> {
 
     Ok(CatalogGraph {
         schema: CATALOG_GRAPH_SCHEMA,
-        agent_spec_revision: agent_spec::AGENT_SPEC_REVISION,
+        agent_spec_revision: fractal_build_stamp::AGENT_SPEC_REVISION,
         complete,
         roots: GraphRoots {
             catalog: root.clone(),

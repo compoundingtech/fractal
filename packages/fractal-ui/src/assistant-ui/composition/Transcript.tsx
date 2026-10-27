@@ -1,9 +1,11 @@
 import * as React from 'react'
+import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { ActionBarPrimitive, MessagePrimitive, ThreadPrimitive, useAui, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar } from 'react-aria-components'
+import type { ScenarioMountedWindow } from '@fractal/scenarios/storybook/check'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
-import { EmbraceScrollViewport } from '../EmbraceScrollViewport'
+import { EmbraceScrollViewport, historyBatchSize } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
 import { WorkLogV1 } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
@@ -14,6 +16,7 @@ import { ErrorOverlay, ErrorOverlayHost } from './ErrorOverlay'
 import { HighlightedSource, Markdown, MarkdownImagePolicy, type InlineReferenceRenderer, type MarkdownImageOpener, type MarkdownImageResolver } from './Markdown'
 import { ThinkingRun } from './ThinkingEntry'
 import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEmptyState } from './TranscriptFeedback'
+import { TranscriptAttachmentImagesContext, TranscriptAttachments, type TranscriptAttachmentImages } from './TranscriptAttachments'
 import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Icon } from './Icons'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
@@ -21,6 +24,13 @@ import { readingColumnStyles } from '../reading-column.stylex'
 import { observeUserMessageOverflow, TranscriptActiveContext } from './user-message-overflow'
 import { TranscriptSearch } from './TranscriptSearch'
 import { useClockLabel } from '../../time/clock'
+import { NarrowLayoutContext } from './NarrowLayout'
+
+export const transcriptInitialTailCount = 2
+/** Story-declared window tied to the same constants as the real initial mount. */
+export const transcriptMountedWindow: Extract<ScenarioMountedWindow, { readonly _tag: 'tail' }> = {
+  _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
+}
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -42,20 +52,27 @@ export interface TranscriptProps {
   readonly title: string
   /** Omit when the host already owns the conversation's header band. */
   readonly showHeader?: boolean
+  /** With showHeader=false, preserve sync/run controls in the owning pane header's stable action slot. */
+  readonly headerActionsHost?: HTMLElement | null
   readonly sync: SyncStatus
   /** Omit to subscribe only elapsed/sync labels to the host HumanClockProvider. */
   readonly now?: number
   readonly observedAt: number
+  /** Optional host ownership of the final rendered turn; no additional DOM or rendering policy. */
+  readonly tailRef?: React.Ref<HTMLElement>
   /** Open output in the host's detail surface. No split/controller is hidden in the kit. */
   readonly onOpenTool?: (call: WorkLogCall) => void
   readonly onRetrySync?: () => void
   readonly onRetryRun?: () => void
   readonly onRetrySend?: (itemId: string) => void
+  /** Message Markdown images only; attachments use `attachmentImages`. */
   readonly resolveImage?: MarkdownImageResolver
   /** Opens a deferred image outside the page (for hosts whose CSP forbids inline remote images). */
   readonly onLoadImage?: MarkdownImageOpener
   /** The host's own inline references in message Markdown, such as a `doc/…` name it can open. */
   readonly renderInlineReference?: InlineReferenceRenderer
+  /** Host-owned reads of image attachments on user and received (assistant or mailbox) prose, started only by Show image or Retry. Omit to keep every attachment a deferred card. */
+  readonly attachmentImages?: TranscriptAttachmentImages
   readonly availability?: TranscriptAvailability
   readonly history?: TranscriptHistory
   readonly emptyState?: React.ReactNode | TranscriptEmptyState
@@ -114,10 +131,14 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
     if (element === null || expanded || !active) return
     return observeUserMessageOverflow(element, setOverflows)
   }, [item.text, expanded, active])
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}{item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><span id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}>{expanded ? item.text : item.text.slice(0, 600)}</span>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} />{item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}{item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} />}</MessagePrimitive.Root>
 }
 const messageTimeFormatter = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' })
-/** Sender, time and Copy share one header line; Copy shows on pointer hover or keyboard focus. A prose run shows the header once. */
+/**
+ * Sender, time and Copy share one header line; Copy shows on pointer hover or keyboard focus. A prose run shows the header once.
+ * Received prose (an assistant answer or the paired body of incoming mail) shows its attachments below the text through the
+ * same `TranscriptAttachments` as a user message, read for the attachment's carrier message, else this item's id.
+ */
 export function SeatProse({ item, senderLine, continuation = false }: { readonly item: (TextItem & { readonly role: 'assistant' }) | MessageItem; readonly senderLine?: string; readonly continuation?: boolean }) {
   const streaming = item._tag === 'Text' && item.streaming
   const completed = streaming ? NaN : Date.parse(item.at)
@@ -130,7 +151,7 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
       {!streaming && <span {...stylex.props(styles.answerMeta)}>{runText === undefined ? <ActionBarPrimitive.Copy aria-label="Copy answer" {...stylex.props(styles.copy, hovered && styles.copyVisible)}><Icon name="copy" size={12} /></ActionBarPrimitive.Copy> : <RunCopy text={runText} visible={hovered} />}{Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
-    {item._tag === 'Text' ? <Markdown text={item.text} streaming={item.streaming} /> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
+    {item._tag === 'Text' ? <><Markdown text={item.text} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
   </MessagePrimitive.Root>
 }
 /**
@@ -235,7 +256,7 @@ const contentVersion = (item: ConversationItem): string => {
   contentVersions.set(item, version)
   return version
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string }) {
+const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef }: { turn: TranscriptTurn; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement> }) {
   const detail = React.useCallback((call: WorkLogCall) => <ToolDetailPreview call={call} onOpen={onOpenTool} />, [onOpenTool])
   // The work log lists tool calls separately, so every thought of the turn is visually adjacent: one disclosure.
   const reasoning = turn.items.filter((item): item is Extract<ConversationItem, { _tag: 'Reasoning' }> => item._tag === 'Reasoning' && item.text.trim().length > 0)
@@ -248,7 +269,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, now, stranded, onO
     const end = continues.indexOf(false, index + 1)
     return shown.slice(index, end === -1 ? undefined : end).map(entry => entry._tag === 'Text' ? entry.text : '').join('\n\n')
   })
-  return <section data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
+  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} {...stylex.props(styles.turn)}>
     {turn.prompt !== undefined && (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)}
     {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} ariaLabel={`Work log ${turn.id}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
     {shown.map((item, index) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <SenderCaption.Provider key={item.id} value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continues[index]!}><RunCopyText.Provider value={runTexts[index]}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider>)}
@@ -311,8 +332,9 @@ function HistoryRange({ total, startIndex, materializing, earlierId, firstId, re
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, showHeader = true, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, onRetrySync, onRetryRun, onRetrySend, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
   const scrollId = React.useId()
+  const narrow = React.useContext(NarrowLayoutContext)
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. A child effect runs before its provider's adoption effect, so
@@ -377,27 +399,31 @@ export function Transcript({ turns, title, showHeader = true, sync, now, observe
   const empty = committed.length === 0 && turns.length === 0 && sync._tag === 'Live'
     ? <div aria-label="Empty conversation" data-testid="transcript-empty" {...stylex.props(styles.emptyBody)}><TranscriptEmptyContent emptyState={emptyState} /></div>
     : loadingState ?? <TranscriptSkeleton sync={sync} now={now} observedAt={observedAt} onRetrySync={onRetrySync} />
-  return <TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
-    {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>
-      {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
-      {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} />}
-      {running !== undefined && <><div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div><RunElapsed startedAt={running.work.startedAt} now={now} /></>}
-    </header>}
-    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={2} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
-      renderHeader={(startIndex, revealRow, materializing) => committed.length > 2 && <HistoryRange total={committed.length} startIndex={startIndex} materializing={materializing} earlierId={committed[Math.max(0, startIndex - 4)]!.id} firstId={committed[0]!.id} revealRow={revealRow} scrollId={scrollId} />}>
+  const headerStatus = <>
+    {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
+    {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} inline={!showHeader} />}
+    {running !== undefined && <>{!narrow && <div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div>}<RunElapsed startedAt={running.work.startedAt} now={now} /></>}
+  </>
+  return <TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={onRetrySend}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
+    {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
+    {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
+    <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} stateKey={viewportKey} initialTailCount={transcriptInitialTailCount} scrollToBottomKey={scrollToBottomKey} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
+      renderHeader={(startIndex, revealRow, materializing) => committed.length > transcriptInitialTailCount && <HistoryRange total={committed.length} startIndex={startIndex} materializing={materializing} earlierId={committed[Math.max(0, startIndex - historyBatchSize)]!.id} firstId={committed[0]!.id} revealRow={revealRow} scrollId={scrollId} />}>
       {(startIndex, revealRow) => <>
       {history._tag === 'HasOlder' && startIndex === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
       {committed.length === 0 ? empty : <TranscriptSearch turns={committed} startIndex={startIndex} revealRow={revealRow} {...stylex.props(styles.timeline)}>
-        {committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}
+        {committed.slice(startIndex).map(turn => <PreparedTurn key={turn.id} turn={turn} tailRef={turn === committed[committed.length - 1] ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)}
       </TranscriptSearch>}</>}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
-  </ThreadPrimitive.Root></RetrySend.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider>
+  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider>
 }
 const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
 const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
-  header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInlineStart: `max(${s.lg}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${s.lg}, env(safe-area-inset-right, 0px))`, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  headerStatus: { position: 'relative', display: 'flex', alignItems: 'center', flexShrink: 1, gap: s.md, minWidth: 0, maxWidth: { default: 300, '@container thread-header (max-width: 440px)': 112 }, height: g.controlMd },
+  headerProgress: { minWidth: g.controlLg },
   title: { flex: '1 1 0', minWidth: 0, fontWeight: t.weightMedium, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   lane: { flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
   // The shared reading column keeps rows and a reading-column composer on the same bounds.

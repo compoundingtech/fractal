@@ -2,7 +2,7 @@
 import type * as FoldersClient from '../folders/client.ts'
 import type { FolderState } from '../folders/client.ts'
 import type { DataSource } from '../data/source.ts'
-import { ActionRefused } from '@st3/sdk/effect'
+import { ActionRefused } from '@fractal/sdk/effect'
 import { Effect } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'

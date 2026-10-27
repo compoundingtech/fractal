@@ -2,7 +2,7 @@
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { EmbraceRuntimeProvider, Transcript } from '@smalltalk/fractal-ui/assistant-ui'
+import { EmbraceRuntimeProvider, Transcript } from '@fractal/ui/assistant-ui'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 
 // Keep the real kit/runtime DOM. Expose StyleX's precompiled declarations as test metadata

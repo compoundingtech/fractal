@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
-import { Agent, decodeUnknownSync, type TerminalScreen } from '@smalltalk/st3-client/schema'
-import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@st3/sdk/effect'
+import { FractalClient } from '@fractal/client'
+import { Agent, decodeUnknownSync, type TerminalScreen } from '@fractal/client/schema'
+import type { PtyMode, PtyOutput, PtySession, PtySize, PtyState, PtyTarget } from '@fractal/sdk/effect'
 import { Effect, SubscriptionRef } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { readFile } from 'node:fs/promises'
@@ -13,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { observed, unavailable, waiting, type Feed, type Grants } from '../data/source.ts'
+import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
+import { gatewayTerminalInput } from './terminal-input-port.ts'
 import { makeActionTerminalInput } from './actionTerminalInput.ts'
 import { makeScreen } from './fixtures.ts'
 import type { TerminalInputPortFactory } from './orderedTerminalInput.ts'
@@ -177,9 +180,9 @@ const gatewaySessions = ({ hold = false }: { readonly hold?: boolean } = {}) => 
  * `terminal.input` only with the `terminal.control` scope. It pins the input-only branch of the
  * decision; today the Gateway path is reached after a granted ATTACH is refused or lost.
  */
-const inputWithoutControl: Grants = { actions: 'granted', messageSend: 'ungranted', terminalInput: 'granted', terminalControl: 'ungranted' }
+const inputWithoutControl: Grants = { actions: 'granted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'granted', terminalControl: 'ungranted' }
 /** What a limited pairing holds on the pinned server: PEEK only (compoundingtech/smalltalk#2873). */
-const watchOnly: Grants = { actions: 'granted', messageSend: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }
+const watchOnly: Grants = { actions: 'granted', messageSend: 'ungranted', attachmentUpload: 'ungranted', terminalInput: 'ungranted', terminalControl: 'ungranted' }
 /** Let every settled promise run its continuations: one macrotask turn, no timer advance. */
 const drain = () => act(() => new Promise<void>((resolve) => setTimeout(resolve, 0)))
 /** The page goes to the background (hidden tab) or is being unloaded or frozen into the bfcache. */
@@ -646,4 +649,40 @@ describe('input capability', () => {
     await relayout()
     expect(opened[0]!.resized).toEqual([])
   })
+  it.each(['switches terminals', 'loses the terminal input grant'] as const)(
+    'posts nothing for a key whose snapshot read finishes after the view %s',
+    async (cut) => {
+      const terminals = { [ref]: observed({ value: screen }), [other]: observed({ value: otherScreen }) }
+      const posted: unknown[] = []
+      const read = Promise.withResolvers<string | undefined>()
+      const reads: Array<PromiseWithResolvers<string | undefined>> = [read]
+      const transport: typeof fetch = async (input, init) => {
+        if (new URL(String(input)).pathname.endsWith('/capabilities')) return Response.json(recording.capabilities)
+        posted.push(init?.body)
+        return Response.json({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/native' }, value: {} })
+      }
+      let granted = true
+      const terminalInput = gatewayTerminalInput({
+        connect: (fetchImpl) => new FractalClient({ baseUrl: 'https://gateway.invalid', fetchImpl }),
+        transport,
+        snapshot: () => reads.shift()?.promise ?? Promise.resolve('snapshot/next'),
+        liveScreen: (subject) => {
+          const feed = terminals[subject]
+          return feed?._tag === 'Observed' ? feed.value : undefined
+        },
+        granted: () => granted,
+      })
+      await mount({ terminal: terminals, terminalInput, grants: inputWithoutControl })
+      await vi.waitFor(() => expect(field()).not.toBeNull())
+      await act(async () => field()!.focus())
+      await act(async () => press('a', 'KeyA'))
+      if (cut === 'switches terminals') await mount({ terminal: terminals, terminalInput, grants: inputWithoutControl, at: other })
+      else {
+        granted = false
+        await mount({ terminal: terminals, terminalInput, grants: { ...inputWithoutControl, terminalInput: 'ungranted' } })
+      }
+      await act(async () => read.resolve('snapshot/late'))
+      expect(posted).toEqual([])
+    },
+  )
 })

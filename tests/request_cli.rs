@@ -84,7 +84,7 @@ fn stable_request_key_atomically_deduplicates_one_canonical_agent_message() {
     assert_eq!(second["filename"], first["filename"]);
 
     let inbox = tmp.path().join("h/worker/resources/inbox");
-    let messages = st2::message::list_dir(&inbox).unwrap();
+    let messages = fractal_legacy_runner::message::list_dir(&inbox).unwrap();
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].from.as_deref(), Some("h.example-ci"));
     assert_eq!(messages[0].in_reply_to, None);
@@ -110,7 +110,7 @@ fn stable_request_key_atomically_deduplicates_one_canonical_agent_message() {
         String::from_utf8_lossy(&conflict.stderr)
             .contains("idempotency key reused with different request")
     );
-    assert_eq!(st2::message::list_dir(&inbox).unwrap().len(), 1);
+    assert_eq!(fractal_legacy_runner::message::list_dir(&inbox).unwrap().len(), 1);
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn request_api_rejects_agent_impersonation_and_unknown_flat_principals() {
 
     assert!(!tmp.path().join("h.not-declared/inbox").exists());
     assert!(
-        st2::message::list_dir(&tmp.path().join("h/worker/resources/inbox"))
+        fractal_legacy_runner::message::list_dir(&tmp.path().join("h/worker/resources/inbox"))
             .unwrap()
             .is_empty()
     );
@@ -222,7 +222,7 @@ fn malformed_or_misplaced_principal_declarations_fail_before_publication() {
         );
         assert!(!output.status.success());
         assert!(
-            st2::message::list_dir(&tmp.path().join("h/worker/resources/inbox"))
+            fractal_legacy_runner::message::list_dir(&tmp.path().join("h/worker/resources/inbox"))
                 .unwrap()
                 .is_empty()
         );
@@ -254,7 +254,7 @@ fn request_json_and_typed_tags_fail_closed_at_the_cli_boundary() {
         assert!(!output.status.success());
     }
     assert!(
-        st2::message::list_dir(&tmp.path().join("h/worker/resources/inbox"))
+        fractal_legacy_runner::message::list_dir(&tmp.path().join("h/worker/resources/inbox"))
             .unwrap()
             .is_empty()
     );
@@ -271,7 +271,7 @@ fn request_read_and_reply_bind_the_json_envelope_to_native_message_provenance() 
     let envelope = r#"{"version":1,"idempotencyKey":"forged","from":"h.example-ci","to":"h.worker","replyTo":"h.example-ci","tags":{},"body":{}}"#;
     fs::write(
         inbox.join(filename),
-        st2::message::render_message(
+        fractal_legacy_runner::message::render_message(
             "h.attacker",
             Some("request forged"),
             None,
@@ -290,7 +290,7 @@ fn request_read_and_reply_bind_the_json_envelope_to_native_message_provenance() 
         assert!(String::from_utf8_lossy(&output.stderr).contains("frontmatter sender"));
     }
     assert!(
-        st2::message::list_dir(&tmp.path().join("principals/h/example-ci/resources/inbox"))
+        fractal_legacy_runner::message::list_dir(&tmp.path().join("principals/h/example-ci/resources/inbox"))
             .unwrap()
             .is_empty()
     );
@@ -395,7 +395,7 @@ fn typed_reply_routes_to_the_principal_and_status_is_a_tagged_json_union() {
     assert_eq!(second_reply["filename"], first_reply["filename"]);
 
     let principal_inbox = tmp.path().join("principals/h/example-ci/resources/inbox");
-    assert_eq!(st2::message::list_dir(&principal_inbox).unwrap().len(), 1);
+    assert_eq!(fractal_legacy_runner::message::list_dir(&principal_inbox).unwrap().len(), 1);
 
     let replied = request(
         tmp.path(),
@@ -515,7 +515,7 @@ fn concurrent_replays_publish_exactly_one_request() {
     filenames.dedup();
     assert_eq!(filenames.len(), 1);
     assert_eq!(
-        st2::message::list_dir(&root.join("h/worker/resources/inbox"))
+        fractal_legacy_runner::message::list_dir(&root.join("h/worker/resources/inbox"))
             .unwrap()
             .len(),
         1

@@ -4,7 +4,9 @@ import { DateTime, Option } from 'effect'
 import * as React from 'react'
 
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
-import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { HumanTime } from '@fractal/ui/human-time'
 
 import { useDataSource } from '../../data/react.tsx'
 import { agentTodosAtom, type TodoState } from './model.ts'
@@ -17,6 +19,7 @@ const occurrenceKey = ({ counts, parts }: { counts: Map<string, number>; parts: 
 }
 
 const styles = stylex.create({
+  resources: { color: 'inherit', fontSize: '0.75rem' },
   pinned: {
     width: '100%',
     minWidth: 0,
@@ -41,6 +44,7 @@ const styles = stylex.create({
     outline: { default: 'none', ':focus-visible': `2px solid ${tokens['--ds-blue-700']}` },
     borderRadius: scale.radiusDefault,
   },
+  summaryTouch: { minHeight: 44, boxSizing: 'border-box', paddingBlock: 14 },
   summaryRow: {
     display: 'inline-flex',
     verticalAlign: 'middle',
@@ -72,7 +76,7 @@ const styles = stylex.create({
   list: { listStyle: 'none', margin: 0, padding: 0 },
   task: { display: 'flex', gap: s.md, paddingBlock: scale.space1, lineHeight: 1.5 },
   content: { minWidth: 0, overflowWrap: 'anywhere' },
-  done: { color: tokens['--ds-gray-900'] },
+  done: { color: c.fg },
   status: { color: tokens['--ds-gray-900'], width: 16, flexShrink: 0, textAlign: 'center' },
   active: { color: tokens['--ds-blue-900'] },
   note: {
@@ -103,31 +107,36 @@ const statusMarks = { pending: '○', in_progress: '◉', completed: '✓', bloc
 export const AgentTodos = ({
   state,
   detail = false,
+  placement = 'pinned',
 }: {
   readonly state: TodoState
   readonly detail?: boolean
+  /** `resources`: a section of the Resources view; it names every state instead of hiding unobserved ones. */
+  readonly placement?: 'pinned' | 'resources'
 }): React.ReactNode => {
+  const narrow = React.useContext(NarrowLayoutContext)
   if (state._tag !== 'Observed') {
-    if (!detail) return null
+    if (!detail && placement !== 'resources') return null
     return (
-      <p role="status" {...stylex.props(styles.detail)}>
+      <p role="status" {...stylex.props(placement === 'resources' ? styles.resources : styles.detail)}>
         {state._tag === 'Waiting'
-          ? 'Waiting for todo observations…'
+          ? 'Loading to-dos…'
           : state._tag === 'Unavailable'
-            ? `Todos unavailable: ${state.detail}`
-            : 'No harness todo snapshot observed. This is not an empty todo list.'}
+            ? "To-dos aren't available right now."
+            : 'This session has not shared a to-do list.'}
       </p>
     )
   }
-  const { todo, completed, total, phase, stale } = state
+  const { todo, completed, total, phase, binding } = state
+  const stale = binding === 'stale'
   const snapshot = todo.snapshot
   const label =
     phase?.name ??
     (total === 0
-      ? 'No tasks'
+      ? 'No to-dos'
       : completed === total
         ? 'Complete'
-        : 'No open phase in displayed tasks')
+        : 'To-dos in progress')
   const phaseOccurrences = new Map<string, number>()
   const list = (
     <>
@@ -150,14 +159,16 @@ export const AgentTodos = ({
                   {...stylex.props(styles.task)}
                 >
                   <span
-                    aria-label={statusLabels[task.status]}
+                    aria-label={
+                      typeof task.status === 'string' ? statusLabels[task.status] : 'Unrecognized status'
+                    }
                     {...stylex.props(
                       styles.status,
                       task.status === 'in_progress' && styles.active,
                       task.status === 'blocked' && styles.stale,
                     )}
                   >
-                    {statusMarks[task.status]}
+                    {typeof task.status === 'string' ? statusMarks[task.status] : '?'}
                   </span>
                   <span
                     {...stylex.props(styles.content, task.status === 'completed' && styles.done)}
@@ -176,66 +187,56 @@ export const AgentTodos = ({
         )
       })}
       {snapshot.phases.length === 0 ? (
-        <p {...stylex.props(styles.note)}>No displayed tasks in this snapshot.</p>
+        <p {...stylex.props(styles.note)}>No to-dos in this list.</p>
       ) : null}
       {snapshot.truncated ? (
         <p {...stylex.props(styles.note)}>
-          Task list truncated by the harness. Progress uses full-source totals.
+          Only some to-dos are shown. Progress counts the full list.
         </p>
       ) : null}
       {(snapshot.totals.abandoned ?? 0) > 0 ? (
         <p {...stylex.props(styles.note)}>
-          {snapshot.totals.abandoned} abandoned · not counted as completed.
+          {snapshot.totals.abandoned} abandoned, not counted as done.
         </p>
       ) : null}
       <div {...stylex.props(styles.provenance)}>
-        <p {...stylex.props(styles.note)}>
-          Source: fact.todo · {snapshot.harness} / {snapshot.source_op} ·{' '}
-          {stale ? 'stale snapshot' : 'current binding'}
-        </p>
-        <p {...stylex.props(styles.note)}>
-          Observed{' '}
-          <time dateTime={DateTime.formatIso(snapshot.observed_at)}>
-            {DateTime.formatIso(snapshot.observed_at)}
-          </time>{' '}
-          · accepted {DateTime.formatIso(todo.accepted_at)}
-        </p>
-        <p {...stylex.props(styles.note)}>
-          Claim {todo.claim_id} · session {snapshot.session_id} · incarnation{' '}
-          {snapshot.incarnation_id}
-        </p>
+        {binding !== 'current' ? <p {...stylex.props(styles.note)}>
+          {binding === 'pending' ? 'Checking to-dos…' : 'These to-dos may be out of date.'}
+        </p> : null}
+        <div {...stylex.props(styles.note)}>
+          <HumanTime at={DateTime.toEpochMillis(snapshot.observed_at)} prefix="Updated " tooltip={!narrow} />
+        </div>
       </div>
     </>
   )
   return detail ? (
-    <section aria-label="Harness todos" {...stylex.props(styles.detail)}>
+    <section aria-label="To-dos" {...stylex.props(styles.detail)}>
       <h2 {...stylex.props(styles.heading)}>
-        <span>Todos · {label}</span>
+        <span>To-dos · {label}</span>
         <span {...stylex.props(styles.count)}>
-          {completed}/{total} completed{stale ? ' · Stale' : ''}
+          {completed}/{total} completed{binding === 'pending' ? ' · Checking' : stale ? ' · May be out of date' : ''}
         </span>
       </h2>
       {list}
     </section>
   ) : (
-    <div {...stylex.props(styles.pinned)}>
-      <details aria-label="Harness todos" {...stylex.props(styles.strip)}>
-        <summary {...stylex.props(styles.summary)}>
+    <div {...stylex.props(placement === 'resources' ? styles.resources : styles.pinned)}>
+      <details aria-label="To-dos" {...stylex.props(placement === 'pinned' && styles.strip)}>
+        <summary {...stylex.props(styles.summary, narrow && styles.summaryTouch)}>
           <span {...stylex.props(styles.summaryRow)}>
             <span title={label} {...stylex.props(styles.phase)}>
-              Todos · {label}
+              To-dos · {label}
             </span>
             <span
-              aria-label={`${completed} of ${total} tasks completed`}
+              aria-label={`${completed} of ${total} to-dos completed`}
               {...stylex.props(styles.count)}
             >
               {completed}/{total}
             </span>
-            <span {...stylex.props(styles.source, stale && styles.stale)}>
-              {stale ? 'Stale · ' : ''}
-              {snapshot.harness}
-              {snapshot.truncated ? ' · Partial' : ''}
-            </span>
+            {binding !== 'current' || snapshot.truncated ? <span {...stylex.props(styles.source, stale && styles.stale)}>
+              {binding === 'pending' ? 'Checking' : stale ? 'May be out of date' : ''}
+              {snapshot.truncated ? `${binding !== 'current' ? ' · ' : ''}Some shown` : ''}
+            </span> : null}
           </span>
         </summary>
         <div {...stylex.props(styles.body)}>{list}</div>
@@ -248,11 +249,13 @@ export const AgentTodos = ({
 export const LiveAgentTodos = ({
   agentRef,
   detail = false,
+  placement,
 }: {
   readonly agentRef: string
   readonly detail?: boolean
+  readonly placement?: 'pinned' | 'resources'
 }): React.ReactNode => {
   const source = useDataSource()
   const state = useAtomValue(agentTodosAtom({ source, agentRef }))
-  return <AgentTodos state={state} detail={detail} />
+  return <AgentTodos state={state} detail={detail} {...(placement === undefined ? {} : { placement })} />
 }

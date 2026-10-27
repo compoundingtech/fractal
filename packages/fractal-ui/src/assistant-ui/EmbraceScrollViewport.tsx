@@ -362,7 +362,7 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly children?: React.ReactNode | ((startIndex: number, revealRow: (id: string, preservePosition?: boolean) => void, materializing: boolean) => React.ReactNode)
 }
 
-const historyBatchSize = 4
+export const historyBatchSize = 4
 
 export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
   const store = React.useContext(ViewportStoreContext)

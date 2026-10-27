@@ -7,17 +7,17 @@
         "tsgo": "tsgo"
       },
       "locked": {
-        "lastModified": 1790808689,
-        "narHash": "sha256-9jHWv8HDDS7qXaekIpvBgULPu3Yl7NPXJVdJUXnkxXU=",
+        "lastModified": 1793038040,
+        "narHash": "sha256-hdNsyVpb3yY42DN3CM9vW13T5CK9X4r4EwYQ+OJrOCE=",
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "3089f7e1faa82d7a4cb4de0e8d485164f837708b",
+        "rev": "4e87aab8bc8dbab8b05040c3c23558c3e34d4773",
         "type": "github"
       },
       "original": {
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "3089f7e1faa82d7a4cb4de0e8d485164f837708b",
+        "rev": "4e87aab8bc8dbab8b05040c3c23558c3e34d4773",
         "type": "github"
       }
     },
@@ -42,6 +42,27 @@
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
         "rev": "3089f7e1faa82d7a4cb4de0e8d485164f837708b",
+        "type": "github"
+      }
+    },
+    "fabric": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1792912755,
+        "narHash": "sha256-Zs+3vv/BbQTFVbuMpC3+ENdnjVIDiOwlrPjyhP23RUk=",
+        "owner": "compoundingtech",
+        "repo": "fabric",
+        "rev": "1e6e93e9a662a40749f91d63eeecc4e98de114bd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "compoundingtech",
+        "repo": "fabric",
+        "rev": "1e6e93e9a662a40749f91d63eeecc4e98de114bd",
         "type": "github"
       }
     },
@@ -241,23 +262,24 @@
         ]
       },
       "locked": {
-        "lastModified": 1792361433,
-        "narHash": "sha256-pwpEEPDa2LSyeud0ejAaE8Rq2YddN3F579EeRGF9xQA=",
+        "lastModified": 1792793749,
+        "narHash": "sha256-SvBLC5XDieiklYrFq4WlCQCYB+UHA2QGg2n5kzXPNvU=",
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "4f703c7d7f9cbff5d713b1234d1db98223881bca",
+        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
         "type": "github"
       },
       "original": {
         "owner": "compoundingtech",
         "repo": "pty",
-        "rev": "4f703c7d7f9cbff5d713b1234d1db98223881bca",
+        "rev": "79d526d1be4f77bb3764dc1d880492806f8a07fc",
         "type": "github"
       }
     },
     "root": {
       "inputs": {
         "effect-utils": "effect-utils",
+        "fabric": "fabric",
         "fenix": "fenix",
         "flake-utils": "flake-utils_2",
         "nixpkgs": "nixpkgs_3",

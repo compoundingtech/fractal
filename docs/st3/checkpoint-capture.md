@@ -36,7 +36,7 @@ the history.** Specifically, at any moment it holds at most:
 Everything proportional to the sealed set lives in a staging file on disk: the envelopes, the
 compact claim rows, the drop marks, the new tombstones and the proof's saved answers.
 
-The test (`crates/st3/tests/checkpoint_memory.rs`) states the number. On a synthetic history of
+The test (`crates/fractal/tests/checkpoint_memory.rs`) states the number. On a synthetic history of
 4,800 claims in many small slots, a full pass (capture, plan, prove, trim) raises live heap by at
 most 8 MiB above its starting point, measured by a counting allocator. The same pass on four times
 the history raises it by less than 1.5 times as much. The staged pass holds under 1 MiB at both

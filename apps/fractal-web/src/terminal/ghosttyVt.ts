@@ -1,4 +1,4 @@
-import { TerminalId, type TerminalLine, type TerminalModes, type TerminalRun, TerminalScreen } from '@smalltalk/st3-client/schema'
+import { TerminalId, type TerminalLine, type TerminalModes, type TerminalRun, TerminalScreen } from '@fractal/client/schema'
 import * as Schema from 'effect/Schema'
 
 class GhosttyError extends Schema.TaggedError<GhosttyError>()('GhosttyError', {

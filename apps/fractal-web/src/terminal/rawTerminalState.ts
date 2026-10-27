@@ -14,7 +14,7 @@ import {
   type PtySize,
   type PtyState,
   type PtyTarget,
-} from '@st3/sdk/effect'
+} from '@fractal/sdk/effect'
 import type * as Effect from 'effect/Effect'
 import type * as Scope from 'effect/Scope'
 

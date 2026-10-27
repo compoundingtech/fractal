@@ -3,7 +3,7 @@
  * the protocol states a viewer must show (connecting, truncated screen, stale-fence end).
  */
 
-import type { TerminalScreen } from '@smalltalk/st3-client/schema'
+import type { TerminalScreen } from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import type { ReactNode } from 'react'
 import { Button as AriaButton } from 'react-aria-components'

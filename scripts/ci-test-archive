@@ -281,7 +281,11 @@ def download(directory):
         raise ValueError('successful producer manifest hash is required')
     if directory.exists() or directory.is_symlink():
         raise ValueError('archive download destination must be fresh')
-    endpoint = f'repos/{repository}/actions/artifacts/{artifact_id}'
+    # Repository names can redirect after a rename; the numeric ID is stable.
+    repository_id = environment.get('GITHUB_REPOSITORY_ID') or output('gh', 'api', f'repos/{repository}', '--jq', '.id')
+    if not repository_id.isdecimal() or int(repository_id) <= 0:
+        raise ValueError('invalid repository ID')
+    endpoint = f'repositories/{repository_id}/actions/artifacts/{artifact_id}'
     metadata = subprocess.run(['gh', 'api', endpoint], capture_output=True, timeout=60)
     if metadata.returncode < 0 or metadata.returncode >= 128:
         raise SystemExit(metadata.returncode if metadata.returncode >= 0 else 128 - metadata.returncode)
@@ -348,7 +352,7 @@ def main():
         subprocess.run(['bash', 'scripts/ci-linux', 'conversation-model'], check=True)
         # The real-user gateway must retain the standalone production feature set.
         with (directory / 'production-build.json').open('w') as stream:
-            subprocess.run(['cargo', 'build', '--locked', '-p', 'st3', '--bin', 'st3',
+            subprocess.run(['cargo', 'build', '--locked', '-p', 'fractal', '--bin', 'st3',
                             '--message-format=json'], check=True, stdout=stream)
         artifacts = [json.loads(line) for line in (directory / 'production-build.json').read_text().splitlines()]
         binaries = [item for item in artifacts if item.get('reason') == 'compiler-artifact'

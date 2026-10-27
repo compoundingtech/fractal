@@ -8,7 +8,7 @@ import type {
   Runtime,
   Snapshot,
   TerminalScreen,
-} from '@smalltalk/st3-client'
+} from '@fractal/client'
 import type { AttachmentSendRequest, MessageSendAction } from './source.ts'
 import { Effect, Layer, SubscriptionRef } from 'effect'
 import * as Option from 'effect/Option'
@@ -65,6 +65,7 @@ class Gateway {
   terminalAttachTransportFailure = false
   runtimesWithoutTerminal = new Set<string>()
   messageGrant: 'granted' | 'ungranted' = 'granted'
+  attachmentUploadGrant: 'granted' | 'ungranted' = 'ungranted'
   terminalInputGrant: 'granted' | 'ungranted' = 'granted'
   terminalControlGrant: 'granted' | 'ungranted' = 'ungranted'
   transportFailure = false
@@ -120,6 +121,7 @@ class Gateway {
         capabilities: [
           { id: 'work.done', state: 'granted', version: 0 },
           { id: 'message.send', state: this.messageGrant, version: 0 },
+          { id: 'control.messages', state: this.attachmentUploadGrant, version: 0 },
           { id: 'terminal.input', state: this.terminalInputGrant, version: 0 },
           { id: 'terminal.control', state: this.terminalControlGrant, version: 0 },
         ],
@@ -784,6 +786,32 @@ describe('live feed sync sidecars', () => {
       }),
     ),
   )
+  it.live('explicit roster Retry reacquires a failed follow and leaves a healthy follow alone', () =>
+    withGateway((live, gateway) =>
+      Effect.gen(function* () {
+        live.registry.mount(live.source.agents)
+        yield* settle
+        const first = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(first)
+        gateway.send({ kind: 'error', id: first, collection: 'agents', code: 'unavailable', message: 'Roster temporarily unavailable', retryable: false })
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Unavailable', reason: 'failed' })
+        expect(live.source.retryAgents).toBeTypeOf('function')
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).not.toBe(first)
+        gateway.fleet([agent])
+        yield* settle
+        expect(live.registry.get(live.source.agents)).toMatchObject({ _tag: 'Observed', freshness: 'live', value: [{ id: agent.id }] })
+        const recovered = gateway.subscription('agents').id
+        live.source.retryAgents?.()
+        yield* settle
+        expect(gateway.subscription('agents').id).toBe(recovered)
+      }),
+    ),
+  )
   it.live('reports a rejected socket credential as Failed on mounted and later-opened follows', () =>
     withGateway((live, gateway) =>
       Effect.gen(function* () {
@@ -862,6 +890,59 @@ describe('cold conversation admission', () => {
 
 
 describe('terminal dependent-read authority', () => {
+  it.live('prefetches only explicit terminal intent and shares that retained viewer with drawer demand', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.agents)
+      yield* settle
+      gateway.fleet([agent])
+      yield* settle
+      expect(gateway.runtimeReads).toEqual([])
+      expect(gateway.terminalActions).toEqual([])
+      const ref = 'terminal/example'
+      live.source.prefetchTerminal?.(ref)
+      yield* settle
+      expect(gateway.runtimeReads).toEqual(['runtime/old'])
+      expect(gateway.terminalActions).toHaveLength(1)
+      live.source.prefetchTerminal?.(ref)
+      live.registry.mount(live.source.terminalInterest!(ref))
+      yield* settle
+      expect(gateway.runtimeReads).toEqual(['runtime/old'])
+      expect(gateway.terminalActions).toHaveLength(1)
+    })),
+  )
+
+  it.live('renders the retained terminal immediately on warm remount without Waiting or another attach', () =>
+    withGateway((live, gateway) => Effect.gen(function* () {
+      live.registry.mount(live.source.agents)
+      yield* settle
+      gateway.fleet([agent])
+      yield* settle
+      const ref = 'terminal/example'
+      const leave = live.registry.mount(live.source.terminalInterest!(ref))
+      const stopReading = live.registry.mount(live.source.terminal(ref))
+      yield* settle
+      gateway.screen(gateway.subscription('terminal').id, 'old', 'Retained output')
+      yield* settle
+      expect(live.registry.get(live.source.terminal(ref))).toMatchObject({ _tag: 'Observed' })
+      stopReading()
+      leave()
+      yield* settle
+      const reads = gateway.runtimeReads.length
+      const attaches = gateway.terminalActions.length
+      /** React reads the retained snapshot before its passive visible-interest effect. */
+      expect(live.registry.get(live.source.terminal(ref))).toMatchObject({
+        _tag: 'Observed', value: { lines: [expect.objectContaining({ text: 'Retained output' })] },
+      })
+      const reopen = live.registry.mount(live.source.terminalInterest!(ref))
+      expect(live.registry.get(live.source.terminal(ref))).toMatchObject({
+        _tag: 'Observed', value: { lines: [expect.objectContaining({ text: 'Retained output' })] },
+      })
+      expect(gateway.runtimeReads).toHaveLength(reads)
+      expect(gateway.terminalActions).toHaveLength(attaches)
+      reopen()
+    })),
+  )
+
   it.live('terminal failure contract: reports a seat missing from an authoritative live roster without runtime reads', () =>
     withGateway((live, gateway) => Effect.gen(function* () {
       live.registry.mount(live.source.agents)
@@ -1308,12 +1389,17 @@ describe('raw terminal stream', () => {
     ),
   )
 
-  it.live('publishes terminal.input and terminal.control as separate grants for the input decision', () =>
-    withGateway((live) =>
+  it.live('publishes terminal.input and terminal.control separately without dropping attachment grants', () =>
+    withGateway((live, gateway) =>
       Effect.gen(function* () {
+        gateway.attachmentUploadGrant = 'granted'
         live.registry.mount(live.source.grants)
         yield* settle
-        expect(live.registry.get(live.source.grants)).toMatchObject({ terminalInput: 'granted', terminalControl: 'ungranted' })
+        expect(live.registry.get(live.source.grants)).toMatchObject({
+          attachmentUpload: 'granted',
+          terminalInput: 'granted',
+          terminalControl: 'ungranted',
+        })
       }),
     ),
   )
@@ -1325,7 +1411,11 @@ describe('raw terminal stream', () => {
         gateway.terminalInputGrant = 'ungranted'
         live.registry.mount(live.source.grants)
         yield* settle
-        expect(live.registry.get(live.source.grants)).toMatchObject({ terminalInput: 'ungranted', terminalControl: 'granted' })
+        expect(live.registry.get(live.source.grants)).toMatchObject({
+          attachmentUpload: 'ungranted',
+          terminalInput: 'ungranted',
+          terminalControl: 'granted',
+        })
       }),
     ),
   )
