@@ -834,6 +834,18 @@ fn owner_cursor_expiry_remains_a_typed_retryable_gateway_error() {
 }
 
 #[test]
+fn peer_too_old_keeps_upgrade_guidance_at_the_gateway() {
+    let message = "This host runs an older Fractal version; update it to open subagent conversations.";
+    let error = remote_read_error("host/owner", crate::peer::ClientReadRejected::new(
+        "peer-too-old", StatusCode::UNPROCESSABLE_ENTITY, message,
+    ).into());
+    assert_eq!(error.code, "peer-too-old");
+    assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error.message, message);
+    assert_eq!(error.details["owner_host_id"], "host/owner");
+}
+
+#[test]
 fn an_owner_read_deadline_keeps_its_typed_gateway_timeout() {
     let rejected = crate::peer::ClientReadRejected::new(
         "read-deadline",

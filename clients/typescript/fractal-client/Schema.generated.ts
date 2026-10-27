@@ -4282,6 +4282,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "not-found",
   "forbidden",
   "unsupported-capability",
+  "peer-too-old",
   "validation-failed",
   "idempotency-conflict",
   "issuer-required",

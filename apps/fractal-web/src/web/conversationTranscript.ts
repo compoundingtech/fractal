@@ -204,13 +204,14 @@ export type ConversationTranscriptState =
     }
 
 /** Why the pane cannot show a conversation; `not-found` comes from the read error's code, never its message. */
-export type UnavailableClassification = 'ungranted' | 'unsupported' | 'not-found' | 'failed'
+export type UnavailableClassification = 'ungranted' | 'unsupported' | 'peer-too-old' | 'not-found' | 'failed'
 
 /** Fixed copy only: feed.detail carries source diagnostics and never reaches rendered or accessible text. */
 const unavailableCopy: Readonly<Record<UnavailableClassification, { readonly reason: string; readonly detail: string }>> = {
   ungranted: { reason: 'Conversation access not granted', detail: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
   unsupported: { reason: 'Conversation not supported', detail: 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.' },
   'not-found': { reason: 'Conversation not found', detail: 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
+  'peer-too-old': { reason: 'Host update required', detail: 'This host runs an older Fractal version; update it to open subagent conversations. Your draft is unchanged.' },
   failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' },
 }
 
@@ -225,7 +226,8 @@ export const mapConversationFeed = (
     case 'Waiting':
       return { _tag: 'Waiting' }
     case 'Unavailable': {
-      const classification: UnavailableClassification = feed.reason === 'failed' && feed.code === 'not-found' ? 'not-found' : feed.reason
+      const classification: UnavailableClassification = feed.code === 'peer-too-old' ? 'peer-too-old'
+        : feed.reason === 'failed' && feed.code === 'not-found' ? 'not-found' : feed.reason
       const code = feed.code !== undefined && diagnosticCode.test(feed.code) ? feed.code : undefined
       return { _tag: 'Unavailable', classification, code, availability: { _tag: 'Unavailable', ...unavailableCopy[classification] } }
     }
