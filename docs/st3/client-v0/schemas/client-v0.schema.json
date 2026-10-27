@@ -193,9 +193,9 @@
       "required": ["api_version", "capabilities"],
       "properties": {
         "api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]},
-        "capabilities": {"type": "array", "minItems": 1, "maxItems": 1, "items": {
+        "capabilities": {"type": "array", "minItems": 1, "maxItems": 2, "items": {
           "type": "object", "additionalProperties": false, "required": ["id", "version", "state"],
-          "properties": {"id": {"const": "device-key-proofs"}, "version": {"const": 1}, "state": {"const": "granted"}}
+          "properties": {"id": {"enum": ["device-key-proofs", "fabric-gateway-grant"]}, "version": {"const": 1}, "state": {"const": "granted"}}
         }}
       }
     },
@@ -1359,7 +1359,8 @@
             "runs_truncated": { "type": "boolean" },
             "run_generations": { "propertyNames": {"$ref": "#/$defs/MissionRunId"}, "type": "object", "additionalProperties": { "$ref": "#/$defs/RunGenerationId" } },
             "visualization": { "oneOf": [{ "$ref": "#/$defs/Visualization" }, { "type": "null" }] },
-            "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] }
+            "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] },
+            "resources": { "type": "array", "items": { "$ref": "#/$defs/DeclaredResource" }, "description": "The resources the current published revision names, in authored order. Read-only. An older daemon omits the field." }
           }
         }
       ]
@@ -1859,13 +1860,14 @@
             "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] },
             "under": { "type": "array", "items": { "$ref": "#/$defs/AgentRelationship" } },
             "delivery": { "oneOf": [{ "$ref": "#/$defs/AgentDelivery" }, { "type": "null" }], "description": "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." },
-            "subagents": { "type": "array", "items": { "$ref": "#/$defs/AgentSubagent" }, "description": "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field." },
+            "subagents": { "type": "array", "items": { "$ref": "#/$defs/AgentSubagent" }, "description": "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents." },
             "handoff": {"oneOf": [{"$ref": "#/$defs/AgentHandoff"}, {"type": "null"}], "description": "Placement handoff phase; the destination waits for former hosts to acknowledge their stopped runtimes."},
             "rollout": { "type": ["object", "null"], "description": "Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons." },
             "workspace": { "type": ["string", "null"], "description": "The declared workspace on the owning host." },
             "lifecycle": { "$ref": "#/$defs/AgentLifecycle", "description": "The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row." },
             "checkout": { "oneOf": [{ "$ref": "#/$defs/AgentCheckout" }, { "type": "null" }], "description": "The requested Git worktree repository, base and branch. Present before launch; it does not assert that checkout succeeded." },
-            "suspension": { "oneOf": [{ "$ref": "#/$defs/AgentSuspension" }, { "type": "null" }], "description": "The seat's latest suspend or resume and its phase. An older daemon omits the field." }
+            "suspension": { "oneOf": [{ "$ref": "#/$defs/AgentSuspension" }, { "type": "null" }], "description": "The seat's latest suspend or resume and its phase. An older daemon omits the field." },
+            "resources": { "type": "array", "items": { "$ref": "#/$defs/DeclaredResource" }, "description": "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }
           }
         }
       ]
@@ -1992,6 +1994,20 @@
       "required": ["agent_id"],
       "properties": {
         "agent_id": { "$ref": "#/$defs/Id" },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "DeclaredResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A named edge from a seat or mission declaration to an ordinary resource subject in the graph.",
+      "required": ["name", "subject", "kind", "resolution"],
+      "properties": {
+        "name": { "type": "string", "description": "Unique within the declaration." },
+        "subject": { "$ref": "#/$defs/Id", "description": "The ordinary resource subject targeted by this edge. URI references use resource/uri/SHA256 of the exact URI." },
+        "kind": { "type": "string", "enum": ["uri", "subject"], "description": "Whether the edge was authored with uri= or subject=." },
+        "resolution": { "type": "string", "enum": ["resolved", "unresolved", "not-applicable"], "description": "URI locator availability. Subject references use not-applicable; this is not a subject existence check." },
+        "uri": { "type": "string", "description": "The exact absolute URI, any scheme. Present only for resolved URI references." },
         "reason": { "type": ["string", "null"] }
       }
     },
@@ -3611,6 +3627,7 @@
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "person_id": { "type": "string", "pattern": "^person/[^/]+$" },
         "full_control": { "type": "boolean" },
+        "fabric_gateway": { "type": "boolean", "description": "Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing." },
         "scopes": {
           "type": "array",
           "minItems": 1,
@@ -3650,7 +3667,8 @@
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "device_public_key": { "type": "string", "minLength": 32 },
-        "key_storage": { "enum": ["secure-enclave", "software"] }
+        "key_storage": { "enum": ["secure-enclave", "software"] },
+        "fabric_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "AssistantPairedSession": {
@@ -3687,7 +3705,19 @@
         "expires_at": { "$ref": "#/$defs/Timestamp" },
         "device_key_chain": { "type": "array", "items": { "type": "string" } },
         "device_key_proofs": { "type": "array", "items": { "type": "object" }, "maxItems": 2 },
-        "person_root_key_proof": { "type": "object" }
+        "person_root_key_proof": { "type": "object" },
+        "fabric_grant": { "$ref": "#/$defs/FabricGrant" }
+      }
+    },
+    "FabricGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["granted", "already-trusted", "not-enabled", "not-requested", "failed"] },
+        "service": { "type": "string" },
+        "peer": { "type": "string" },
+        "detail": { "type": "string" }
       }
     },
     "DeviceSignature": {

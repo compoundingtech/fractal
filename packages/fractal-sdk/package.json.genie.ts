@@ -1,8 +1,8 @@
 import { defineCatalog, packageJson } from '../../repos/effect-utils/genie/external.ts'
 
 const catalog = defineCatalog({
-  effect: '4.0.0',
-  '@effect/vitest': '4.0.0',
+  effect: '4.0.3',
+  '@effect/vitest': '4.0.3',
   '@types/node': '24.10.0',
   typescript: '6.0.3',
   vitest: '4.1.9',

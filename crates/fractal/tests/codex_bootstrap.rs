@@ -20,13 +20,12 @@ use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 const SUBJECT: &str = "agent/eval.codex-bootstrap";
-const RUNTIME: &str = "codex-bootstrap";
 const TERMINAL: &str = "pty/person/eval/019a0000-0000-7000-8000-000000000001";
 
-fn runtime_claim(store: &Store, status: &str, incarnation: Option<&str>) {
+fn runtime_claim(store: &Store, runtime_id: &str, status: &str, incarnation: Option<&str>) {
     let mut fields = BTreeMap::from([
         ("status".into(), json!(status)),
-        ("runtime_id".into(), json!(RUNTIME)),
+        ("runtime_id".into(), json!(runtime_id)),
         ("host".into(), json!("bootstrap")),
     ]);
     if let Some(incarnation) = incarnation {
@@ -45,11 +44,21 @@ fn runtime_claim(store: &Store, status: &str, incarnation: Option<&str>) {
         .unwrap();
 }
 
-struct Cleanup(PtyRuntime);
+fn declared_runtime(store: &Store, subject: &str) -> String {
+    store
+        .desired_subjects_named(&[subject.to_owned()])
+        .unwrap()
+        .remove(0)
+        .member
+        .unwrap()
+        .runtime_id
+}
+
+struct Cleanup(PtyRuntime, String);
 impl Drop for Cleanup {
     fn drop(&mut self) {
-        let _ = self.0.stop(RUNTIME);
-        let _ = self.0.remove(RUNTIME);
+        let _ = self.0.stop(&self.1);
+        let _ = self.0.remove(&self.1);
     }
 }
 
@@ -76,7 +85,7 @@ async fn bound_cold_codex_promotes_custody_delivers_once_and_returns_to_its_shel
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
-    delivery_recovery_control(true, true, Some(CompletionControl { order: "before", failure: false, rejection: None })).await;
+    delivery_recovery_control(true, true, Some(CompletionControl { order: "before", failure: false, rejection: None, preflight: false })).await;
 }
 
 #[derive(Clone, Copy)]
@@ -84,6 +93,7 @@ struct CompletionControl {
     order: &'static str,
     failure: bool,
     rejection: Option<&'static str>,
+    preflight: bool,
 }
 
 macro_rules! codex_completion_control {
@@ -93,6 +103,7 @@ macro_rules! codex_completion_control {
             if fractal_daemon::test_support::supervise_test() { return; }
             delivery_recovery_control(true, true, Some(CompletionControl {
                 order: $order, failure: $failure, rejection: $rejection,
+                preflight: false,
             })).await;
         }
     };
@@ -104,6 +115,14 @@ codex_completion_control!(bound_codex_failure_after_join_keeps_failure, "after",
 codex_completion_control!(bound_codex_foreign_token_after_terminal_stays_fenced, "before", false, Some("token"));
 codex_completion_control!(bound_codex_foreign_runtime_after_terminal_stays_fenced, "before", false, Some("runtime"));
 codex_completion_control!(bound_codex_foreign_invocation_after_terminal_stays_fenced, "before", false, Some("invocation"));
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn codex_preflight_failure_without_harness_event_is_reported() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    delivery_recovery_control(false, true, Some(CompletionControl {
+        order: "before", failure: true, rejection: None, preflight: true,
+    })).await;
+}
 
 fn lease_evidence(root: &Path) -> Value {
     use sha2::{Digest as _, Sha256};
@@ -148,7 +167,6 @@ async fn delivery_recovery_control(
     let state_socket = root.join("state.sock");
     let pty_root = root.join("pty");
     let runtime = PtyRuntime::new(pty_root.clone()).with_binary(pty.to_string_lossy());
-    let _cleanup = Cleanup(runtime.clone());
     // Real driver publications run concurrently with views and mailbox reads. Use the
     // daemon's WAL storage; shared-memory fixtures return SQLITE_LOCKED on that mix.
     let store = Arc::new(Store::open(&root.join("claims.sqlite3"), "bootstrap").unwrap());
@@ -183,6 +201,8 @@ async fn delivery_recovery_control(
             Some("person/eval"),
         )
         .unwrap();
+    let runtime_id = declared_runtime(&store, if bound_shell { TERMINAL } else { SUBJECT });
+    let _cleanup = Cleanup(runtime.clone(), runtime_id.clone());
     let queued = mailbox_loss.then(|| {
         let run = store
             .create_mission_run(&fractal_daemon::model::MissionRunRequest {
@@ -199,7 +219,7 @@ async fn delivery_recovery_control(
         store.set_step_state(&subject, "ready", None).unwrap();
         subject
     });
-    runtime_claim(&store, "starting", None);
+    runtime_claim(&store, &runtime_id, "starting", None);
     let delayed = Arc::new(AtomicBool::new(false));
     let reads = Arc::new(AtomicUsize::new(0));
     let state = AppState {
@@ -277,6 +297,11 @@ async fn delivery_recovery_control(
     )
     .unwrap();
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let preflight = completion.is_some_and(|control| control.preflight);
+    if preflight {
+        std::fs::write(&provider,
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'codex-cli 0.164.0'; exit 0; fi\necho 'synthetic app-server schema failure' >&2\nexit 23\n").unwrap();
+    }
     // Other cargo jobs can replace the shared target binary. A private copy keeps
     // this control-read proof from accidentally exercising driver re-execution.
     let binary_dir = tempfile::Builder::new()
@@ -302,18 +327,19 @@ async fn delivery_recovery_control(
         ("ST3_MAILBOX_TRANSPORT", "push".to_owned()),
     ]);
     let barrier = root.join("completion-control");
-    if let Some(control) = completion {
+    if let Some(control) = completion.filter(|control| !control.preflight) {
         std::fs::create_dir(&barrier).unwrap();
         std::fs::write(barrier.join("order"), control.order).unwrap();
         environment.insert("ST3_FIXTURE_TERMINAL_COMPLETION", barrier.to_string_lossy().into_owned());
     }
     let launch_root = root.to_owned();
+    let launch_runtime_id = runtime_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new(pty);
         command
             .env_clear()
             .env("PTY_ROOT", pty_root)
-            .args(["run", "-d", "--force", "--id", RUNTIME, "--cwd"])
+            .args(["run", "-d", "--force", "--id", &launch_runtime_id, "--cwd"])
             .arg(launch_root)
             .args([
                 "--tag",
@@ -357,7 +383,7 @@ async fn delivery_recovery_control(
         .snapshot()
         .unwrap()
         .into_iter()
-        .find(|p| p.name == RUNTIME)
+        .find(|p| p.name == runtime_id)
         .unwrap();
     let physical_incarnation = format!(
         "{}:{}",
@@ -367,7 +393,7 @@ async fn delivery_recovery_control(
     let shell_pid = if bound_shell {
         let stats: Value = serde_json::from_str(
             &pty_core::registry::with_root(&root.join("pty"), || {
-                pty_client::query_status_json(RUNTIME, pty_client::STATS_TIMEOUT)
+                pty_client::query_status_json(&runtime_id, pty_client::STATS_TIMEOUT)
             })
             .unwrap(),
         )
@@ -409,9 +435,23 @@ async fn delivery_recovery_control(
     } else {
         physical_incarnation.clone()
     };
-    runtime_claim(&store, "running", Some(&incarnation));
+    runtime_claim(&store, &runtime_id, "running", Some(&incarnation));
     if bound_shell {
         std::fs::write(root.join("launch-bound-codex"), b"launch").unwrap();
+    }
+    if preflight {
+        until(|| root.join("driver-returned").exists(),
+            "Codex preflight failure was hidden waiting for a harness event").await;
+        assert_eq!(std::fs::read_to_string(root.join("driver-returned")).unwrap(), "2");
+        let diagnostic = store.latest_claim(SUBJECT, Some("harness.diagnostic")).unwrap().unwrap();
+        assert_eq!(diagnostic.body["fields"]["code"], "codex-launch-failed");
+        assert!(diagnostic.body["fields"]["reason"].as_str().unwrap()
+            .contains("synthetic app-server schema failure"));
+        let ended = store.latest_claim(SUBJECT, Some("runtime.observed")).unwrap().unwrap();
+        assert_eq!(ended.body["fields"]["status"], "exited");
+        assert_eq!(ended.body["fields"]["exit_code"], 1);
+        server.abort();
+        return;
     }
     let client = fractal_daemon::client::Client::unix(&socket);
     // The in-process API and fixture driver have different executable inodes. Establish
@@ -440,7 +480,7 @@ async fn delivery_recovery_control(
                 .collect::<Vec<_>>();
             let screen = std::process::Command::new(on_path("pty").unwrap())
                 .env("PTY_ROOT", root.join("pty"))
-                .args(["peek", "--plain", "--full", RUNTIME])
+                .args(["peek", "--plain", "--full", &runtime_id])
                 .output()
                 .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
                 .unwrap_or_else(|error| format!("pty peek failed: {error}"));
@@ -672,7 +712,7 @@ async fn delivery_recovery_control(
             .snapshot()
             .unwrap()
             .into_iter()
-            .find(|p| p.name == RUNTIME)
+            .find(|p| p.name == runtime_id)
             .unwrap();
         assert_eq!(
             format!(
@@ -807,7 +847,7 @@ async fn delivery_recovery_control(
                 .snapshot()
                 .unwrap()
                 .into_iter()
-                .find(|p| p.name == RUNTIME)
+                .find(|p| p.name == runtime_id)
                 .unwrap()
                 .status,
             "running"
@@ -859,7 +899,6 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     let state_socket = root.path().join("state.sock");
     let pty_root = root.path().join("pty");
     let runtime = PtyRuntime::new(pty_root.clone()).with_binary(pty.to_string_lossy());
-    let _cleanup = Cleanup(runtime.clone());
     let store = Arc::new(Store::open_memory("bootstrap").unwrap());
     let source = format!(
         "version 2\nagent \"eval.codex-bootstrap\" {{ host \"bootstrap\"; workspace {:?}; harness \"codex\" {{}} }}",
@@ -869,7 +908,9 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     store
         .apply_internal(&intent, "bootstrap-declared-seat")
         .unwrap();
-    runtime_claim(&store, status, previous);
+    let runtime_id = declared_runtime(&store, SUBJECT);
+    let _cleanup = Cleanup(runtime.clone(), runtime_id.clone());
+    runtime_claim(&store, &runtime_id, status, previous);
     let pending = Arc::new(AtomicUsize::new(0));
     let bound = Arc::new(AtomicUsize::new(0));
     let state = AppState {
@@ -957,12 +998,13 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         ),
         ("ST3_MAILBOX_TRANSPORT", "push".to_owned()),
     ]);
+    let launch_runtime_id = runtime_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         let mut command = std::process::Command::new(pty);
         command
             .env_clear()
             .env("PTY_ROOT", &pty_root)
-            .args(["run", "-d", "--force", "--id", RUNTIME, "--cwd"])
+            .args(["run", "-d", "--force", "--id", &launch_runtime_id, "--cwd"])
             .arg(Path::new(&environment["HOME"]))
             .args([
                 "--tag",
@@ -1014,7 +1056,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         .snapshot()
         .unwrap()
         .into_iter()
-        .find(|p| p.name == RUNTIME)
+        .find(|p| p.name == runtime_id)
         .unwrap();
     assert_eq!(
         observation.status, "running",
@@ -1026,7 +1068,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         observation.created_at.unwrap()
     );
     assert_eq!(harness.body["fields"]["incarnation_id"], incarnation);
-    runtime_claim(&store, "running", Some(&incarnation));
+    runtime_claim(&store, &runtime_id, "running", Some(&incarnation));
     until(
         || marker.exists(),
         "the provider did not launch after its mailbox bound",

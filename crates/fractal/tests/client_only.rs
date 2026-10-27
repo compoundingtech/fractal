@@ -241,7 +241,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
     device_name: "Demo laptop".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -382,7 +382,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: Some(vec!["read.projections".into()]), })
+    scopes: Some(vec!["read.projections".into()]), fabric_gateway: None, })
         .await
         .unwrap()
         .value;

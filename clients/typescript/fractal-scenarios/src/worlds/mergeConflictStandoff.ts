@@ -37,7 +37,7 @@ export const syntheticMergeConflictStandoff: WorldDefinition = {
     const machine = resources.machine(ctx, builder.host, runtimes.map((value) => value.id), mission.steps.map((step) => step.work))
     const roster: Slice<'roster'> = {
       kind: 'roster', variant: 'default', source, decode: 'strict', loading: false,
-      state: { agents: agents.map((value) => value.agent), runtimes, machines: [machine], order: members.map((member) => member.id) },
+      state: { sessions: [], devices: [], agents: agents.map((value) => value.agent), runtimes, machines: [machine], order: members.map((member) => member.id) },
       timeline: [
         { _tag: 'changes', at_ms: 8_000, store: 0, upserts: [{ ...machine, revision: 'mh-terminal', updated_at: ctx.t.at(8_000), runtime_ids: [...machine.runtime_ids, builder.terminalRuntime], occupancy: { running_runtimes: 3 } }], removes: [] },
         { _tag: 'changes', at_ms: 18_000, store: 0, upserts: members.flatMap((member, step) => {
@@ -46,7 +46,7 @@ export const syntheticMergeConflictStandoff: WorldDefinition = {
         }), removes: [] },
       ],
     }
-    const details: Slice<'details'> = { kind: 'details', variant: 'default', source, decode: 'strict', loading: false, state: { missions: [resources.mission(ctx, mission, 'running', -5_000)], work: members.map((claimant, step) => resources.work(ctx, { mission, step, claimant, state: 'waiting-person', updatedMs: -5_000, goals: [step === 0 ? 'TTL is 300 seconds' : 'Stale reads are allowed'] })) }, timeline: [{ _tag: 'changes', at_ms: 18_000, store: 0, upserts: [resources.mission(ctx, mission, 'completed', 18_000), ...members.map((claimant, step) => resources.work(ctx, { mission, step, claimant, state: 'completed', updatedMs: 18_000, goals: [step === 0 ? 'TTL is 300 seconds' : 'Stale reads are allowed'] }))], removes: [] }] }
+    const details: Slice<'details'> = { kind: 'details', variant: 'default', source, decode: 'strict', loading: false, state: { launches: [], launch_variants: [], missions: [resources.mission(ctx, mission, 'running', -5_000)], work: members.map((claimant, step) => resources.work(ctx, { mission, step, claimant, state: 'waiting-person', updatedMs: -5_000, goals: [step === 0 ? 'TTL is 300 seconds' : 'Stale reads are allowed'] })) }, timeline: [{ _tag: 'changes', at_ms: 18_000, store: 0, upserts: [resources.mission(ctx, mission, 'completed', 18_000), ...members.map((claimant, step) => resources.work(ctx, { mission, step, claimant, state: 'completed', updatedMs: 18_000, goals: [step === 0 ? 'TTL is 300 seconds' : 'Stale reads are allowed'] }))], removes: [] }] }
     const cards = members.map((requester) => resources.attention(ctx, { key: `review-${requester.key}`, kind: 'agent-request', person, requester, source: requester.id, mission, title: 'Review the cache policy three-way conflict', detail: `${file}\n${conflict}`, priority: 'high', requestedMs: -5_000, actions: ['review.approve', 'review.request-changes', 'custom.reply'] }))
     const attention: Slice<'attention'> = { kind: 'attention', variant: 'default', source, decode: 'strict', loading: false, state: { attention: cards, messages: [] }, timeline: [{ _tag: 'changes', at_ms: 2_000, store: 0, upserts: members.map((member) => resources.message(ctx, { key: `decision-${member.key}`, from: person.id, to: member.id, title: 'Combined cache policy approved', content: decision, sentMs: 2_000 })), removes: cards.map((card) => card.id) }] }
     const c = child(ctx, 'conversation')

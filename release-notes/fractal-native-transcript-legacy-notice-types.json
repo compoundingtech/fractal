@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep the legacy OMP envelope recognizer typed to its supported producer grammar when native grouped-job notices extend the shared UI model.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "Rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Type-only narrowing; legacy recognition behavior is unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

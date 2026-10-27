@@ -176,10 +176,14 @@ log_root=${CI_LOCAL_LOG_DIR:-$real_home/.cache/ci-local-logs}
 log_dir=$log_root/run-$(date -u +%Y%m%dT%H%M%SZ)-$$
 mkdir -p "$log_dir"
 echo "ci-local: stage logs in $log_dir"
-# Keep the latest 10 runs' logs (CI_LOCAL_LOG_DIR itself, when given, is the caller's and is not pruned).
+# Keep the latest 10 runs' logs, and those of every run still going: a run that waits hours for build slots on a busy
+# host is older than ten later runs, and it still writes to its directory (CI_LOCAL_LOG_DIR itself, when given, is the
+# caller's and is not pruned).
 if [ -z "${CI_LOCAL_LOG_DIR:-}" ]; then
   # shellcheck disable=SC2012
-  ls -1dt "$log_root"/run-* 2>/dev/null | tail -n +11 | while IFS= read -r old; do rm -rf "$old"; done
+  ls -1dt "$log_root"/run-* 2>/dev/null | tail -n +11 | while IFS= read -r old; do
+    kill -0 "${old##*-}" 2>/dev/null || rm -rf "$old"
+  done
 fi
 # One line per build-slot wait as it starts and ends, `wait|slot EPOCH STAGE`, to CI_LOCAL_QUEUE_LOG when the caller names one: scripts/st-test
 # reads it while the run goes on, so its time limit counts only the time the stages run, not the time they wait for a slot.

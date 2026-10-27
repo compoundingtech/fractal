@@ -610,6 +610,7 @@ pub async fn complete_assistant(
             code: code.trim().into(),
             device_public_key: public,
             key_storage: Some("software".into()),
+            fabric_node_id: None,
         },
     ).await.context("Complete assistant pairing")?;
     let mut device = AssistantDevice { endpoint, allow_public_http, session: session.value, signing_key: key };
@@ -810,6 +811,7 @@ pub async fn complete_with_options(
         code: code.trim().into(),
         device_public_key: public.clone(),
         key_storage: Some("software".into()),
+        fabric_node_id: None,
     },)
         .await
         .context("Complete device pairing")?
@@ -1067,7 +1069,8 @@ mod tests {
                 expires_at: "2026-11-01T00:00:00Z".into(),
                 device_key_chain: serde_json::from_value(case["chain"].clone()).unwrap(),
                 device_key_proofs: Vec::new(),
-                person_root_key_proof: None, },
+                person_root_key_proof: None,
+                fabric_grant: None, },
                 signing_key: Some(key.clone()),
             };
             let fields = &case["fields"];

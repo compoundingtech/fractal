@@ -18,7 +18,7 @@
     "./fabric": "./fabric.mjs"
   },
   "peerDependencies": {
-    "effect": "4.0.0"
+    "effect": "4.0.3"
   },
   "peerDependenciesMeta": {
     "effect": {
@@ -29,7 +29,7 @@
     "ws": "8.22.0"
   },
   "devDependencies": {
-    "effect": "4.0.0",
+    "effect": "4.0.3",
     "typescript": "6.0.3"
   }
 }

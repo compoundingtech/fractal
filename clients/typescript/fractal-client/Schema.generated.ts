@@ -849,6 +849,23 @@ export const AgentTodo = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentTodo = typeof AgentTodo.Type
 export type AgentTodoEncoded = typeof AgentTodo.Encoded
 
+/** A named edge from a seat or mission declaration to an ordinary resource subject in the graph. */
+export const DeclaredResource = /*#__PURE__*/ (() => Schema.Struct({
+  /** Whether the edge was authored with uri= or subject=. */
+  "kind": Schema.Literals(["uri","subject"]).annotate({ description: "Whether the edge was authored with uri= or subject=." }),
+  /** Unique within the declaration. */
+  "name": Schema.String.annotate({ description: "Unique within the declaration." }),
+  "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** URI locator availability. Subject references use not-applicable; this is not a subject existence check. */
+  "resolution": Schema.Literals(["resolved","unresolved","not-applicable"]).annotate({ description: "URI locator availability. Subject references use not-applicable; this is not a subject existence check." }),
+  /** The ordinary resource subject targeted by this edge. URI references use resource/uri/SHA256 of the exact URI. */
+  "subject": Id,
+  /** The exact absolute URI, any scheme. Present only for resolved URI references. */
+  "uri": optionalKey(Schema.String).annotate({ description: "The exact absolute URI, any scheme. Present only for resolved URI references." })
+}).annotate({ identifier: "DeclaredResource", description: "A named edge from a seat or mission declaration to an ordinary resource subject in the graph." }))()
+export type DeclaredResource = typeof DeclaredResource.Type
+export type DeclaredResourceEncoded = typeof DeclaredResource.Encoded
+
 export const HostId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host").annotate({ identifier: "HostId" }))()
 export type HostId = typeof HostId.Type
 export type HostIdEncoded = typeof HostId.Encoded
@@ -984,6 +1001,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "reachability": AgentReachability,
   /** Diagnostic harness reason, not a machine-readable verdict. */
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Diagnostic harness reason, not a machine-readable verdict." }),
+  /** The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field. */
+  "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
   /** Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons. */
   "rollout": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE).annotate({ description: "Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons." }),
@@ -992,8 +1011,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When this observed state began in this runtime incarnation. Same-state observations never reset it. */
   "since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When this observed state began in this runtime incarnation. Same-state observations never reset it." }),
   "state": AgentState,
-  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field. */
-  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field." }),
+  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents. */
+  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents." }),
   /** The seat's latest suspend or resume and its phase. An older daemon omits the field. */
   "suspension": Schema.OptionFromOptionalNullOr(AgentSuspension, NULL_NONE).annotate({ description: "The seat's latest suspend or resume and its phase. An older daemon omits the field." }),
   /** Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible. */
@@ -2780,6 +2799,8 @@ export const Mission = /*#__PURE__*/ (() => Schema.Struct({
   "operational": optionalKey(Operational),
   /** st's presentation of this mission: its word, who must act, each step, the stuck step and what a person can do (docs/clients/ui-contract.md, Mission). Absent on older daemons and until st has a published agents roster. */
   "presentation": optionalKey(MissionPresentation),
+  /** The resources the current published revision names, in authored order. Read-only. An older daemon omits the field. */
+  "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the current published revision names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
   "run_counts": optionalKey(Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))),
   "run_details": optionalKey(Schema.Array(MissionRunSummary)),
@@ -4081,12 +4102,22 @@ export const Page = /*#__PURE__*/ (() => Schema.Struct({
 export type Page = typeof Page.Type
 export type PageEncoded = typeof Page.Encoded
 
+export const FabricGrant = /*#__PURE__*/ (() => Schema.Struct({
+  "detail": optionalKey(Schema.String),
+  "peer": optionalKey(Schema.String),
+  "service": optionalKey(Schema.String),
+  "state": Schema.Literals(["granted","already-trusted","not-enabled","not-requested","failed"])
+}).annotate({ identifier: "FabricGrant" }))()
+export type FabricGrant = typeof FabricGrant.Type
+export type FabricGrantEncoded = typeof FabricGrant.Encoded
+
 export const PersonPairedSession = /*#__PURE__*/ (() => Schema.Struct({
   "credential": Schema.RedactedFromValue(Schema.String.check(Schema.isMinLength(32))),
   "device_id": Id,
   "device_key_chain": optionalKey(Schema.Array(Schema.String)),
   "device_key_proofs": optionalKey(Schema.Array(Schema.Record(Schema.String, Schema.Unknown)).check(Schema.isMaxLength(2))),
   "expires_at": Timestamp,
+  "fabric_grant": optionalKey(FabricGrant),
   "kind": Schema.Literal("paired-session"),
   "person_id": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/]+$", "u"))),
   "person_root_key_proof": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
@@ -4540,7 +4571,7 @@ export type ObservationResponseEncoded = typeof ObservationResponse.Encoded
 /** Static unauthenticated pairing preflight; no envelope, presence update or graph information. */
 export const PairingAdvertisement = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
-  "capabilities": Schema.Array(Schema.Struct({ "id": Schema.Literal("device-key-proofs"), "state": Schema.Literal("granted"), "version": Schema.Literal(1) })).check(Schema.isMinLength(1)).check(Schema.isMaxLength(1))
+  "capabilities": Schema.Array(Schema.Struct({ "id": Schema.Literals(["device-key-proofs","fabric-gateway-grant"]), "state": Schema.Literal("granted"), "version": Schema.Literal(1) })).check(Schema.isMinLength(1)).check(Schema.isMaxLength(2))
 }).annotate({ identifier: "PairingAdvertisement", description: "Static unauthenticated pairing preflight; no envelope, presence update or graph information." }))()
 export type PairingAdvertisement = typeof PairingAdvertisement.Type
 export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
@@ -4548,6 +4579,8 @@ export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
 export const PersonPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "device_name": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(120)),
+  /** Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing. */
+  "fabric_gateway": optionalKey(Schema.Boolean).annotate({ description: "Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing." }),
   "full_control": optionalKey(Schema.Boolean),
   "person_id": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/]+$", "u"))),
   /** Narrows the default limited grant. Must not be combined with full_control. */
@@ -4567,6 +4600,7 @@ export const PairingComplete = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))),
   "device_public_key": Schema.String.check(Schema.isMinLength(32)),
+  "fabric_node_id": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u")))),
   "key_storage": optionalKey(Schema.Literals(["secure-enclave","software"]))
 }).annotate({ identifier: "PairingComplete" }))()
 export type PairingComplete = typeof PairingComplete.Type

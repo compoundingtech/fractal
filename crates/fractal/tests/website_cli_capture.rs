@@ -1,11 +1,11 @@
 #![cfg(unix)]
-//! Seeds an in-memory fixture daemon for the fractal.how CLI capture and serves it until stopped.
+//! Seeds a fixture daemon for the fractal.how CLI and TUI captures and serves it until stopped.
 //!
 //! Run (ignored by default):
 //!   CAPTURE_DIR=/tmp/cli-capture cargo test -p fractal --features test-support \
 //!     --test website_cli_capture -- --ignored --nocapture
 //! The daemon listens on $CAPTURE_DIR/st3.sock until $CAPTURE_DIR/stop exists. Every name is invented.
-//! scripts/website-cli-capture/capture.sh then prints the transcript.
+//! scripts/website-cli-capture/capture.sh then prints the CLI transcript, tui.sh a TUI screen.
 
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
@@ -51,9 +51,15 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
     let socket = dir.join("st3.sock");
     let _ = std::fs::remove_file(&socket);
     let _ = std::fs::remove_file(dir.join("stop"));
+    // A fresh store file each run. Against an in-memory store the TUI could not save its space
+    // ("database table is locked: batches") and said so on screen.
+    let database = dir.join("store.sqlite");
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", database.display()));
+    }
     let state = AppState {
         owning_person: None,
-        store: Arc::new(Store::open_memory("studio").unwrap()),
+        store: Arc::new(Store::open(&database, "studio").unwrap()),
         notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0,
         node: "studio".into(),
@@ -123,6 +129,11 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
     work(&build.subject, &oncall, "claim", "build-claim", "Building 2.3");
     work(&build.subject, &oncall, "progress", "build-progress", "Tests pass, packaging the release");
 
+    // The background publications the daemon starts before it listens (crates/fractal/src/main.rs).
+    // Without them the TUI reads attention unpresented, agents and missions unknown.
+    fractal_daemon::api::start_agent_roster(&state);
+    fractal_daemon::api::start_attention_list(&state);
+    fractal_daemon::api::start_published_lists(&state);
     let served = socket.clone();
     let server = tokio::spawn(async move {
         fractal_daemon::api::serve_unix(&served, fractal_daemon::api::router(state)).await

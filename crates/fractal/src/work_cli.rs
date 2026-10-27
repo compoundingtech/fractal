@@ -315,7 +315,17 @@ pub(super) async fn run_work(
         }
         WorkCommand::Claim(args) => post_work(client, "claim", args, json_output).await,
         WorkCommand::Renew(args) => post_work(client, "renew", args, json_output).await,
-        WorkCommand::Progress(args) => post_work(client, "progress", args, json_output).await,
+        WorkCommand::Progress(mut args) => {
+            if let Some(eta) = args.eta {
+                args.action.summary = Some(fractal_store::work_eta::summary(
+                    args.action.summary.as_deref(),
+                    &eta,
+                    args.action.actor.as_deref().context("a work action needs explicit --as")?,
+                    current_unix_ms()?,
+                )?);
+            }
+            post_work(client, "progress", args.action, json_output).await
+        }
         WorkCommand::Complete(args) => post_work(client, "complete", args, json_output).await,
         WorkCommand::Fail(args) => post_work(client, "fail", args, json_output).await,
         WorkCommand::Release(args) => post_work(client, "release", args, json_output).await,

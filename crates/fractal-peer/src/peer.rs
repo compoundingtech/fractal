@@ -146,6 +146,9 @@ pub enum ClientReadOperation {
         limit: usize,
         cursor: Option<String>,
     },
+    SessionDetail {
+        session_id: String,
+    },
     TerminalScreen {
         terminal_id: String,
         /// Ask the owner for its best-effort session facts too.
@@ -1362,6 +1365,9 @@ async fn receive_client_read(
                 let value = answer?.value;
                 relay_trace::result(Phase::Envelope, || Ok(serde_json::to_value(value)?))
             }
+            ClientReadOperation::SessionDetail { session_id } => {
+                Ok(serde_json::to_value(client.sessions_get(&session_id).await?.value)?)
+            }
             ClientReadOperation::TerminalScreen { terminal_id, facts } => {
                 let value = if facts {
                     client.terminal_screen_with_facts(&terminal_id).await?.value
@@ -1708,7 +1714,12 @@ fn started_at_unix_ms() -> u64 {
 impl Backend for MainBackend {
     async fn ready(&self) {
         loop {
-            if self.client.get::<serde_json::Value>("/v1/health").await.is_ok() {
+            if let Ok(health) = self.client.get::<serde_json::Value>("/v1/health").await {
+                if let Some(warning) = crate::replication_worker_build::startup_warning(
+                    health.get("build").and_then(|build| build.get("commit")).and_then(Value::as_str),
+                ) {
+                    eprintln!("st replication-worker: WARNING: {warning}");
+                }
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1951,6 +1962,9 @@ pub async fn conversation_gateway_relay(
 /// Run the replication worker: sync this node's store, through its daemon, with the fleet.
 pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     config.validate()?;
+    if let Err(error) = crate::replication_worker_build::record(&config.state_dir) {
+        eprintln!("st replication-worker: WARNING: cannot report worker build: {error:#}");
+    }
     let worker = WorkerConfig {
         node: config.node.clone(),
         fleet_id: config
