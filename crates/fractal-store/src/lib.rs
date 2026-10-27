@@ -26,6 +26,7 @@ pub mod backup;
 pub mod conversation_delivery;
 pub mod external_sessions;
 pub mod recorder_receipts;
+pub mod replication_worker_build;
 pub mod render;
 pub mod client_values;
 pub mod graph;
