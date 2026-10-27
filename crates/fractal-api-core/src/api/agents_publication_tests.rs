@@ -295,3 +295,45 @@ fn agents_publication_failed_old_generation_does_not_restore_cancelled_demand() 
     assert!(result.is_err());
     assert!(!store.agents_publication_demand(), "an invalidated fold cannot resurrect old demand");
 }
+
+#[test]
+fn agents_publication_reset_between_restore_check_and_cas_wins() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    store.fractal.request_roster_refresh();
+    let checked = Arc::new(std::sync::Barrier::new(2));
+    let release = Arc::new(std::sync::Barrier::new(2));
+    *store.fractal.agent_roster_restore_checked.lock() = Some(Arc::new({
+        let checked = Arc::clone(&checked);
+        let release = Arc::clone(&release);
+        move || { checked.wait(); release.wait(); }
+    }));
+    std::thread::scope(|scope| {
+        let attempt = scope.spawn(|| {
+            let result: anyhow::Result<()> = store.answer_agent_roster_requests(|| {
+                anyhow::bail!("failed fold with an unanswered request")
+            });
+            assert!(result.is_err());
+        });
+        checked.wait();
+        let generation = store.fractal.presented_agents.generation();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let reset = scope.spawn(move || {
+            started_tx.send(()).unwrap();
+            store.forget_current_views();
+        });
+        started_rx.recv().unwrap();
+        let reset_serialized = store.fractal.agent_roster_request_generation.try_lock().is_none();
+        let generation_held = store.fractal.presented_agents.generation() == generation;
+        release.wait();
+        attempt.join().unwrap();
+        reset.join().unwrap();
+        assert!(reset_serialized, "the checked restore must serialize against the reset");
+        assert!(generation_held, "reset cannot advance the generation before restore finishes");
+        assert_ne!(store.fractal.presented_agents.generation(), generation);
+    });
+    *store.fractal.agent_roster_restore_checked.lock() = None;
+    assert!(!store.agents_publication_demand(), "reset clears even a request restored after the check");
+}
