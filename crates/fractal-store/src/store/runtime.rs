@@ -172,6 +172,14 @@ impl Store {
 impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
+        resource_references::create_schema(connection)?;
+        // Legacy run stamps are projection metadata, not ownership of a shared URI.
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h379d33768384 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run=NULL, owner_generation=NULL, owner_step=NULL
+             WHERE kind='resource' AND subject LIKE 'resource/uri/%'
+               AND (owner_run IS NOT NULL OR owner_generation IS NOT NULL OR owner_step IS NOT NULL)",
+            [],
+        )?;
         push_registrations::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5484380b8507 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
@@ -345,6 +353,7 @@ impl Runtime for FractalRuntime {
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
         projectors::run_hooks(projectors::OPEN, transaction)?;
+        resource_references::open(transaction, shared_memory)?;
         if shared_memory {
             rebuild_operations_tx(transaction)?;
             rebuild_planning_tx(transaction)?;
@@ -622,7 +631,7 @@ impl Runtime for FractalRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.slo-breach-episodes.v1";
+    "st3.shared-projections.slo-breach-episodes-declared-resource-edges.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {

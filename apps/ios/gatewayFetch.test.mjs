@@ -8,7 +8,7 @@ await assert.rejects(empty502('https://gateway.example/v1/client/work?limit=30')
 const html = gatewayFetch(async () => new Response('<html>Bad Gateway</html>', { status: 502, headers: { 'content-type': 'text/html' } }));
 await assert.rejects(html('https://gateway.example/v1/client/agents'), /gateway returned HTTP 502 with no Fractal response/);
 
-// st JSON responses, including st error envelopes, pass through untouched.
+// Fractal JSON responses, including Fractal error envelopes, pass through untouched.
 const body = JSON.stringify({ api_version: 'st3.client.v0', value: { ok: true } });
 const ok = await gatewayFetch(async () => new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }))('https://gateway.example/v1/client/capabilities');
 assert.deepEqual(await ok.json(), JSON.parse(body));

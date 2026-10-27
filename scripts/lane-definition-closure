@@ -128,7 +128,7 @@ NOT_DEFINITION = {
 NOT_READ = {
     # Workflow paths as GitHub's API reports them (a run's `path`), matched against API responses; the files are never opened.
     'scripts/ci-build-snapshot': {'.github/workflows/fleet.yml', '.github/workflows/main-upkeep.yml', '.github/workflows/macos.yml',
-                                  '.github/workflows/release-smalltalk.yml'},
+                                  '.github/workflows/release-fractal.yml'},
     # The same, in a fake API response; and the .gitignore it writes into its fixture checkout.
     'scripts/ci-build-snapshot-test': {'.github/workflows/fleet.yml', '.gitignore'},
     'scripts/ci-perf-cache': {'.github/workflows/daily-long.yml', '.github/workflows/perf.yml'},  # the same

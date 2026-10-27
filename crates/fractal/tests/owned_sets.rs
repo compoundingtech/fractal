@@ -44,21 +44,19 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         json!({"status":"running","features":{"owned_sets":1}}),
     );
     let socket = root.join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: name.into(),
-        state_dir: root.clone(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: name.into(),
+    state_dir: root.clone(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
@@ -620,6 +618,14 @@ impl fractal_daemon::reconcile::RuntimeControl for RolloutRuntime {
 }
 
 fn native_observation(store: &Store, subject: &str, incarnation: &str) {
+    // The fixture producer retries on each reconciliation pass, just as the native
+    // report waits for the graph to acknowledge the newly started runtime.
+    if !store.latest_claim(subject, Some("runtime.observed")).unwrap()
+        .is_some_and(|runtime| runtime.body["fields"]["status"] == "running"
+            && runtime.body["fields"]["incarnation_id"].as_str() == Some(incarnation))
+    {
+        return;
+    }
     append(
         store,
         subject,

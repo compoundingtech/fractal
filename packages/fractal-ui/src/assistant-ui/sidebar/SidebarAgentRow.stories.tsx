@@ -213,12 +213,27 @@ function PhoneRows() {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar/Agent Row',
   component: SidebarAgentRow,
   // label-content-name-mismatch is an experimental axe rule, so the strict a11y check enables it explicitly for every row story.
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'controlled agent-row contracts: exact names, descriptions, geometry and interactions are asserted against module-local row fixtures' }, layout: 'fullscreen', a11y: { config: { rules: [{ id: 'label-content-name-mismatch', enabled: true }] } }, docs: { description: { component: 'Baseline agent row: reported facts only. The hover card and reported details omit unreported fields instead of showing placeholders; hovering a row swaps the time slot for a quick Open action; rows without a reported time keep the shared metric track so titles stay aligned.' } } },
 } satisfies Meta
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'DensitiesAndChildren:contract-fixture',
+  'FrozenWorkingVersusIdle:contract-fixture',
+  'HoverCardKnown:contract-fixture',
+  'HoverCardUnknown:contract-fixture',
+  'PhoneFocusNoHover:contract-fixture',
+  'PhoneTouchTargets:contract-fixture',
+  'QuickOpenAction:contract-fixture',
+  'ThemedOverlaysAndFocus:contract-fixture',
+  'TimeCohort:contract-fixture',
+]
 type Story = StoryObj
 export const HoverCardKnown: Story = { tags: ['critical'], name: 'Hover card · fully reported', render: () => <main {...stylex.props(styles.root)}><CardPair row={knownRow} /></main>, play: async ({ canvasElement }) => assertCompactCard(canvasElement) }
 export const HoverCardUnknown: Story = { tags: ['critical'], name: 'Hover card · unreported fields omitted', render: () => <main {...stylex.props(styles.root)}><CardPair row={unreportedRow} /></main>, play: async ({ canvasElement }) => {

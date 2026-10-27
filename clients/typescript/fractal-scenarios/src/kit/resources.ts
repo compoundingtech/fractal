@@ -1,4 +1,4 @@
-import type { Attention, Capabilities, Machine, Message, Mission, Work, WorkState } from '@fractal/client'
+import type { Attention, Capabilities, Device, Launch, LaunchVariant, Machine, Message, Mission, Session, Work, WorkState } from '@fractal/client'
 
 import type { CastAgent, CastHost, CastMission, CastPerson } from './cast.ts'
 import type { FactoryContext } from './context.ts'
@@ -21,6 +21,66 @@ export const machine = (ctx: FactoryContext, host: CastHost, runtimeIds: string[
   work,
   transports: [{ protocol: ctx.cast.hosts[0] === host ? 'unix' : 'fabric', status: ctx.cast.hosts[0] === host ? 'local' : 'up', last_success_at: ctx.t.at(-30_000) }],
   runtime_ids: runtimeIds,
+})
+
+export const session = (ctx: FactoryContext, member: CastAgent, state: Session['state'], startedMs: number): Session => ({
+  id: member.session,
+  kind: 'session',
+  revision: 's-1',
+  updated_at: ctx.t.at(-4_000),
+  owner_id: member.id,
+  state,
+  started_at: ctx.t.at(startedMs),
+  runtime_incarnation: member.incarnation,
+  timeline_cursor: `timeline/${member.session}/0`,
+})
+
+export const device = (ctx: FactoryContext, person: CastPerson, name: string): Device => ({
+  id: scenarioId(ctx, 'device', person.id),
+  kind: 'device',
+  revision: 'd-1',
+  updated_at: ctx.t.at(-60_000),
+  person_id: person.id,
+  grant_kind: 'person',
+  name,
+  session_actor: `${person.id}/session/scenario`,
+  state: 'active',
+  scopes: ['read'],
+  expires_at: ctx.t.at(24 * 60 * 60_000),
+})
+
+export const launch = (ctx: FactoryContext, value: CastMission, planner: CastAgent, variants: string[]): Launch => ({
+  id: scenarioId(ctx, 'launch', 'api-rename'),
+  kind: 'launch',
+  revision: 'l-1',
+  updated_at: ctx.t.at(-12 * 60_000),
+  title: value.title,
+  phase: 'review',
+  request: 'Rename fetchUser to loadUser while preserving session propagation.',
+  planner: planner.id,
+  planner_config: { provider: 'codex' },
+  target: { type: 'mission-run', mission_id: value.id, mission_run_id: value.run, generation_id: value.generation },
+  variants,
+  decisions: [],
+  approvals: [],
+})
+
+export const launchVariant = (ctx: FactoryContext, value: CastMission, launchId: string, ordinal: number): LaunchVariant => ({
+  id: scenarioId(ctx, 'launch-variant', `api-rename-${ordinal}`),
+  kind: 'launch-variant',
+  revision: 'lv-1',
+  updated_at: ctx.t.at(-12 * 60_000),
+  launch_id: launchId,
+  ordinal,
+  candidate_revision: 1,
+  status: ordinal === 0 ? 'previewable' : 'rejected',
+  target_generation: value.generation,
+  normalized_mission: {
+    title: value.title,
+    goal: ordinal === 0 ? 'Rename the API and preserve every session argument' : 'Compare a staged compatibility rename',
+    steps: value.steps.map((step) => ({ path: step.path, title: step.title })),
+  },
+  diagnostics: [],
 })
 
 export const mission = (ctx: FactoryContext, value: CastMission, state: Mission['state'], updatedMs: number): Mission => ({

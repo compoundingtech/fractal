@@ -5,22 +5,25 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "test:embed": "node scripts/embed-proof.mjs",
     "changelog:registry": "node scripts/changelog-registry.mjs",
     "changelog:registry:check": "node scripts/changelog-registry.mjs --check",
     "typecheck": "node scripts/changelog-registry.mjs && tsc --noEmit",
+    "check:st-coverage": "bun scripts/check-st-coverage.ts",
     "dev": "vite --config vite.config.ts --configLoader runner",
     "build": "vite build --config vite.config.ts --configLoader runner",
+    "build:embed": "vite build --config vite.embed.config.ts --configLoader runner",
     "start": "node server/main.mts"
   },
   "dependencies": {
-    "@effect/opentelemetry": "4.0.0",
-    "@effect/platform-node": "4.0.0",
-    "@effect/platform-node-shared": "4.0.0",
+    "@effect/opentelemetry": "4.0.3",
+    "@effect/platform-node": "4.0.3",
+    "@effect/platform-node-shared": "4.0.3",
     "@overeng/devbar": "workspace:^",
     "@overeng/meters": "workspace:^",
     "@overeng/utils": "workspace:^",
     "@fractal/client": "file:../../clients/typescript/fractal-client",
-    "effect": "4.0.0",
+    "effect": "4.0.3",
     "fractional-indexing": "3.2.0",
     "@fractal/ui": "workspace:*",
     "@fractal/sdk": "workspace:*",
@@ -30,10 +33,10 @@
     "react-aria-components": "1.21.1",
     "react-stately": "3.50.0",
     "@stylexjs/stylex": "0.19.0",
-    "@effect/atom-react": "4.0.0"
+    "@effect/atom-react": "4.0.3"
   },
   "devDependencies": {
-    "@effect/vitest": "4.0.0",
+    "@effect/vitest": "4.0.3",
     "@fractal/scenarios": "workspace:*",
     "@types/node": "24.10.0",
     "typescript": "6.0.3",

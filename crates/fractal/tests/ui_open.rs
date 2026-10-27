@@ -146,21 +146,19 @@ impl Tui {
 
 fn state(root: &Path, node: &str) -> AppState {
     let store = Store::open_memory(node).unwrap();
-    AppState {
-        owning_person: None,
-        store: Arc::new(store),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(store),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: node.into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: root.join("unused-pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 /// An in-memory store holding `sources`, served on a unix socket for `PERSON`.
@@ -342,7 +340,7 @@ async fn a_seat_opens_agents_and_missions_in_splits_of_the_running_terminal_inte
     let missing = seat_opens(root.path(), &socket, &["agent/seat-one.ghost"]).await;
     assert!(!missing.status.success(), "{}", said(&missing));
     assert!(
-        said(&missing).contains("st has no agent/seat-one.ghost"),
+        said(&missing).contains("fractal: Fractal has no agent/seat-one.ghost"),
         "{}",
         said(&missing)
     );

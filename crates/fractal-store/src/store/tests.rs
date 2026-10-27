@@ -1965,17 +1965,17 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         assert_eq!(
             lines
                 .iter()
-                .filter(|line| line.starts_with("st: projection full replay "))
+                .filter(|line| line.starts_with("fractal: projection full replay "))
                 .cloned()
                 .collect::<Vec<_>>(),
             [format!(
-                "st: projection full replay phase=startup/project-replication-backlog reason={reason} frontier={expected_frontier} target={target}"
+                "fractal: projection full replay phase=startup/project-replication-backlog reason={reason} frontier={expected_frontier} target={target}"
             )],
             "{reason}"
         );
         let details = lines
             .iter()
-            .filter_map(|line| line.strip_prefix("st: projection failure detail "))
+            .filter_map(|line| line.strip_prefix("fractal: projection failure detail "))
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         if matches!(reason, "incremental-error:internal" | "operation-conflict"
@@ -2007,9 +2007,9 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                 };
                 assert_eq!(details[0]["claim_kind"], expected_kind);
                 let detail_position = lines.iter().position(|line|
-                    line.starts_with("st: projection failure detail ")).unwrap();
+                    line.starts_with("fractal: projection failure detail ")).unwrap();
                 let replay_position = lines.iter().position(|line|
-                    line.starts_with("st: projection full replay ")).unwrap();
+                    line.starts_with("fractal: projection full replay ")).unwrap();
                 assert!(detail_position < replay_position);
             }
         } else {
@@ -2496,6 +2496,76 @@ fn current_runtime_views_reduce_what_they_show_not_every_runtime_ever_held() {
         .map(|status| status.subject)
         .collect::<Vec<_>>();
     assert_eq!(current_layer, live);
+}
+
+#[test]
+fn cold_runtime_fields_match_sparse_null_and_transition_history() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/field-fold";
+    let observations = [
+        ("runtime.observed", json!({"fields": {
+            "status": "running", "runtime_id": "one", "incarnation_id": "first",
+            "terminal": true, "reachability": "reachable", "reason": "initial"
+        }})),
+        ("runtime.observed", json!({"fields": {"status": "idle", "terminal": null}})),
+        ("resource.observed", json!({"fields": {
+            "kind": "vcs.issue", "attribution_only": true, "status": "ignored",
+            "facts": {"opened_by": "person/test"}
+        }})),
+        ("mission-run.state", json!({"fields": {"mode": "eval"}})),
+        ("runtime.observed", json!({"fields": {"status": "running", "reason": null}})),
+        ("resource.observed", json!({"status": "up", "runtime_id": "two"})),
+    ];
+    let mut snapshots = vec![0];
+    for (step, (kind, body)) in observations.into_iter().enumerate() {
+        store.set_write_clock_at(1_800_000_000_000 + step as u128).unwrap();
+        observe_runtime(&store, subject, "running", "fixture");
+        let index = store.index().unwrap();
+        // Sparse legacy records are reducer inputs, not current admission examples.
+        store.connection.lock().expect("fixture writer connection").execute(
+            /* sqlite-large-value: allow-for-now lv-hf8af949bb730 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=?1, body=?2 WHERE store_index=?3",
+            params![kind, body.to_string(), index],
+        ).unwrap();
+        snapshots.push(index);
+    }
+    let connection = store.readers.get();
+    for index in snapshots {
+        for fields in [RUNTIME_PROJECTION_FIELDS, &["status"][..], &["status", "mode"][..]] {
+            let mut expected = latest_actual_at(&connection, subject, Some(index)).unwrap();
+            if let Some(Value::Object(actual)) = &mut expected {
+                actual.retain(|field, _| fields.contains(&field.as_str()));
+            }
+            assert_eq!(
+                latest_actual_fields_at(&connection, subject, Some(index), fields).unwrap(),
+                expected, "snapshot {index}, fields {fields:?}",
+            );
+        }
+    }
+}
+
+#[test]
+fn cold_runtime_fields_stop_decoding_after_a_complete_observation() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/bounded-runtime-fold";
+    for step in 0..240 {
+        store.set_write_clock_at(1_800_000_000_000 + step).unwrap();
+        observe_runtime(&store, subject, "running", &format!("epoch-{step}"));
+        let index = store.index().unwrap();
+        store.connection.lock().expect("fixture writer connection").execute(
+            /* sqlite-large-value: allow-for-now lv-h13b02e7126c4 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE store_index=?2",
+            params![json!({"fields": {
+                "status": "running", "runtime_id": "one", "incarnation_id": format!("epoch-{step}"),
+                "terminal": true, "reachability": "reachable", "reason": null
+            }}).to_string(), index],
+        ).unwrap();
+    }
+    let connection = store.readers.get();
+    ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+    let actual = latest_actual_fields_at(
+        &connection, subject, None, RUNTIME_PROJECTION_FIELDS,
+    ).unwrap().unwrap();
+    assert_eq!(actual["incarnation_id"], "epoch-239");
+    assert_eq!(ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get), 1);
 }
 
 #[test]
@@ -8043,9 +8113,87 @@ fn harness_usage_replicates_on_a_schedule_while_working_and_at_once_when_it_stop
     assert!(
         local_observation_position(&usage("context_occupancy", 36, 1, start + 11 * minute).0)
             .is_none(),
-        "an idle harness replicates its usage at once"
+        "the interval has passed since the stop replicated the last reading"
     );
-    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 12);
+    assert!(
+        local_observation_position(&usage("context_occupancy", 37, 1, start + 12 * minute).0)
+            .is_some(),
+        "subagents answering while the harness rests wait for the interval"
+    );
+    let state = |state: &str, at: u128| {
+        store
+            .append_latest_observation(&harness_state(subject, state, at as u64), at)
+            .unwrap()
+    };
+    state("working", start + 13 * minute);
+    state("idle", start + 14 * minute);
+    assert_eq!(
+        usage_claims(&store).last(),
+        Some(&occupancy(37)),
+        "the turn's end replicates what was pending"
+    );
+    state("working", start + 15 * minute);
+    state("idle", start + 16 * minute);
+    assert!(
+        local_observation_position(&usage("context_occupancy", 38, 1, start + 16 * minute + 500).0)
+            .is_none(),
+        "a turn's last response can arrive after its idle report and replicates at once"
+    );
+    assert!(
+        local_observation_position(&usage("context_occupancy", 39, 1, start + 17 * minute).0)
+            .is_some(),
+        "later responses of the same rest wait for the interval"
+    );
+    state("idle", start + 19 * minute);
+    assert_eq!(usage_claims(&store).last(), Some(&occupancy(38)));
+    state("idle", start + 22 * minute);
+    assert_eq!(
+        usage_claims(&store).last(),
+        Some(&occupancy(39)),
+        "a resting harness's re-stamp replicates the reading that waited out its interval"
+    );
+    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 21);
+}
+
+/// Measured on the fleet (2026-10-26): a seat whose main loop waited while its subagent worked
+/// replicated a usage claim for every response, one every four seconds, because its harness
+/// reported idle. Ten minutes of that, then a working turn of the same pace, then its end.
+#[test]
+fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let second = 1_000_u128;
+    let state = |state: &str, at: u128| {
+        store
+            .append_latest_observation(&harness_state(subject, state, at as u64), at)
+            .unwrap();
+    };
+    let mut responses = 0;
+    let mut respond = |at: u128| {
+        responses += 1;
+        store
+            .append_latest_observation(&harness_usage(subject, "context_occupancy", responses, 0), at)
+            .unwrap();
+    };
+    state("idle", start);
+    for tick in 0..=150 {
+        respond(start + second + tick * 4 * second);
+    }
+    let resting = store.claims_for(subject, Some("harness.usage")).unwrap().len();
+    // The first reading, then one per five-minute interval of the ten minutes.
+    assert_eq!(resting, 3, "{resting} usage claims for 151 responses at rest");
+    let turn = start + 11 * 60 * second;
+    state("working", turn);
+    for tick in 0..75 {
+        respond(turn + second + tick * 4 * second);
+    }
+    state("idle", turn + 301 * second);
+    let total = store.claims_for(subject, Some("harness.usage")).unwrap().len();
+    // The interval during the turn, and its end.
+    assert_eq!(total, resting + 2, "{total} usage claims for {responses} responses");
+    let newest = store.latest_claim(subject, Some("harness.usage")).unwrap().unwrap();
+    assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
 }
 
 #[test]
@@ -11177,4 +11325,57 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
     assert!(check(2));
     runtime("exited", None);
     assert!(!check(2));
+}
+
+#[test]
+fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let diagnose = |code: &str, n: usize| {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "harness.diagnostic".into(),
+                actor: Some(subject.into()),
+                fields: serde_json::from_value(json!({"code": code, "incarnation_id": "one"}))
+                    .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("{code}:{n}")),
+            })
+            .unwrap()
+    };
+    let reads = || HARNESS_DIAGNOSTIC_READS.with(std::cell::Cell::get);
+    let prompt = diagnose("provider-trust-prompt", 0);
+    for n in 0..20 {
+        diagnose(if n % 2 == 0 { "claude-channel-attached" } else { "claude-channel-unattached" }, n);
+    }
+    let before = reads();
+    let codes = |diagnostics: &[ClaimRecord]| {
+        diagnostics.iter().map(|claim| claim.body["fields"]["code"].clone()).collect::<Vec<_>>()
+    };
+    // The channel's attachment reports are left out; the other diagnostics stay in order.
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-trust-prompt")]);
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-trust-prompt")]);
+    assert_eq!(reads(), before + 1, "an unchanged seat's diagnostics were read again");
+    let later = diagnose("provider-capacity", 0);
+    assert_eq!(
+        codes(&store.harness_diagnostics(subject).unwrap()),
+        [json!("provider-trust-prompt"), json!("provider-capacity")]
+    );
+    assert_eq!(reads(), before + 2, "an added diagnostic was not read");
+    // A checkpoint trim lowers the count, so the claims that remain are read again.
+    {
+        let mut connection = store.connection.write();
+        // Only the claim goes, as a trim would delete it; its signature and record stay.
+        connection.pragma_update(None, "foreign_keys", false).unwrap();
+        let tx = connection.transaction().unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-hedf22a898ad6 owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM claim_positions WHERE claim_id=?1", [&prompt.id]).unwrap();
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h88bcdc72f0ea owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "DELETE FROM claims WHERE id=?1", [&prompt.id]).unwrap();
+        tx.commit().unwrap();
+        connection.pragma_update(None, "foreign_keys", true).unwrap();
+    }
+    assert_eq!(codes(&store.harness_diagnostics(subject).unwrap()), [json!("provider-capacity")]);
+    assert_eq!(reads(), before + 3, "a trimmed diagnostic stayed");
+    assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
 }

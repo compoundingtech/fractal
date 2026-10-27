@@ -13,6 +13,12 @@ older pushes must not keep consuming runners after their source is superseded. M
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The five required queue checks and complete test partitions are retained.
 
+When a trusted note covers a pull request's web check, `fractal-web-execution` skips at job
+level and allocates no runner. The always-emitted `fractal-web` collector accepts that skip
+only for a pull request with an explicit evidence decision and successful change detection;
+failure and cancellation still fail. Merge-group and manual execution never take this shortcut,
+and the queue retains complete shard receipts.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
@@ -598,9 +604,16 @@ inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack s
 The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
 are disabled by the workspace configuration.
 The store cache key is
-`typescript-client-<os>-node24.18.0-pnpm12.7.0-<sha256 of pnpm-lock.yaml>`.
+`typescript-client-<os>-node24.18.0-pnpm12.15.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
+
+The effect-utils GVS shared-store default and `pnpm:store:retire` task do not
+relocate this workspace's stores: Fractal uses the hoisted linker, a plain
+`nix develop .#web` shell (not the upstream pnpm devenv tasks), explicit
+`${{ runner.temp }}/pnpm-store` in CI, and a sandbox-local `$TMPDIR/store`
+for the fixed-output installation. Store cache keys track pnpm 12.15.0;
+no legacy-store retirement is needed for this cutover.
 
 After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
@@ -651,6 +664,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   the final commit). `--no-renames` counts both sides of a rename. Missing or malformed
   SHAs, failed fetches and failed diffs conservatively select every web lane, including
   kit plays, with a warning; `workflow_dispatch` also forces all lanes.
+  Kit inputs explicitly include the raw PTY terminal surface and its bundled runtime
+  dependencies; terminal unit tests alone do not select kit plays.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
   `clients/typescript/fractal-views/**`, `clients/typescript/fractal-scenarios/**` and `fixtures/**`.
   Within `clients/typescript/fractal-client`, only the consumed export graph (`index.ts`,
@@ -677,7 +692,7 @@ their sandbox flags and declared-input boundary remain unchanged.
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
-  `fractal-web-pnpm-<os>-pnpm12.7.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  `fractal-web-pnpm-<os>-pnpm12.15.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
@@ -921,7 +936,7 @@ Calling-thread CPU excludes host descheduling and unrelated Node worker-thread C
 Each report includes all samples and host load averages; load never skips the lane or
 changes its thresholds.
 
-The web shell supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+The web shell supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
 mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching
@@ -1487,7 +1502,7 @@ repo-settings changes have merged.
 | --- | --- |
 | `fleet.yml` | The old fork-only fleet compatibility job is absorbed into `linux-gate`, which now covers every PR and main. This preserves fork coverage and adds same-repository coverage on Namespace. |
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
-| `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
+| `release-fractal.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
 | `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
@@ -1737,7 +1752,7 @@ it does not establish the cause of earlier digest mismatches or a measured speed
 ## Tests the sandboxed st3 check does not run
 
 `checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
-`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+`nix/fractal-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
 Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
 sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
 test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`

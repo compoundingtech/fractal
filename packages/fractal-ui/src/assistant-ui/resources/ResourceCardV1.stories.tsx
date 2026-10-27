@@ -21,12 +21,18 @@ const resource: ResourceData = {
 
 interface Args { scheme: 'dark' | 'light' }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Resources/Resource Card',
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exact two-file diff pins the visible and accessible name "2 changed files" while keyboard focus, Escape and Enter prove one tooltip, no native titles and full-detail dialog description; catalog diffs vary those counts and descriptions.' }, layout: 'fullscreen', docs: { description: { component: 'Resource card hover and standalone dialog: the hover card is the only hover disclosure and the dialog keeps the full detail as its description.' } } },
   args: { scheme: 'dark' },
   argTypes: { scheme: { control: 'inline-radio', options: ['dark', 'light'] } },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'HoverAndDialog:contract-fixture',
+]
 type Story = StoryObj<Args>
 
 export const HoverAndDialog: Story = { name: 'Hover and dialog · no native titles', render: ({ scheme }) => <main {...stylex.props(styles.root, ...baselineTheme, ...(scheme === 'light' ? lightTheme : []))}><ThemePortal><div {...stylex.props(styles.frame)}><ResourceCardV1 resource={resource} variant="RC-2" /></div></ThemePortal></main>, play: async ({ canvasElement }) => {

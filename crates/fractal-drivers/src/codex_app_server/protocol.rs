@@ -44,8 +44,9 @@ pub(super) fn ensure_supported_protocol(codex: &str) -> Result<String> {
         .with_context(|| format!("generating the Codex app-server schema from {codex}"))?;
     anyhow::ensure!(
         output.status.success(),
-        "{codex} app-server schema generation failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
+        "{codex} app-server schema generation failed ({}): {}",
+        output.status,
+        super::diagnostic_output_tail(&output.stderr)
     );
     let read_schema = |name: &str| -> Result<Value> {
         let path = generated.path().join(name);
@@ -518,16 +519,17 @@ fn nullable_schema<'a>(
     resolve_schema(definitions, only)
 }
 
-/// Every unit word of a `oneOf` union that mixes a string enum with data-carrying object arms —
-/// the shape `CodexErrorInfo` has. Only the enum arms carry words st2 can match on.
+/// Every unit word of a union mixing string enums with data-carrying object arms.
+/// Codex 0.164.0 emits `anyOf`; earlier releases emitted `oneOf`. Both contain the
+/// same unit words used for typed error classification.
 fn schema_variant_words(
     definitions: &serde_json::Map<String, Value>,
     definition: &str,
 ) -> Result<BTreeSet<String>> {
-    let arms = schema_definition(definitions, definition)?
-        .get("oneOf")
+    let schema = schema_definition(definitions, definition)?;
+    let arms = schema.get("oneOf").or_else(|| schema.get("anyOf"))
         .and_then(Value::as_array)
-        .with_context(|| format!("{definition} has no oneOf variants"))?;
+        .with_context(|| format!("{definition} has no oneOf or anyOf variants"))?;
     let mut words = BTreeSet::new();
     for arm in arms {
         let Some(values) = resolve_schema(definitions, arm)?

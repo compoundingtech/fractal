@@ -245,7 +245,7 @@ fn move_command(unit: &str, pid: u32, slice: Option<&str>, runtime_id: &str) -> 
     ]);
     let weight = LIVE_WEIGHT.to_string();
     let memory_low = LIVE_MEMORY_LOW.to_string();
-    let description = format!("st PTY server for {runtime_id}");
+    let description = format!("Fractal PTY server for {runtime_id}");
     let pid = pid.to_string();
     let mut properties: Vec<[&str; 3]> = vec![
         ["Description", "s", &description],

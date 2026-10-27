@@ -10,13 +10,27 @@ only when every active member advertises support. An older-release member that
 returns within **30 days offline** must not block or corrupt the fleet.
 
 **Implementation status: open — [#4002](https://github.com/compoundingtech/fractal/issues/4002).**
-This is the required contract and design sketch, not a claim that current releases
-meet it. Until the implementation and acceptance tests land, installing the same
-verified source on every member remains the safe operational guidance; it is not
-the compatibility requirement. Read each release's **Upgrade impact** before restart.
-Check exact sources using `BUILD.json`, `RELEASE.json`, `st --version --json`, and
-the daemon's `machine_version` in `st doctor --json`. Installing an archive does not
-replace a running daemon.
+The Q22 window is a required target and design sketch, **not a current guarantee**.
+Hosts roll out independently today through
+[per-feature peer capability negotiation](replication.md#peer-protocol-capability-negotiation):
+every new peer operation and changed ID or wire format must be gated before dispatch
+at each hop. Missing support requires a genuinely compatible fallback or a typed
+`peer-too-old` refusal with upgrade guidance, never a speculative request to an older
+decoder. An unsupported feature does not make the entire mixed fleet unsupported.
+The adjacent-release target covers baseline work and features without a negotiated
+gate; it neither substitutes for capability checks nor authorizes new ungated
+incompatible changes. Features requiring all-member activation have the additional
+admission conditions below, not a coordinated host-rollout requirement.
+
+Read each release's **Upgrade impact** before restart. A patch tag is a publication
+label, not a promise of compatible databases or safe rollback. Check exact sources
+using `BUILD.json`, `RELEASE.json`, `st --version --json`, and the daemon's
+`machine_version` in `st doctor --json`. Downloading or installing an archive does
+not restart or replace the running daemon **process**. It does replace installed
+command files and, on macOS, the app bundle. Until an explicit restart, the daemon
+keeps its current build while new CLI invocations use the installed build. Follow
+the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
+alone as a daemon upgrade.
 
 ### Additive claims and unknown-field retention
 
@@ -218,7 +232,7 @@ the existing fragment-presence/schema check is not this acceptance proof.
 | --- | --- |
 | Linux x86_64 archive | glibc 2.35+ (for example Ubuntu 22.04), Bash or Zsh, CA certificates, `curl`, `tar`, a checksum tool and Git for the walkthrough. Persistent service setup needs a systemd user manager; enable lingering for work after logout. Archives include the pinned PTY runtime and need neither Rust nor Nix. Native release CI verifies extraction, installation, exact source and CLI/TUI smoke tests. |
 | Apple Silicon archive | macOS 15+, `curl`, `tar`, `shasum`, Git and Python 3. Installer creates `SmallTalk.app`, with ad-hoc signing unless explicitly configured otherwise. LaunchAgent permissions and login remain user setup. Optional voice-helper builds need Xcode's macOS 26 SDK; voice is not an onboarding prerequisite. |
-| Nix profile or Home Manager | A Nix installation with `nix-command` and `flakes` enabled. It supplies build dependencies and PTY; pin the same source across members. Home Manager owns service paths when that route is selected. Harness login and host permissions remain separate. |
+| Nix profile or Home Manager | A Nix installation with `nix-command` and `flakes` enabled. It supplies build dependencies and PTY; pin and verify each member's source, negotiating capabilities across independently upgraded hosts. Home Manager owns service paths when that route is selected. Harness login and host permissions remain separate. |
 
 A **fresh Mac onboarding rehearsal remains unverified**. The separate macOS workspace CI is
 [manually disabled](https://github.com/compoundingtech/fractal/actions/workflows/macos.yml)

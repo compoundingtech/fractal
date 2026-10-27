@@ -57,8 +57,30 @@ function Example({ sticky = true, cold = false, width = 440, light = false, noSe
 // non-sticky single scroll already lands clear, so only the sticky band can expose an unsettled reveal.
 function Pair({ cold = false, width = 440, light = false }: { readonly cold?: boolean; readonly width?: number; readonly light?: boolean }) { return <main {...stylex.props(styles.matrix)}><Example cold={cold} width={width} light={light} /><Example sticky={cold} noSettle={cold} cold={cold} width={width} light={light} /></main> }
 const geometryReason = 'Synthetic depth-6 tree geometry with controlled breadth and stable reveal keys exercises sticky ancestor caps, push-out, focus, collapse and narrow breadcrumbs. Scenario worlds express tree depths only up to 3, not this geometry contract.'
-const meta = { title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled, or for the cold reveal with measured settling disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Sidebar tree', component: SidebarTree, parameters: { layout: 'fullscreen', docs: { description: { component: 'A measured RAC treegrid. Sticky copies are hidden from accessibility and inert; every regression includes a production-component comparison with stickiness disabled, or for the cold reveal with measured settling disabled. RAC represents tree items as treegrid rows.' } } } } satisfies Meta
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AccessibleRows:contract-fixture',
+  'AllStates:contract-fixture',
+  'ChevronIcons:contract-fixture',
+  'ColdRevealBeforeMeasurement:contract-fixture',
+  'CollapseFilterReorder:contract-fixture',
+  'Dark1440:contract-fixture',
+  'DepthCap:contract-fixture',
+  'FocusAndReveal:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+  'Modal240:contract-fixture',
+  'Modal240Light:contract-fixture',
+  'PinnedClick:contract-fixture',
+  'PushOutBoundary:contract-fixture',
+  'RevealAfterWidthChange:primitive',
+  'RevealUnvisitedAncestors:contract-fixture',
+  'StickyChain:contract-fixture',
+  'VisibleFocusDoesNotJump:contract-fixture',
+]
 type Story = StoryObj
 const frames = async () => { await document.fonts.ready; for (let i = 0; i < 6; i++) await new Promise<void>(resolve => requestAnimationFrame(() => resolve())) }
 /** Asynchronous settling (reveal retries, ResizeObserver delivery) on a contended CI host; assertions are unchanged. */
