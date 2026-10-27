@@ -662,7 +662,7 @@ test('ordered membership root/place/remove/page and strict versioned bodies roun
     assert.deepEqual(roundTrip(Rich.OrderedMembershipOperation, fixture.edit.parameters.operations[1]), fixture.edit.parameters.operations[1]);
     assert.deepEqual(roundTrip(Rich.OrderedMembershipPage, fixture.page), {
         ...fixture.page,
-        page: { ...fixture.page.page, next_cursor: null, cursor_expires_at: null },
+        page: { ...fixture.page.page, next_cursor: null, cursor_expires_at: null, omitted_items: null },
     });
     assert.deepEqual(roundTrip(Rich.ActionRequest, fixture.edit), fixture.edit);
     assert.deepEqual(roundTrip(Rich.CollectionCommand, fixture.subscribe), fixture.subscribe);
