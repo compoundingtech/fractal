@@ -958,11 +958,11 @@ export const fractalWebJobs = {
           KIT_SHARD_COUNT: kitShardCountExpression,
           KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
           // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
-          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
+          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out), with calibrated CPU cost;
           // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
           KIT_PLAY_SET: kitPlaySetExpression,
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
-          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
+          KIT_PLAY_WALL_GUARD_SECONDS: "${{ github.event_name == 'pull_request' && '268' || '' }}",
           // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
           // placed in the import graph); merge groups and manual runs run every test file.
           APP_TEST_SET: appTestSetExpression,
