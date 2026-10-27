@@ -789,6 +789,8 @@ const unreportedReason = 'The number of subagents isn’t reported.'
  * its inverted surface (light on a dark root), and replaces the row's hover card instead of stacking on it.
  */
 const expectExplained = async (trigger: HTMLElement, root: HTMLElement, text: string, light: boolean, where: string) => {
+  // Establish pointer modality before entering: userEvent sends pointerenter before its first pointermove after a key.
+  await userEvent.hover(root)
   await userEvent.hover(trigger)
   const hovered = await within(document.body).findByRole('tooltip').catch(error => { throw new Error(`${where}: hover did not disclose ${text}`, { cause: error }) })
   await expect(hovered, `${where}: hover tooltip`).toHaveTextContent(text)
