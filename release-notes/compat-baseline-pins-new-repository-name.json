@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The compatibility baseline pins name the release archives under the renamed repository, so the published-release freshness check passes again.",
+  "replay": {"status": "none", "detail": "No claim, replay or projection change; CI configuration and its test only."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "The pinned archives and their SHA-256 digests are unchanged; only the URL's repository name changes."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to restore the old URLs."}
+}

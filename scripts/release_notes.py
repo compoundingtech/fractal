@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render source-pinned notes; incomplete impact metadata blocks publication only."""
+"""Validate and render source-pinned release upgrade-impact notes."""
 import argparse
 import json
 import math
@@ -19,10 +19,24 @@ FIELDS = {
 }
 VERSIONS = {
     'schema': ('crates/smallclaims/src/store.rs', r'pub const SCHEMA_VERSION:.*?user_version\s*=\s*(\d+)'),
-    'rules': ('crates/st3/src/store/checkpoint_rules.rs', r'pub const RULES_VERSION:\s*u32\s*=\s*(\d+)'),
+    'rules': ('crates/fractal-store/src/store/checkpoint_rules.rs', r'pub const RULES_VERSION:\s*u32\s*=\s*(\d+)'),
+}
+# Where a version constant lived before the file moved; a release range may start before the move.
+LEGACY_PATHS = {
+    'crates/fractal-store/src/store/checkpoint_rules.rs': (
+        'crates/st3-store/src/store/checkpoint_rules.rs',
+        'crates/st3-daemon/src/store/checkpoint_rules.rs',
+        'crates/st3/src/store/checkpoint_rules.rs',
+    ),
+    'crates/fractal-storage-version/src/lib.rs': (
+        'crates/st-storage-version/src/lib.rs',
+    ),
 }
 FRAGMENTS = 'release-notes/'
 SHA = re.compile(r'[0-9a-f]{40}')
+# PRs already open when #1661 introduced the check keep their prior merge policy.
+# They still need complete classification before a public release.
+PR_ADOPTION_BOUNDARY = 1661
 
 
 class ImpactError(ValueError):
@@ -96,9 +110,26 @@ def validate(fragment, path):
             raise ImpactError(f'{path}.downtime: measurements require changed or unknown status')
 
 
+def version_source(repo, source, path):
+    for candidate in (path, *LEGACY_PATHS.get(path, ())):
+        try:
+            return candidate, subprocess.check_output(
+                ['git', 'show', f'{source}:{candidate}'], cwd=repo, text=True, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            continue
+    raise ImpactError(f'{source[:12]}: {path} is missing (also tried {list(LEGACY_PATHS.get(path, ()))})')
+
+
 def version(repo, source, field):
     path, pattern = VERSIONS[field]
-    content = source_text(repo, source, path)
+    path, content = version_source(repo, source, path)
+    if field == 'schema' and re.search(
+        r'pub use (?:fractal_storage_version|st_storage_version)::STORAGE_VERSION as CURRENT_SCHEMA_VERSION;', content
+    ):
+        # Read the authoritative constant from the candidate tree. Historical releases
+        # still keep their version in smallclaims' PRAGMA declaration.
+        path, content = version_source(repo, source, 'crates/fractal-storage-version/src/lib.rs')
+        pattern = r'pub const STORAGE_VERSION:\s*u32\s*=\s*(\d+)'
     match = re.search(pattern, content)
     if not match:
         raise ImpactError(f'{source[:12]}: cannot identify {field} version in {path}')
@@ -157,10 +188,68 @@ def collect(repo, since, source):
     }
 
 
-def render(repo, previous, source, tag, repository='compoundingtech/smalltalk', since=None):
+def check_pull_request(repo, base, source, pr_number=None, queue_ref=None):
+    """Check the effective merge tree, independently of the unreleased main backlog.
+
+    Each new first-parent PR merge in a queue group needs a fresh fragment. Existing
+    fragments are immutable; a later correction or backfill gets its own file.
+    No event identity means strict local validation without a rollout exemption.
+    """
+    base, source = resolve(repo, base), resolve(repo, source)
+    if subprocess.run(['git', 'merge-base', '--is-ancestor', base, source], cwd=repo).returncode:
+        raise ImpactError('PR/queue base must be an ancestor of the effective merge source')
+    changes = git(repo, 'diff', '--no-renames', '--name-status', base, source, '--', FRAGMENTS).splitlines()
+    for change in changes:
+        status, path = change.split('\t', 1)
+        if path.endswith('.json') and status != 'A':
+            raise ImpactError(f'{path}: existing fragments are immutable; add a new fragment for corrections')
+    commits = git(repo, 'rev-list', '--first-parent', '--reverse', f'{base}..{source}').splitlines()
+    if not commits:
+        raise ImpactError('no integrated change to classify')
+    queue_number = None
+    if queue_ref is not None:
+        match = re.fullmatch(r'(?:refs/heads/)?gh-readonly-queue/main/pr-(\d+)-[0-9a-f]{40}', queue_ref)
+        if not match:
+            raise ImpactError('cannot identify PR from merge-group head ref')
+        queue_number = int(match[1])
+    coverage, exemptions, version_changes = {}, {}, []
+    for commit in commits:
+        number = pr_number
+        if queue_number is not None:
+            subject = git(repo, 'show', '-s', '--format=%s', commit)
+            match = re.match(r'Merge pull request #(\d+) from ', subject)
+            # The ref identifies a single-PR group even with a custom merge message.
+            # For a multi-PR group, identify every member rather than exempting the
+            # whole group based on its head PR's number.
+            if match:
+                number = int(match[1])
+            elif len(commits) == 1:
+                number = queue_number
+            else:
+                raise ImpactError(f'{commit}: cannot identify a PR in the multi-PR merge group')
+        added = git(repo, 'diff', '--no-renames', '--name-only', '--diff-filter=A',
+                    f'{commit}^1', commit, '--', FRAGMENTS).splitlines()
+        fresh = [path for path in added if path.endswith('.json')]
+        exempt = number is not None and number <= PR_ADOPTION_BOUNDARY
+        if not fresh and not exempt:
+            raise ImpactError(f'{commit}: add a uniquely named release-notes/NAME.json for this PR, including docs-only changes')
+        if not fresh:
+            exemptions[commit] = number
+            continue
+        report = collect(repo, f'{commit}^1', commit)
+        coverage.update(report['coverage'])
+        version_changes.extend(report['version_changes'])
+    # Reuse the publication contract, including explicit statuses, measurements and
+    # declared schema/rules transitions. Old PRs without notes are exempt only from
+    # the PR gate; collect() for publication never receives or applies exemptions.
+    return {'previous_source': base, 'source': source, 'coverage': coverage,
+            'version_changes': version_changes, 'exemptions': exemptions}
+
+
+def render(repo, previous, source, tag, repository='compoundingtech/fractal', since=None):
     report = collect(repo, since or previous, source)
     source, since = report['source'], report['previous_source']
-    lines = [f'Smalltalk {tag} at `{source}`. Artifacts identify this exact source in RELEASE.json.', '',
+    lines = [f'Fractal {tag} at `{source}`. Artifacts identify this exact source in RELEASE.json.', '',
              '## Upgrade impact', '',
              f'From **{previous}** (`{since}`) to **{tag}** (`{source}`).',
              'This classification covers the entire source interval. Earlier starting releases may have additional requirements.', '',
@@ -186,12 +275,15 @@ def render(repo, previous, source, tag, repository='compoundingtech/smalltalk', 
                              f'Method: {observation["method"]}. These are contextual observations, not a downtime guarantee.')
         lines.append('')
     lines.extend([f'## Changes since {previous}', ''])
+    report['change_links'] = {}
     for commit in report['coverage']:
         raw = git(repo, 'show', '-s', '--format=%s%n%b', commit)
         subject, _, body = raw.partition('\n')
         merge = re.match(r'Merge pull request #(\d+) from ', subject)
         title = body.strip().splitlines()[0] if merge and body.strip() else subject
         link = f'https://github.com/{repository}/pull/{merge.group(1)}' if merge else f'https://github.com/{repository}/commit/{commit}'
+        for path in report['coverage'][commit]:
+            report['change_links'].setdefault(path, link)
         lines.append(f'- [{title}]({link})')
     if not report['coverage']:
         lines.append('- No source changes.')
@@ -208,7 +300,7 @@ def main():
     parser.add_argument('--output', type=Path, help='Notes file; default stdout')
     parser.add_argument('--manifest', type=Path, help='Optional machine-readable impact report')
     parser.add_argument('--repo', type=Path, default=Path(__file__).resolve().parent.parent)
-    parser.add_argument('--repository', default='compoundingtech/smalltalk')
+    parser.add_argument('--repository', default='compoundingtech/fractal')
     args = parser.parse_args()
     previous = args.previous or subprocess.check_output(
         ['gh', 'release', 'view', '--repo', args.repository, '--json', 'tagName', '--jq', '.tagName'], text=True

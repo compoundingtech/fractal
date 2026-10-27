@@ -13,7 +13,7 @@ fn write(root: &Path, relative: &str, contents: &str) {
 }
 
 fn author(root: &Path, state: &str, reason: Option<&str>) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_st2"));
+    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st2"));
     command.args([
         "--catalog",
         root.to_str().unwrap(),
@@ -38,7 +38,7 @@ fn author_target(
     reason: Option<&str>,
     managed_by: Option<&str>,
 ) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_st2"));
+    let mut command = Command::new(test_env!("CARGO_BIN_EXE_st2"));
     command.args([
         "--catalog",
         root.to_str().unwrap(),
@@ -60,7 +60,7 @@ fn author_target(
 }
 
 fn author_as(root: &Path, actor: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_st2"))
+    Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args([
             "--catalog",
             root.to_str().unwrap(),
@@ -125,7 +125,7 @@ fn cli_suspends_resumes_and_retires_without_rewriting_unrelated_source() {
 
     let retired = author(root, "retired", Some("Mission complete"));
     assert!(retired.status.success());
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     let worker = found
         .specs
@@ -257,7 +257,7 @@ fn cli_managed_by_authority_retires_a_projected_seat_and_refuses_every_inexact_c
     write(root, "h/seat/agent.kdl", projected);
 
     let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_st2"))
+        Command::new(test_env!("CARGO_BIN_EXE_st2"))
             .args([
                 "--catalog",
                 root.to_str().unwrap(),
@@ -310,7 +310,7 @@ fn cli_managed_by_authority_retires_a_projected_seat_and_refuses_every_inexact_c
     );
 
     // The seat now reads back as retired, which is what the activation leg verifies.
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     assert!(
         found
@@ -360,7 +360,7 @@ fn cli_applies_the_existing_self_or_descendant_authority_guardrail() {
     let receipt: serde_json::Value = serde_json::from_slice(&refused.stdout).unwrap();
     assert_eq!(receipt["code"], "desired-state-not-authorized");
     assert!(
-        st2::discover(root)
+        fractal_legacy_runner::discover(root)
             .specs
             .iter()
             .any(|spec| spec.identity == "worker" && spec.desired_state.is_running())
@@ -386,7 +386,7 @@ fn legacy_retirement_reads_and_authoring_preserves_resources() {
     write(root, "h/worker/agent.kdl", &legacy);
 
     // Read compatibility: legacy `retired #true` is retired and its resources parse.
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     let worker = found
         .specs
@@ -408,7 +408,7 @@ fn legacy_retirement_reads_and_authoring_preserves_resources() {
     assert!(!authored.contains("desired-state"), "{authored}");
     assert!(authored.contains("resource \"work\" uri=\"work://h/current-task\""));
     assert!(authored.contains("resource \"issue\" uri=\"github-issue://example/project/41\""));
-    let running_spec = st2::discover(root);
+    let running_spec = fractal_legacy_runner::discover(root);
     let worker = running_spec
         .specs
         .iter()
@@ -429,7 +429,7 @@ fn legacy_retirement_reads_and_authoring_preserves_resources() {
     assert!(!authored.contains("retired #true"), "{authored}");
     assert!(authored.contains("resource \"work\" uri=\"work://h/current-task\""));
     assert!(authored.contains("resource \"issue\" uri=\"github-issue://example/project/41\""));
-    let found = st2::discover(root);
+    let found = fractal_legacy_runner::discover(root);
     let worker = found
         .specs
         .iter()
@@ -619,7 +619,7 @@ fn valid_retirement_ignores_an_unrelated_preexisting_core_error() {
     let receipt: serde_json::Value = serde_json::from_slice(&retired.stdout).unwrap();
     assert_eq!(receipt["result"], "changed");
     assert_eq!(receipt["desired_state"], "retired");
-    let report = st2::validate::validate_for_host(root, "h");
+    let report = fractal_legacy_runner::validate::validate_for_host(root, "h");
     assert!(
         report
             .issues

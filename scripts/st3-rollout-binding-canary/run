@@ -14,11 +14,13 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import traceback
 import uuid
 
 HERE = Path(__file__).resolve().parent
 boot = runpy.run_path(str(HERE.parent / "st3-boot-canaries/run"))
 Node, until, Failure, trace = (boot[key] for key in ("Node", "until", "Failure", "trace"))
+from st3_test_evidence import register, capture, write_json
 SUBJECT = "agent/garden/cedar"
 
 
@@ -45,6 +47,7 @@ def start_observations(node):
 
 
 def run(args, root, evidence):
+    register(root, evidence)
     node = Node(root, args.binary.resolve(), "omp")
     provider = args.omp or shutil.which("omp")
     mode = "real-omp" if provider else "fixture (OMP unavailable on runner)"
@@ -174,6 +177,8 @@ agent "garden/cedar" {{
             starts = [json.loads(line) for line in path.read_text().splitlines()]
             sessions = [row for row in starts if row.get("event") == "session"]
             assert len(sessions) == 2 and all(row["sessionId"] == native for row in sessions), sessions
+            assert all(row["sessionFile"] == str(transcript) and row["resumed"] is True
+                       for row in sessions), sessions
             assert not any(row.get("event") == "turn" for row in starts), starts
         messages = [json.loads(line) for line in transcript.read_text().splitlines()
                     if json.loads(line).get("type") == "message"]
@@ -184,17 +189,22 @@ agent "garden/cedar" {{
     except Exception as error:
         return {"verdict": "fail", "provider": mode, "version": version, "failure": str(error)}
     finally:
-        if node.daemon and node.daemon.poll() is None:
-            (evidence / "trace.jsonl").write_text(node.cli("trace", "show", SUBJECT,
-                                                          "--json", "--limit", "500", check=False))
-            (evidence / "agent.json").write_text(node.cli("agents", "show", SUBJECT, "--json", check=False))
-            (evidence / "start-observations.json").write_text(json.dumps(start_observations(node), indent=2) + "\n")
-        node.stop()
-        shutil.copy2(root / "daemon.log", evidence / "daemon.log")
-        for index, path in enumerate((root / "state/drivers").rglob("driver.log")):
-            shutil.copy2(path, evidence / f"driver-{index}.log")
-        if receipts.exists():
-            shutil.copy2(receipts, evidence / "native-starts.jsonl")
+        try:
+            errors = capture(root, evidence)
+            if errors:
+                raise Failure("evidence capture failed: " + "; ".join(errors))
+            if node.daemon and node.daemon.poll() is None:
+                (evidence / "trace.jsonl").write_text(node.cli("trace", "show", SUBJECT,
+                                                              "--json", "--limit", "500", check=False))
+                (evidence / "agent.json").write_text(node.cli("agents", "show", SUBJECT, "--json", check=False))
+                write_json(evidence / "start-observations.json", start_observations(node))
+        finally:
+            try:
+                node.stop()
+            finally:
+                errors = capture(root, evidence, final=True)
+                if errors:
+                    raise Failure("evidence capture failed: " + "; ".join(errors))
 
 
 def main():
@@ -212,12 +222,14 @@ def main():
     root = boot["private_root"]()
     try:
         result = run(args, root, args.evidence.resolve())
-    finally:
-        shutil.rmtree(root)
-    (args.evidence / "result.json").write_text(json.dumps(result, indent=2) + "\n")
+    except Exception as error:
+        result = {"verdict": "fail", "failure": f"{type(error).__name__}: {error}",
+                  "traceback": traceback.format_exc()}
+    write_json(args.evidence / "result.json", result)
     print(json.dumps(result), flush=True)
     return 0 if result["verdict"] == "pass" else 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    from st3_test_process import supervised_main
+    sys.exit(supervised_main(main))
