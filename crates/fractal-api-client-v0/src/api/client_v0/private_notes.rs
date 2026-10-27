@@ -65,7 +65,40 @@ fn publish_observation(state: &AppState, input: &mut ClaimInput) -> Result<(), S
     Ok(())
 }
 
-pub(super) async fn write(state: &AppState, session: &ClientSession, request: &mut ActionRequest) -> Result<Value, ApiError> {
+fn reserve_key(state: &AppState, authority: &str, subject: &str, digest: &str) -> Result<(), St3Error> {
+    let reservation = ClaimInput {
+        subject: subject.into(),
+        kind: "client.action-result".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("authority_actor".into(), json!(authority)),
+            ("request_digest".into(), json!(digest)),
+            ("result".into(), json!({"status":"reserved"})),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: Some(None),
+        idempotency_key: None,
+    };
+    match state.store.append_claim(&reservation) {
+        Ok(_) => Ok(()),
+        Err(error) if error.code == "stale-subject" => {
+            let receipt = state.store.observations_for(subject, "client.action-result")
+                .map_err(|_| St3Error::new("private-notes-indeterminate", "the shared action key reservation is unavailable"))?
+                .into_iter()
+                .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none());
+            if receipt.as_ref().and_then(|receipt| receipt.body.pointer("/fields/request_digest"))
+                .and_then(Value::as_str) == Some(digest)
+            {
+                Ok(())
+            } else {
+                Err(St3Error::new("idempotency-conflict", "the idempotency key was already used for a different action"))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) async fn write(state: &AppState, session: &ClientSession, request: &mut ActionRequest, receipt_subject: &str, request_digest: &str) -> Result<Value, ApiError> {
     require_scope(session, "control.work")?;
     if !acting_party(session) {
         return Err(forbidden("client mutations require a concrete person or a local agent"));
@@ -101,10 +134,18 @@ pub(super) async fn write(state: &AppState, session: &ClientSession, request: &m
     let writer = state.clone();
     let actor = session.actor.clone();
     let key = request.idempotency_key.clone();
+    let authority = session.authority_actor.clone();
+    let receipt_subject = receipt_subject.to_owned();
+    let request_digest = request_digest.to_owned();
     let mut result = super::super::blocking_action(move || {
         writer.private_notes.write_with_audit(
             &writer.node, &writer.state_dir, &actor, &key, &write,
-            || publish_observation(&writer, &mut audit.borrow_mut()),
+            || {
+                // Reserve the shared key before any private mutation. Even an indeterminate
+                // completion must exclude other actions until exact-key recovery succeeds.
+                reserve_key(&writer, &authority, &receipt_subject, &request_digest)?;
+                publish_observation(&writer, &mut audit.borrow_mut())
+            },
             || {
                 let mut completed = audit.borrow_mut();
                 completed.fields.insert("stage".into(), json!("completed"));
@@ -258,6 +299,17 @@ mod tests {
             BEGIN SELECT RAISE(FAIL, 'completed audit refusal'); END;").unwrap();
         assert_eq!(invoke(&state, &session, request.clone()).await.unwrap_err().code, "private-notes-indeterminate");
         assert_eq!(std::fs::read_to_string(&carrier).unwrap(), "Private durable context.\n");
+        let conflicting = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/pending-notes-cross-action".into(),
+            action_type: "message.send".into(),
+            idempotency_key: request.idempotency_key.clone(),
+            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+            parameters: json!({"to":"agent/worker","content":"must not steal a pending notes key"}),
+        };
+        let index = state.store.index().unwrap();
+        assert_eq!(invoke(&state, &session, conflicting).await.unwrap_err().code, "idempotency-conflict");
+        assert_eq!(state.store.index().unwrap(), index);
         let before = std::fs::metadata(&carrier).unwrap();
         let newer = read(&state, &session).await;
         let other = action(&newer, "notes-other-operation-0001", "must not bypass pending completion");

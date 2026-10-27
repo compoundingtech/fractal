@@ -8692,7 +8692,7 @@ async fn action_inner(
             // Never replay a private fence from the graph or bypass current
             // ownership checks and owner-local exact-request recovery.
             validate_fence(&state, &request.fence)?;
-            return private_notes::write(&state, &session, &mut request).await.map(Json);
+            return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
         }
         let mut result = receipt
             .body
@@ -8890,11 +8890,9 @@ async fn action_inner(
     } else {
         None
     };
-    let notes_result = if request.action_type == "private-notes.write" {
-        Some(private_notes::write(&state, &session, &mut request).await?)
-    } else {
-        None
-    };
+    if request.action_type == "private-notes.write" {
+        return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
+    }
     let affected = if let Some(attachment) = &terminal_attachment {
         vec![
             attachment["attachment_id"]
@@ -8904,16 +8902,11 @@ async fn action_inner(
         ]
     } else if let Some(claim) = &arrangement_claim {
         vec![claim.subject.clone()]
-    } else if notes_result.is_some() {
-        Vec::new()
     } else {
         dispatch_action(&state, &snapshot, &session, &request).await?
     };
     let operation_id = format!("operation/client-{}", &request_digest[..24]);
     let mut result = json!({ "kind": "action-result", "action_id": request.id, "operation_id": operation_id, "status": "completed", "affected_ids": affected });
-    if let Some(notes) = notes_result {
-        result = notes;
-    }
     if let Some(attachment) = terminal_attachment {
         result["terminal_attachment"] = attachment;
     }
@@ -8931,9 +8924,6 @@ async fn action_inner(
         .as_object_mut()
         .expect("action result is an object")
         .remove("terminal_attachment");
-    // Private recovery fences belong only to the owner-local receipt.
-    persisted_result.as_object_mut().expect("action result is an object").remove("private_notes");
-    persisted_result.as_object_mut().expect("action result is an object").remove("snapshot_id");
     let receipt_write = state.store.append_claim(&ClaimInput {
         subject: receipt_subject.clone(),
         kind: "client.action-result".into(),
@@ -8976,10 +8966,6 @@ async fn action_inner(
                 message: "the idempotency key was already used for a different action".into(),
                 details: Box::default(),
             });
-        }
-        if request.action_type == "private-notes.write" {
-            result["snapshot_id"] = Value::String(new_client_snapshot(&state).id);
-            return Ok(Json(result));
         }
         let mut replay = receipt
             .body
