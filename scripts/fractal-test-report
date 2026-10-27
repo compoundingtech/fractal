@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""How long the per-PR suite takes on a dev box: scripts/st-test's own run records against the time objective.
+"""How long the per-PR suite takes on a dev box: scripts/fractal-test's own run records against the time objective.
 
   scripts/fractal-test-report [RUNS.jsonl ...] [--hours 24 | --since 2026-10-24T00:00:00Z] [--slo-s 720] [--max-s 900] [--markdown]
 
-Reads the lines scripts/st-test appends after every run (default ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl, or ST_TEST_RUNS) and
+Reads the lines scripts/fractal-test appends after every run (default ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl, or ST_TEST_RUNS) and
 prints JSON, or with --markdown a short table. Nothing is written and nothing is run.
 
-The objective (docs/st3/gate-evidence.md, "Running the checks locally"): a full warm run of the per-PR suite (`scripts/st-test` with no
+The objective (docs/st3/gate-evidence.md, "Running the checks locally"): a full warm run of the per-PR suite (`scripts/fractal-test` with no
 --check and no --crate, on a kept build target) takes 12 minutes (--slo-s 720) or less. Only such runs in the window (by `ended`) count, and
 only those that ran and signed all of it: exit 0. The others are counted by why they are left out: `not_full`, `cold`, `partial` (exit 4:
 a tree that edits a lane runs nothing for that check, so its time is not a run of the suite) and `failed`. Percentiles are nearest-rank (p90 of N sorted values is the
@@ -29,7 +29,7 @@ PARTIAL = 4  # nothing failed, but a check did not run: the tree edits its lane 
 
 
 def default_path():
-    """Where scripts/st-test records its runs (the same rule it uses)."""
+    """Where scripts/fractal-test records its runs (the same rule it uses)."""
     value = os.environ.get('ST_TEST_RUNS', '')
     if value and value != 'off':
         return Path(value)
@@ -142,7 +142,7 @@ def markdown(result):
     excluded = ', '.join(f'{count} {reason}' for reason, count in result['excluded'].items() if count) or 'none'
     share = '-' if result['within_slo'] is None else f'{result["within_slo"]:.0%}'
     unreadable = f'; {result["unreadable"]} unreadable lines' if result['unreadable'] else ''
-    lines = [f'**st-test full warm runs**, {result["window"]["since"]} .. {result["window"]["until"]}: {result["count"]} counted '
+    lines = [f'**fractal-test full warm runs**, {result["window"]["since"]} .. {result["window"]["until"]}: {result["count"]} counted '
              f'(left out: {excluded}{unreadable})', '',
              f'Objective: p90 at most {result["slo_s"]}s, no run over {result["max_allowed_s"]}s; {share} of runs within {result["slo_s"]}s.', '',
              '| runs | count | p50 | p90 | max |', '|---|---:|---:|---:|---:|',
@@ -159,7 +159,7 @@ def markdown(result):
 
 def main(argv, now=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
-    parser.add_argument('files', nargs='*', metavar='RUNS.jsonl', help='default: the file scripts/st-test writes')
+    parser.add_argument('files', nargs='*', metavar='RUNS.jsonl', help='default: the file scripts/fractal-test writes')
     parser.add_argument('--hours', type=float, default=24.0, help='the window, ending now (default 24)')
     parser.add_argument('--since', help='the window starts here instead (ISO 8601, UTC)')
     parser.add_argument('--slo-s', type=int, default=720, help='the p90 objective in seconds (default 720)')

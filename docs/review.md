@@ -8,7 +8,7 @@ conversation, and so that two reviewers given the same head reach the same verdi
 A change goes from idea to main in this order, and each agent does all of it for its own change:
 
 1. **Idea and development.** The author works on a branch and merges `main` into it (never rebases, never force-pushes).
-2. **Signed checks.** `scripts/st-test --all --push origin` runs every check on the head and signs what it ran. No push goes out
+2. **Signed checks.** `scripts/fractal-test --all --push origin` runs every check on the head and signs what it ran. No push goes out
    with a check unsigned; a check that fails or flakes is fixed first.
 3. **Signed review.** The review below runs on the signed head and produces a structured verdict, which is signed like a check.
 4. **Merge queue.** A head with every check signed and a signed review that is `GO` at **low** or **medium** risk is put in the
@@ -72,7 +72,7 @@ All at one exact head:
    which includes a head that is only a merge of `main` with an empty `git show --remerge-diff`.
 2. **It merges cleanly.** `git merge-tree --write-tree origin/main <head>` succeeds. Whether a clean merge still breaks something
    that changed on `main` is judged by the checks signed on the merge (see "Behind main"), not guessed by the reviewer.
-3. **Every check is signed at this head** (`scripts/st-test --status`; or the merge of this head with `main`, where the protected
+3. **Every check is signed at this head** (`scripts/fractal-test --status`; or the merge of this head with `main`, where the protected
    files moved), and none is red; the required checks on GitHub agree. A skipped check is a pass only where its signed note says
    why it was skipped.
 4. **No flake.** A crate with a test that passed only on a retry is not signed in its own per-crate record, so on every path
@@ -95,7 +95,7 @@ All at one exact head:
 9. **Compatibility flags are right.** Any claim kind, claim field, client or wire change, schema change, new decision name,
    retention or replication change, or CLI contract change is flagged and raises the risk (see the rubric), with the rollout rule
    it needs (for example, daemons before clients).
-10. **Evidence and trust paths are read the hard way.** For `scripts/st-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`,
+10. **Evidence and trust paths are read the hard way.** For `scripts/fractal-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`,
     `scripts/ci-local`, `scripts/ci-linux`, workflows, rulesets, `.st/` and the store: who can influence the input, which version
     of the script runs (the base's or the tree under test), whether it fails open or closed, and what a buggy or hostile tree
     could make it sign.
@@ -214,7 +214,7 @@ files and lines actually read.
 
 - **Up to three** changes may be in the queue at once.
 - A change goes in the queue **alone** when it changes `.st/`, a workflow, a ruleset or repository setting, the evidence or
-  signing path (`scripts/st-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`, `scripts/ci-local`, `scripts/ci-linux`, the lane
+  signing path (`scripts/fractal-test`, `scripts/evidence-*`, `scripts/ci-evidence-*`, `scripts/ci-local`, `scripts/ci-linux`, the lane
   scripts, `scripts/ci-rust-test-notes`), the store's core file, or a workspace-wide toolchain or dependency pin. A reviewer may
   also keep a change alone when it judges it risky (a reconcile or schema change), and says so in the verdict.
 - Everything else may **batch** when the changed files do not overlap.
