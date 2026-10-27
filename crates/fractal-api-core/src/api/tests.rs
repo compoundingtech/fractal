@@ -12148,6 +12148,18 @@ mission "agent-jobs" state="ready" {
     assert!(card()["background_jobs"].is_null());
     append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"two","background_jobs":1}));
     assert_eq!(card()["background_jobs"], 1);
+    let fault = crate::model::AttentionRequest {
+        reviewer: "person/test".into(), title: "Mailbox unavailable".into(),
+        reason: "The current mailbox lost delivery custody.".into(), severity: "error".into(),
+        targets: vec![worker.clone()], actor: "daemon/runtime".into(),
+        idempotency_key: "agent-jobs-mailbox-loss".into(),
+    };
+    let episode = "attention/agent-jobs-mailbox";
+    store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
+    assert_eq!(card()["harness_state"], "indeterminate");
+    assert!(card()["background_jobs"].is_null(), "a mailbox availability fence clears the count");
+    store.recover_operational_failure(episode, "authenticated replay control", "agent-jobs-repaired").unwrap();
+    assert_eq!(card()["background_jobs"], 1);
     append("harness.observed", json!({"state":"ended","driver":"omp","incarnation_id":"two","background_jobs":1}));
     assert!(card()["background_jobs"].is_null());
 }
