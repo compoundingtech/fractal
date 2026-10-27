@@ -10,9 +10,15 @@ struct OperationalFailures(Mutex<Option<FoldedFailures>>);
 type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 
 #[cfg(any(test, feature = "test-support"))]
+pub type FaultIncarnationReadHook = Box<dyn FnMut(&str)>;
+
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// How often this thread folded the operational failure claims.
     pub static OPERATIONAL_FAILURE_FOLDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Runs after an incarnation lookup, never after a memo hit.
+    pub static FAULT_INCARNATION_READ_HOOK: std::cell::RefCell<Option<FaultIncarnationReadHook>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// How long a run whose cleanup failed shows that fault after it finishes.
@@ -29,7 +35,43 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     WHERE assignee>='person/' AND assignee<'person0'
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
+/// Only fault revalidation fences, without queue positions or execution clocks.
+struct FaultStepState {
+    subject: String,
+    run: String,
+    generation: String,
+    status: String,
+    assigned_to: Option<String>,
+    attempt: u32,
+    readiness_epoch: u32,
+}
+
+impl From<StepRunView> for FaultStepState {
+    fn from(step: StepRunView) -> Self {
+        Self {
+            subject: step.subject,
+            run: step.run,
+            generation: step.generation,
+            status: step.status,
+            assigned_to: step.assigned_to,
+            attempt: step.attempt,
+            readiness_epoch: step.readiness_epoch,
+        }
+    }
+}
+
 impl Store {
+    fn fault_step_effective_state(&self, subject: &str) -> Result<Option<FaultStepState>> {
+        let connection = self.readers.get();
+        let mut step = person_work::step(&connection, &normalize_step_run(subject))?;
+        if let Some(step) = &mut step {
+            // step_run applies these fences at wall-clock time, not the fault's as_of.
+            // Keep that reducer, but omit queue, timing, wake and presentation enrichment.
+            apply_effective_step_state(&connection, step, now_ms())?;
+        }
+        Ok(step.map(FaultStepState::from))
+    }
+
     /// A step's name within its mission, while st has the step.
     pub fn step_path(&self, step: &str) -> Result<Option<String>> {
         Ok(self
@@ -1163,14 +1205,40 @@ impl Store {
         Ok(items)
     }
 
-    /// Return this call's history cut for the broken-gate reducer, without caching authority.
-    /// Read it at its original first-use point, after the derived fault families below.
+    /// Revalidate operational failures at one SQLite read cut, including all nested readers.
+    /// The history cut returned for broken gates and the local incarnation memo share that cut.
     pub fn operational_attention_items_with_failures(
         &self,
         person: Option<&str>,
         as_of: u128,
     ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
+        self.read_snapshot_unindexed(|| {
+            self.operational_attention_items_with_failures_impl::<true>(person, as_of)
+        })
+    }
+
+    /// The pre-optimization reader, retained only as an exact-output and SQL-work oracle.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn operational_attention_items_with_failures_reference(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
+        self.read_snapshot_unindexed(|| {
+            self.operational_attention_items_with_failures_impl::<false>(person, as_of)
+        })
+    }
+
+    fn operational_attention_items_with_failures_impl<const MEMOIZE: bool>(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
         let connection = self.readers.get();
+        // Negative results matter too. This map is discarded before the next snapshot,
+        // and is filled lazily at the original incarnation fence's first use.
+        let mut incarnations = BTreeMap::<String, Option<String>>::new();
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
@@ -1316,22 +1384,27 @@ impl Store {
                 }
             }
             if let Some(incarnation) = f["incarnation"].as_str() {
-                let actual = self.latest_actual_value(source)?;
-                let current = actual
-                    .as_ref()
-                    .and_then(|v| {
-                        v.pointer("/fields/incarnation_id")
-                            .or_else(|| v.get("incarnation_id"))
-                    })
-                    .and_then(Value::as_str);
-                if current != Some(incarnation) {
+                if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
+                    let actual = self.latest_actual_value(source)?;
+                    let current = actual.as_ref().and_then(|v| {
+                        v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
+                    }).and_then(Value::as_str).map(str::to_owned);
+                    #[cfg(any(test, feature = "test-support"))]
+                    FAULT_INCARNATION_READ_HOOK.with(|hook| {
+                        if let Some(hook) = hook.borrow_mut().as_mut() {
+                            hook(source);
+                        }
+                    });
+                    incarnations.insert(source.clone(), current);
+                }
+                if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {
                     continue;
                 }
             }
             // Diagnostic history stays immutable; current work/runtime state decides whether
             // this episode still needs an owner. This changes no canonical timing fold.
             let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake(failure, as_of)? else {
+                let Some(context) = self.current_exhausted_work_wake::<MEMOIZE>(failure, as_of)? else {
                     continue;
                 };
                 Some(context)
@@ -1375,11 +1448,11 @@ impl Store {
         Ok((items, failures))
     }
 
-    fn current_exhausted_work_wake(
+    fn current_exhausted_work_wake<const MINIMAL: bool>(
         &self,
         failure: &AttentionRequestView,
         as_of: u128,
-    ) -> Result<Option<(StepRunView, ClaimRecord)>> {
+    ) -> Result<Option<(FaultStepState, ClaimRecord)>> {
         let [agent, step_subject, diagnostic_id] = failure.targets.as_slice() else {
             return Ok(None);
         };
@@ -1396,7 +1469,12 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(step) = self.step_run(step_subject)? else {
+        let current = if MINIMAL {
+            self.fault_step_effective_state(step_subject)?
+        } else {
+            self.step_run(step_subject)?.map(FaultStepState::from)
+        };
+        let Some(step) = current else {
             return Ok(None);
         };
         if step.status != "ready"
