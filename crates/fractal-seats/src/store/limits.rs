@@ -120,9 +120,25 @@ pub trait LimitsStore {
     /// The usage of a period against the declared accounts: every row and limit, and each
     /// account's credits used so far in the calendar month of `until_ms`.
     fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<super::usage_accounts::AttributedUsage>;
+    /// Which of `seats` are declared agents now. `[limits] keep` lists seats by name and nothing
+    /// removes a retired seat from it, so this lets a report say which entries keep nothing.
+    fn declared_seats(&self, seats: &[String]) -> Result<BTreeSet<String>>;
 }
 
 impl LimitsStore for Store {
+    fn declared_seats(&self, seats: &[String]) -> Result<BTreeSet<String>> {
+        let connection = self.readers.get();
+        let mut statement =
+            connection.prepare_cached("SELECT 1 FROM desired WHERE subject=?1 AND kind='agent'")?;
+        let mut declared = BTreeSet::new();
+        for seat in seats {
+            if statement.exists([seat])? {
+                declared.insert(seat.clone());
+            }
+        }
+        Ok(declared)
+    }
+
     fn attributed_usage(&self, since_ms: u64, until_ms: u64) -> Result<super::usage_accounts::AttributedUsage> {
         super::usage_accounts::attributed_usage(self, since_ms, until_ms)
     }
@@ -1593,6 +1609,17 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         // The same readings stop both once the account is no longer exempt, so a reload applies.
         let outcome = store.enforce_account_limits(&policy(), now + 2).unwrap();
         assert_eq!(outcome.stopped, [first, later]);
+    }
+
+    #[test]
+    fn declared_seats_names_the_kept_entries_that_still_exist() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let kept = ["agent/alder.pooled".to_owned(), "agent/alder.retired".to_owned()];
+        assert_eq!(
+            store.declared_seats(&kept).unwrap(),
+            BTreeSet::from(["agent/alder.pooled".to_owned()])
+        );
     }
 
     #[test]
