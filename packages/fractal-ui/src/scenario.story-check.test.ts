@@ -1,9 +1,9 @@
 /** @vitest-environment jsdom */
 /// <reference types="vite/client" />
 import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
-import { loadWorld } from '@fractal/scenarios'
+import { foldSlice, loadWorld } from '@fractal/scenarios'
 import { useScenarioSlice } from '@fractal/scenarios/react'
-import { scenarioSections } from './scenario-transcript.story-harness'
+import { scenarioSections, type TranscriptSection } from './scenario-transcript.story-harness'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -20,8 +20,7 @@ import './scenario-fixture-graph.unit.test.ts'
 import { storyGlobs } from '../.storybook/stories.ts'
 import storybookConfig from '../.storybook/main.ts'
 
-import { transcriptInitialTailCount, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
-import { historyBatchSize } from './assistant-ui/EmbraceScrollViewport'
+import { transcriptInitialSourceRowCount, transcriptMountedWindow, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 
 // jsdom has no layout engine. This test observes domain reads, not resize geometry;
 // the real browser plays remain the proof for observer-driven layout behavior.
@@ -76,10 +75,8 @@ test('an error boundary cannot hide an exempt story domain read', () => {
   }, {})).toThrow(/exempt|forbidden/)
 })
 
-test('the story mounted window uses the real Transcript and viewport mount constants', () => {
-  expect(transcriptMountedWindow).toEqual({
-    _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
-  })
+test('the story mounted window uses the real Transcript initial source-row bound', () => {
+  expect(transcriptMountedWindow).toEqual({ _tag: 'sourceRows', rows: transcriptInitialSourceRowCount })
 })
 test('Markdown AllStates consumes the declared conversation slice', () => {
   const result = scenarioStoryCheck(AllStates, meta)
@@ -464,13 +461,58 @@ test('scenario transcript preserves tool operations and failed tool lifecycle', 
   expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
 })
 
-test('phone whole-thread projection preserves turns while leaving mounting to Transcript', () => {
+test('scenario transcript projects native reasoning, generic arguments and structured tool results', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  const items = turns.flatMap(turn => turn.items)
+  expect(items).toContainEqual(expect.objectContaining({
+    _tag: 'Reasoning', id: 'timeline-entry/scenario-transcript-families-builder-3',
+    text: 'I will compare the release scope and report totals before exporting.', streaming: false,
+  }))
+  const call = items.find(item => item._tag === 'ToolCall' && item.callId === 'inspect-report')
+  expect(call).toMatchObject({
+    _tag: 'ToolCall', name: 'catalog.compare_release', status: 'success',
+    input: { releases: ['atlas-7', 'atlas-8'], include: { totals: true, sections: ['runtime', 'client'] }, limit: 3 },
+    result: { mediaType: 'application/json', content: { release: 'atlas-8', totals: { passed: 18, failed: 0 }, sections: [{ name: 'runtime', ready: true }, { name: 'client', ready: true }] } },
+  })
+  expect(turns.flatMap(turn => turn.work.calls)).toContainEqual(expect.objectContaining({ kind: 'read', title: 'catalog.compare_release', outputLanguage: 'json' }))
+})
+
+test('scenario transcript retains semantic failure evidence and interrupts unresolved terminal calls', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  for (const status of ['failed', 'cancelled']) {
+    const turn = turns.find(turn => turn.items.some(item => item._tag === 'Status' && item.status === status))
+    expect(turn).toBeDefined()
+    expect(turn?.work).toMatchObject({ running: false, failed: status === 'failed', interrupted: status === 'cancelled', calls: [expect.objectContaining({ status: 'interrupted' })] })
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'ToolCall', status: 'interrupted' }))
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'Status', status, detail: expect.any(String) }))
+  }
+  const failed = turns.find(turn => turn.work.failed)
+  expect(failed?.work.failureNote).toBe('Export worker lost; report totals retained, but no export result was received.')
+  expect(failed?.items).toContainEqual(expect.objectContaining({ _tag: 'Notice', kind: 'error', text: 'The export worker disconnected before returning a result.' }))
+})
+
+test('scenario transcript replaces a streaming revision with its final native content', () => {
+  const slice = loadWorld('transcript-families').slices.conversation
+  const before = scenarioSections(slice).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const after = scenarioSections({ ...slice, state: foldSlice(slice, 2_000).state }).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const partial = before.find(item => item._tag === 'Text' && item.streaming)
+  expect(partial).toMatchObject({ _tag: 'Text', streaming: true, text: 'The report totals are retained; checking the handoff summary.' })
+  expect(after.filter(item => item.id === partial?.id)).toHaveLength(1)
+  expect(after.find(item => item.id === partial?.id)).toMatchObject({ _tag: 'Text', streaming: false, text: 'All 18 checks passed. The export failed and its retry was cancelled; hand off the report totals, not an export artifact.' })
+  expect(after).toContainEqual(expect.objectContaining({ _tag: 'Status', status: 'completed', detail: 'Handoff summary complete; no export claimed.' }))
+})
+
+test('phone whole-thread projection preserves source rows while leaving mounting to Transcript', () => {
   const slice = loadWorld('huge').slices.conversation
+  const sourceIds = (sections: readonly TranscriptSection[]) => sections.flatMap(section => section.turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]))
+  const sourceRowCount = (turns: readonly TranscriptTurn[]) => turns.reduce((rows, turn) => rows + turn.items.length + (turn.prompt === undefined ? 0 : 1), 0)
   const bounded = scenarioSections(slice).sections
   const whole = scenarioSections(slice, 'whole-thread').sections
   expect(whole).toHaveLength(slice.state.threads.length)
-  expect(whole.flatMap(section => section.turns.map(turn => turn.id))).toEqual(bounded.flatMap(section => section.turns.map(turn => turn.id)))
-  expect(whole.some(section => section.turns.length > transcriptInitialTailCount + historyBatchSize)).toBe(true)
+  expect(sourceIds(whole)).toEqual(sourceIds(bounded))
+  // Bounded sections mount whole; whole threads exceed the initial bound, so Transcript defers their history.
+  expect(bounded.every(section => sourceRowCount(section.turns) <= transcriptInitialSourceRowCount)).toBe(true)
+  expect(whole.some(section => sourceRowCount(section.turns) > transcriptInitialSourceRowCount)).toBe(true)
 })
 
 test('connection geometry header and bounded history belong to the same thread', () => {

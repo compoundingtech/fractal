@@ -9,7 +9,8 @@ import { ScenarioReadBoundary } from '../react/index.ts'
 /** Per-thread conversation mount policy; other slices retain their full marker contract. */
 export type ScenarioMountedWindow =
   | { readonly _tag: 'all' }
-  | { readonly _tag: 'tail'; readonly turns: number; readonly historyBatch: number }
+  /** The final `rows` source rows (text content and tool calls) plus the latest user prompt; at most `rows` mount whole. */
+  | { readonly _tag: 'sourceRows'; readonly rows: number }
 
 export interface ScenarioParameter {
   readonly _tag: 'slices'

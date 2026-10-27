@@ -41,7 +41,7 @@
     {
       "name": "skip-and-signing-machinery",
       "level": "medium",
-      "globs": ["scripts/st-test", "scripts/evidence-*", "scripts/ci-evidence-*", "scripts/ci-local", "scripts/ci-linux", "scripts/review", "scripts/review-*", ".st/**"]
+      "globs": ["scripts/st-test", "scripts/fractal-test", "scripts/evidence-*", "scripts/ci-evidence-*", "scripts/ci-local", "scripts/ci-linux", "scripts/review", "scripts/review-*", ".st/**"]
     },
     {
       "name": "workflows",

@@ -1,6 +1,6 @@
-# st architecture
+# Fractal architecture
 
-st is the Fractal claims-graph runtime. KDL declarations are its human authoring surface. Claims
+Fractal is the Fractal claims-graph runtime. KDL declarations are its human authoring surface. Claims
 are its durable fact surface. Projections, process observations, and caches are derived state.
 
 This document defines the stable system shape. The linked technical documents define the complete
@@ -362,7 +362,7 @@ See [resource subscriptions](resource-subscriptions.md) for provider and intake 
 
 ## Replication
 
-One st node is a complete local system. Fleet nodes exchange authenticated claim envelopes and
+One Fractal node is a complete local system. Fleet nodes exchange authenticated claim envelopes and
 document bytes over loopback or tailnet HTTP, or a `fabric://NODE_ID/PROTOCOL` route.
 
 Replication compares immutable envelope inventories. Receipt order cannot change the deterministic
@@ -388,7 +388,7 @@ set; peer URLs are loopback or tailnet `http://` URLs or `fabric://NODE_ID/PROTO
 Fleet messages use a shared secret and request-bound signatures.
 
 Each member’s render transaction refuses symbolic-link escapes and conflicting file ownership.
-It refuses to change a tracked file. st removes the `.st3` directory that older releases wrote
+It refuses to change a tracked file. Fractal removes the `.st3` directory that older releases wrote
 for a native harness only when Git tracks nothing in it. Additive Git excludes combine
 across operations and worktrees sharing an exclude file. A failed member pass records a fault
 without blocking other members; stopping a member does not require its render to succeed.

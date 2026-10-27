@@ -1,7 +1,7 @@
 # Seat handoff
 
 A seat's work lives in the graph, but a session's understanding does not. When a seat restarts and
-the harness cannot continue the earlier conversation, the new session knows only what st gives it.
+the harness cannot continue the earlier conversation, the new session knows only what Fractal gives it.
 The handoff is that gift: one document per seat, written by the seat, and a first message that
 puts it in front of the next session together with the live state of the seat's work.
 
@@ -39,9 +39,9 @@ leaves only what it wrote before, so it keeps the handoff current as it works.
 
 ## Before a planned restart
 
-A planned restart is one st chooses to make while the seat is up: an operator's or agent's
+A planned restart is one Fractal chooses to make while the seat is up: an operator's or agent's
 `st agents restart`, a pool switch to another account at a limit, or a declaration change (an
-account, model, workspace or launch change) applied to a running seat. Before st stops the seat it
+account, model, workspace or launch change) applied to a running seat. Before Fractal stops the seat it
 sends it a "Prepare for restart" message from `daemon/runtime` with a deadline (two minutes), and
 waits. The message carries the reserved tag `st3-restart-prepare:REQUEST`, so it wakes the seat.
 

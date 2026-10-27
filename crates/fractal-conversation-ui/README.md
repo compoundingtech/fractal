@@ -42,7 +42,7 @@ assert_eq!(selection.text(&["▎ ```sh", "▎   cargo test"]), "cargo test");
 
 Terminal consumers opt into `features = ["ratatui"]`. This adds `Cache`, `Theme`, and the
 `conversation`, `doc`, `text`, `ansi`, and `theme` modules, plus the `SelectionLine`
-implementation for ratatui's `Line`. stui and the st CLI enable this feature explicitly.
+implementation for ratatui's `Line`. the Fractal terminal UI and the Fractal CLI enable this feature explicitly.
 
 Verify the two builds independently, since a workspace build unifies the terminal consumers'
 features:

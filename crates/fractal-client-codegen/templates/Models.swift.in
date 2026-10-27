@@ -39,6 +39,31 @@ public struct Snapshot: Codable, Sendable, Equatable {
     enum CodingKeys: String, CodingKey { case id, hostID = "host_id", storeIndex = "store_index", projectionVersion = "projection_version", createdAt = "created_at" }
 }
 
+/// Node-local source cut; do not compare across nodes or publication epochs.
+public struct AgentsStatusWatermark: Codable, Sendable, Equatable {
+    public let storeIndex: UInt64
+    public let localFrontier: UInt64
+    enum CodingKeys: String, CodingKey { case storeIndex = "store_index", localFrontier = "local_frontier" }
+}
+
+/// Immutable publication identity; materialization time is not producer time.
+public struct AgentsPublicationMetadata: Codable, Sendable, Equatable {
+    public let nodeEpoch: String
+    public let revision: UInt64
+    public let statusWatermark: AgentsStatusWatermark
+    public let materializedAtMS: UInt64
+    enum CodingKeys: String, CodingKey { case nodeEpoch = "node_epoch", revision, statusWatermark = "status_watermark", materializedAtMS = "materialized_at_ms" }
+}
+
+/// Complete current view; the wire contract requires `hasMore` to be false.
+public struct AgentsPublication: Codable, Sendable {
+    public let publication: AgentsPublicationMetadata
+    public let items: [AgentResource]
+    public let order: [String]
+    public let hasMore: Bool
+    enum CodingKeys: String, CodingKey { case publication, items, order, hasMore = "has_more" }
+}
+
 public struct ErrorEnvelope: Codable, Error, Sendable {
     public let apiVersion: String
     public let errorVersion: String
@@ -456,7 +481,7 @@ public enum ResourceReferenceResolution: String, Codable, Sendable { case resolv
 public struct DeclaredResource: Codable, Sendable { public let name, subject: String; public let kind: ResourceReferenceKind; public let resolution: ResourceReferenceResolution; public let uri, reason: String?; }
 public struct AgentMailCustody: Codable, Sendable { public let successor, state: String }
 public struct AgentEndReason: Codable, Sendable { public let kind, endedAt: String; public let actor, reason, exitSignal, diagnostic: String?; public let exitCode: Int64?; enum CodingKeys: String, CodingKey { case kind, endedAt = "ended_at", actor, reason, exitSignal = "exit_signal", diagnostic, exitCode = "exit_code" } }
-public struct AgentResource: Codable, Sendable { public let id, kind, revision, updatedAt, name, state, reachability: String; public let runtimeIDs: [String]; public let ownerRunID, driver, harnessState, harnessErrorState, since, observation, blockedOn, ask, reason, activity, hostID, lastActivityAt, silentSince, downSince, fault, incarnationID, currentSessionID: String?; public let endReason: AgentEndReason?; public let currentWorkIDs, upcomingWorkIDs: [String]?; public let activeWorkCount, queuedWorkCount: UInt64?; public let nextWorkID: String?; public let currentWork, upcomingWork: [WorkLabel]?; public let nextWork: WorkLabel?; public let usage: UsageSummary?; public let under: [AgentRelationship]; public let mailCustody: AgentMailCustody?; public let delivery: AgentDelivery?; public let subagents: [AgentSubagent]?; public let suspension: AgentSuspension?; public let checkout: AgentCheckout?; public let workspace: String?; public let lifecycle: AgentLifecycle?; public let handoff: AgentHandoff?; public let rollout: JSONValue?; public let todo: AgentTodo?; public let presentation: AgentPresentation?; public let resources: [DeclaredResource]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", name, state, reachability, runtimeIDs = "runtime_ids", ownerRunID = "owner_run_id", driver, harnessState = "harness_state", harnessErrorState = "harness_error_state", endReason = "end_reason", since, observation, blockedOn = "blocked_on", ask, reason, activity, hostID = "host_id", lastActivityAt = "last_activity_at", silentSince = "silent_since", downSince = "down_since", fault, incarnationID = "incarnation_id", currentSessionID = "current_session_id", currentWorkIDs = "current_work_ids", activeWorkCount = "active_work_count", nextWorkID = "next_work_id", upcomingWorkIDs = "upcoming_work_ids", queuedWorkCount = "queued_work_count", currentWork = "current_work", nextWork = "next_work", upcomingWork = "upcoming_work", usage, under, mailCustody = "mail_custody", delivery, subagents, suspension, checkout, workspace, lifecycle, handoff, rollout, todo, presentation, resources, operational } }
+public struct AgentResource: Codable, Sendable { public let id, kind, revision, updatedAt, name, state, reachability: String; public let runtimeIDs: [String]; public let ownerRunID, driver, harnessState, harnessErrorState, since, observation, blockedOn, ask, reason, activity, hostID, lastActivityAt, silentSince, downSince, fault, incarnationID, currentSessionID: String?; public let backgroundJobs: UInt64?; public let endReason: AgentEndReason?; public let currentWorkIDs, upcomingWorkIDs: [String]?; public let activeWorkCount, queuedWorkCount: UInt64?; public let nextWorkID: String?; public let currentWork, upcomingWork: [WorkLabel]?; public let nextWork: WorkLabel?; public let usage: UsageSummary?; public let under: [AgentRelationship]; public let mailCustody: AgentMailCustody?; public let delivery: AgentDelivery?; public let subagents: [AgentSubagent]?; public let suspension: AgentSuspension?; public let checkout: AgentCheckout?; public let workspace: String?; public let lifecycle: AgentLifecycle?; public let handoff: AgentHandoff?; public let rollout: JSONValue?; public let todo: AgentTodo?; public let presentation: AgentPresentation?; public let resources: [DeclaredResource]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", name, state, reachability, runtimeIDs = "runtime_ids", ownerRunID = "owner_run_id", driver, harnessState = "harness_state", backgroundJobs = "background_jobs", harnessErrorState = "harness_error_state", endReason = "end_reason", since, observation, blockedOn = "blocked_on", ask, reason, activity, hostID = "host_id", lastActivityAt = "last_activity_at", silentSince = "silent_since", downSince = "down_since", fault, incarnationID = "incarnation_id", currentSessionID = "current_session_id", currentWorkIDs = "current_work_ids", activeWorkCount = "active_work_count", nextWorkID = "next_work_id", upcomingWorkIDs = "upcoming_work_ids", queuedWorkCount = "queued_work_count", currentWork = "current_work", nextWork = "next_work", upcomingWork = "upcoming_work", usage, under, mailCustody = "mail_custody", delivery, subagents, suspension, checkout, workspace, lifecycle, handoff, rollout, todo, presentation, resources, operational } }
 /// Unknown lifecycle strings are preserved so newer roster rows remain readable.
 public enum AgentLifecycle: Codable, Sendable, Equatable {
     case standing, owner, bounded
