@@ -76,8 +76,11 @@ fn main() {
         );
     }
     let full_rev = git(&["rev-parse", "HEAD"]);
-    let dirty =
-        full_rev.is_some() && git(&["status", "--porcelain"]).is_some_and(|s| !s.is_empty());
+    // `--no-optional-locks`: a plain status refreshes the index's stat data and writes the index back when a file was
+    // touched but not changed (a fresh worktree, a restored checkout). The index is one of this script's inputs, so that
+    // write made the next cargo command rerun this script and rebuild every package that depends on this crate.
+    let dirty = full_rev.is_some()
+        && git(&["--no-optional-locks", "status", "--porcelain"]).is_some_and(|s| !s.is_empty());
     if let Some(full_rev) = &full_rev {
         let rev = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| full_rev.clone());
         let commit_ts = git(&["log", "-1", "--format=%ct"])
