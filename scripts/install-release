@@ -33,6 +33,7 @@ bin_dir=${bin_dir:-${FRACTAL_MACOS_BIN_DIR-${ST_MACOS_BIN_DIR:-$HOME/.local/bin}
 # Check each hop: a Home Manager link can be dangling, and must still remain owned
 # by its package manager.
 refuse_nix_path() (
+    # Safety net for real Nix/Home Manager layouts (normally absolute links), not a hardened path resolver.
     path=$1
     hops=0
     xdg_profiles=${XDG_STATE_HOME:-$HOME/.local/state}/nix/profiles
@@ -61,6 +62,25 @@ refuse_nix_path() (
         [ "$hops" -le 40 ] || { printf 'install: cannot resolve installation link %s\n' "$1" >&2; exit 1; }
         link=$(readlink "$component")
         case "$link" in /*) path=$link$suffix ;; *) path="$(dirname "$component")/$link$suffix" ;; esac
+        # Resolve the existing directory prefix physically; normalize only its
+        # missing suffix lexically, including relative targets containing ../.
+        prefix=$path
+        missing=
+        while [ ! -d "$prefix" ]; do
+            missing="/$(basename "$prefix")$missing"
+            prefix=$(dirname "$prefix")
+        done
+        normalized=$(cd "$prefix" && pwd -P)
+        while [ -n "$missing" ]; do
+            part=${missing%%/*}
+            if [ "$missing" = "$part" ]; then missing=; else missing=${missing#*/}; fi
+            case "$part" in
+                ''|.) ;;
+                ..) normalized=${normalized%/*} ;;
+                *) normalized=${normalized%/}/$part ;;
+            esac
+        done
+        path=${normalized:-/}
     done
 )
 for name in st3 st pty fractal; do refuse_nix_path "$bin_dir/$name"; done

@@ -157,15 +157,20 @@ exec "{real}" "$@"
     (installed / 'st3').write_bytes(original)
     (installed / 'st3').chmod(0o755)
     # The managed generation can be a dangling ancestor, not the leaf symlink.
-    for mode in ['default', 'custom', 'ancestor']:
+    for mode in ['default', 'custom', 'ancestor', 'relative']:
         state = root / ('xdg-' + mode)
         if mode == 'default':
             state = root / 'home/.local/state'
         profile = state / 'nix/profiles/home-manager'
         if mode == 'ancestor':
             profile = root / 'arbitrary-generation'
+        if mode == 'relative':
+            profile = root / 'relative-generation'
         profile.parent.mkdir(parents=True, exist_ok=True)
-        profile.symlink_to('/nix/store/gc-collected-fractal')
+        target = '/nix/store/gc-collected-fractal'
+        if mode == 'relative':
+            target = os.path.relpath('/nix/store', profile.parent) + '/./missing/../gc-collected-fractal'
+        profile.symlink_to(target)
         destination = root / ('dangling-' + mode) / 'bin'
         destination.mkdir(parents=True)
         (destination / 'st3').symlink_to(profile / 'bin/st3')
@@ -173,7 +178,7 @@ exec "{real}" "$@"
                          extra={'XDG_STATE_HOME': '' if mode == 'default' else str(state)})
         assert result.returncode != 0 and 'Nix-owned path' in result.stderr, result
         assert (destination / 'st3').readlink() == profile / 'bin/st3'
-        assert profile.readlink() == Path('/nix/store/gc-collected-fractal')
+        assert profile.readlink() == Path(target)
         assert not (destination / 'pty').exists()
     # Exact published v0.3.17 installer from source f4cec96e414fee2a780910730b019fe6bdbddc1d.
     # It rejects --quiet and requires the historical four-command payload.

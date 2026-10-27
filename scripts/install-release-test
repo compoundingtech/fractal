@@ -85,19 +85,27 @@ for target in /nix/store/missing-fractal/bin/st3 /nix/var/nix/profiles/per-user/
   rm "$work/nix/bin/st3"
 done
 # A dangling ancestor can hide the managed generation from a leaf-only link walk.
-for mode in default custom ancestor; do
+for mode in default custom ancestor relative; do
   state="$work/xdg-$mode"
   if [[ $mode == default ]]; then state="$HOME/.local/state"; fi
   profile="$state/nix/profiles/home-manager"
   if [[ $mode == ancestor ]]; then profile="$work/arbitrary-generation"; fi
+  if [[ $mode == relative ]]; then profile="$work/relative-generation"; fi
   bin="$work/dangling-$mode/bin"
   mkdir -p "$(dirname "$profile")" "$bin"
-  ln -s /nix/store/gc-collected-fractal "$profile"
+  target=/nix/store/gc-collected-fractal
+  if [[ $mode == relative ]]; then
+    target=
+    prefix=$(dirname "$profile")
+    while [[ $prefix != / ]]; do target="../$target"; prefix=$(dirname "$prefix"); done
+    target="${target}nix/./store/missing/../gc-collected-fractal"
+  fi
+  ln -s "$target" "$profile"
   ln -s "$profile/bin/st3" "$bin/st3"
   if XDG_STATE_HOME="$state" install_fixture --bin-dir "$bin" > "$work/dangling.out" 2> "$work/dangling.err"; then exit 1; fi
   grep -q 'Nix-owned path' "$work/dangling.err"
   test "$(readlink "$bin/st3")" = "$profile/bin/st3"
-  test "$(readlink "$profile")" = /nix/store/gc-collected-fractal
+  test "$(readlink "$profile")" = "$target"
   test ! -e "$bin/pty"
 done
 # Similar directory names outside Nix's actual roots are ordinary archive targets.
