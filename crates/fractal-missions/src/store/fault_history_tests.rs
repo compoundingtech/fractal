@@ -211,3 +211,226 @@ fn a_history_row_decode_error_propagates_instead_of_returning_no_faults() {
     ).unwrap();
     assert_eq!(assert_fault_parity(&store, now_ms()).len(), 1);
 }
+
+// Keep the shared history fold identical: only the operational reader uses the
+// pre-optimization incarnation lookups and enriched step projection.
+fn reference_fault_snapshot(store: &Store, as_of: u128) -> Result<Vec<FaultView>> {
+    let mut items = store.subscription_fault_items(as_of)?;
+    let (operational, failures) =
+        store.operational_attention_items_with_failures_reference(None, as_of)?;
+    items.extend(operational);
+    items.extend(
+        store.broken_gate_items_from_failures(None, as_of, failures)?
+            .into_iter()
+            .filter(|item| !item.person.starts_with("person/")),
+    );
+    items.extend(store.checkpoint_attention_items(None, as_of)?);
+    items.extend(store.signature_attention_items()?);
+    let fallback = store.fleet_fault_agent()?;
+    store.current_attention(items, as_of)?
+        .into_iter()
+        .map(|item| {
+            Ok(FaultView {
+                owner: store.fault_owner(&item, fallback.as_deref())?,
+                item,
+            })
+        })
+        .collect()
+}
+
+fn assert_reference_snapshot_parity(store: &Store, as_of: u128) -> Vec<FaultView> {
+    let expected = reference_fault_snapshot(store, as_of).unwrap();
+    let actual = store.fault_snapshot(as_of).unwrap();
+    assert_eq!(
+        serde_json::to_value(&actual).unwrap(),
+        serde_json::to_value(expected).unwrap(),
+        "complete snapshot items, ordering and owners at {as_of}",
+    );
+    actual
+}
+
+fn append_snapshot_fixture_claim(
+    store: &Store,
+    subject: &str,
+    kind: &str,
+    fields: Value,
+    key: &str,
+) -> ClaimRecord {
+    store.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: kind.into(),
+        actor: Some("daemon/runtime".into()),
+        fields: serde_json::from_value(fields).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(key.into()),
+    }).unwrap()
+}
+
+fn observe_snapshot_incarnation(store: &Store, incarnation: &str) {
+    append_snapshot_fixture_claim(
+        store, "agent/node.worker", "runtime.observed",
+        json!({"status": "running", "runtime_id": "node.worker", "incarnation_id": incarnation}),
+        &format!("snapshot-runtime-{incarnation}"),
+    );
+    append_snapshot_fixture_claim(
+        store, "agent/node.worker", "harness.observed",
+        json!({"state": "idle", "driver": "codex", "incarnation_id": incarnation}),
+        &format!("snapshot-harness-{incarnation}"),
+    );
+}
+
+fn append_snapshot_wake(
+    store: &Store,
+    step: &StepRunView,
+    mismatch: &str,
+) -> ClaimRecord {
+    let agent = if mismatch == "assignment" {
+        "agent/node.other"
+    } else {
+        "agent/node.worker"
+    };
+    let diagnostic = append_snapshot_fixture_claim(
+        store, agent, "harness.diagnostic",
+        json!({
+            "code": "work-wake-exhausted", "status": "failed",
+            "incarnation_id": if mismatch == "incarnation" { "worker-old" } else { "worker-current" },
+            "step_run": step.subject,
+            "attempt": if mismatch == "attempt" { step.attempt + 1 } else { step.attempt },
+            "readiness_epoch": if mismatch == "epoch" { step.readiness_epoch + 1000 } else { step.readiness_epoch },
+            "wake_attempts": 3,
+        }),
+        &format!("snapshot-diagnostic-{mismatch}"),
+    );
+    append_snapshot_fixture_claim(
+        store, agent, "operational.failure",
+        json!({
+            "episode": format!("snapshot-wake-{mismatch}"),
+            "condition": "work-wake-exhausted",
+            "reviewer": "agent/node.ops",
+            "title": format!("exhausted wake {mismatch}"),
+            "reason": "ready work remains unclaimed", "severity": "error",
+            "targets": [agent, step.subject.clone(), diagnostic.id],
+        }),
+        &format!("snapshot-wake-failure-{mismatch}"),
+    )
+}
+
+fn exhausted_snapshot_fixture() -> (Store, MissionRunView, StepRunView) {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(
+        &store,
+        r#"version 2
+agent "worker" { workspace "/tmp"; command "true" }
+agent "other" { workspace "/tmp"; command "true" }
+agent "ops" { command "true"; handles-faults }
+mission "snapshot-work" state="ready" {
+  goal "Exercise exhausted wake snapshot reads."
+  step "work" { assigned-to "agent/node.worker" }
+}"#,
+        "snapshot-work-publish",
+    );
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "snapshot-work".into(),
+        revision: None,
+        workspace: "/tmp".into(),
+        requester: Some("person/operator".into()),
+        mode: Some("run".into()),
+        inputs: BTreeMap::new(),
+        idempotency_key: "snapshot-work-run".into(),
+    }).unwrap();
+    store.set_step_state(&run.steps[0].subject, "ready", None).unwrap();
+    let step = store.step_run(&run.steps[0].subject).unwrap().unwrap();
+    for incarnation in ["worker-old", "worker-previous", "worker-current"] {
+        observe_snapshot_incarnation(&store, incarnation);
+        for index in 0..4 {
+            let episode = format!("snapshot-{incarnation}-{index}");
+            append_snapshot_fixture_claim(
+                &store, "agent/node.worker", "operational.failure",
+                json!({
+                    "episode": episode, "condition": "observed",
+                    "reviewer": "agent/node.ops", "title": episode,
+                    "reason": "retained incarnation failure", "severity": "error",
+                    "targets": ["agent/node.worker"], "incarnation": incarnation,
+                }),
+                &episode,
+            );
+        }
+    }
+    append_snapshot_wake(&store, &step, "current");
+    (store, run, step)
+}
+
+#[test]
+fn fault_snapshot_reference_matches_exhausted_wake_and_reuses_incarnation_reads() {
+    let (store, _run, step) = exhausted_snapshot_fixture();
+    let as_of = now_ms();
+    let faults = assert_reference_snapshot_parity(&store, as_of);
+    assert_eq!(faults.len(), 5);
+    assert!(faults.iter().all(|fault| fault.owner.as_deref() == Some("agent/node.ops")));
+    assert_eq!(faults.iter().filter(|fault| fault.item.title.starts_with("snapshot-worker-current-")).count(), 4);
+    let wake = faults.iter().find(|fault| fault.item.title == "exhausted wake current").unwrap();
+    assert_eq!(wake.item.step.as_deref(), Some(step.subject.as_str()));
+
+    // Warm both complete readers before counting: pool growth PRAGMAs must not
+    // accidentally count against just the reference path.
+    reference_fault_snapshot(&store, as_of).unwrap();
+    store.fault_snapshot(as_of).unwrap();
+    let reference_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let expected = reference_fault_snapshot(&store, as_of).unwrap();
+    let reference_work = reference_scope.finish();
+    let optimized_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+    let actual = store.fault_snapshot(as_of).unwrap();
+    let optimized_work = optimized_scope.finish();
+    assert_eq!(serde_json::to_value(actual).unwrap(), serde_json::to_value(expected).unwrap());
+    println!(
+        "fault_snapshot complete snapshot statements: reference={}, optimized={}, saved={}",
+        reference_work.statements, optimized_work.statements,
+        reference_work.statements.saturating_sub(optimized_work.statements),
+    );
+    assert!(optimized_work.statements > 0, "count real SQLite work");
+    assert!(optimized_work.statements < reference_work.statements);
+
+    // A per-call cache must not retain the prior runtime across later writes,
+    // even when the caller reuses the same explicit as_of.
+    observe_snapshot_incarnation(&store, "worker-next");
+    assert!(assert_reference_snapshot_parity(&store, as_of).is_empty());
+    append_snapshot_fixture_claim(
+        &store, "agent/node.worker", "operational.failure",
+        json!({
+            "episode": "snapshot-next", "condition": "observed",
+            "reviewer": "agent/node.ops", "title": "next incarnation",
+            "reason": "new runtime fault", "severity": "error",
+            "targets": ["agent/node.worker"], "incarnation": "worker-next",
+        }),
+        "snapshot-next-failure",
+    );
+    let later = assert_reference_snapshot_parity(&store, now_ms());
+    assert_eq!(later.len(), 1);
+    assert_eq!(later[0].item.title, "next incarnation");
+}
+
+#[test]
+fn fault_snapshot_reference_preserves_exhausted_wake_fences() {
+    let (store, run, step) = exhausted_snapshot_fixture();
+    for mismatch in ["attempt", "epoch", "incarnation", "assignment"] {
+        append_snapshot_wake(&store, &step, mismatch);
+        let faults = assert_reference_snapshot_parity(&store, now_ms());
+        assert_eq!(faults.iter().filter(|fault| fault.item.title.starts_with("exhausted wake")).count(), 1);
+        assert!(faults.iter().any(|fault| fault.item.title == "exhausted wake current"));
+    }
+    store.set_step_state(&step.subject, "working", None).unwrap();
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().all(|fault| !fault.item.title.starts_with("exhausted wake")));
+    store.set_step_state(&step.subject, "ready", None).unwrap();
+    let later_step = store.step_run(&step.subject).unwrap().unwrap();
+    assert!(later_step.readiness_epoch > step.readiness_epoch);
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().all(|fault| !fault.item.title.starts_with("exhausted wake")));
+    append_snapshot_wake(&store, &later_step, "later-epoch");
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().any(|fault| fault.item.title == "exhausted wake later-epoch"));
+    store.set_mission_run_state(&run.id, "cancelled", "terminal", Some("wake run ended")).unwrap();
+    assert!(assert_reference_snapshot_parity(&store, now_ms())
+        .iter().all(|fault| !fault.item.title.starts_with("exhausted wake")));
+}

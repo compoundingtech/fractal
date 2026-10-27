@@ -29,7 +29,53 @@ const PERSON_STEPS_QUERY: &str = "SELECT subject FROM step_runs
     WHERE assignee>='person/' AND assignee<'person0'
     AND status IN ('ready','pending') AND (?1 IS NULL OR assignee=?1) ORDER BY subject";
 
+/// Stored fences only: fault revalidation must not derive queue positions or execution clocks.
+struct FaultStepState {
+    subject: String,
+    run: String,
+    generation: String,
+    status: String,
+    assigned_to: Option<String>,
+    attempt: u32,
+    readiness_epoch: u32,
+}
+
+impl From<StepRunView> for FaultStepState {
+    fn from(step: StepRunView) -> Self {
+        Self {
+            subject: step.subject,
+            run: step.run,
+            generation: step.generation,
+            status: step.status,
+            assigned_to: step.assigned_to,
+            attempt: step.attempt,
+            readiness_epoch: step.readiness_epoch,
+        }
+    }
+}
+
 impl Store {
+    fn fault_step_state(&self, subject: &str) -> Result<Option<FaultStepState>> {
+        let subject = normalize_step_run(subject);
+        Ok(self.readers.get().prepare_cached(
+            "SELECT subject, run_id, status, assignee, attempt, readiness_epoch
+             FROM step_runs WHERE subject=?1",
+        )?.query_row([subject], |row| {
+            let subject: String = row.get(0)?;
+            let generation = subject.split('/').nth(1)
+                .map(|id| format!("run-generation/{id}")).unwrap_or_default();
+            Ok(FaultStepState {
+                subject,
+                run: format!("mission-run/{}", row.get::<_, String>(1)?),
+                generation,
+                status: row.get(2)?,
+                assigned_to: row.get(3)?,
+                attempt: row.get(4)?,
+                readiness_epoch: row.get(5)?,
+            })
+        }).optional()?)
+    }
+
     /// A step's name within its mission, while st has the step.
     pub fn step_path(&self, step: &str) -> Result<Option<String>> {
         Ok(self
@@ -1170,7 +1216,29 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
     ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
+        self.operational_attention_items_with_failures_impl::<true>(person, as_of)
+    }
+
+    /// The pre-optimization reader, retained only as an exact-output and SQL-work oracle.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn operational_attention_items_with_failures_reference(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
+        self.operational_attention_items_with_failures_impl::<false>(person, as_of)
+    }
+
+    fn operational_attention_items_with_failures_impl<const MEMOIZE: bool>(
+        &self,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<(Vec<AttentionItemView>, Vec<AttentionRequestView>)> {
         let connection = self.readers.get();
+        // Negative results matter too. This map is discarded before the next snapshot,
+        // and is filled lazily at the original incarnation fence's first use.
+        let mut incarnations = BTreeMap::<String, Option<String>>::new();
         let mut items = self.reconcile_fault_attention(person, as_of)?;
         items.extend(self.observer_attention_items(person, as_of)?);
         items.extend(self.loop_attention_items(person, as_of)?);
@@ -1241,7 +1309,12 @@ impl Store {
             } else if source.starts_with("step-run/") {
                 // A timeout fault holds while its attempt is still running past the same budget:
                 // an extension, a completion, a failure or a release ends it.
-                let Some(step) = person_work::step(&connection, source)? else {
+                let current = if MEMOIZE {
+                    self.fault_step_state(source)?
+                } else {
+                    person_work::step(&connection, source)?.map(FaultStepState::from)
+                };
+                let Some(step) = current else {
                     continue;
                 };
                 let extension =
@@ -1316,22 +1389,21 @@ impl Store {
                 }
             }
             if let Some(incarnation) = f["incarnation"].as_str() {
-                let actual = self.latest_actual_value(source)?;
-                let current = actual
-                    .as_ref()
-                    .and_then(|v| {
-                        v.pointer("/fields/incarnation_id")
-                            .or_else(|| v.get("incarnation_id"))
-                    })
-                    .and_then(Value::as_str);
-                if current != Some(incarnation) {
+                if !MEMOIZE || !incarnations.contains_key(source.as_str()) {
+                    let actual = self.latest_actual_value(source)?;
+                    let current = actual.as_ref().and_then(|v| {
+                        v.pointer("/fields/incarnation_id").or_else(|| v.get("incarnation_id"))
+                    }).and_then(Value::as_str).map(str::to_owned);
+                    incarnations.insert(source.clone(), current);
+                }
+                if incarnations.get(source.as_str()).and_then(|value| value.as_deref()) != Some(incarnation) {
                     continue;
                 }
             }
             // Diagnostic history stays immutable; current work/runtime state decides whether
             // this episode still needs an owner. This changes no canonical timing fold.
             let wake = if f["condition"] == "work-wake-exhausted" {
-                let Some(context) = self.current_exhausted_work_wake(failure, as_of)? else {
+                let Some(context) = self.current_exhausted_work_wake::<MEMOIZE>(failure, as_of)? else {
                     continue;
                 };
                 Some(context)
@@ -1375,11 +1447,11 @@ impl Store {
         Ok((items, failures))
     }
 
-    fn current_exhausted_work_wake(
+    fn current_exhausted_work_wake<const MINIMAL: bool>(
         &self,
         failure: &AttentionRequestView,
         as_of: u128,
-    ) -> Result<Option<(StepRunView, ClaimRecord)>> {
+    ) -> Result<Option<(FaultStepState, ClaimRecord)>> {
         let [agent, step_subject, diagnostic_id] = failure.targets.as_slice() else {
             return Ok(None);
         };
@@ -1396,7 +1468,12 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(step) = self.step_run(step_subject)? else {
+        let current = if MINIMAL {
+            self.fault_step_state(step_subject)?
+        } else {
+            self.step_run(step_subject)?.map(FaultStepState::from)
+        };
+        let Some(step) = current else {
             return Ok(None);
         };
         if step.status != "ready"
