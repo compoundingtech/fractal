@@ -68,18 +68,18 @@ fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
     changed["native_fixture"]["capture"] = json!("second");
     for fresh in [vec![], vec![changed]] {
         assert_eq!(
-            store.apply_operational_repair_with_legacy_starts(&plan.token, &fresh).unwrap_err().code,
+            store.apply_operational_repair_with_legacy_starts(&plan.token, &fresh, None).unwrap_err().code,
             "stale-repair-plan",
         );
     }
     let wrong_token = format!("orpv0:{}", "0".repeat(64));
     assert_eq!(
-        store.apply_operational_repair_with_legacy_starts(&wrong_token, std::slice::from_ref(&evidence))
+        store.apply_operational_repair_with_legacy_starts(&wrong_token, std::slice::from_ref(&evidence), None)
             .unwrap_err().code,
         "stale-repair-plan",
     );
     let result = store.apply_operational_repair_with_legacy_starts(
-        &plan.token, std::slice::from_ref(&evidence),
+        &plan.token, std::slice::from_ref(&evidence), Some("agent/repair-owner"),
     ).unwrap();
     assert_eq!(result.applied, 1);
     assert_eq!(result.affected_subjects, vec!["agent/example-legacy"]);
@@ -104,6 +104,20 @@ fn legacy_runtime_repair_binds_evidence_and_persists_atomic_closure_receipt() {
         [&receipt_id], |row| row.get(0),
     ).unwrap();
     let receipt: Value = serde_json::from_str(&receipt).unwrap();
+    assert_eq!(reopened.claim_by_id(&receipt_id).unwrap().unwrap().actor.as_deref(),
+        Some("daemon/runtime"));
+    let caller: Value = serde_json::from_str(
+        receipt["fields"]["reason"].as_str().unwrap()
+            .split_once("; bound caller: ").unwrap().1
+            .split_once("; legacy runtime start closures: ").unwrap().0,
+    ).unwrap();
+    assert_eq!(caller, json!({"actor": "agent/repair-owner"}));
+    // d0dfa385 and a3324293 register this exact four-field SystemOnly shape.
+    let fields = receipt["fields"].as_object().unwrap().iter()
+        .map(|(key, value)| (key.clone(), value.clone())).collect();
+    fractal_schema::registry().validate_replicated_claim(
+        "repair/compatibility", "repair.applied", &fields,
+    ).unwrap();
     assert!(receipt["fields"].get("legacy_runtime_start_closures").is_none());
     let closures: Value = serde_json::from_str(
         receipt["fields"]["reason"].as_str().unwrap().split_once("; legacy runtime start closures: ").unwrap().1,
@@ -172,7 +186,7 @@ fn legacy_runtime_repair_token_binds_every_local_operation_field() {
         let plan = store.operational_repair_plan_with_legacy_starts(std::slice::from_ref(&evidence)).unwrap();
         store.connection.write().execute(/* sqlite-large-value: allow-for-now lv-hb1926b4fb61f owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ update, []).unwrap();
         assert_eq!(store.apply_operational_repair_with_legacy_starts(
-            &plan.token, &[evidence],
+            &plan.token, &[evidence], None,
         ).unwrap_err().code, "stale-repair-plan");
     }
 }
@@ -215,7 +229,7 @@ fn filtered_legacy_runtime_repair_token_never_applies_unselected_items() {
     let widened = OperationalRepairFilter::new(&[], &classes);
     let tampered = format!("orpv0:{digest}:{}", hex::encode(serde_json::to_vec(&widened).unwrap()));
     for token in [format!("orpv0:{digest}"), tampered] {
-        assert_eq!(store.apply_operational_repair_with_legacy_starts(&token, &evidence)
+        assert_eq!(store.apply_operational_repair_with_legacy_starts(&token, &evidence, None)
             .unwrap_err().code, "stale-repair-plan");
     }
     store.connection.write().execute(
@@ -223,7 +237,7 @@ fn filtered_legacy_runtime_repair_token_never_applies_unselected_items() {
         "UPDATE local_runtime_starts SET result='{\"error\":\"unselected changed\"}' WHERE id='unselected-op'",
         [],
     ).unwrap();
-    let result = store.apply_operational_repair_with_legacy_starts(&filtered.token, &evidence).unwrap();
+    let result = store.apply_operational_repair_with_legacy_starts(&filtered.token, &evidence, None).unwrap();
     assert_eq!(result.applied, 1);
     let connection = store.readers.get();
     let closed: bool = connection.query_row(
@@ -253,7 +267,7 @@ fn filtered_legacy_runtime_repair_refuses_changed_selected_set_and_class() {
         /* sqlite-large-value: allow-for-now lv-h1dbcb8c5613a owner=fractal_store::store::tests TODO=bound-or-reference-values-and-reclamation */
         "UPDATE local_runtime_starts SET revoked_by='changed-stop' WHERE id='legacy-op'", [],
     ).unwrap();
-    assert_eq!(store.apply_operational_repair_with_legacy_starts(&selected.token, &evidence)
+    assert_eq!(store.apply_operational_repair_with_legacy_starts(&selected.token, &evidence, None)
         .unwrap_err().code, "stale-repair-plan");
 }
 
