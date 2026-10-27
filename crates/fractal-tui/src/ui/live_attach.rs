@@ -194,7 +194,7 @@ impl State {
                         }
                         ui.flash(format!("Could not open the terminal: {reason}"));
                     } else {
-                        ui.flash(format!("No direct terminal ({reason}); trying st's view"));
+                        ui.flash(format!("No direct terminal ({reason}); trying Fractal's view"));
                     }
                 }
             }

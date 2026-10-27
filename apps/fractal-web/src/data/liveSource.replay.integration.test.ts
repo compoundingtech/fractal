@@ -81,6 +81,19 @@ const conversationItems = (live: LiveSource) => {
 }
 
 describe('scenario replay through the real live source', () => {
+  it.live('classifies an unmodelled replay usage read as unsupported', () =>
+    withReplay(world, (live, clock) => Effect.gen(function* () {
+      const usage = live.source.nativeDetails!.usagePeriod(world.slices.roster.state.agents[0]!.id)
+      const release = live.registry.mount(usage)
+      try {
+        yield* settle(clock)
+        expect(live.registry.get(usage)).toMatchObject({ _tag: 'Unavailable', reason: 'unsupported' })
+      } finally {
+        release()
+      }
+    })),
+  )
+
   it.live('decodes the world roster and conversation, then publishes a timed append', () =>
     withReplay(world, (live, clock) => Effect.gen(function* () {
       expect(catalog.some((entry) => entry.id === world.id)).toBe(true)
@@ -98,7 +111,7 @@ describe('scenario replay through the real live source', () => {
       expect(initial.length).toBeGreaterThan(0)
       expect(initialIds.every((id) => thread.items.some((entry) => entry.id === id))).toBe(true)
       expect(initial).toContainEqual(expect.objectContaining({
-        _tag: 'UnknownEvent', id: thread.items.at(-1)!.id, eventType: 'diagnostic_summary',
+        _tag: 'Unsupported', id: thread.items.at(-1)!.id, harness: 'st', recordKind: 'diagnostic_summary', reason: 'unknown-entry-type',
       }))
 
       const event = world.slices.conversation.timeline[0]!
@@ -109,7 +122,8 @@ describe('scenario replay through the real live source', () => {
       expect(updated).toHaveLength(initial.length + event.items.length)
       expect(updated.map((item) => item.id)).toEqual([...initialIds, ...event.items.map((entry) => entry.id)])
       expect(updated.at(-1)).toMatchObject({
-        _tag: 'UnknownEvent', eventType: 'diagnostic_summary', data: { status: 'passed' },
+        _tag: 'Unsupported', harness: 'st', recordKind: 'diagnostic_summary', reason: 'unknown-entry-type',
+        inspect: { text: expect.stringContaining('passed'), truncated: false },
       })
     })),
   )

@@ -29,8 +29,8 @@ pub fn project(subject: &SubjectStatus, terminal_harness: Option<&CurrentHarness
             Some(a) if a.starts_with("agent/") => "stopped-by-agent",
             _ => return None,
         }
-    } else if subject.reachability == "unreachable" && matches!(actual, Some("running" | "ready" | "working" | "idle")) { "host-lost" }
-    else if harness.is_some() && diagnostic.is_some() { "harness-exited" }
+    } else if harness.is_some() && diagnostic.is_some() { "harness-exited" }
+    else if subject.reachability == "unreachable" && matches!(actual, Some("running" | "ready" | "working" | "idle")) && exit_code.is_none() && exit_signal.is_none() { "host-lost" }
     else if (harness.is_some() || actual == Some("exited")) && failed_exit { "crashed" }
     else if (harness.is_some() || actual == Some("exited")) && exit_code == Some(0) && !failed_exit && matches!(subject.reachability.as_str(), "reachable" | "local") { "completed" }
     else { return None; };
@@ -82,6 +82,17 @@ mod tests {
         let end = project(&seat, None, None, None, false, "2026-10-04T00:00:00Z").unwrap();
         assert_eq!(end["kind"], "harness-exited");
         assert_eq!(end["diagnostic"], "auth refused: exact provider text");
+    }
+    #[test]
+    fn launch_diagnostic_with_clean_exit_is_not_host_lost() {
+        let mut seat = subject(Some("exit 0"));
+        seat.reachability = "unreachable".into();
+        seat.actual = Some(json!({"fields": {"status": "running"}}));
+        seat.harness.as_mut().unwrap().reason = Some("Codex launch failed before ready".into());
+        let end = project(&seat, None, None, None, false, "2026-10-26T00:00:00Z").unwrap();
+        assert_eq!(end["kind"], "harness-exited");
+        assert_eq!(end["exit_code"], 0);
+        assert_eq!(end["diagnostic"], "Codex launch failed before ready");
     }
     #[test]
     fn actor_stop_and_retirement_take_precedence_over_clean_exit() {

@@ -51,6 +51,17 @@ stops the runtime, and freezes portable transcript files after the process ends.
 stays declared. Its restart policy does not restart it, `st agents restart` refuses it, and mail
 sent to it waits until it resumes.
 
+An incarnation-bearing report is accepted only while the latest runtime observation records
+that incarnation as running. The writer checks this authority before replaying or deduplicating
+a report, so retries from an ended or superseded incarnation cannot replace its successor's
+binding. During a rollout, verification records the observed replacement's runtime authority
+before waiting for its native binding.
+
+Consecutive identical native-session reports reuse the current binding claim. Switching to
+another session and then returning appends a fresh binding for the revisited session, so the
+latest claim continues to identify the active native session. Todo observations from another
+session or incarnation remain visible with stale provenance rather than appearing current.
+
 Resume launches the driver with the session in `ST3_NATIVE_RESUME_SESSION`. Each driver
 relaunches its harness on exactly that session:
 
@@ -69,6 +80,36 @@ a `native-resume-unavailable` diagnostic whose status is the reason: `transcript
 native session. A different session (`native-session-mismatch`), no session within three minutes
 (`native-session-unbound`), or an exit before binding fails the resume. After a failed resume the
 seat stays suspended on the same snapshot, with the code and reason.
+
+### Explicit pi-family transcript paths
+
+OMP's session manager reports the actual `sessionFile` along with the native ID on
+session, ready, and session-switch frames. The publisher verifies that exact regular
+file's header names the reported ID, then binds its canonical path to the subject and
+incarnation. An externally resumed file need not live under managed `provider-sessions`.
+Conversation replay consumes this exact-incarnation binding, so a resumed transcript
+created before the current incarnation is readable without guessing a file by cwd or age.
+
+On Linux, an older loaded hook that reports only its current native ID can also bind
+an explicit launch path without a restart. The publisher checks the incarnation's
+runtime PID and kernel start time, the exact subject's managed OMP driver and its direct
+provider child, the account, and the provider's absolute `--resume` path. That file's
+header must match the hook's **current** native ID; launch argv alone is never sufficient.
+Process lifetimes and parent links are checked again before accepting the path. A
+different current session, ambiguous provider, or missing ownership evidence refuses
+recovery rather than searching for another transcript.
+
+An import's provenance remains binding authority only while it is the latest binding.
+A later native-session report supersedes it; querying an incarnation without its own
+binding must not revive a historical import.
+
+Ordinary continuation passes the recorded path through `FRACTAL_NATIVE_CONTINUE_PATH`.
+Rollout restoration passes it through `FRACTAL_NATIVE_RESUME_PATH`. Suspend/resume recovers
+the path from the durable binding for the suspended incarnation and snapshot's native
+ID, then uses the same resume-path carrier; the snapshot schema is unchanged. A changed
+binding fails with `snapshot-binding-changed`. Missing, unreadable, or foreign explicit
+files are refused rather than replaced with a managed transcript. Without an explicit
+path, fresh managed-session publication and checked managed-transcript restoration remain unchanged.
 
 ## Leaving an existing suspension when resume refuses
 

@@ -16,6 +16,6 @@ const agents = [{ id: 'agent/example/harbor/keeper', kind: 'agent', name: 'examp
 const { rows, note } = saidRows(found(), agents);
 assert.deepEqual(rows.map(row => [row.agentId, row.excerpt, row.when]), [['agent/example/harbor/keeper', 'the harbor keys rotated at noon', '10-02 21:40']]);
 assert.equal(note, '');
-// st's freshness is said.
+// Fractal's freshness is said.
 assert.equal(saidRows(found({ refreshing: true }), agents).note, 'still indexing, more may come');
 assert.equal(saidRows(found({ incomplete_sources: ['session/three'] }), agents).note, 'some conversations could not be searched');

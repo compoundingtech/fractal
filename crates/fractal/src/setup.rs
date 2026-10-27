@@ -38,7 +38,7 @@ pub struct SetupArgs {
     /// Keep fractal running as a user service (default: true).
     #[arg(long, action = clap::ArgAction::Set)]
     pub service: Option<bool>,
-    /// Install st3, the st link and pty in ~/.local/bin (default: true).
+    /// Install Fractal (st3 and the st link) and pty in ~/.local/bin (default: true).
     #[arg(long, action = clap::ArgAction::Set)]
     pub install: Option<bool>,
     /// Start the daemon if stopped (default: true).
@@ -107,7 +107,7 @@ pub fn prepare_plain_ui() -> Result<Option<String>> {
                 return Ok(run(SetupArgs::default()).await?.initial_subject);
             } else if !daemon_ready(&config).await
                 && ask_bool(
-                    "The st daemon is not running. Start it?",
+                    "The Fractal daemon is not running. Start it?",
                     "--start",
                     None,
                     false,
@@ -201,7 +201,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
     config.node = node;
     config.validate()?;
     let service = ask_bool(
-        "Keep st running in the background (no admin rights needed)?",
+        "Keep Fractal running in the background (no admin rights needed)?",
         "--service",
         args.service,
         args.yes,
@@ -214,7 +214,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         args.start.unwrap_or(true)
     } else {
         ask_bool(
-            "Start the st daemon?",
+            "Start the Fractal daemon?",
             "--start",
             args.start,
             args.yes,
@@ -276,7 +276,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
                 !args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            say!("Start the st daemon and run {program} setup to begin onboarding.");
+            say!("Start the Fractal daemon and run {program} setup to begin onboarding.");
             None
         }
     } else {
@@ -313,7 +313,7 @@ async fn prepare_harness(
             Err(error)
                 if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
-                println!("The running daemon is older than this st; checking the login PATH from here.");
+                println!("The running daemon is older than this Fractal build; checking the login PATH from here.");
                 fractal_daemon::environment::available_harnesses()?
             }
             Err(error) => return Err(error),
@@ -371,7 +371,7 @@ async fn prepare_harness(
     };
     if chosen == "claude" {
         let install = ask_bool(
-            "Install the st Claude channel (no admin rights needed)?",
+            "Install the Fractal Claude channel (no admin rights needed)?",
             "--claude-channel",
             args.claude_channel,
             args.yes,
@@ -386,16 +386,19 @@ async fn prepare_harness(
         }
         // CLI plugin commands must see the same account login environment as the daemon.
         if let Err(error) = ensure_claude_channel(executable) {
+            if args.harness.is_some() || (!args.yes && found.len() > 1) {
+                anyhow::bail!("Claude channel installation failed: {error}");
+            }
             say!("Claude channel installation failed: {error}");
             return Ok(fallback_harness(&found));
         }
-        if fractal_drivers::claude_channel::st3_policy_available() {
+        if fractal_drivers::claude_channel::fractal_policy_available() {
             say!(
                 "Claude channel policy is present; seats use --channels plugin:st-channel@st."
             );
         } else {
             say!(
-                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. st accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo {} claude-channel install-policy", args.program()
+                "Claude channel uses --dangerously-load-development-channels plugin:st-channel@st. Fractal accepts its local-development dialog when starting a seat. Provider or organization channel restrictions still apply.\nOptional administrator approval policy: sudo {} claude-channel install-policy", args.program()
             );
         }
     }
@@ -677,14 +680,14 @@ fn copy_executable(source: &Path, target: &Path) -> Result<()> {
 fn find_pty(executable: &Path) -> Result<PathBuf> {
     let sibling = executable
         .parent()
-        .context("st executable directory")?
+        .context("Fractal executable directory")?
         .join("pty");
     if sibling.is_file() {
         return Ok(sibling);
     }
     let environment = fractal_daemon::environment::snapshot()?;
     fractal_runtime::resolve_executable("pty", &environment)
-        .context("pty is missing; unpack the complete st archive (st3, st and pty) before setup")
+        .context("pty is missing; unpack the complete Fractal archive (st3, st and pty) before setup")
 }
 
 fn install_binaries(executable: &Path) -> Result<PathBuf> {
@@ -722,10 +725,10 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     .filter_map(|(name, exists)| exists.then_some(name))
     .collect::<Vec<_>>();
     if replacing.is_empty() {
-        println!("Installing st3, st and pty in {}", bin.display());
+        println!("Installing Fractal (st3, st and pty) in {}", bin.display());
     } else {
         println!(
-            "Installing st3, st and pty in {}, replacing the existing {}",
+            "Installing Fractal (st3, st and pty) in {}, replacing the existing {}",
             bin.display(),
             replacing.join(", ")
         );
@@ -740,7 +743,7 @@ fn install_binaries(executable: &Path) -> Result<PathBuf> {
     }
     File::open(&bin)?.sync_all()?;
     record_installed_binaries(&bin)?;
-    say!("Installed st3, st and pty in {}", bin.display());
+    say!("Installed Fractal (st3, st and pty) in {}", bin.display());
     Ok(target)
 }
 

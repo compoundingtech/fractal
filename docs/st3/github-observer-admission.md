@@ -29,7 +29,44 @@ Core, GraphQL and search use separate request counters (including GitHub
 Enterprise `/api/graphql` and `/api/v3/search` path shapes without relaxing any
 existing transport-domain policy). These are NOT GraphQL points, search-provider
 or secondary-limit guarantees. Failed sends and conditional304s remain reserved.
-Refusal adds no reservation and returns the existing typed ProviderRateLimit.
+Refusal adds no reservation and returns a typed `LocalObserverBudget`, displayed
+as “local observer budget reached, next slot at T”, not a GitHub HTTP 429.
+For N/N-1 compatibility, non-fault local deferral uses the existing wire state
+`healthy` with `error_code=local-observer-budget`, reason and next deadline.
+It does not claim a successful provider read or change the last resource facts.
+Watch wire state remains `active`; its existing reason visibly says `throttled`
+and the next slot, including in `fractal gh ls`. No owner attention item is raised.
+`degraded` is not used because existing attention rules always escalate it.
+No new enum value or response field is required by older daemon/TUI/web/client readers.
+
+GitHub HTTP 429 and secondary-limit 403 responses honour `Retry-After` (seconds
+or HTTP date) and `x-ratelimit-reset`, using the latest future deadline. If neither
+header names a future deadline, the observer waits fifteen minutes; a stale
+primary reset cannot turn a secondary limit into a one-second polling loop.
+Every changed refusal deadline is persisted, including when the HTTP status and
+reason have not changed, so attention evaluates the latest reset rather than
+the first refusal's expired reset.
+
+Each REST page, check/status sub-request and GraphQL query (including a smaller
+query retried after a GraphQL execution error) passes admission separately.
+REST read redirects are followed explicitly, up to ten hops within the same API
+origin, with a new reservation and response attribution for each hop. Cross-origin
+redirects are refused rather than forwarding credentials. Mutations are sent once,
+without following redirects. Automatic transport retries are disabled in the
+observer and authorized gateway clients; an ordinary HTTP 5xx is not retried
+inside a send. A reservation can still correspond to no
+completed HTTP request when a connection fails, so the ledger remains a
+conservative attempt ceiling rather than proof of exact provider debits.
+
+Provider header history is separate: `STATE/github-admission.json.budget-history.json`
+retains the first actual `limit`, `used`, `remaining`, and reset sample for each
+resource/reset/minute, for up to 48 hours and at most 8,192 samples. These retain
+provider units: core requests and GraphQL points are never added together or
+inferred from each other's request counts. Sampling adds no HTTP request and
+publishes only a new minute/reset sample, not every response. The ring uses the
+existing bounded private-file publication path; corrupt history is not silently
+overwritten. A history I/O gap is visible in doctor and never changes admission
+or the actual HTTP outcome. The enforced reservation window remains 61 minutes.
 
 Counters are coalesced per minute/caller/resource, including unscoped traffic:
 a100000-call unscoped flood in one minute occupies one row and cannot consume

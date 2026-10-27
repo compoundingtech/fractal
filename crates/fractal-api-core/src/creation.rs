@@ -104,7 +104,6 @@ pub fn agent_document(
         ));
         harness_body.nodes_mut().push(node);
     }
-    // The harness grammar requires a body even when the provider has no default flags.
     harness.set_children(harness_body);
     body.nodes_mut().push(harness);
     if let Some(key) = creation_key {

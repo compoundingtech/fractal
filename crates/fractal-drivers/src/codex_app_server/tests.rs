@@ -1,5 +1,53 @@
 use super::*;
 
+#[test]
+fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("app-server.log");
+    let previous = "previous incarnation diagnostic\n";
+    let current = (0..30).map(|i| format!("stderr line {i}\n")).collect::<String>();
+    fs::write(&path, format!("{previous}{current}")).unwrap();
+    let tail = app_server_log_tail(&path, previous.len() as u64).unwrap();
+    assert_eq!(tail.lines().count(), 20);
+    assert!(tail.starts_with("stderr line 10\n"));
+    assert!(tail.ends_with("stderr line 29"));
+    assert!(!tail.contains("previous"));
+    assert_eq!(app_server_log_tail(&path, fs::metadata(&path).unwrap().len()).unwrap(), "");
+}
+
+#[test]
+fn launch_diagnostic_bounds_lossy_utf8_at_a_character_boundary() {
+    let multibyte = "é".repeat(6_000);
+    let tail = diagnostic_output_tail(multibyte.as_bytes());
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.ends_with('é'));
+    assert!(tail.chars().all(|c| c == 'é'));
+
+    let mut invalid = vec![0xff; 8 * 1024];
+    invalid.extend_from_slice("final é".as_bytes());
+    let tail = diagnostic_output_tail(&invalid);
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.contains('\u{fffd}'));
+    assert!(tail.ends_with("final é"));
+}
+
+#[test]
+fn protocol_schema_gate_accepts_codex_0164_error_union() {
+    let mut schemas = compatible_protocol_schemas();
+    let error = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo").unwrap();
+    let mut arms = error.as_object_mut().unwrap().remove("oneOf").unwrap();
+    // 0.164.0 also includes a forward-compatible string/object catch-all. It must
+    // not erase the explicitly declared authentication and capacity words.
+    arms.as_array_mut().unwrap().push(json!({"type": ["string", "object"]}));
+    error["anyOf"] = arms;
+    verify_codex_protocol_schemas(&schemas).unwrap();
+    let words = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo/anyOf/0/enum")
+        .unwrap().as_array_mut().unwrap();
+    words.retain(|word| word != "unauthorized");
+    assert!(format!("{:#}", verify_codex_protocol_schemas(&schemas).unwrap_err())
+        .contains("CodexErrorInfo has no 'unauthorized' word"));
+}
+
 // Shared CI runs several workspace suites at once; these waits test event ordering,
 // not a two-second performance bound.
 const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);

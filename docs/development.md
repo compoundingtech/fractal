@@ -295,7 +295,7 @@ domain must belong to a zone in the configured Cloudflare account.
 
 Materialize the pinned `effect-utils` member before installing dependencies,
 as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
-Use the web shell's pnpm 12.7.0, not a separate global install:
+Use the web shell's pnpm 12.15.0, not a separate global install:
 
 ```sh
 mr apply --worktree-mode commit

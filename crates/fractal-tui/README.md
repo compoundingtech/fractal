@@ -4,7 +4,7 @@
 a mission, a terminal, Inbox or usage. `st ui --space NAME` opens a named space. `st ui --demo`
 shows them on invented data and sends nothing. Spaces are the Fractal terminal UI's only layout: the layout from
 before them is gone ([#1166](https://github.com/compoundingtech/fractal/issues/1166)), and
-`st ui --classic` refuses with what to run instead.
+`st ui --classic` refuses with what to run instead. `tui` is an alias of `ui`, including after global options such as `st --endpoint URL tui`.
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
 
@@ -15,7 +15,7 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#st3` Nix package and run `ST3_PERSON=person/<your-id> st` in a terminal
+Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> st` in a terminal
 with a running Fractal daemon. For source development, use
 `ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
@@ -92,6 +92,9 @@ cargo build -p fractal --locked
 ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
 ```
 
+After an intended mission-rendering change, regenerate its text, style and target golden with
+`STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --locked mission_golden`, review the fixture diff,
+then run the same test without `STUI_UPDATE_GOLDEN`.
 The PTY smoke test runs with or without a local daemon or Fractal config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
@@ -112,7 +115,7 @@ both unset for ordinary use. The selector only observes the UI: it does not open
 change the actor/endpoint, attach a terminal or alter subscriptions. An existing file is
 never appended to or overwritten; a new file is mode 0600 on Unix.
 
-Start the installed `st` once, using the person's ordinary pairing/configuration and
+Start the installed `fractal` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
 Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
 attachment), `--demo`, or a headless test client as a conversation-render measurement.
