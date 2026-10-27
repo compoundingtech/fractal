@@ -166,7 +166,8 @@ final class ScenariosTests: XCTestCase {
                     var state = try object(root.required("state"))
                     var values = try array(state.required(field))
                     var value = try object(values[0])
-                    value["future_inventory_field"] = .bool(true)
+                    let enumField = ["sessions": "state", "devices": "state", "launches": "phase", "launch_variants": "status"][field]!
+                    value[enumField] = .string("future-inventory-state")
                     values[0] = .object(value)
                     state[field] = .array(values)
                     root["state"] = .object(state)
