@@ -35,7 +35,7 @@ const utf8 = new TextEncoder()
 let registry: AtomRegistry.AtomRegistry
 let root: Root
 let host: HTMLDivElement
-let frames: FrameRequestCallback[]
+let frames: Map<number, FrameRequestCallback>
 /**
  * Every ResizeObserver the pane creates. The viewport always follows its own geometry for scrolling;
  * only a raw ATTACH turns an observed size into a RESIZE vote.
@@ -53,9 +53,14 @@ beforeEach(() => {
     unobserve() {}
     disconnect() { this.elements.length = 0 }
   })
-  frames = []
-  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => frames.push(callback))
-  vi.stubGlobal('cancelAnimationFrame', () => {})
+  frames = new Map()
+  let nextFrame = 0
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    const id = ++nextFrame
+    frames.set(id, callback)
+    return id
+  })
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
   // jsdom fetches no module assets; serve the committed Ghostty module the browser would load.
   vi.stubGlobal('fetch', async () => new Response(new Uint8Array(await readFile(join(import.meta.dirname, 'assets/ghostty-key-encoder.generated.wasm'))), { headers: { 'content-type': 'application/wasm' } }))
   // jsdom has no font loading; the registered terminal faces resolve as loaded.
@@ -89,7 +94,9 @@ const mount = async ({ terminal, reachability = 'reachable', terminalRaw, termin
 const chip = () => host.querySelector('[data-terminal-mode]')
 const field = () => host.querySelector<HTMLTextAreaElement>('textarea[aria-label="Terminal input"]')
 const paint = () => act(async () => {
-  for (const callback of frames.splice(0)) callback(0)
+  const pending = [...frames.values()]
+  frames.clear()
+  for (const callback of pending) callback(0)
 })
 
 interface FakeSession {
