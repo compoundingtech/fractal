@@ -743,7 +743,7 @@ pub async fn client_sessions_detail(
         })?;
         let id = session_id.as_str();
         let managed = crate::relay_trace::result(crate::relay_trace::Phase::Owner, || {
-            managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+            client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
         })
         .map_err(ApiError::internal)?;
         if let Some((_, _, origin)) = managed {
@@ -791,12 +791,8 @@ pub async fn client_sessions_detail(
     // Child transcripts are deliberately absent from the top-level session inventory.
     // Resolve their resource by the same parent/task identity used by timeline reads.
     let session_id = client_detail_id("session", &id);
-    if let Some(child) = crate::subagent_sessions::resolve_child(
-        state.native_session_home.as_deref(),
-        &session_id,
-    )
-    .map_err(ApiError::internal)?
-    {
+    if crate::subagent_sessions::child_parts(&session_id).is_some() {
+        let child = client_v0::conversation_blocks::source(&state, &session_id, None)?;
         return Ok(Json(external_session_resource(child)));
     }
     client_detail(
