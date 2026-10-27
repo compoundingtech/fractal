@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
-import { plainError, type ClientConnection } from '../../../clients/typescript/st3-client';
-import { ActionSheetIOS, Alert, ScrollView, View } from 'react-native';
+import { plainError, type ClientConnection } from '../../../clients/typescript/fractal-client';
+import { ActionSheetIOS, Alert, ScrollView, Switch, Text, View } from 'react-native';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
 import { clientDetail, clientTitle, deviceDetail, deviceTitle, olderThanMember } from '../presentation';
-import { isUnmanaged, isUnresolved } from '@smalltalk/st3-views';
+import { isUnmanaged, isUnresolved } from '@fractal/views';
 import { useStore } from '../store';
 import { TABS } from '../tabs';
 import { theme } from '../theme';
@@ -32,7 +32,7 @@ function useClients() {
     try { setClients((await client.clientsList()).value.items); setIssue(''); }
     catch (error) {
       const text = plainError(error);
-      setIssue(/404|not-found|it is gone/i.test(text) ? 'This st does not list its clients yet: its daemon needs an update.' : `Could not read connected clients: ${text}`);
+      setIssue(/404|not-found|it is gone/i.test(text) ? 'This Fractal version does not list its clients yet; it needs an update.' : `Could not read connected clients: ${text}`);
     }
   }, [client, inventoryGranted]);
   useFocusEffect(useCallback(() => {
@@ -55,7 +55,7 @@ export function FleetScreen() {
   const gatewayListed = data.machines.some(machine => machine.id === gatewayMachineId);
   const found = <>
     {undeclared.map(session => <T key={session.id} dim style={{ paddingLeft: 34 }}>? {isUnresolved(session) ? 'unresolved process' : 'native session'} · {session.driver ?? 'harness'}{session.process ? ` · pid ${session.process.pid}` : ''}</T>)}
-    {!undeclared.length ? <T dim style={{ paddingLeft: 34 }}>no sessions found running outside st</T> : null}
+    {!undeclared.length ? <T dim style={{ paddingLeft: 34 }}>no sessions found running outside Fractal</T> : null}
   </>;
   return <Screen>
     <Banners />
@@ -93,6 +93,7 @@ export function FleetScreen() {
         <T>route · {carrierInfo.routeText}</T>
         {carrierInfo.route.fellBack && carrierInfo.route.why ? <T color={theme.waiting}>{carrierInfo.route.why}</T> : null}
         {carrierInfo.issue ? <T color={theme.fault}>{carrierInfo.issue}</T> : null}
+        <NotificationsSetting />
         <Button label="forget this device" color={theme.red} onPress={() => Alert.alert('Forget this device?', 'You will need to pair again.', [{ text: 'Cancel', style: 'cancel' }, { text: 'Forget', style: 'destructive', onPress: () => void actions.forget() }])} />
       </View>
       <CarrierSection />
@@ -110,7 +111,7 @@ export function FleetScreen() {
         second={clientDetail(item, now)}
       />)}
       <SectionHeader title="devices" count={data.devices.length} />
-      {data.devices.map(device => <ListRow key={device.id} title={deviceTitle(device, caps?.session_actor)} second={`${deviceDetail(device, now)} · ${device.scopes.join(', ')}`} />)}
+      {data.devices.map(device => <ListRow key={device.id} title={deviceTitle(device, caps?.session_actor)} second={`${deviceDetail(device, now)} · ${device.scopes.join(', ')}${device.push ? device.push.registered ? ` · push registered${device.push.environment ? ` (${device.push.environment})` : ''}` : ' · push not registered' : ''}`} />)}
       <SectionHeader title="tab order" />
       {order.map(tab => <ListRow key={tab} title={tab} right={<T dim>{order.indexOf(tab) + 1}</T>} onPress={() => ActionSheetIOS.showActionSheetWithOptions(
         { title: `Move ${tab}`, options: ['Move up', 'Move down', 'Cancel'], cancelButtonIndex: 2, disabledButtonIndices: [...(order.indexOf(tab) === 0 ? [0] : []), ...(order.indexOf(tab) === TABS.length - 1 ? [1] : [])] },
@@ -118,6 +119,29 @@ export function FleetScreen() {
       )} />)}
     </ScrollView>
   </Screen>;
+}
+
+function NotificationsSetting() {
+  const { pushInfo, actions, status } = useStore();
+  const detail = !pushInfo.loaded ? 'Checking notification support…'
+    : pushInfo.cleanup === 'pending' ? 'Remote opt-out is pending. Reconnect to previously registered members before forgetting this phone.'
+    : pushInfo.cleanup === 'failed' ? 'Could not confirm remote opt-out. Pairing credentials are kept; reconnect and retry.'
+    : !pushInfo.environment ? 'Requires a push-enabled build on a physical iPhone.'
+    : status !== 'online' ? 'Connect to your paired member to register. Turning off is saved on this phone.'
+    : !pushInfo.granted ? 'Push registration is unavailable on this paired member.'
+    : pushInfo.status === 'failed' ? 'Could not update registration. Reconnect or turn notifications off and on to try again.'
+    : pushInfo.status === 'permission-denied' ? 'Allow notifications in iOS Settings, or turn this setting off.'
+    : pushInfo.status === 'working' ? 'Updating registration…'
+    : pushInfo.status === 'registered' ? `Registered (${pushInfo.environment}). No alerts are sent yet.`
+    : pushInfo.enabled ? 'Registration is waiting for this connection. No alerts are sent yet.'
+    : 'Off by default. Register this phone for future alerts; no alerts are sent yet.';
+  return <View style={{ paddingVertical: 12, gap: 5 }}>
+    <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+      <Text style={{ color: theme.text, fontSize: 17 }}>Notifications</Text>
+      <Switch value={pushInfo.enabled} disabled={!pushInfo.enabled && !pushInfo.canEnable} onValueChange={on => void actions.setPushEnabled(on)} accessibilityLabel="Notifications on this phone" />
+    </View>
+    <Text style={{ color: theme.subtext0, fontSize: 13 }}>{detail}</Text>
+  </View>;
 }
 
 // The carrier: how this phone reaches its member. The saved gateway (Tailscale, the local network or
@@ -235,7 +259,7 @@ export function PairScreen() {
   return <Screen>
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, paddingBottom: 48 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive">
-      <T soft>Begin pairing on a trusted st machine, then enter its short-lived ID, code, and the person-root fingerprint copied separately. Use HTTPS or an already encrypted path such as Tailscale for the paired-only gateway.</T>
+      <T soft>Begin pairing on a trusted Fractal machine, then enter its short-lived ID, code, and the person-root fingerprint copied separately. Use HTTPS or an already encrypted path such as Tailscale for the paired-only gateway.</T>
       {pairDraft ? <T soft>Pairing with {pairDraft.gateway}</T> : overFabric && !url ? <>
         <T soft>Pairing over Fabric with {carrierInfo.target ? fabricTargetLabel(carrierInfo.target) : ''}. {carrierInfo.fabric.phase === 'ready' ? 'Fabric is connected.' : carrierInfo.fabric.phase === 'failed' || carrierInfo.fabric.phase === 'refused' ? carrierInfo.fabric.reason : 'Connecting to Fabric…'}</T>
         {carrierInfo.node ? <><T dim>This phone's fabric node ID, for the member's grant (public):</T><T selectable>{carrierInfo.node}</T></> : null}

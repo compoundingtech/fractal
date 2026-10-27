@@ -55,7 +55,7 @@ Ops took one read-only filesystem census at 16:13 UTC on 2026-10-16. The daemon'
 ## Staged binary capability for deployment
 
 `CHECKPOINT_SPACE_GATE_VERSION` is the fixed integer `2`, exported from
-`smallclaims::store` through `st3::store`. The staged `st3` binary answers
+`smallclaims::store` through `fractal_daemon::store`. The staged `st3` binary answers
 `--checkpoint-space-gate-capabilities` with exactly one JSON line:
 
 ```json

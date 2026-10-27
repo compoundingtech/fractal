@@ -5,22 +5,24 @@ import { Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Modal, Popover } fr
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { ChromeControl } from './assistant-ui/composition/ChromeControl'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
+import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
 import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { tooltipFor } from './story-play'
 
 /**
  * The chrome's quiet icon controls in place: the sidebar header and footer, and the thread header with the
  * agent, resources and conversation controls beside the terminal and panel toggles (panel open, so pressed).
  * Resources is a dialog trigger and Conversation menu a menu trigger, as in the app; each is disabled when
- * given a reason. Below 640px the sidebar strip stacks above the header.
+ * given a reason. Below 640px the sidebar strip stacks above the header. `phone` hosts it in a narrow (touch) layout.
  */
-function ChromeControlsStory({ scheme = 'dark', resourcesDisabledReason, conversationDisabledReason, onResources }: { scheme?: Scheme; resourcesDisabledReason?: string; conversationDisabledReason?: string; onResources?: () => void }) {
+function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabledReason, conversationDisabledReason, onResources }: { scheme?: Scheme; phone?: boolean; resourcesDisabledReason?: string; conversationDisabledReason?: string; onResources?: () => void }) {
   const [collapsed, setCollapsed] = React.useState(false)
   const [panelOpen, setPanelOpen] = React.useState(true)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
   const [needsMe, setNeedsMe] = React.useState(false)
-  return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
+  return <NarrowLayoutContext.Provider value={phone}><main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}>
     <aside aria-label="Agents" {...stylex.props(styles.sidebar)}>
       <header {...stylex.props(styles.band)}>
         <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(value => !value)} />
@@ -51,17 +53,32 @@ function ChromeControlsStory({ scheme = 'dark', resourcesDisabledReason, convers
         </div>
       } />
     </section>
-  </main>
+  </main></NarrowLayoutContext.Provider>
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Chrome controls',
   component: ChromeControlsStory,
-  parameters: { layout: 'fullscreen' },
+  parameters: { scenario: { _tag: 'primitive', reason: "Exercises icon-button chrome, disabled reasons and menus independently of domain state." }, layout: 'fullscreen' },
   args: { scheme: 'dark', onResources: fn() },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof ChromeControlsStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'DisabledMenu:primitive',
+  'DisabledMenuLight:primitive',
+  'DisabledReason:primitive',
+  'DisabledReasonLight:primitive',
+  'PhoneTapQuiet:primitive',
+  'ProgrammaticFocusQuiet:primitive',
+  'QuietIcons:primitive',
+  'QuietIconsFlow:primitive',
+  'QuietIconsLight:primitive',
+  'WindowBlurQuiet:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 const header = (canvasElement: HTMLElement) => within(canvasElement).getByTestId('thread-header')
@@ -179,6 +196,81 @@ export const DisabledMenu: Story = { args: { conversationDisabledReason: convers
   await expect(conversation).toHaveAttribute('aria-expanded', 'false')
 } }
 export const DisabledMenuLight: Story = { ...DisabledMenu, args: { ...DisabledMenu.args, scheme: 'light' } }
+
+/** Polls past the tooltip's open delay: no tooltip may appear at any point in the window. */
+const staysWithoutTooltip = async (ms: number) => {
+  const until = performance.now() + ms
+  while (performance.now() < until) {
+    await expect(within(document.body).queryByRole('tooltip')).toBeNull()
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
+  }
+}
+
+/**
+ * Desktop decision C: Tab onto Resources names it (positive control), but focus moved by code while the input
+ * modality is still keyboard, as a host restoring focus does, shows no tooltip although the ring is visible.
+ * After pointer input, programmatic focus retains neither the ring nor a tooltip.
+ */
+export const ProgrammaticFocusQuiet: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
+  const scope = within(header(canvasElement))
+  const resources = scope.getByRole('button', { name: 'Resources' })
+  const conversation = scope.getByRole('button', { name: 'Conversation menu' })
+  scope.getByRole('button', { name: 'Actions for fractal-web' }).focus()
+  await userEvent.tab()
+  await expect(resources).toHaveFocus()
+  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Resources'))
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
+  conversation.focus()
+  await expect(conversation).toHaveFocus()
+  await expect(conversation).toHaveAttribute('data-focus-visible', 'true')
+  await expect(getComputedStyle(conversation).outlineStyle).toBe('solid')
+  await staysWithoutTooltip(600)
+  await userEvent.click(canvasElement)
+  resources.focus()
+  await expect(resources).toHaveFocus()
+  await waitFor(() => expect(resources).not.toHaveAttribute('data-focus-visible'))
+  await expect(getComputedStyle(resources).outlineStyle).toBe('none')
+  await staysWithoutTooltip(600)
+} }
+
+/** Losing window focus clears desktop tooltip intent; restoring focus alone must not reopen it. */
+export const WindowBlurQuiet: Story = { play: async ({ canvasElement }) => {
+  const scope = within(header(canvasElement))
+  const resources = scope.getByRole('button', { name: 'Resources' })
+  scope.getByRole('button', { name: 'Actions for fractal-web' }).focus()
+  await userEvent.tab()
+  await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveTextContent('Resources'))
+  window.dispatchEvent(new Event('blur'))
+  await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
+  window.dispatchEvent(new Event('focus'))
+  await staysWithoutTooltip(600)
+  scope.getByRole('button', { name: 'Conversation menu' }).focus()
+  await staysWithoutTooltip(600)
+} }
+
+/**
+ * Phone host: a tap presses the 44px control and opens no tooltip. Restoring focus after keyboard input keeps
+ * the ring without a tooltip; real Tab navigation still discloses the focused control's label.
+ */
+export const PhoneTapQuiet: Story = { args: { phone: true }, play: async ({ canvasElement }) => {
+  const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
+  const needsMe = sidebar.getByRole('button', { name: 'Needs me only' })
+  await userEvent.pointer({ keys: '[TouchA]', target: needsMe })
+  await expect(needsMe).toHaveAttribute('aria-pressed', 'true')
+  await staysWithoutTooltip(600)
+  const sort = sidebar.getByRole('button', { name: 'Sort agents · Manual' })
+  await userEvent.keyboard('a')
+  sort.focus()
+  await waitFor(() => expect(sort).toHaveAttribute('data-focus-visible', 'true'))
+  await expect(sort).toHaveFocus()
+  await staysWithoutTooltip(600)
+  await userEvent.tab({ shift: true })
+  await userEvent.tab()
+  await expect(sort).toHaveFocus()
+  await expect(await tooltipFor(sort, 'Sort agents · Manual')).toHaveTextContent('Sort agents · Manual')
+  await userEvent.keyboard('{Escape}')
+} }
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: { default: 'column', '@media (min-width: 640px)': 'row' }, minHeight: '100vh', boxSizing: 'border-box', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },

@@ -10,9 +10,9 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use st2::agents::roster;
-use st2::message::send_to_inbox;
-use st2::status::{State, set_state, status_path};
+use fractal_legacy_runner::agents::roster;
+use fractal_legacy_runner::message::send_to_inbox;
+use fractal_legacy_runner::status::{State, set_state, status_path};
 
 fn write(root: &Path, rel: &str, contents: &str) {
     let path = root.join(rel);
@@ -102,7 +102,7 @@ fn roster_projects_presence_name_and_enrich_across_the_catalog() {
     )
     .unwrap();
     send_to_inbox(
-        &st2::message::inbox_dir(&root.join("example-linux/st2-claude")),
+        &fractal_legacy_runner::message::inbox_dir(&root.join("example-linux/st2-claude")),
         "example-linux.cos-claude",
         None,
         None,
@@ -111,7 +111,7 @@ fn roster_projects_presence_name_and_enrich_across_the_catalog() {
     )
     .unwrap();
     let restored = send_to_inbox(
-        &st2::message::inbox_dir(&root.join("example-linux/st2-claude")),
+        &fractal_legacy_runner::message::inbox_dir(&root.join("example-linux/st2-claude")),
         "example-linux.cos-claude",
         Some("already handled"),
         None,
@@ -119,10 +119,10 @@ fn roster_projects_presence_name_and_enrich_across_the_catalog() {
         "must not count twice",
     )
     .unwrap();
-    let archive = st2::message::archive_dir(&root.join("example-linux/st2-claude"));
+    let archive = fractal_legacy_runner::message::archive_dir(&root.join("example-linux/st2-claude"));
     fs::create_dir_all(&archive).unwrap();
     fs::copy(
-        st2::message::inbox_dir(&root.join("example-linux/st2-claude")).join(&restored),
+        fractal_legacy_runner::message::inbox_dir(&root.join("example-linux/st2-claude")).join(&restored),
         archive.join(&restored),
     )
     .unwrap();
@@ -538,8 +538,8 @@ fn roster_derives_unknown_from_a_stale_version_1_heartbeat() {
     assert_eq!(roster(root, "example-linux")[0].status, State::Available);
 
     // Backdate the embedded heartbeat past the stale window → unknown.
-    let stale_ms = st2::message::now_ms()
-        - u64::try_from((st2::status::STATUS_STALE + Duration::from_secs(60)).as_millis()).unwrap();
+    let stale_ms = fractal_legacy_runner::message::now_ms()
+        - u64::try_from((fractal_legacy_runner::status::STATUS_STALE + Duration::from_secs(60)).as_millis()).unwrap();
     fs::write(&sp, format!("available\nv1 {stale_ms}\n")).unwrap();
     assert_eq!(roster(root, "example-linux")[0].status, State::Unknown);
 }
@@ -549,14 +549,14 @@ fn roster_derives_unknown_from_a_stale_version_1_heartbeat() {
 /// beside it derives `unknown` — the wedge case the record exists for.
 #[test]
 fn roster_joins_a_real_context_record_independently_of_observed_state() {
-    use st2::harness_context::{Compaction, CompactionTrigger, Harness, Reading, Writer};
+    use fractal_legacy_runner::harness_context::{Compaction, CompactionTrigger, Harness, Reading, Writer};
 
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     // A harness-context write stages under the catalog control plane and validates canonical
     // `<catalog>/agents/<host>/<identity>` ancestry ("Replicated-path discipline"), so this
     // fixture must be a real catalog rather than a bare host/identity pair.
-    fs::create_dir_all(root.join(st2::catalog_lock::CONTROL_DIR)).unwrap();
+    fs::create_dir_all(root.join(fractal_legacy_runner::catalog_lock::CONTROL_DIR)).unwrap();
     write(
         root,
         "agents/example-linux/filling/agent.kdl",
@@ -576,7 +576,7 @@ fn roster_joins_a_real_context_record_independently_of_observed_state() {
             used_percent: Some(92.0),
             model: Some("claude-opus-5".to_string()),
             cost_usd: Some(3.5),
-            rate_limits: st2::harness_context::RateLimits {
+            rate_limits: fractal_legacy_runner::harness_context::RateLimits {
                 five_hour: Some(100.0),
                 seven_day: Some(55.0),
                 ..Default::default()
@@ -658,7 +658,7 @@ fn roster_joins_a_real_context_record_independently_of_observed_state() {
     );
 
     // …and no record at all still reads `-`.
-    fs::remove_file(st2::harness_context::harness_context_path(&agent_dir)).unwrap();
+    fs::remove_file(fractal_legacy_runner::harness_context::harness_context_path(&agent_dir)).unwrap();
     assert_eq!(human(root), "example-linux.filling\tbusy\tobs:-\tctx:-\t\t\n");
 }
 
@@ -668,7 +668,7 @@ fn roster_uses_version_1_origin_time_for_last_activity() {
     let root = tmp.path();
     write(root, "example-linux/idle/agent.kdl", &agent_kdl("idle", "example-linux"));
     let sp = status_path(&root.join("example-linux/idle"));
-    let heartbeat_ms = st2::message::now_ms() - 1_000;
+    let heartbeat_ms = fractal_legacy_runner::message::now_ms() - 1_000;
     fs::write(&sp, format!("available\nv1 {heartbeat_ms}\n")).unwrap();
 
     let row = &roster(root, "example-linux")[0];
@@ -681,7 +681,7 @@ fn status_cli_writes_and_reads_the_version_1_record() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
     write(root, "h/worker/agent.kdl", &agent_kdl("worker", "h"));
-    let before = st2::message::now_ms();
+    let before = fractal_legacy_runner::message::now_ms();
 
     let set = Command::new(test_env!("CARGO_BIN_EXE_st2"))
         .args(["status", "h.worker", "--set", "busy", "--root"])
@@ -696,7 +696,7 @@ fn status_cli_writes_and_reads_the_version_1_record() {
     );
     assert_eq!(String::from_utf8(set.stdout).unwrap(), "status: busy\n");
 
-    let after = st2::message::now_ms();
+    let after = fractal_legacy_runner::message::now_ms();
     let raw = fs::read_to_string(status_path(&root.join("h/worker"))).unwrap();
     let lines: Vec<&str> = raw.lines().collect();
     assert_eq!(lines.len(), 2);

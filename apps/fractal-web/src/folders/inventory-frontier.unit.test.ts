@@ -1,5 +1,5 @@
-import type { Arrangement, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@smalltalk/st3-client'
-import { ActionResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import type { Arrangement, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@fractal/client'
+import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
 import { Effect } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi } from 'vitest'

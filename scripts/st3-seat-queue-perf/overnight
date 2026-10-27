@@ -32,7 +32,9 @@ declare -A roots=() binaries=([base]=$base [branch]=$branch)
 background=()
 stop_all() {
   local label job
-  for job in "${background[@]}"; do kill "$job" 2>/dev/null || true; done
+  for job in "${background[@]}"; do
+    python3 "$here/../script_process.py" "$job" 15 --parent "$$"
+  done
   for label in "${!roots[@]}"; do
     perf_stop_daemon "${roots[$label]}" >/dev/null 2>&1 || true
     rm -rf "${roots[$label]}" "$(perf_state_dir "${roots[$label]}")"

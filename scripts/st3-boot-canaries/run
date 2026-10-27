@@ -45,12 +45,13 @@ import traceback
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.dont_write_bytecode = True
+from script_process import signal_private
 from st_boundary import fresh_seat_findings, isolated_path, output_findings
 from st3_test_evidence import register, capture, write_json
 from st3_events import Events, claim, fields
 
 HARNESSES = ("claude", "codex", "pi", "omp", "opencode")
-SCENARIOS = ("claim-socket-denied", "access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
+SCENARIOS = ("claim-socket-denied", "access-auto", "access-bypass", "fresh", "restart", "daemon-restart", "ask-sigterm", "ask-sigkill", "reexec", "concurrent", "suspend", "utf8", "idle-hold", "channel-missing", "channel-uninitialized", "channel-parked", "import")
 MISSION = "canary/boot"
 RUN_ID = f"{MISSION}/c1"
 LETTERS = "abcde"
@@ -162,7 +163,8 @@ client_gateway_socket = "{root / 'run/client.sock'}"
                       alive=lambda: self.daemon.poll() is None or fail("daemon exited: " + self.tail("daemon.log")))
 
     def kill_daemon(self):
-        os.killpg(self.daemon.pid, signal.SIGKILL)
+        if self.daemon.poll() is None:
+            os.killpg(self.daemon.pid, signal.SIGKILL)
         self.daemon.wait()
 
     def tail(self, name):
@@ -229,7 +231,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for pid, _ in self.seat_processes():
                 try:
-                    os.kill(pid, sig)
+                    signal_private(pid, sig, endpoint=self.endpoint)
                 except ProcessLookupError:
                     pass
             time.sleep(0.3)
@@ -752,13 +754,20 @@ def claude_attachment(node, seats, mode):
     recovered_incarnation = seats.view("a")[0].get("incarnation_id")
     recovery_claims = (node.api("/v1/claims?subject=" + seat_subject("a") + "&limit=100") or {}).get("claims", [])
     automatic = [row for row in recovery_claims if row.get("kind") == "runtime.action.requested"
-                 and row.get("body", {}).get("fields", {}).get("operation") == "claude-channel-recovery"]
+                 and row.get("body", {}).get("fields", {}).get("operation") in ("claude-channel-recovery", "claude-channel-recovery-window-v1")]
     if mode == "missing":
         if recovered_incarnation == blocked_incarnation or len(automatic) != 1:
             fail(f"the missing channel did not recover with one automatic restart: {automatic}")
         continued_session(node, "automatic channel recovery")
-    elif recovered_incarnation != blocked_incarnation or automatic:
-        fail("a channel initialized during recheck was unnecessarily restarted")
+    else:
+        # A slow store can delay the attach report past the recheck. The reconciler then
+        # finds the channel attached before stopping anything, settles its own request as
+        # retained, and keeps the incarnation (channel_recovery.rs). That is not a restart.
+        retained = {(row.get("body", {}).get("evidence") or [None])[0] for row in recovery_claims
+                    if row.get("kind") == "runtime.action.succeeded"
+                    and row.get("body", {}).get("fields", {}).get("incarnation_id") == blocked_incarnation}
+        if recovered_incarnation != blocked_incarnation or any(row.get("id") not in retained for row in automatic):
+            fail("a channel initialized during recheck was unnecessarily restarted")
     until(lambda: (node.api("/v1/messages/read/" + early) or {}).get("status") in ("read", "closed"),
           seats.bound, "early mail did not recover after channel attachment")
     until(lambda: native_offer_count(node, early) == 1, seats.bound, "early mail was not offered once")
@@ -802,7 +811,7 @@ def claude_channel_parked(node, seats):
     def attempts():
         claims = (node.api("/v1/claims?subject=" + seat_subject("a") + "&limit=500") or {}).get("claims", [])
         return [row for row in claims if row.get("kind") == "runtime.action.requested"
-                and row.get("body", {}).get("fields", {}).get("operation") == "claude-channel-recovery"]
+                and row.get("body", {}).get("fields", {}).get("operation") in ("claude-channel-recovery", "claude-channel-recovery-window-v1")]
 
     # Each incarnation needs the driver's 20 s detection window, then the reconciler's
     # 10/20/40 s backoff, then a restart: about 170 s in all before any load. Bound each
@@ -1108,6 +1117,40 @@ def prove_claim_socket_denied(node, seats, evidence):
     }, indent=2) + "\n")
 
 
+def prove_pending_ask_restart(node, seats, name, evidence):
+    """No person input or model handoff is allowed from interruption to the live picker."""
+    assert node.harness == "omp"
+    ask = {"toolName": "ask", "toolCallId": "canary-pending-ask",
+           "input": {"questions": [{"question": "Which restart policy?",
+                                  "options": [{"label": "Keep"}, {"label": "Replace"}]}]}}
+    (node.root / "ws/pending-ask.json").write_text(json.dumps(ask))
+    before = until(lambda: next((row for row in receipts(node, "a")
+                                 if row.get("event") == "picker-live"), None),
+                   seats.bound, "the initial ask picker did not open")
+    assert before["ask"] == ask and not before["reopening"]
+    calls = sum(row.get("event") == "turn" for row in receipts(node, "a"))
+    signum = signal.SIGTERM if name == "ask-sigterm" else signal.SIGKILL
+    # Same boundary as daemon-restart: lose the daemon and its PTY seats, as on host shutdown.
+    # Do not use agents restart, a prompt, an answer, or a manual retry to recover the picker.
+    os.killpg(node.daemon.pid, signum)
+    node.daemon.wait(30)
+    for row in json.loads(node.pty("list", "--json").stdout or "[]"):
+        node.pty("kill", row["name"])
+    node.start()
+    after = until(lambda: next((row for row in receipts(node, "a")
+                                if row.get("event") == "picker-live"
+                                and row.get("pid") != before["pid"]), None),
+                  seats.bound, "the interrupted ask picker did not reopen automatically")
+    assert after["reopening"] and after["ask"] == ask, (before, after)
+    assert after["sessionId"] == before["sessionId"], (before, after)
+    assert sum(row.get("event") == "turn" for row in receipts(node, "a")) == calls, \
+        "restart called the provider before the picker became live"
+    (evidence / "pending-ask-restart.json").write_text(json.dumps({
+        "signal": signal.Signals(signum).name, "before": before, "after": after,
+        "provider_calls_during_restart": 0, "person_actions_during_restart": 0,
+    }, indent=2) + "\n")
+
+
 def run(args, root, evidence):
     register(root, evidence)
     node = Node(root, args.binary, args.harness)
@@ -1142,7 +1185,7 @@ def run(args, root, evidence):
         else:
             node.start()
         source = root / "mission.kdl"
-        source.write_text(mission_source(node, count, args.harness, hold=args.scenario in ("suspend", "claim-socket-denied")))
+        source.write_text(mission_source(node, count, args.harness, hold=args.scenario in ("suspend", "claim-socket-denied", "ask-sigterm", "ask-sigkill")))
         node.cli("apply", str(source), "--as", "person/eval")
         node.cli("missions", "start", MISSION, "--id", RUN_ID, "--workspace", str(root / "ws"),
                  "--as", "person/eval")
@@ -1151,6 +1194,10 @@ def run(args, root, evidence):
             return {"verdict": "pass", "harness": args.harness, "scenario": args.scenario,
                     "cause": "connect EPERM", "same_seat_recovered": True}
         seats.prove("boot")
+        if args.scenario in ("ask-sigterm", "ask-sigkill"):
+            prove_pending_ask_restart(node, seats, args.scenario, evidence)
+            return {"verdict": "pass", "harness": args.harness, "scenario": args.scenario,
+                    "same_pending_ask": True, "provider_calls_during_restart": 0}
         catalogs_before = {str(path): path.read_bytes() for pattern in ("catalog.kdl", "agent.kdl")
                            for path in (root / "state/drivers").rglob(pattern)}
         scenario(node, seats, args.scenario, args.scratch, args.replacement_binary)

@@ -1,11 +1,15 @@
 # Current collection subscriptions
 
 Connect once to `GET /v1/client/collections/stream` with WebSocket subprotocol
-`st3.client.collections.v0`. The same Unix or paired client credentials used by
+`fractal.client.collections.v0`. The same Unix or paired client credentials used by
 the rest of client v0 apply. One connection accepts up to sixteen subscriptions.
 The optional `collections` capability version 1 advertises this bound; older
 daemons omit it and accept eight. Clients reserve their existing conversation
 and terminal slots before adding optional windows on older daemons.
+
+Every receiving fleet host must run #3430 or later before these new-only senders
+are deployed. That release still accepts old-only `st3.client.collections.v0`
+clients; there is no dual-offer negotiation or automatic old-name retry.
 
 The server sends a WebSocket protocol ping every eight seconds and answers client
 pings with the same payload. These frames do not read collection windows. A send
@@ -17,6 +21,31 @@ Send one JSON command per subscription:
 ```json
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
+
+**Proposed trace context, pending [#1910](https://github.com/compoundingtech/smalltalk/pull/1910)
+and Nathan's decision:** subscribe frames may add
+`"trace": {"traceparent": "W3C value", "tracestate": "optional W3C value"}`.
+The lowercase `trace` wire key belongs to the repository-local client_v0 namespace;
+its members use W3C Trace Context, not a separate identifier format. Every
+collection-socket subscribe variant accepts the field, but it affects only `missions`,
+`attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, and `terminal`,
+the collections that emit `st.subscription.first_frame`.
+It grants no authority and changes no subscription fields.
+
+The daemon accepts absent, null, and malformed `trace` values without rejecting the
+frame. It uses the W3C propagator to validate the parent; an invalid or non-string
+`traceparent`, or a non-object field, is ignored entirely. A valid context parents the
+bounded `st.subscription.first_frame` SERVER span, which also links to the upgrade.
+It records `st.parent.sampled` using the same policy as HTTP SERVER spans. Without a
+valid context the first-frame span remains an INTERNAL root linked to the upgrade.
+Later changes, rereads, and resyncs emit no spans. Existing older collection decoders
+ignore the unknown field; frames without it remain unchanged.
+
+Dedicated conversation and terminal streams have no subscribe frame, so their
+upgrade-linked behavior is unchanged. Unsubscribe, command frames, and strict HTTP
+bodies do not acquire this field. The generated TypeScript client exposes `trace`
+as an opaque `SubscribeTraceContext`. Typed SDK helpers and Swift client support
+are follow-up work after the #1910 decision.
 
 Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
@@ -45,6 +74,13 @@ key hints for subsequent reads. Unrelated agent changes neither refold the selec
 card nor emit a change frame. They do not build a fleet roster.
 The selected card folds apart from the fleet roster: a warm fleet projection neither
 answers an exact window nor is narrowed or evicted by one.
+
+Client-v0 agent rows keep immutable storage IDs and the same schema across HTTP
+projections, published rosters, and collection windows. Renaming does not add native
+`identity`, `naming_revision`, `requested_id`, or `renamed_to` fields to those rows.
+This includes the HTTP `/v1/client/agents` list and detail routes. Alias lookup
+still selects the same underlying agent; native rename receipts expose its
+canonical name and naming revision separately.
 
 The existing HTTP `GET /v1/client/agents/{id}` detail read folds only that agent's card; it does
 not require a fleet list read first.
@@ -197,6 +233,23 @@ A conversation is one more subscription too. Name an agent or a session:
 {"kind":"subscribe","id":"talk","collection":"conversation","conversation":"agent/ID"}
 ```
 
+The first frame carries the conversation's newest 200 entries, or fewer when the subscribe
+names an optional `limit` (1 through 200). A replacement frame with `has_more: true` also
+carries `older_cursor`: pass it to `GET /v1/client/sessions/{id}/timeline?cursor=…` for the
+entries just before the frame's oldest entry, then follow that response's `page.next_cursor`.
+A client that pages this way can ask for a small first frame, such as `"limit":20`. When a
+replacement frame has older history, later deltas carry only new entries and revisions of
+entries from that frame onward. A change to an older entry sends a replacement frame instead,
+with the same requested limit and a fresh `older_cursor`. Every replacement frame is an
+authoritative new history snapshot: discard pages read back before it and their cursors, even
+when its window overlaps them, and ignore older-page responses requested before it. Page back
+from the new `older_cursor` to see the revision.
+Native conversation cursors also pin the source's content generation. A generation change
+triggers `replace: true` even when the newest sequence is unchanged and replay would return
+no delta entries. For append-only JSONL harness transcripts, the existing index detects
+file replacement, shrinkage and changes to the last complete record; an interior edit that
+preserves both the file length and the final record does not advance that generation.
+
 An agent's conversation is its current session's timeline with the Fractal to or from the agent
 joined in. The first `conversation` frame carries `id`, `collection` (`conversation`),
 `session_id`, `replace: true`, the newest page of timeline `items`, and `has_more`. Later frames
@@ -273,6 +326,12 @@ Optional capability `presentation` version 1 says agent rows carry `presentation
 word, list group, why the agent needs someone, and what it holds and has queued (see
 [the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
 lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
+
+The same capability says attention rows carry `presentation`: the Now group and card, who
+**Chat about this** reaches, who raised it, and the step it holds (see
+[the UI contract](../../clients/ui-contract.md#attention-row)). The attention refresher computes
+it; every attention route copies it from the published list, and a row the list has not
+published yet has none until it does.
 
 ## Screen inventories
 

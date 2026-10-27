@@ -14,7 +14,7 @@ node "$fixtures/generate.mjs" --seed 138 --out "$out"
 # same scanner with --policy and their private identity list before publishing a diff.
 node "$fixtures/scan.mjs" "$out" "$root/apps/fractal-web" "$root/scripts/ci-fractal-web"
 node --test "$fixtures/privacy.integration.test.mjs"
-node "$fixtures/verify.mjs" --fixtures "$out" --native "$root/clients/typescript/st3-client/Schema.generated.ts"
+node "$fixtures/verify.mjs" --fixtures "$out" --native "$root/clients/typescript/fractal-client/Schema.generated.ts"
 # Committed reference examples must equal fresh generator output exactly: no drift, no extra files.
 diff -r "$out" "$fixtures/example" >/dev/null || { echo "fractal-web fixtures gate: example/ is stale; regenerate with generate.mjs --seed 138 --out $fixtures/example" >&2; exit 1; }
 echo "fractal-web fixtures gate: PASS"

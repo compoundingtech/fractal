@@ -168,16 +168,16 @@ tile is refused. See [Sekrets: Tiles](sekrets.md#tiles).
 
 ## What it proves
 
-`crates/st3/tests/tiles_root.rs` runs on a real host with `sudo -n`, systemd and cgroups v2. Its
+`crates/fractal/tests/tiles_root.rs` runs on a real host with `sudo -n`, systemd and cgroups v2. Its
 tiles get user IDs from a test range, and afterwards `st tiles remove` removes every tile, unit
 and directory:
 
 ```sh
-ST_TILES_ROOT_TEST=1 cargo test -p st3 --test integration tiles_root:: -- --nocapture
+ST_TILES_ROOT_TEST=1 cargo test -p fractal --test integration tiles_root:: -- --nocapture
 ```
 
 CI does not run these: its runners have no root, and the tests return at once there. The builder
-of every change to `crates/st3-daemon/src/tiles` or `tests/tiles_root.rs` runs them on a Linux host with
+of every change to `crates/fractal-daemon/src/tiles` or `tests/tiles_root.rs` runs them on a Linux host with
 root before review, and the pull request says where and at which commit. Before a release that
 ships a harness in a tile (design step 2), a release gate must run them on a host like the ones
 that will run tiles; that gate is part of step 2.

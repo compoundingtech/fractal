@@ -152,6 +152,10 @@ pub(super) fn read(
         (prefix, cursor) => prefix.or(cursor),
     };
     let upper = prefix.and_then(prefix_end);
+    // A name's current-only page has at most one row: (name, hash) is the primary key and
+    // only the latest hash matches. A larger limit finds that row and then walks every older
+    // version of the name looking for a second one that cannot exist.
+    let limit = if name.is_some() && !history { limit.min(1) } else { limit };
     let sql = query(
         name.is_some(),
         prefix.is_some(),

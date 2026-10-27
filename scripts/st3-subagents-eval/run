@@ -31,6 +31,7 @@ import time
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.dont_write_bytecode = True
+from script_process import signal_private
 from st_boundary import isolated_path
 KILLED = "agent/eval/killed"
 RESTARTED = "agent/eval/restarted"
@@ -178,7 +179,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         pids = [pid for pid, argv in self.seat_processes(subject) if only is None or only in argv]
         for pid in pids:
             try:
-                os.kill(pid, sig)
+                signal_private(pid, sig, endpoint=self.endpoint)
             except ProcessLookupError:
                 pass
         return pids

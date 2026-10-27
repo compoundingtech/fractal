@@ -30,7 +30,7 @@ only to the isolated daemon's Unix socket and `person/tester`.
 Every check writes `PASS` or `FAIL` to `<out>/report.txt`. Independent checks
 continue after failure; failed setup dependencies stop immediately. The final
 exit is nonzero if any check failed.
-Synthetic pages, chunk responses, TS rows, parent stui capture (`stui.txt`) and
+Synthetic pages, chunk responses, TS rows, parent terminal UI capture (`stui.txt`) and
 child capture (`stui-child.txt`) are retained as evidence. Cleanup stops the
 terminal and daemon and removes isolation unless `--keep` was supplied.
 
@@ -75,7 +75,7 @@ terminal and daemon and removes isolation unless `--keep` was supplied.
   marks (`[x]` completed, `[ ]` pending, `[~]` in progress, `[!]` blocked, `[/]`
   abandoned), the completed header count `todo 1/5`, child `open session/` row,
   IRC sender/message, and one shared transcript provenance suffix.
-- Real stui connects, opens its palette and the saved parent, renders parent
+- The real terminal UI connects, opens its palette and the saved parent, renders parent
   content, a bash command row with cwd/timeout, transcript model header, full
   assignment and parent contract, and the named child open row. Activating that row
   shows child completion without parent assistant content.
@@ -100,5 +100,5 @@ with a deadline; there are no fixed startup sleeps.
 The isolated tmux session is named `omp-e2e`, with a unique socket under
 `${TMPDIR:-/tmp}/agent-tmux-sockets/omp-e2e-*.sock` (not the ambient server).
 The exact `tmux -S ... attach -t omp-e2e` monitor command is printed on startup.
-If the saved-session palette affordance is missing, the stui check fails rather
+If the saved-session palette affordance is missing, the terminal UI check fails rather
 than creating a host-visible fake OMP process or substituting a demo renderer.

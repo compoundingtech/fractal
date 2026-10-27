@@ -1,3 +1,4 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 import { auditCaches } from './cache-audit.ts'
 import { linuxActionlintConfig, linuxStageJob, workspacePreparationSteps } from './workspace-ci.ts'
@@ -9,7 +10,7 @@ import { linuxActionlintConfig, linuxStageJob, workspacePreparationSteps } from 
 // Namespace only, one run a day, never on pull requests, and nothing here is a required check.
 const title = 'Daily debug-assertions run failed'
 
-export default githubWorkflow(auditCaches({
+export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   actionlint: linuxActionlintConfig,
   name: 'Debug assertions daily',
   on: {
@@ -38,4 +39,4 @@ if [ -n "$existing" ]; then gh issue comment "$existing" --body "$body"; else gh
       permissions: { contents: 'read', issues: 'write', actions: 'read' },
     },
   },
-}, {}))
+}, {})))

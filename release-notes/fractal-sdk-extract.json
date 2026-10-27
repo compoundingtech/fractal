@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Extract the app-independent Effect SDK into the top-level @fractal/sdk workspace package",
+  "replay": {"status": "none", "detail": "No claim replay, recovery, projection or persisted-state behavior changes."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, schema versions or data rewrites change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules, rules digests and fleet coordination requirements are unchanged."},
+  "compatibility": {"status": "changed", "detail": "The @fractal/sdk npm name and effect entry point are unchanged, but its source package moves to packages/fractal-sdk without a forwarding shim. Browser consumers provide the app-local BrowserSt3Platform Layer for page-bootstrap socket adoption and visibility/LRU policy; non-browser consumers supply a collections socket factory and may provide a bearer credential callback. The generated client protocol, authorization rules and existing collections socket remain unchanged; typed descriptors reuse the existing window ingestion pass."},
+  "downtime": {"status": "none", "detail": "No daemon startup work or expected service interruption is introduced. Follows continue to share one multiplexed collections socket; this change makes no new latency measurement claim."},
+  "manual": {"status": "changed", "detail": "Source consumers using the old app-relative package location must use packages/fractal-sdk. Browser applications must inject their platform Layer; non-browser applications must supply a socket factory that honors credential headers. Fractal Web and repository workspace, build and CI references are updated in this change. Operators do not need to migrate state or re-pair clients."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new rollback restrictions; reverting the SDK extraction requires no data migration."}
+}

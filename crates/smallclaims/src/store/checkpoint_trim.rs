@@ -330,19 +330,7 @@ impl Store {
         actions: &mut Vec<CheckpointAction>,
     ) -> Result<Option<CheckpointManifestNeed>> {
         self.runtime.checkpoint_preflight()?;
-        let interrupted = {
-            let connection = self.readers.get();
-            connection
-                .prepare_cached("SELECT id FROM checkpoints WHERE state='trimming' ORDER BY id")?
-                .query_map([], |row| row.get::<_, String>(0))?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        {
-            let _span = crate::profile::span("trim.resume");
-            for checkpoint in interrupted {
-                self.finish_trim(&checkpoint, actions)?;
-            }
-        }
+        self.finish_interrupted_trims(actions)?;
         match self.newest_application(claims)? {
             None | Some(Application::Done) => Ok(None),
             Some(Application::Manifest(need)) => Ok(Some(need)),
@@ -394,11 +382,31 @@ impl Store {
         }
     }
 
+    /// Finish every trim a crash interrupted after its tombstones committed (`trimming`). A
+    /// checkpoint still `recording` is not committed and stays as it is.
+    pub(crate) fn finish_interrupted_trims(&self, actions: &mut Vec<CheckpointAction>) -> Result<()> {
+        let interrupted = {
+            let connection = self.readers.get();
+            connection
+                .prepare_cached("SELECT id FROM checkpoints WHERE state='trimming' ORDER BY id")?
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let _span = crate::profile::span("trim.resume");
+        for checkpoint in interrupted {
+            self.finish_trim(&checkpoint, actions)?;
+        }
+        Ok(())
+    }
+
     /// The newest stable checkpoint this node needs a manifest for, if any. The replication
     /// worker asks when a peer advertises a checkpoint this node has not applied, and fetches
-    /// the manifest from a peer that applied this one.
+    /// the manifest from a peer that applied this one. A member that trims locally needs none.
     pub fn checkpoint_manifest_need(&self) -> Result<Option<CheckpointManifestNeed>> {
         self.runtime.checkpoint_preflight()?;
+        if self.trims_locally() {
+            return Ok(None);
+        }
         let claims = self.checkpoint_claims()?;
         Ok(match self.newest_application(&claims)? {
             Some(Application::Manifest(need)) => Some(need),
@@ -435,6 +443,12 @@ impl Store {
         manifest: &CheckpointManifest,
     ) -> Result<Vec<CheckpointAction>, St3Error> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
+        if self.trims_locally() {
+            return Err(St3Error::new(
+                "trim-is-local",
+                "this member trims locally ([trim] local), so it adopts no checkpoint manifest",
+            ));
+        }
         self.adopt_checkpoint_checked(manifest, true)
     }
 
@@ -1115,3 +1129,5 @@ mod capture_lifetime_tests;
 mod phase_span_tests;
 #[cfg(test)]
 mod pacing_tests;
+#[cfg(test)]
+mod local_trim_tests;

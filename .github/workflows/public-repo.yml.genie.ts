@@ -1,5 +1,5 @@
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
-import { linuxActionlintConfig } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
@@ -31,7 +31,7 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       permissions: { contents: 'read' },
       steps: [
         // PR code executes only on a disposable hosted runner, with no secrets or write token.
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0, 'persist-credentials': false } },
+        ...fullHistoryCheckoutSteps({ 'persist-credentials': false }),
         { name: 'Test changelog requirement policy', run: 'node --test apps/fractal-web/scripts/ci/changelog-policy.unit.test.mjs' },
         {
           name: 'Require a new changelog entry for UI changes',

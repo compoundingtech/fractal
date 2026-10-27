@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # A local Nix binary cache in a keyed Namespace-backed Actions cache, for Nix-built outputs and downloads.
 #
 # /nix itself cannot be cached: a restored /nix carries the Nix installer's receipt but not its
@@ -79,8 +80,10 @@ case "$cmd" in
     [ -n "${CI_PERF_SHELL_ROOT:-}" ] && roots+=("$CI_PERF_SHELL_ROOT")
     # Native release downloads are not store paths. Only the sandbox's packaged
     # messaging baseline belongs in this Nix cache.
-    if [[ "${ST3_MESSAGING_COMPAT_BIN:-}" == /nix/store/* ]]; then
-      roots+=("${ST3_MESSAGING_COMPAT_BIN%/bin/st3}")
+    if [[ "${FRACTAL_MESSAGING_COMPAT_BIN-${ST3_MESSAGING_COMPAT_BIN:-}}" == /nix/store/* ]]; then
+      # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+      fractal_selected=${FRACTAL_MESSAGING_COMPAT_BIN-${ST3_MESSAGING_COMPAT_BIN-}}
+      roots+=("${fractal_selected%/bin/st3}")
     fi
     [ -n "${ST2_VISTA_COMPONENT:-}" ] && roots+=("${ST2_VISTA_COMPONENT%%/share/*}")
     if [ "${#roots[@]}" -gt 0 ]; then

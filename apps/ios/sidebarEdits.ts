@@ -1,11 +1,11 @@
-import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementBodyV1, type ArrangementOperation } from '../../clients/typescript/st3-client';
+import { ClientError, SIDEBAR_ARRANGEMENT_UUID, type Arrangement, type ArrangementBodyV1, type ArrangementOperation } from '../../clients/typescript/fractal-client';
 
 /** The sidebar edits version 1 layouts; version 2 arrangements are folder-only and ordered by membership. */
 export type SidebarArrangement = Arrangement & { body: ArrangementBodyV1 };
 
 /** What a person reads when their Sidebar was removed and no older one exists to edit. */
 export const SIDEBAR_RETIRED = 'This Sidebar was removed; restoring a removed Sidebar is not available yet.';
-/** Whether st refused to create the Sidebar because the person retired it. Retired arrangements
+/** Whether Fractal refused to create the Sidebar because the person retired it. Retired arrangements
  *  leave the window, so this refusal is how the phone learns it. */
 export function sidebarRetired(error: unknown): boolean { return error instanceof ClientError && error.response.code === 'arrangement-retired'; }
 

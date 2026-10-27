@@ -57,17 +57,16 @@ pub(super) fn unavailable(connection: &Connection, claim_id: &str) -> Result<Opt
 
 pub(super) type Judgment = (Verdict, Option<ClaimSignature>);
 /// At most budget candidates are judged in this writer loan. Unprocessed work stays queued.
+/// The caller already read the current claim in this transaction; reuse that decoded body.
 pub(super) fn advance(
     connection: &Connection,
     roots: &BTreeSet<(String, String)>,
-    claim_id: &str,
+    row: &ClaimRow,
     memo: &RefCell<BTreeMap<String, Verdict>>,
     budget: usize,
 ) -> Result<(Option<Judgment>, usize)> {
+    let claim_id = &row.id;
     let count = candidate_count(connection, claim_id)?;
-    let Some(row) = claim_row(connection, claim_id)? else {
-        return Ok((None, 0));
-    };
     let roots_digest = crate::hash::canonical_hash(roots)?;
     let previous=connection.prepare_cached("SELECT candidate_count,roots_digest,last_signature,best_signature,best_verdict,best_reason,complete,dirty,blocked FROM claim_signature_judging WHERE claim_id=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h5c7fa1bc38b3 owner=smallclaims::store::principals::judging TODO=trace-statement-and-value-representation */ [claim_id],|row|Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?,row.get::<_,Option<String>>(5)?,row.get::<_,bool>(6)?,row.get::<_,bool>(7)?,row.get::<_,bool>(8)?))).optional()?;
@@ -105,7 +104,7 @@ pub(super) fn advance(
         .map(|text| Ok(serde_json::from_str::<ClaimSignature>(text)?))
         .collect::<Result<Vec<_>>>()?;
     let (verdict, links, signature) =
-        judge_candidates(connection, roots, &row, candidates, 0, memo)?;
+        judge_candidates(connection, roots, row, candidates, 0, memo)?;
     blocked |= matches!(&verdict,Verdict::Held(reason) if reason.starts_with("signature-judgment-incomplete:"));
     for link in &links {
         connection

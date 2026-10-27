@@ -1,13 +1,13 @@
-import { linuxActionlintConfig } from './workspace-ci.ts'
+import { fullHistoryCheckoutSteps, linuxActionlintConfig } from './workspace-ci.ts'
 import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
 // Publishes once a day, only when main changed since the last release. It builds nothing: it
-// takes the archives that the newest successful main run of release-smalltalk.yml uploaded.
+// takes the archives that the newest successful main run of release-fractal.yml uploaded.
 // Tags made with this workflow's token do not start the tag workflow, so there is no second build.
 export default githubWorkflow(auditCaches({
   actionlint: linuxActionlintConfig,
-  name: 'Smalltalk daily release',
+  name: 'Fractal daily release',
   on: {
     schedule: [{ cron: '17 5 * * *' }],
     workflow_dispatch: {
@@ -21,7 +21,7 @@ export default githubWorkflow(auditCaches({
     },
   },
   permissions: { contents: 'read' },
-  concurrency: { group: 'smalltalk-daily-release', 'cancel-in-progress': false },
+  concurrency: { group: 'fractal-daily-release', 'cancel-in-progress': false },
   jobs: {
     release: {
       name: 'daily-release',
@@ -34,10 +34,10 @@ export default githubWorkflow(auditCaches({
         TAG: '${{ inputs.tag }}',
       },
       steps: [
-        { uses: 'actions/checkout@v4', with: { 'fetch-depth': 0 } },
+        ...fullHistoryCheckoutSteps(),
         {
           name: 'Publish the verified archives of main when it changed',
-          run: 'scripts/release-smalltalk-daily ${TAG:+--tag "$TAG"}',
+          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"}',
         },
       ],
     },

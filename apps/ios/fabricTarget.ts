@@ -44,8 +44,9 @@ export function fabricTargetFromText(text: string): FabricTarget | null {
   return fabricTargetFromQuery(at >= 0 ? trimmed.slice(at + 1) : trimmed);
 }
 
-/** What a build may carry: `EXPO_PUBLIC_ST3_FABRIC_DEFAULT`, set in an ignored env file on the build host. A repository build has none. */
-export function buildFabricDefault(raw: string | undefined = process.env.EXPO_PUBLIC_ST3_FABRIC_DEFAULT): FabricTarget | null {
+/** A build may carry `EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT` (legacy `EXPO_PUBLIC_ST3_FABRIC_DEFAULT`) in an ignored env file. A repository build has none. */
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — literal lookups are required by Expo.
+export function buildFabricDefault(raw: string | undefined = process.env.EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT ?? process.env.EXPO_PUBLIC_ST3_FABRIC_DEFAULT): FabricTarget | null {
   return fabricTargetFromQuery(raw);
 }
 

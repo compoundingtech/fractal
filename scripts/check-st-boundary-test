@@ -95,13 +95,13 @@ class BoundaryCheck(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="boundary-st2-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        for name in ("st3", "stui", "st-drivers", "st2"):
+        for name in ("fractal", "fractal-tui", "fractal-drivers", "fractal-legacy-runner"):
             crate = self.root / "crates" / name
             (crate / "src").mkdir(parents=True)
             (crate / "src/lib.rs").write_text("pub fn fixture() {}\n")
             (crate / "Cargo.toml").write_text(f'[package]\nname="{name}"\nversion="0.1.0"\nedition="2024"\n')
-        with (self.root / "crates/st3/Cargo.toml").open("a") as manifest:
-            manifest.write('\n[dependencies]\nstui={path="../stui"}\n')
+        with (self.root / "crates/fractal/Cargo.toml").open("a") as manifest:
+            manifest.write('\n[dependencies]\nfractal-tui={path="../fractal-tui"}\n')
         (self.root / "Cargo.toml").write_text('[workspace]\nresolver="3"\nmembers=["crates/*"]\n')
         # This dependency-free workspace needs no restored registry, compiler
         # cache or runner Cargo configuration. Keep the pinned Cargo/toolchain.
@@ -153,31 +153,31 @@ class BoundaryCheck(unittest.TestCase):
         self.assertIn("fixture cargo failure detail", result.stderr)
 
     def test_each_product_import_fails_cli(self):
-        for crate in ("st3", "stui"):
+        for crate in ("fractal", "fractal-tui"):
             path = self.root / "crates" / crate / "src/lib.rs"
-            for spelling in ("use st2::hooks;", "use r#st2 \n ::hooks;", "extern crate st2 as legacy;"):
+            for spelling in ("use fractal_legacy_runner::hooks;", "use r#fractal_legacy_runner \n ::hooks;", "extern crate fractal_legacy_runner as legacy;"):
                 with self.subTest(crate=crate, spelling=spelling):
                     path.write_text(spelling)
                     result = self.check_sources()
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("st2 import", result.stderr)
+                    self.assertIn("fractal_legacy_runner import", result.stderr)
             path.write_text("pub fn fixture() {}")
 
     def test_renamed_and_indirect_dependency_fail_cli(self):
-        for product in ("st3", "stui"):
+        for product in ("fractal", "fractal-tui"):
             manifest = self.root / "crates" / product / "Cargo.toml"
             original = manifest.read_text()
-            manifest.write_text(original + ('\n' if product == 'st3' else '\n[dependencies]\n') + 'legacy={package="st2",path="../st2"}\n')
+            manifest.write_text(original + ('\n' if product == 'fractal' else '\n[dependencies]\n') + 'legacy={package="fractal-legacy-runner",path="../fractal-legacy-runner"}\n')
             result = self.check_sources()
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn(f"{product} -> st2", result.stderr)
-            manifest.write_text(original + ('\n' if product == 'st3' else '\n[dependencies]\n') + 'st-drivers={path="../st-drivers"}\n')
-            shared = self.root / "crates/st-drivers/Cargo.toml"
+            self.assertIn(f"{product} -> fractal-legacy-runner", result.stderr)
+            manifest.write_text(original + ('\n' if product == 'fractal' else '\n[dependencies]\n') + 'fractal-drivers={path="../fractal-drivers"}\n')
+            shared = self.root / "crates/fractal-drivers/Cargo.toml"
             shared_original = shared.read_text()
-            shared.write_text(shared_original + '\n[dependencies]\nlegacy={package="st2",path="../st2",optional=true}\n')
+            shared.write_text(shared_original + '\n[dependencies]\nlegacy={package="fractal-legacy-runner",path="../fractal-legacy-runner",optional=true}\n')
             result = self.check_sources()
             self.assertNotEqual(result.returncode, 0)
-            self.assertIn(f"{product} -> st-drivers -> st2", result.stderr)
+            self.assertIn(f"{product} -> fractal-drivers -> fractal-legacy-runner", result.stderr)
             shared.write_text(shared_original)
             manifest.write_text(original)
 

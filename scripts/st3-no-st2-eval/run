@@ -29,6 +29,7 @@ import urllib.parse
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 sys.dont_write_bytecode = True
+from script_process import signal_private
 from st_boundary import fresh_seat_findings, isolated_path
 
 SUBJECT = "agent/eval/native-seat"
@@ -133,7 +134,7 @@ client_gateway_socket = "{root / 'run/client.sock'}"
         for sig in (signal.SIGTERM, signal.SIGKILL):
             for pid, _, _ in self.seat_processes():
                 try:
-                    os.kill(pid, sig)
+                    signal_private(pid, sig, endpoint=self.endpoint)
                 except ProcessLookupError:
                     pass
             time.sleep(0.3)

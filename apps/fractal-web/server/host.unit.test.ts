@@ -6,24 +6,24 @@ import { readHostConfig, tailnetAdmission } from './host.mts'
 
 const origin = 'https://atlas.example.ts.net:8443'
 const request = (headers: IncomingMessage['headers'], method = 'GET') => ({ headers, method }) as IncomingMessage
-const admit = tailnetAdmission({ origin, logins: ['river@example.com'], listener: () => '127.0.0.1:7410' })
-const signedIn = { 'tailscale-user-login': 'river@example.com' }
+const admit = tailnetAdmission({ origin, logins: ['robin@example.com'], listener: () => '127.0.0.1:7411' })
+const signedIn = { 'tailscale-user-login': 'robin@example.com' }
 
 describe('tailnetAdmission', () => {
   it('admits the allowed login on the published origin, for reads, sends and upgrades', () => {
     expect(admit(request({ ...signedIn, host: 'atlas.example.ts.net:8443' }))).toBe(true)
     expect(admit(request({ ...signedIn, host: 'atlas.example.ts.net:8443', origin }, 'POST'))).toBe(true)
-    expect(admit(request({ ...signedIn, host: '127.0.0.1:7410', origin, upgrade: 'websocket' }))).toBe(true)
+    expect(admit(request({ ...signedIn, host: '127.0.0.1:7411', origin, upgrade: 'websocket' }))).toBe(true)
   })
 
   it('refuses a missing or other login', () => {
     expect(admit(request({ host: 'atlas.example.ts.net:8443', origin }))).toBe(false)
-    expect(admit(request({ 'tailscale-user-login': 'cedar@example.com', host: 'atlas.example.ts.net:8443', origin }))).toBe(false)
+    expect(admit(request({ 'tailscale-user-login': 'blair@example.com', host: 'atlas.example.ts.net:8443', origin }))).toBe(false)
   })
 
   it('refuses a login header that carries more than one value', () => {
     // Node joins a repeated header into one comma-separated value, so a forged copy next to the real one never matches.
-    for (const joined of ['river@example.com, cedar@example.com', 'cedar@example.com, river@example.com', 'river@example.com,river@example.com'])
+    for (const joined of ['robin@example.com, blair@example.com', 'blair@example.com, robin@example.com', 'robin@example.com,robin@example.com'])
       expect(admit(request({ 'tailscale-user-login': joined, host: 'atlas.example.ts.net:8443', origin }))).toBe(false)
   })
 
@@ -45,15 +45,15 @@ describe('tailnetAdmission', () => {
   })
 
   it('requires an exact https origin and at least one login', () => {
-    expect(() => tailnetAdmission({ origin: 'http://atlas.example.ts.net', logins: ['river@example.com'], listener: () => undefined })).toThrow()
-    expect(() => tailnetAdmission({ origin: `${origin}/`, logins: ['river@example.com'], listener: () => undefined })).toThrow()
+    expect(() => tailnetAdmission({ origin: 'http://atlas.example.ts.net', logins: ['robin@example.com'], listener: () => undefined })).toThrow()
+    expect(() => tailnetAdmission({ origin: `${origin}/`, logins: ['robin@example.com'], listener: () => undefined })).toThrow()
     expect(() => tailnetAdmission({ origin, logins: [], listener: () => undefined })).toThrow()
   })
 })
 
 describe('readHostConfig', () => {
   const env = {
-    WF_PORT: '7410', WF_PUBLIC_ORIGIN: origin, WF_TAILNET_LOGINS: 'river@example.com, cedar@example.com',
+    WF_PORT: '7411', WF_PUBLIC_ORIGIN: origin, WF_TAILNET_LOGINS: 'robin@example.com, blair@example.com',
     WF_ST_GATEWAY: 'unix:/run/example/st3-client.sock', WF_ST_AUTHORIZATION_FILE: '/secrets/web-bearer', WF_DIST: '/srv/web',
   }
   const secret = (text: string, mode = 0o100600, uid = 1000) => ({
@@ -64,14 +64,20 @@ describe('readHostConfig', () => {
 
   it('reads the bearer from its file and defaults to a loopback listener', () => {
     expect(readHostConfig(env, files, 1000)).toEqual({
-      dist: '/srv/web', host: '127.0.0.1', port: 7410, origin, logins: ['river@example.com', 'cedar@example.com'],
+      dist: '/srv/web', host: '127.0.0.1', port: 7411, origin, logins: ['robin@example.com', 'blair@example.com'],
       socketPath: '/run/example/st3-client.sock', authorization: ['Bearer', 'synthetic-token'].join(' '), deploymentId: 'atlas.example.ts.net:8443',
     })
   })
 
-  it('refuses a non-loopback listener, a missing setting, no logins and a malformed bearer', () => {
+  it('requires an explicit publisher port and preserves the configured value', () => {
+    expect(() => readHostConfig({ ...env, WF_PORT: undefined }, files, 1000)).toThrow(/WF_PORT/)
+    expect(readHostConfig({ ...env, WF_PORT: '8444' }, files, 1000).port).toBe(8444)
+  })
+
+  it('refuses a non-loopback listener, an invalid port, no logins and a malformed bearer', () => {
     expect(() => readHostConfig({ ...env, WF_HOST: '0.0.0.0' }, files, 1000)).toThrow(/loopback/)
     expect(() => readHostConfig({ ...env, WF_PORT: '' }, files, 1000)).toThrow(/WF_PORT/)
+    expect(() => readHostConfig({ ...env, WF_PORT: '65536' }, files, 1000)).toThrow(/WF_PORT/)
     expect(() => readHostConfig({ ...env, WF_TAILNET_LOGINS: ' , ' }, files, 1000)).toThrow(/WF_TAILNET_LOGINS/)
     expect(() => readHostConfig(env, secret('two tokens'), 1000)).toThrow(/one bearer/)
   })

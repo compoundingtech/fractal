@@ -13,6 +13,8 @@
 # Writes trace.txt, the transcript and result.txt to OUT_DIR (default: a kept temporary directory).
 # Exits 0 only when every assertion holds.
 set -Eeuo pipefail
+signal_helper="$(cd "$(dirname "$0")/.." && pwd)/script_process.py"
+python3 "$signal_helper" --check-platform
 
 st3="$(readlink -f "$1")"
 pty="$(readlink -f "$2")"
@@ -28,7 +30,7 @@ st3="$tools/st3"
 for profile in .bash_profile .zprofile; do
   printf 'export PATH="%s:$PATH"\n' "$tools" >"$home/$profile"
 done
-trap 'pkill -u "$(id -u)" -f "$home" 2>/dev/null || true; rm -rf "$home" "$tools"' EXIT
+trap 'python3 "$signal_helper" all 15 --env "HOME=$home" 2>/dev/null || true; rm -rf "$home" "$tools"' EXIT
 
 # The folders a first listing of makes macOS ask the person for access.
 guarded=(Documents Desktop Downloads Pictures Movies Music Library)
@@ -67,7 +69,7 @@ st=(env -i HOME="$home" PATH="$path" USER="$(id -un)" LANG=C.UTF-8 SHELL=/bin/sh
   # Something a person made in the work folder, with a nested folder as an agent leaves.
   mkdir -p "$home/st/agents/site"
   echo "my notes" >"$home/st/agents/site/notes.txt"
-  pkill -u "$(id -u)" -f "$home" 2>/dev/null || true
+  python3 "$signal_helper" all 15 --env "HOME=$home" 2>/dev/null || true
   sleep 2
 
   echo "== uninstall, traced"

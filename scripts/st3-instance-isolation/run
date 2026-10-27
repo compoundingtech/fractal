@@ -18,6 +18,8 @@
 # Writes before.snapshot, after.snapshot, the transcript and result.txt to OUT_DIR (default: a
 # temporary directory that is kept). Exits 0 only when the snapshots match and nothing remains.
 set -Eeuo pipefail
+signal_helper="$(cd "$(dirname "$0")/.." && pwd)/script_process.py"
+python3 "$signal_helper" --check-platform
 
 st3="$(readlink -f "$1")"
 pty="$(readlink -f "$2")"
@@ -36,7 +38,7 @@ st3="$tools/st3"
 for profile in .bash_profile .zprofile; do
   printf 'export PATH="%s:$PATH"\n' "$tools" >"$home/$profile"
 done
-trap 'pkill -u "$(id -u)" -f "$home" 2>/dev/null || true; rm -rf "$home" "$tools"' EXIT
+trap 'python3 "$signal_helper" all 15 --env "HOME=$home" 2>/dev/null || true; rm -rf "$home" "$tools"' EXIT
 
 # The only environment st sees: no XDG variables, no ST_* variables, no real HOME. The PATH has
 # the tools beside st3 and the directory that holds the system utilities.
@@ -56,7 +58,7 @@ start_daemon() {
   echo "FAIL: the daemon did not start"; tail -20 "$out/$daemon_log"; exit 1
 }
 stop_daemons() {
-  pkill -u "$(id -u)" -f "$home" 2>/dev/null || true
+  python3 "$signal_helper" all 15 --env "HOME=$home" 2>/dev/null || true
   sleep 1
 }
 

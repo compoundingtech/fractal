@@ -9,11 +9,13 @@ import { surfaceVars as surface, textVars as text, borderVars as border, accentV
 import { readingColumnStyles } from './reading-column.stylex'
 import { Icon } from './composition/Icons'
 import { StopRunButton } from './composition/StopRunButton'
+import { NarrowLayoutContext } from './composition/NarrowLayout'
 import { EffortPicker } from './embrace-composer/EffortPicker'
 import {
   activeTrigger, defaultCommands, draftFromText, insertToken, serializeDraft,
   type Draft, type DraftToken, type MentionToken, type SerializedDraft, type SlashCommand,
 } from './embrace-composer/draft'
+import { ComposerAttachmentNotice, ComposerAttachmentTray, ComposerSendRefusal, ComposerUploadStatus, composerControl, useAttachmentRefusals, type AttachmentRefusal } from './embrace-composer/AttachmentTray'
 
 export interface EmbraceComposerProps {
   readonly variant: 'C1' | 'C2' | 'C3'
@@ -63,7 +65,28 @@ export interface EmbraceComposerProps {
   readonly placeholder?: string
   /** Why the host could not stop the active run; shown beside Stop, which becomes pressable again. Clear it when the next Stop starts. */
   readonly stopRefusal?: string
+  /**
+   * Plain-composer image attachments with the host's per-message limit. With it, the composer shows its own tray
+   * and Attach (while the runtime has an attachment adapter, which also accepts pasted images) and announces refused
+   * picks and pastes. At the limit Attach stays in place but unavailable, naming the limit; an excess is named
+   * instead of sent. `disabledReason` is a short, user-facing cause for images being unavailable now ("You can no
+   * longer send images here."): Attach stays unavailable with it, and while images remain the composer appends a
+   * count-aware way out and an inline Remove, keeping Send withheld (focusable, described by the refusal) until the
+   * draft can go out as text. Keep the runtime's attachment adapter while images are staged, since removal goes
+   * through it. While a send uploads its images, the tray shows them at once as uploading, and the composer offers
+   * Cancel upload (the image's ×, or one control for several), which stops the whole send and returns the text and
+   * images to the draft. Hosts that render their own tray and toolbar omit it.
+   */
+  readonly imageAttachments?: { readonly max: number; readonly disabledReason?: string }
 }
+
+/**
+ * Inside a narrow (phone) host (`NarrowLayoutContext`), the composer's control sizes resolve to 44px touch targets,
+ * its field text to 16px so iOS does not zoom the page on focus, and the field grows to at most a third of the dynamic
+ * viewport so an open keyboard never pushes Send off screen. Popovers render outside this subtree and opt in separately.
+ */
+const narrowGeometry = stylex.createTheme(g, { controlMd: g.touchTarget, controlLg: g.touchTarget })
+const narrowType = stylex.createTheme(t, { bodySize: t.touchInputSize })
 
 const styles = stylex.create({
   root: {
@@ -112,9 +135,23 @@ const styles = stylex.create({
     cursor: { default: 'pointer', ':disabled': 'not-allowed' }, opacity: { default: 1, ':disabled': 0.64 },
     ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
-  primary: { backgroundColor: accent.primary, color: accent.onPrimary },
+  // Unavailable reads as neutral, never as a paler primary: the same surface and muted ink whether the button is
+  // natively disabled (nothing to send) or aria-disabled with a described refusal (sending is blocked).
+  primary: {
+    backgroundColor: { default: accent.primary, ':is(:disabled, [aria-disabled="true"])': surface.rowActive },
+    color: { default: accent.onPrimary, ':is(:disabled, [aria-disabled="true"])': text.fgMuted },
+    borderColor: { default: border.controlBorder, ':is(:disabled, [aria-disabled="true"])': border.borderStrong },
+    cursor: { default: 'pointer', ':is(:disabled, [aria-disabled="true"])': 'not-allowed' },
+    opacity: 1,
+  },
   submitIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlLg, minWidth: g.controlLg, height: g.controlLg, minHeight: g.controlLg, padding: 0, borderRadius: r.full },
   historyIcon: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlMd, height: g.controlMd, minHeight: g.controlMd, padding: 0, borderRadius: r.full, backgroundColor: surface.transparent, borderColor: surface.transparent, ':hover': { backgroundColor: surface.rowHover } },
+  // Narrow hosts: an icon-only control is never narrower than it is tall; menu and suggestion rows are touch rows.
+  touchControl: { minWidth: g.touchTarget },
+  touchRow: { height: 'auto', minHeight: g.touchTarget },
+  // The composer owns the left/right safe-area insets; the narrow host owns top and bottom.
+  narrowInsets: { paddingInlineStart: 'env(safe-area-inset-left, 0px)', paddingInlineEnd: 'env(safe-area-inset-right, 0px)' },
+  narrowInput: { maxHeight: `min(${g.editorMax}, calc(var(--wf-phone-height, 100dvh) / 3))` },
   menu: {
     backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline,
     borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.base,
@@ -161,6 +198,7 @@ const groupPreviewLimit = 4
 /** Requires the same assistant-ui thread/runtime provider as the transcript. */
 export function EmbraceComposer(props: EmbraceComposerProps) {
   const runtimeText = useAuiState(state => state.composer.text)
+  const narrow = React.useContext(NarrowLayoutContext)
   const root = React.useRef<HTMLDivElement>(null)
   const [wrapped, setWrapped] = React.useState(false)
   const [cramped, setCramped] = React.useState(false)
@@ -169,13 +207,14 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
   const density = Math.max(pillLayout ? 1 : 0, footerDensity)
   const compact = density > 0
   const iconOnly = density === 2
-  const densityMinimums = React.useRef<number[] | null>(null)
+  // Per-density footer minimums; touch-sized controls invalidate them.
+  const densityMinimums = React.useRef<{ readonly narrow: boolean; readonly values: number[] } | null>(null)
   const densityContext = React.useMemo(() => ({ compact, iconOnly }), [compact, iconOnly])
   React.useLayoutEffect(() => {
     const footer = root.current?.querySelector<HTMLElement>('[data-testid="composer-footer"]')
     const surface = footer?.closest('form')
     if (!footer || !surface) return
-    const minimums = densityMinimums.current ?? (densityMinimums.current = [])
+    const minimums = densityMinimums.current?.narrow === narrow ? densityMinimums.current.values : (densityMinimums.current = { narrow, values: [] }).values
     const measure = () => {
       const css = getComputedStyle(surface)
       const inner = surface.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight)
@@ -203,7 +242,7 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
       observer.disconnect()
       document.fonts.removeEventListener('loadingdone', measure)
     }
-  }, [density, iconOnly, pillLayout, props.toolbar, props.actions])
+  }, [density, iconOnly, pillLayout, props.toolbar, props.actions, narrow])
   React.useLayoutEffect(() => {
     const field = root.current?.querySelector<HTMLElement>('textarea, [role="textbox"]')
     const footer = root.current?.querySelector<HTMLElement>('[data-testid="composer-footer"]')
@@ -247,16 +286,21 @@ export function EmbraceComposer(props: EmbraceComposerProps) {
       probe.remove()
     }
   }, [pillLayout, runtimeText, props.tokenDraft])
-  const stacked = props.variant === 'C2' || wrapped || cramped || runtimeText.includes('\n')
+  // An attachment tray, an upload in progress or a refused-image notice takes its own row, so the pill opens into the slab while any shows.
+  const { refusals: attachmentRefusals, refuse: refuseAttachment } = useAttachmentRefusals(props.imageAttachments !== undefined)
+  const trayShown = useAuiState(state => props.imageAttachments !== undefined && (state.composer.attachments.length > 0 || (state.composer.submission?.attachments.length ?? 0) > 0)) || attachmentRefusals.length > 0
+  const stacked = props.variant === 'C2' || wrapped || cramped || runtimeText.includes('\n') || trayShown
   const composerProps = {
     ...props,
     style: [styles.adaptiveRoot, stacked ? styles.slab : props.variant === 'C3' ? styles.focusSlab : styles.pill, props.style],
-    inputStyle: [styles.input, styles.growingEditor, props.inputStyle],
+    inputStyle: [styles.input, styles.growingEditor, narrow && styles.narrowInput, props.inputStyle],
     fieldStyle: [stacked ? styles.field : styles.fieldRow, props.fieldStyle],
     footerStyle: [styles.adaptiveFooter, props.footerStyle],
     submitIcon: props.submitIcon ?? <Icon name="send" />,
+    attachmentRefusals,
+    refuseAttachment,
   }
-  return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" {...stylex.props(props.readingColumn === true && readingColumnStyles.column)}>
+  return <CompactComposerContext.Provider value={densityContext}><div ref={root} data-testid="kit-composer" data-narrow={narrow || undefined} {...stylex.props(props.readingColumn === true && readingColumnStyles.column, narrow && narrowGeometry, narrow && narrowType, narrow && styles.narrowInsets)}>
     {(props.plainText ?? props.variant === 'C1') || props.input !== undefined ? <PlainComposer {...composerProps} /> : <TokenComposer {...composerProps} />}
   </div></CompactComposerContext.Provider>
 }
@@ -273,6 +317,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
   readonly effort: Omit<React.ComponentProps<typeof EffortPicker>, 'compact'>
 }) {
   const { compact, iconOnly } = React.useContext(CompactComposerContext)
+  const narrow = React.useContext(NarrowLayoutContext)
   const running = useAuiState(state => state.thread.isRunning)
   const readoutName = target.model === undefined ? target.label : `${target.label} · ${target.model}`
   return <>
@@ -285,7 +330,7 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.label}</Tooltip>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption)}>{choice.label}</MenuItem>)}</Menu></Popover>
+        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Recipient" onAction={key => { const choice = recipients.find(choice => choice.ref === key); if (choice !== undefined) onTargetChange(choice) }}>{recipients.map(choice => <MenuItem key={choice.ref} id={choice.ref} textValue={choice.label} {...stylex.props(styles.targetOption, narrow && styles.touchRow)}>{choice.label}</MenuItem>)}</Menu></Popover>
       </MenuTrigger> : <TooltipTrigger delay={150} closeDelay={0}>
         <Focusable><span tabIndex={0} role="img" aria-label={target.model === undefined ? 'Recipient' : 'Recipient and model'} data-composer-target-readout={readoutName} data-composer-readout={!iconOnly ? true : undefined} {...stylex.props(styles.readout, compact && styles.readoutCompact)}>{iconOnly ? <Icon name="message" /> : target.label}</span></Focusable>
         <Tooltip {...stylex.props(styles.targetTooltip)}>{readoutName}</Tooltip>
@@ -298,16 +343,16 @@ export function EmbraceComposerToolbar({ target, recipients, models, onTargetCha
           </Button>
           <Tooltip {...stylex.props(styles.targetTooltip)}>{target.model ?? 'Model'}</Tooltip>
         </TooltipTrigger>
-        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Model" onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model} {...stylex.props(styles.targetOption)}>{model}</MenuItem>)}</Menu></Popover>
+        <Popover {...stylex.props(styles.targetPopup)}><Menu aria-label="Model" onAction={key => onTargetChange({ ...target, model: String(key) })}>{models.map(model => <MenuItem key={model} id={model} textValue={model} {...stylex.props(styles.targetOption, narrow && styles.touchRow)}>{model}</MenuItem>)}</Menu></Popover>
       </MenuTrigger>}
       <EffortPicker {...effort} compact={compact} />
     </div>
-    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
-    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
+    <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(styles.button, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
+    {running && <ComposerPrimitive.Cancel asChild><Button aria-label="Stop run" {...stylex.props(styles.button, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="stop" /></Button></ComposerPrimitive.Cancel>}
   </>
 }
 
-function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps) {
+function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar, style, onRequestSubmit, submitLabel, submitIcon, inputStyle, fieldStyle, footerStyle, input, actions, stopRefusal, imageAttachments, attachmentRefusals = [], refuseAttachment, placeholder = 'Message, @ mentions and / commands as text' }: EmbraceComposerProps & { readonly attachmentRefusals?: readonly AttachmentRefusal[]; readonly refuseAttachment?: (message: string) => void }) {
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
   const readOnly = disabledReason !== undefined || isDisabled
   const helpId = React.useId()
@@ -317,6 +362,27 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
   const canSend = useAuiState(s => s.composer.canSend)
   const runtimeText = useAuiState(s => s.composer.text)
   const cold = readOnly && runtimeText === ''
+  // The runtime has an attachment adapter; it then also accepts pasted images.
+  const canAttach = useAuiState(s => s.thread.capabilities.attachments) && !readOnly
+  const attachmentCount = useAuiState(s => s.composer.attachments.length)
+  const imagesLabel = (count: number) => `${count} ${count === 1 ? 'image' : 'images'}`
+  const imageCause = imageAttachments?.disabledReason
+  // Why Send is withheld while images are staged; a text-only draft is unaffected. Unavailable images block the whole
+  // draft until removed (with a one-step Remove); an excess over the limit names how many to remove.
+  const sendRefusal = readOnly || imageAttachments === undefined || attachmentCount === 0 ? undefined
+    : imageCause !== undefined ? `${imageCause} ${attachmentCount === 1 ? 'Remove the image to send your text.' : `Remove the ${attachmentCount} images to send your text.`}`
+    : attachmentCount > imageAttachments.max ? `Messages can include ${imagesLabel(imageAttachments.max)}. Remove ${attachmentCount - imageAttachments.max} to send.`
+    : undefined
+  const sendBlocked = sendRefusal !== undefined
+  // Attach keeps its place at the limit and while images are unavailable, described by why it cannot add another.
+  const attachReason = imageAttachments === undefined ? undefined
+    : imageCause ?? (attachmentCount >= imageAttachments.max ? `Messages can include ${imagesLabel(imageAttachments.max)}.` : undefined)
+  const refusalId = React.useId()
+  const attachReasonId = React.useId()
+  // A blocked press never sends: it re-announces the refusal and highlights it, and focus stays where it was.
+  const [refusalAttempt, setRefusalAttempt] = React.useState(0)
+  if (sendRefusal === undefined && refusalAttempt !== 0) setRefusalAttempt(0)
+  const refuseSend = () => setRefusalAttempt(attempt => attempt + 1)
   const composing = React.useRef(false)
   const { compact } = React.useContext(CompactComposerContext)
   // Stop sits beside Send for the whole run; Escape in the composer stops too. Hosts with their own `actions`
@@ -324,7 +390,13 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
   // says why it could not stop it.
   const aui = useAui()
   const canCancel = useAuiState(s => s.composer.canCancel)
-  const canStop = actions === undefined && canCancel
+  const isRunning = useAuiState(s => s.thread.isRunning)
+  // A send whose images are still uploading has left the draft; cancelling it stops the whole send and returns its
+  // text and images to the draft, where each image is removable again. During a run the runtime's cancel also stops
+  // the run, so Stop owns it.
+  const uploading = useAuiState(s => imageAttachments !== undefined && (s.composer.submission?.attachments.length ?? 0) > 0)
+  const cancelsUpload = actions === undefined && canCancel && uploading && !isRunning
+  const canStop = actions === undefined && canCancel && !cancelsUpload
   const [stopping, setStopping] = React.useState(false)
   const stopPending = React.useRef(false)
   stopPending.current = stopping
@@ -332,28 +404,46 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
   if (seenRefusal !== stopRefusal) { setSeenRefusal(stopRefusal); if (stopRefusal !== undefined) setStopping(false) }
   if (!canCancel && stopping) setStopping(false)
   const stop = () => { if (stopPending.current) return; stopPending.current = true; setStopping(true); aui.composer.cancel() }
+  const sendLabel = onRequestSubmit === undefined ? 'Send' : submitLabel ?? 'Send'
   return (
     <ComposerPrimitive.Root
       tabIndex={-1}
       aria-label={conversationLabel === undefined ? 'Message composer' : `Message composer, ${conversationLabel}`}
       {...stylex.props(styles.root, style, cold && styles.cold)}
-      onSubmit={event => { if (readOnly || onRequestSubmit !== undefined) event.preventDefault(); if (!readOnly) onRequestSubmit?.(false) }}
+      onSubmit={event => {
+        if (readOnly || sendBlocked || onRequestSubmit !== undefined) event.preventDefault()
+        if (readOnly) return
+        if (sendBlocked) refuseSend()
+        else onRequestSubmit?.(false)
+      }}
       onCompositionStartCapture={() => { composing.current = true }}
       onCompositionEndCapture={() => { composing.current = false }}
       onKeyDownCapture={event => {
         const imeKey = event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229
         // An Escape that dismisses an IME composition belongs to the IME, never to the run.
-        if (event.key === 'Escape' && canStop && !imeKey) { event.preventDefault(); stop(); return }
+        if (event.key === 'Escape' && (canStop || cancelsUpload) && !imeKey) { event.preventDefault(); if (cancelsUpload) aui.composer.cancel(); else stop(); return }
         if (event.key !== 'Enter') return
         const target = event.target
         if (!(target instanceof HTMLElement && (target.isContentEditable || target.tagName === 'TEXTAREA' || target.tagName === 'INPUT'))) return
         if (imeKey) { event.stopPropagation(); return }
         if (event.repeat) { event.preventDefault(); event.stopPropagation(); return }
+        // The primitive's Mod+Shift+Enter steers past the form; a blocked draft refuses it like any other send.
+        if (sendBlocked && !readOnly && event.shiftKey && (event.metaKey || event.ctrlKey)) { event.preventDefault(); event.stopPropagation(); refuseSend(); return }
         if (onRequestSubmit !== undefined && !event.shiftKey && !(window.matchMedia('(pointer: coarse) and (not (any-pointer: fine))').matches && !event.metaKey && !event.ctrlKey)) {
-          event.preventDefault(); event.stopPropagation(); if (!readOnly) onRequestSubmit(event.metaKey || event.ctrlKey)
+          event.preventDefault(); event.stopPropagation()
+          if (readOnly) return
+          if (sendBlocked) refuseSend()
+          else onRequestSubmit(event.metaKey || event.ctrlKey)
         }
       }}
     >
+      {imageAttachments === undefined ? null : <>
+        <ComposerAttachmentTray onCancelUpload={cancelsUpload ? from => { aui.composer.cancel(); from.closest('form')?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus() } : undefined} />
+        <ComposerSendRefusal id={refusalId} message={sendRefusal} attempt={refusalAttempt}
+          action={imageCause !== undefined ? <Button onPress={event => { void aui.composer.clearAttachments(); event.target.closest('form')?.querySelector<HTMLElement>('textarea, [role="textbox"]')?.focus() }} {...stylex.props(composerControl.ghost, composerControl.outline, composerControl.touchHit)}>{attachmentCount === 1 ? 'Remove image' : `Remove ${imagesLabel(attachmentCount)}`}</Button> : undefined} />
+        <ComposerUploadStatus />
+        <ComposerAttachmentNotice refusals={attachmentRefusals} />
+      </>}
       <div {...stylex.props(styles.fieldWrap, fieldStyle, cold && styles.coldField)}>
       {runtimeText === '' ? <span id={guidanceId} data-testid="composer-placeholder" {...stylex.props(styles.placeholder)}>{guidance}</span> : null}
       {input !== undefined ? input(cold ? [inputStyle ?? styles.input, styles.coldInput] : inputStyle ?? styles.input, [helpId, runtimeText === '' && reason === undefined ? guidanceId : undefined].filter(Boolean).join(' ')) : <ComposerPrimitive.Input
@@ -371,10 +461,23 @@ function PlainComposer({ conversationLabel, targetLabel, disabledReason, toolbar
           {reason ?? (targetLabel === undefined ? undefined : `To ${targetLabel}`)}
         </div>
         {toolbar}
+        {imageAttachments !== undefined && canAttach ? attachReason === undefined
+          ? <ComposerPrimitive.AddAttachment asChild><Button aria-label="Attach image" {...stylex.props(composerControl.ghost, composerControl.icon, composerControl.touchHit)}><Icon name="attach" /></Button></ComposerPrimitive.AddAttachment>
+          // Native, because React Aria's Button drops `aria-disabled`; it stays focusable and only explains itself.
+          : <><button type="button" aria-label="Attach image" aria-disabled="true" aria-describedby={attachReasonId} title={attachReason}
+              onClick={() => { if (sendRefusal !== undefined) refuseSend(); else refuseAttachment?.(attachReason) }}
+              {...stylex.props(composerControl.ghost, composerControl.icon, composerControl.touchHit, composerControl.blocked)}><Icon name="attach" /></button>
+            <span id={attachReasonId} hidden>{attachReason}</span></>
+          : null}
         <div {...stylex.props(styles.grow)} />
         {canStop && stopRefusal !== undefined && !stopping ? <span role="status" title={stopRefusal} {...stylex.props(styles.stopRefusal)}>{stopRefusal}</span> : null}
         {canStop ? <StopRunButton onStop={stop} pending={stopping} /> : null}
-        {actions !== undefined ? actions(compact) : onRequestSubmit === undefined ? <ComposerPrimitive.Send disabled={readOnly} aria-label={submitIcon === undefined ? undefined : 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? 'Send'}</ComposerPrimitive.Send> : <Button isDisabled={readOnly || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
+        {actions !== undefined ? actions(compact)
+          // Blocked, not empty: focusable and described by the refusal; pressing it only re-announces why.
+          : sendBlocked ? <button type="button" aria-disabled="true" aria-describedby={refusalId} onClick={refuseSend}
+              aria-label={submitIcon === undefined ? undefined : sendLabel} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? sendLabel}</button>
+          : onRequestSubmit === undefined ? <ComposerPrimitive.Send disabled={readOnly} aria-label={submitIcon === undefined ? undefined : 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? 'Send'}</ComposerPrimitive.Send>
+          : <Button isDisabled={readOnly || !canSend} onPress={() => onRequestSubmit(false)} aria-label={submitIcon === undefined ? undefined : submitLabel ?? 'Send'} {...stylex.props(styles.button, styles.primary, submitIcon !== undefined && styles.submitIcon)}>{submitIcon ?? submitLabel ?? 'Send'}</Button>}
       </div>
     </ComposerPrimitive.Root>
   )
@@ -396,6 +499,7 @@ function TokenComposer({
   placeholder = 'Message, @ to mention, / for commands',
 }: EmbraceComposerProps) {
   const aui = useAui()
+  const narrow = React.useContext(NarrowLayoutContext)
   const composerStateNow = () => aui.composer.__internal_getRuntime?.().getState() ?? aui.composer.getState()
   const runtimeText = useAuiState((s) => s.composer.text)
   const isDisabled = useAuiState((s) => s.thread.isDisabled)
@@ -572,11 +676,11 @@ function TokenComposer({
             onOpenChange={(next) => { if (!next) setDismissed(triggerKey) }} {...stylex.props(styles.menu)}>
             <ListBox autoFocus="first" aria-label={trigger.kind === '@' ? 'Mention a subject' : 'Commands'} items={previewedGroups} {...stylex.props(styles.menuList)}
               onAction={pick} disabledKeys={options.filter((option) => option.unavailable !== undefined).map((option) => option.id)}
-              renderEmptyState={() => <div {...stylex.props(styles.option)}>No matches</div>}>
+              renderEmptyState={() => <div {...stylex.props(styles.option, narrow && styles.touchRow)}>No matches</div>}>
               {(group) => <ListBoxSection id={group.id}>
                 <Header {...stylex.props(styles.menuHeader)}>{group.label}{group.hidden > 0 ? ` · ${group.options.length + group.hidden}` : ''}</Header>
                 {group.options.map(option => <ListBoxItem key={option.id} id={option.id} textValue={option.label}
-                  className={({ isFocused, isDisabled: optionDisabled }) => stylex.props(styles.option, isFocused && styles.focusedOption, optionDisabled && styles.unavailable).className ?? ''}>
+                  className={({ isFocused, isDisabled: optionDisabled }) => stylex.props(styles.option, narrow && styles.touchRow, isFocused && styles.focusedOption, optionDisabled && styles.unavailable).className ?? ''}>
                   <Text slot="label" {...stylex.props(styles.optionLabel)}>{option.label}</Text>
                   <Text slot="description" {...stylex.props(styles.helpVisibility)}>{option.unavailable ?? option.description}</Text>
                   {option.token._tag === 'Mention' ? option.hint !== undefined && <span aria-hidden="true" data-mention-hint {...stylex.props(styles.description)}>{option.hint}</span> : <span aria-hidden="true" {...stylex.props(styles.description, styles.commandDescription)}>{option.unavailable ?? option.description}</span>}

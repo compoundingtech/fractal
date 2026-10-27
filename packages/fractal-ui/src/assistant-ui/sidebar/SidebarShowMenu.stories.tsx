@@ -90,9 +90,10 @@ const play: NonNullable<Story['play']> = async ({ canvasElement }) => {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar/Show Menu',
   component: ShowMenuHarness,
-  parameters: {
+  parameters: { scenario: { _tag: 'contract-fixture', reason: "Host-owned React filter state exercises show-menu toggles and retained selections independently of catalog data." },
     layout: 'fullscreen',
     viewport: { options: {
       show1440: { name: 'Show desktop', styles: { width: '1440px', height: '900px' }, type: 'desktop' },
@@ -105,6 +106,14 @@ const meta = {
   args: { dark: true, width: 1440 },
 } satisfies Meta<typeof ShowMenuHarness>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Narrow440Dark:contract-fixture',
+  'Narrow440Light:contract-fixture',
+  'Wide1440Dark:contract-fixture',
+  'Wide1440Light:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 export const Wide1440Dark: Story = { play }
 export const Wide1440Light: Story = { args: { dark: false }, play }

@@ -27,8 +27,8 @@ targets; transcript hits preserve their normalized session and timeline entry ID
 selects that agent's transcript and messages exchanged with the person.
 
 `GET /v1/client/conversations/search` is the typed read `conversation.search`. The generated
-clients expose Rust `Client::conversation_search`, TypeScript `St3Client.conversationSearch`,
-and Swift `St3Client.conversationSearch`. They return the same `ConversationSearch` response,
+clients expose Rust `Client::conversation_search`, TypeScript `FractalClient.conversationSearch`,
+and Swift `FractalClient.conversationSearch`. They return the same `ConversationSearch` response,
 including `page`, `indexed_at`, `host_id`, `refreshing`, and `incomplete_sources`. Pages have
 1–200 hits (50 by default). Cursors bind the reader, query, filters, page size, and index
 revision. A changed revision or evicted index returns `cursor-gap`; restart the search.
@@ -68,7 +68,7 @@ warnings are returned, with a count if more were omitted. A refresh failure also
 that the dated index could not be updated. Clients should display this metadata when
 interpreting a missing match.
 
-For an embedded index independent of the daemon, `st3::conversation_search::SearchIndex`
+For an embedded index independent of the daemon, `fractal_daemon::conversation_search::SearchIndex`
 accepts caller-owned, already-authorized `SearchEntry` sources with `replace` and `remove`,
 then produces `SearchHit` values with `search`. The caller owns discovery, access control,
 refresh scheduling, and corpus bounds; the index never reads harness files itself.

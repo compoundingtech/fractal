@@ -4,9 +4,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-pnpm --filter @smalltalk/st3-client test
-pnpm --filter @smalltalk/st3-client typecheck
-pnpm --filter @smalltalk/st3-views test
-pnpm --filter @smalltalk/st3-views typecheck
-pnpm --filter smalltalk-ios-starter exec tsc --noEmit -p .
-pnpm --filter smalltalk-ios-starter test
+# The installation fractal-web and the release build from is a fixed-output derivation: prove its pinned hash
+# (nix/typescript-client-deps.hash) here, so a check that passes cannot hide a main that cannot release. Not inside
+# checks.typescript-client itself (NIX_BUILD_TOP), which has the installation as its input and no Nix of its own.
+if [ -z "${NIX_BUILD_TOP:-}" ]; then
+  bash scripts/ci-nix-fixed-outputs
+fi
+
+pnpm --filter @fractal/client test
+pnpm --filter @fractal/client typecheck
+pnpm --filter @fractal/views test
+pnpm --filter @fractal/views typecheck
+pnpm --filter fractal-ios-starter exec tsc --noEmit -p .
+pnpm --filter fractal-ios-starter test

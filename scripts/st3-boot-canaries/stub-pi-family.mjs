@@ -7,6 +7,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+import { identityEnv } from '../fractal-env.mjs';
 
 const harness = process.env.STUB_HARNESS;
 if (process.argv.includes('--version')) {
@@ -14,15 +16,18 @@ if (process.argv.includes('--version')) {
   console.log(harness === 'omp' ? 'omp v18.4.4' : 'pi 0.0.0-stub');
   process.exit(0);
 }
-if (process.env.ST_ADMISSION_TRACE) {
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+if (process.env.FRACTAL_ADMISSION_TRACE ?? process.env.ST_ADMISSION_TRACE) {
   const { admit } = await import('./admission-omp.mjs');
   await admit();
 } else {
-const agent = process.env.ST_AGENT ?? 'unknown';
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+const agent = identityEnv('FRACTAL_AGENT', 'ST_AGENT') ?? 'unknown';
 const receiptPath = `${process.cwd()}/receipts-${agent.replace(/[^A-Za-z0-9]/g, '-')}.jsonl`;
 const record = (event, fields = {}) => fs.appendFileSync(receiptPath,
   JSON.stringify({ event, at: Date.now() / 1000, pid: process.pid, ...fields }) + '\n');
-const st = (...args) => childProcess.spawnSync(process.env.ST3_BIN, args, { encoding: 'utf8', timeout: 60000 });
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+const st = (...args) => childProcess.spawnSync(process.env.FRACTAL_BIN ?? process.env.ST3_BIN, args, { encoding: 'utf8', timeout: 60000 });
 
 // What a model does when woken: read the message, then run the command the wake gives, exactly as
 // written. Nothing is added: a wake a model cannot follow verbatim fails the canary.
@@ -86,6 +91,11 @@ if (harness === 'omp' && option('--resume')) {
   fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
   fs.writeFileSync(sessionFile, JSON.stringify({ type: 'session', id: sessionId, cwd: process.cwd() }) + '\n');
 }
+// The heal opens the saved session with stdin at EOF and no extension. It does not call a model.
+if (option('--mode') === 'rpc') {
+  record('heal', { sessionId });
+  process.exit(0);
+}
 const resumed = fs.readFileSync(sessionFile, 'utf8').split('\n').length > 2;
 fs.appendFileSync(sessionFile, JSON.stringify({ type: 'launch', at: Date.now() }) + '\n');
 record('session', { sessionId, sessionFile, resumed });
@@ -116,6 +126,41 @@ const { default: extension } = await import(pathToFileURL(process.argv[index + 1
 extension(api);
 await events.get('session_start')?.({}, ctx);
 record('ready');
+// Fault fixture: persist an unanswered native ask, then require the driver's actual F5 retry
+// before exposing its picker on resume. Never reopen it just because ST3_OMP_PENDING_ASK is set.
+const askTrigger = path.join(process.cwd(), 'pending-ask.json');
+let liveAsk;
+const savedAsk = fs.readFileSync(sessionFile, 'utf8').split('\n').filter(Boolean)
+  .map(line => JSON.parse(line)).find(row => row.customType === 'tool_execution_start'
+    && row.data?.toolName === 'ask')?.data;
+const openAsk = async (ask, reopening) => {
+  liveAsk = ask;
+  await events.get('tool_call')?.(ask, ctx);
+  await events.get('tool_execution_start')?.(ask, ctx);
+  record('picker-live', { sessionId, ask, reopening });
+};
+if (savedAsk) {
+  // Match the terminal input contract used by the Rust bridge, including split reads.
+  if (process.stdin.isTTY) process.stdin.setRawMode(true);
+  let input = '';
+  process.stdin.on('data', chunk => {
+    input += chunk.toString();
+    if (!liveAsk && input.includes('\x1b[15~')) void openAsk(savedAsk, true);
+  });
+  process.stdin.resume();
+} else {
+  const trigger = setInterval(() => {
+    if (!fs.existsSync(askTrigger) || liveAsk) return;
+    const ask = JSON.parse(fs.readFileSync(askTrigger, 'utf8'));
+    record('turn', { text: 'fixture model opens ask' });
+    fs.appendFileSync(sessionFile, JSON.stringify({
+      type: 'custom', customType: 'tool_execution_start', data: ask,
+    }) + '\n');
+    void openAsk(ask, false);
+    clearInterval(trigger);
+  }, 50);
+  trigger.unref();
+}
 const keepalive = setInterval(() => {}, 1000);
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   process.on(signal, async () => {

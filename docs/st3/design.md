@@ -31,12 +31,120 @@ public subject and claim vocabulary.
 
 The graph is its own crate, `crates/smallclaims`: the claim log and its batches, envelopes and
 their admission, the canonical order, projection digests, replication between members,
-fleet membership, checkpoints, documents and blobs. It depends on nothing of smalltalk's, so agents,
-missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. smalltalk's store wraps the
+fleet membership, checkpoints, documents and blobs. It depends on nothing of Fractal's, so agents,
+missions, seats, delivery, drivers, the CLI and the terminal UI stay out of it. Fractal's store wraps the
 graph's and plugs in through `smallclaims::store::Runtime`: its tables and their migration, claim
 kind validation, local writes, projection and replay, cache invalidation, the digested tables, and
 the checkpoint rules and proof answers. A runtime may call the graph freely; the graph reaches a
 runtime only through that trait.
+
+### Deployment audit records
+
+The `deploy.*` claim family records deployment receipts on existing `resource/`
+subjects without an installer entry, new signing key, or new trust root. Its receipt ID
+is the content-addressed claim ID. Every body requires integer `version: 1`; readers
+reject unsupported versions. The authoritative fields and nested validation live in
+[`fractal-schema::deploy`](../../crates/fractal-schema/src/deploy.rs) and the schema registry.
+
+- `deploy.go` binds `host`, executing `actor`, `operation` (`install` or `rollback`),
+  `trainId`, exact `old` and `new` package tuples (`packagePath`, `narHash`, `commit`),
+  RFC3339 `issuedAt` and `expiresAt`, `failureRestore`, required `previewDigest`, and
+  `compatSignoffId`. Expiry must be after issue and no more than four hours later.
+  Optional `combined` binds both `stopId` and `planId`; the preview digest remains
+  mandatory whether or not the GO is combined.
+- `deploy.go-revoked` references `goId`; `deploy.go-consumed` records `goId`,
+  `operation`, and a nonempty `result`.
+- `deploy.stop` records `stopId`, `scope`, explicit nonempty `hosts`, and
+  `liftCondition`; `deploy.stop-lifted` binds `stopId` to `releaseGoId`.
+- `deploy.compat-signoff` binds `trainId`, `oldCommit`, and `newCommit`. A GO's
+  `compatSignoffId` denotes this typed claim, not a message or an untyped approval.
+
+Schema admission is not authorization. `st deploy verify-go` checks the local replica
+through the local Unix daemon API; remote endpoints are refused and verification never
+contacts fleet peers or requests synchronization. The verifier uses the existing
+`smallclaims::principal::judge` signature/delegation authorization model and its complete
+local serving state. Unsigned, held or invalid signatures cannot grant authorization.
+
+The caller supplies the executing host and actor, operation, train ID, both exact package
+tuples, preview digest and failure-restore choice. Every value must match the GO. The
+current time must be at or after issue and strictly before expiry, with the four-hour
+lifetime cap still enforced. Revocation makes a GO unusable. A consumption for the same
+GO and operation permits replay, reported as `consumed: true` in the verification receipt;
+a consumption for another operation refuses authorization. Consumption must be signed
+by the GO's actor on its host, and that actor must also be authorized by the packaged
+consumption-signer policy. Wrong-signer or wrong-origin consumption is refused, not ignored,
+and never grants replay authority. Replay still requires every other GO and STOP check.
+
+`compatSignoffId` must resolve to a verified `deploy.compat-signoff` from an allowed
+signer with the same train and old/new commits. Revocation, consumption and STOP-release
+references are typed; dangling references fail closed. A matching combined binding can
+authorize its one active STOP without a separate lift record. Its STOP must cover this
+host/scope, and the required top-level GO preview digest must exactly equal the caller's
+preview. Another active covering STOP still blocks the GO. A lifted STOP needs no
+combined binding; binding an absent, lifted or non-covering STOP is refused.
+A STOP covers a host when it is explicitly listed and its scope is `installer-entry`
+or exactly the GO's train ID. STOP IDs are explicit `stopId` identities; GO and
+compatibility-signoff references are claim IDs. A lift remains durable when its
+referenced release GO expires; expiry does not reactivate an already lifted STOP.
+
+Offline verification still requires a recorded successful synchronization with the GO
+claim's own origin node within ten minutes. Never-synced, unknown-origin, future-dated
+or older-than-ten-minute receipts fail closed. A configured issuer node or a successful
+sync with another node cannot substitute for the GO origin's receipt.
+
+Signed history is a time ratchet, not a clock oracle. With a two-minute tolerance,
+`originRef` is the newest authenticated `signed_at_unix_ms` not later than local
+`now` plus that tolerance, among accepted, active whole-record principal signatures
+from the GO's origin. The existing principal judge authenticates these signatures and
+their admitted node/delegation chains. All GO issue/expiry and origin-receipt freshness
+comparisons use `trusted_now = max(local_now, originRef)`; the four-hour maximum GO
+lifetime remains mandatory. Without eligible origin evidence, local time is used.
+Quiet origins have no signed-history age limit: repeated unchanged successful syncs
+refresh the ten-minute receipt requirement without needing new claims.
+
+Before other time checks, `deploy-clock-untrusted` with reason `behind` refuses a
+local clock more than two minutes behind the newest authenticated own-node signed
+timestamp, or a GO whose own signed issue time or signature timestamp is more than
+two minutes ahead of local time. Other future-dated origin claims do not establish
+rollback: signers choose their timestamps. They are excluded from the ratchet and
+reported as `diagnostics.futureDatedCount` and `diagnostics.maxFutureSkewMs`, without
+refusing an otherwise valid GO. Verification streams only own-node and GO-origin
+active history inside the same read-only snapshot; it retains maxima and diagnostics,
+not a second copy of that history. It still authenticates each relevant candidate.
+
+Own-node evidence additionally requires an accepted claim copy in a validated envelope
+whose writer is this node and whose envelope signature verifies against this node's
+stored key using the existing fleet signature verifier. Principal signatures alone do
+not authenticate writer origin. Self-origin text without that envelope provenance is
+excluded from own-node rollback evidence; the independent GO-origin ratchet rule is
+unchanged.
+
+`VerifyGoReceipt` requires the `diagnostics` object. Receipts from earlier unpublished
+drafts without this field are not wire-compatible.
+
+Residual risk: setting the clock back without newer own-node or eligible origin
+evidence can go undetected. This is a cooperative same-user, auditable control, not a
+host-clock security boundary; maintaining host time synchronization is an operational
+duty. A fresh origin-signed time exchange could strengthen this later, but is not
+part of this offline verifier.
+
+The packaged policy has one strict JSON schema with integer `version: 1` and explicit
+`refusedVerifierHosts`, `consumptionSigners`, `goSigners`, `stopSigners` and
+`compatSignoffSigners` arrays. Missing, unreadable, malformed or unknown-version policy
+refuses all authorization. Signer entries authorize verified principal identities;
+they do not introduce trusted keys or roots. Empty signer lists grant nothing.
+
+The Nix package accepts `deployPolicyFile` as an immutable file input and injects its
+store path at compilation. The installed program does not accept a runtime, environment
+or CLI policy-path override. A bare development package without that build input
+refuses verification. The policy's store path and exact-byte SHA-256 accompany verifier
+receipts. Policy examples and tests use `host-a`, `host-b` and `agent/example-*`.
+
+Claims reuse the daemon-held agent keys and admitted node delegation chains. This is
+an auditable cooperative same-user boundary, not isolation from code running as the
+owner Unix user. All six kinds are durable. Older registries quarantine authenticated
+unknown kinds with their original bytes, excluding them from existing projections and
+list output while allowing unrelated known records to progress.
 
 ## KDL publication
 
@@ -45,13 +153,13 @@ that represents a database transaction.
 
 `st launch preview` validates and renders a planner-authored launch candidate.
 `st apply FILE... --as ACTOR` previews and then atomically applies authored KDL for seats,
-missions and schedules. In [free mode](kdl-lifecycle.md#free-mode) any agent may publish, as itself. A failed
+missions and schedules. In [free mode](../site/reference/configuration.md#free-mode) any agent may publish, as itself. A failed
 declaration rejects the complete publication.
 
 Removing a prior declaration from a later file has no effect. A cancellation, stop, repair, or new
 desired declaration must state the change.
 
-See the [KDL lifecycle](kdl-lifecycle.md) for the complete operator workflow.
+See [Configuration and KDL](../site/reference/configuration.md) for the complete operator workflow.
 
 ## Missions and work
 

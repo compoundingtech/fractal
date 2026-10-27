@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 # Build one evidence bundle from a live onboarding run. Everything it reads is the graph and the
 # Assistant's own conversation; the Assistant's claims are never taken as evidence.
 # Usage: collect.sh VARIANT STARTED_MS SKIP_MS_OR_NONE   (ST_BIN and the isolated environment set)
 set -euo pipefail
 
 variant="${1:?variant}"; started_ms="${2:?started_ms}"; skip_ms="${3:-none}"
-st="${ST_BIN:-st}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+st="${FRACTAL_BIN-${ST_BIN:-st}}"
 assistant="agent/st/assistant"; demo="agent/st/demo"; person="${EVAL_PERSON:-person/avery}"
 now_ms() { date +%s%N | cut -c1-13; }
 
@@ -45,7 +47,8 @@ demo_mission_state="$("$st" missions ls --all --json 2>/dev/null \
   | jq -r '[.. | objects | select((.id? // "") | test("st/onboarding-demo"))] | first | .status // .state // empty' || true)"
 welcome_bytes=0
 # `st agents new st/demo` with no workspace works in its own folder inside the work folder.
-demo_workspace="${ST_WORK_ROOT:-$HOME/st}/agents/st/demo"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+demo_workspace="${FRACTAL_WORK_ROOT-${ST_WORK_ROOT:-$HOME/st}}/agents/st/demo"
 [ -f "$demo_workspace/welcome.md" ] && welcome_bytes="$(wc -c <"$demo_workspace/welcome.md" | tr -d ' ')"
 # Act three raises an alert for the person: ask the graph for the person's alerts, resolved ones
 # included, and look for the one about the demo folder. Its words are the guide's, not the judge's.

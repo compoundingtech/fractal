@@ -3,7 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type * as Native from '@smalltalk/st3-client/schema'
+import type * as Native from '@fractal/client/schema'
 
 vi.mock('@stylexjs/stylex', () => import('../../testStylex.ts'))
 vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))

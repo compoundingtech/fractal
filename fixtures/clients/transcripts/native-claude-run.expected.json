@@ -2,7 +2,7 @@
   {
     "body": {
       "kind": "event",
-      "value": "Earlier history is not shown: st reads only the newest part of this agent's transcript; earlier history is not fetchable through this read"
+      "value": "Earlier history is not shown: Fractal reads only the newest part of this agent's transcript; earlier history is not fetchable through this read"
     },
     "id": "timeline-entry/native-160"
   },

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 exec >controller.log 2>&1
 
@@ -34,8 +35,9 @@ st3 --json missions start eval/review-escalation/standing \
 standing_run=$(jq -er '.mission_run.subject' standing.json)
 st3 trace wait "$OWNER" --for running --timeout 1m >/dev/null
 
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 st3 --json missions start eval/review-escalation/work \
-  --id "eval/review-escalation/work/${ST_MISSION_RUN}" \
+  --id "eval/review-escalation/work/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN}}" \
   --workspace "$PWD" \
   --input "source=resource/eval/review-escalation/source@${source_claim}" \
   --as "$OWNER" >work.json
