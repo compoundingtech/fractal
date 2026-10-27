@@ -6197,9 +6197,6 @@ pub fn start_agent_roster(state: &AppState) {
                 Err(error) => eprintln!("st3: agents roster refresh stopped: {error}"),
             }
             if first {
-                // The bounded startup head is not the complete roster. Queue exactly one
-                // complete publication even when no client has read yet, without a read grace.
-                store.fractal.request_roster_refresh();
                 continue;
             }
             // Pause as long as the refresh took, so refreshing stays under about half a core
@@ -6268,6 +6265,9 @@ async fn refresh_agent_roster_admitted(
             // Startup publishes a bounded head; complete presentation follows on demand.
             crate::task_cpu::performance_blocking("published_list.agents", || if first {
                 reader.answer_agent_roster_requests(|| {
+                    // Queue the complete follow-on before publishing the head: a projection
+                    // reset after that publication must be able to cancel this old demand.
+                    reader.fractal.request_roster_refresh();
                     reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
                 })
             } else {
