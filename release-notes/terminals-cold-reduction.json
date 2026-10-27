@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Runtime and terminal resources retain canonical authority, snapshot membership and the same serialized fields. Full public status responses and claim fences are unchanged. Internal runtime reductions omit discarded harness, provenance, conflicts and actual fields, preserving sparse observations, explicit nulls, state-transition clearing and rival-origin ancestry checks."
+    "detail": "Runtime and terminal resources retain canonical authority, snapshot membership and the same serialized fields. Full public status responses and claim fences are unchanged. Internal runtime reductions keep current harness semantics while omitting discarded provenance, conflicts and actual fields, preserving sparse observations, explicit nulls, state-transition clearing and rival-origin ancestry checks."
   },
   "downtime": {
     "status": "none",

@@ -24,7 +24,7 @@ resync watcher thread
    '- equal → nothing; changed → queue per class window
    |
    v  window boundary
-st2::event::emit_builtin_resync(agent_id,
+fractal_legacy_runner::event::emit_builtin_resync(agent_id,
                  event-id=<sha256(canonical binding/path/old/new/occurrence body)>,
                  key=<binding label>, supersede=true,
                  subject="resource <binding> changed")

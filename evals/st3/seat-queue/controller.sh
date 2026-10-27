@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -Eeuo pipefail
 
-: "${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}"
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+: "${FRACTAL_MISSION_RUN-${ST_MISSION_RUN:?ST_MISSION_RUN must identify the eval mission run}}"
 
 readonly REQUESTER=person/eval-requester
 readonly WORKER=agent/eval/seat-queue/worker
@@ -133,8 +135,9 @@ expect_next_claim() {
 
 start_run() {
   local label=$1 output run
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   output="$(st3 missions start "eval/seat-queue/$label" \
-    --id "$label-$ST_MISSION_RUN" \
+    --id "$label-${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}" \
     --workspace "$PWD" \
     --as "$REQUESTER" \
     --json)"
@@ -164,7 +167,7 @@ wait_for_worker
 checkpoint seat-idle
 
 for label in alpha bravo charlie; do
-  st3 missions publish "$GENERATED/$label.kdl" --as "$REQUESTER" >/dev/null
+  st3 apply "$GENERATED/$label.kdl" --as "$REQUESTER" >/dev/null
 done
 
 # Start order is the default queue order: alpha, then bravo, then charlie.
@@ -228,7 +231,7 @@ jq -e --arg alpha "$alpha" '.value.runs[0].mission_run_id == $alpha and .value.r
   || fail "alpha was not the waiting head run when charlie was claimed"
 
 # Release alpha's gate while the seat still holds charlie's work.
-st3 attention approve "$alpha_sign_off" \
+st3 alerts approve "$alpha_sign_off" \
   --as "$REQUESTER" \
   --reason "the alpha draft is signed off" >/dev/null
 checkpoint sign-off-approved

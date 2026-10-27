@@ -85,6 +85,12 @@ current-key invalidation feed with retained removals and gap detection. It is no
 transition replay, an action request, authorization, or an immutable historical page.
 Commit-only notifications and subscribe-before-snapshot/recheck are consumer-owned.
 
+The opt-in [`events` feed](IVM_EVENTS.md) supplies bounded committed keyed invalidations,
+independent availability delivery, stable provider identity and explicit retained floors.
+It uses the existing writer commit observer; graph-watch still owns client transport and
+authorization. The reference runtime gates replacement-repair views pending a proved
+repair-before-projection eligibility implementation.
+
 For current observations, `LocalChange` captures old/new keys and a separate local generation.
 Clock, deadline, ownership and external-file dependencies require explicit adapters;
 replicated claim frontiers cannot stand in for them.
@@ -127,3 +133,7 @@ retention and commit-inclusive writer cost are not bounded by the correctness re
 Integrators must measure relevant unchanged-answer history growth, genuine fanout, SQL/VM
 work, retained bytes and writer wait/hold before activating a reader. Each reader migration
 is a separate PR; this crate addition does not activate one.
+
+The opt-in [read-after-write API](IVM_AFTER_WRITE.md) returns database-bound receipts and waits reactively for certified source processing plus view readiness.
+
+[Explicit asynchronous catch-up](IVM_ASYNCHRONOUS.md) captures admitted claims transactionally and processes bounded pages on an owner-scheduled worker, with certified prefix/readiness evidence. It does not convert existing stores or migrate production readers.

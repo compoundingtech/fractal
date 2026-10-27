@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve Fractal environment bridges across the API, reconcile, GitHub-base, seats-base, secrets and telemetry crate splits.",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persisted schema changes." },
+  "rules": { "status": "none", "detail": "No rule changes." },
+  "compatibility": { "status": "none", "detail": "The moved HookEnv map implementation retains shared alias resolution. Launch-environment helpers are public across the new crate boundary, and GitHub-base declares its direct driver-contract dependency. CLI bindings, hook identity conflict evidence, silent empty masking and paired launch-token assertions remain unchanged." },
+  "downtime": { "status": "none", "detail": "No service changes." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "No runtime state migration." }
+}

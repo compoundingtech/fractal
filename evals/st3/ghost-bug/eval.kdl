@@ -39,7 +39,7 @@ version 2
         step "read-bug-report" { title "The exact immutable bug report is understood"; goal "Read the referenced task document through st3 documents get. Identify the leak reproduction, root-cause requirement, regression-test requirement, and verification contract." }
         step "send-debug-brief" {
           title "The specialist receives one bounded debugging brief"
-          goal "Send agent/${ST_MISSION_RUN}/gbx.fix exactly one Small Talk message. Require reproduction, root cause, smallest fix, a mutation-valid regression test, green suite, commit, and evidence report. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/debug-brief resource.observed --actor agent/${ST_MISSION_RUN}/gbx.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send agent/${ST_MISSION_RUN}/gbx.fix exactly one Fractal message. Require reproduction, root cause, smallest fix, a mutation-valid regression test, green suite, commit, and evidence report. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/debug-brief resource.observed --actor agent/${ST_MISSION_RUN}/gbx.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "read-bug-report" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/debug-brief" { kind "custom.st3.message-receipt"; state "published" } }
         }
@@ -68,7 +68,7 @@ version 2
         }
         step "report-fix-evidence" {
           title "The supervisor receives the complete debugging evidence"
-          goal "Send agent/${ST_MISSION_RUN}/gbx.sup exactly one Small Talk report. Include the root cause, changed files, commit, red-before proof, green suite, direct reproduction, and clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/gbx.fix --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send agent/${ST_MISSION_RUN}/gbx.sup exactly one Fractal report. Include the root cause, changed files, commit, red-before proof, green suite, direct reproduction, and clean tree. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/worker-report resource.observed --actor agent/${ST_MISSION_RUN}/gbx.fix --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "publish-fix-revision" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/worker-report" { kind "custom.st3.message-receipt"; state "published" } }
         }
@@ -87,7 +87,7 @@ version 2
         step "verify-fix-read-only" { title "The supervisor independently verifies the root-cause fix"; goal "Without edits, inspect ../worker. Run the complete suite and direct reproduction. Verify the regression test, mutation-free defaultOptions, published HEAD, committed diff, and clean tree."; depends-on { step "read-worker-report" completed } }
         step "confirm-requester" {
           title "The requester receives one verified bug-fix confirmation"
-          goal "Send person/eval-requester exactly one Small Talk message. Cite the root cause, real commit, regression test, and read-only verification. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-confirmation resource.observed --actor agent/${ST_MISSION_RUN}/gbx.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
+          goal "Send person/eval-requester exactly one Fractal message. Cite the root cause, real commit, regression test, and read-only verification. Use tag mission-run:$ST_MISSION_RUN. Save the bare message ID as MID. Run: st3 claim resource/mission-run/$ST_MISSION_RUN/final-confirmation resource.observed --actor agent/${ST_MISSION_RUN}/gbx.sup --field kind=custom.st3.message-receipt --field state=published --field message=message/$MID. Complete this step after the claim."
           depends-on { step "verify-fix-read-only" completed }
           produces { resource "mission-run/${ST_MISSION_RUN}/final-confirmation" { kind "custom.st3.message-receipt"; state "published" } }
         }
