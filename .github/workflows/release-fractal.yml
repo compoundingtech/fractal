@@ -1,5 +1,5 @@
 # Generated file - DO NOT EDIT
-# Source: release-smalltalk.yml.genie.ts
+# Source: release-fractal.yml.genie.ts
 
 name: Fractal tag release
 
@@ -11,8 +11,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
-      - .github/workflows/release-smalltalk.yml
-      - .github/workflows/release-smalltalk.yml.genie.ts
+      - .github/workflows/release-fractal.yml
+      - .github/workflows/release-fractal.yml.genie.ts
       - .gitignore
       - crates/fractal-build-stamp/**
       - crates/fractal-drivers/src/version.rs
@@ -23,7 +23,7 @@ on:
       - scripts/release-build-stamp.py
       - scripts/release-rust-version
       - scripts/fixtures/install-release-v0.3.17
-      - scripts/release-smalltalk*
+      - scripts/release-fractal*
       - scripts/release_notes*
       - scripts/compat-baseline-release*
       - .github/*-compat-baseline.json
@@ -372,11 +372,12 @@ jobs:
           scripts/install-release-test
           python3 scripts/install-macos-test
           python3 scripts/release_notes_test.py
-          python3 scripts/release-smalltalk-edge-test
+          python3 scripts/release-fractal-edge-test
+          python3 scripts/release-fractal-manifest-test
           python3 scripts/compat-baseline-release-test
 
       - name: Test the daily release failure path
-        run: python3 scripts/release-smalltalk-daily-test
+        run: python3 scripts/release-fractal-daily-test
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -461,11 +462,11 @@ jobs:
         run: |
           scripts/install-release-test
           python3 scripts/install-macos-test
-          python3 scripts/release-smalltalk-test
+          python3 scripts/release-fractal-test
           python3 scripts/release_notes_test.py
 
       - name: Build, package, and test extracted tools
-        run: "scripts/release-smalltalk '${{ matrix.target }}' dist"
+        run: "scripts/release-fractal '${{ matrix.target }}' dist"
       - id: build-snapshot-save
         name: Keep valid same-source build outputs
         if: "!cancelled() && (github.event_name != 'merge_group' || vars.CI_OUTAGE_FAST_QUEUE != 'on')"
@@ -534,13 +535,13 @@ jobs:
           cd dist
           cat ./*.sha256 > SHA256SUMS
           sha256sum --check SHA256SUMS
-          python3 ../scripts/release-smalltalk-manifest.py "$SOURCE_SHA"
+          python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
           cp ../docs/st3/binary-releases.md RELEASE-NOTES.md
           printf '\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\n' "$SOURCE_SHA" >> RELEASE-NOTES.md
 
       - uses: actions/upload-artifact@v4
         with:
-          name: smalltalk-release
+          name: fractal-release
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -587,10 +588,10 @@ jobs:
           git fsck --connectivity-only --no-dangling --no-progress
       - uses: actions/download-artifact@v4
         with:
-          name: smalltalk-release
+          name: fractal-release
           path: dist
       - name: Move the rolling edge pre-release to this verified commit
-        run: scripts/release-smalltalk-edge --source "$SOURCE_SHA" --dist dist --run-url "$RUN_URL"
+        run: scripts/release-fractal-edge --source "$SOURCE_SHA" --dist dist --run-url "$RUN_URL"
       - name: Report job cache coverage
         if: always()
         shell: bash
@@ -628,7 +629,7 @@ jobs:
           git fsck --connectivity-only --no-dangling --no-progress
       - uses: actions/download-artifact@v4
         with:
-          name: smalltalk-release
+          name: fractal-release
           path: dist
       - name: Publish the verified tag artifacts
         run: |
@@ -639,7 +640,7 @@ jobs:
           python3 scripts/release_notes.py --source "$SOURCE_SHA" --tag "$TAG" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json
           cd dist
           sha256sum --check SHA256SUMS
-          python3 ../scripts/release-smalltalk-manifest.py "$SOURCE_SHA"
+          python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
           # Refuse to replace any existing release or its assets. A partial draft stays private
           # for inspection; delete that draft before retrying, never move the tag.
           gh release create "$TAG" --verify-tag --draft --title "Fractal $TAG" \

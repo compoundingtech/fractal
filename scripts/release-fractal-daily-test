@@ -22,10 +22,13 @@ import json, os, pathlib, shutil, sys
 args = sys.argv[1:]
 if args[:2] == ['run', 'list']:
     print(json.dumps([{'databaseId': 7, 'headSha': os.environ['FAKE_SHA']}]))
+elif args[0] == 'api' and '/actions/runs/' in args[1]:
+    print(json.dumps([{'artifacts': [{'name': os.environ['FAKE_ARTIFACT'], 'expired': False}]}]))
 elif args[0] == 'api' and args[-1] == 'repos/example/project/releases?per_page=100':
     print(json.dumps([[{'tag_name': 'v0.3.17', 'draft': False, 'prerelease': False,
                        'published_at': '2026-10-07T00:00:00Z', 'id': 17}]]))
 elif args[:2] == ['run', 'download']:
+    assert args[args.index('--name') + 1] == os.environ['FAKE_ARTIFACT'], args
     destination = pathlib.Path(args[args.index('--dir') + 1])
     for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
         shutil.copy(item, destination / item.name)
@@ -95,8 +98,8 @@ with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     checkout = root / 'checkout'
     (checkout / 'scripts').mkdir(parents=True)
-    shutil.copy(repo / 'scripts/release-smalltalk-daily', checkout / 'scripts/release-smalltalk-daily')
-    shutil.copy(repo / 'scripts/release-smalltalk-manifest.py', checkout / 'scripts/release-smalltalk-manifest.py')
+    shutil.copy(repo / 'scripts/release-fractal-daily', checkout / 'scripts/release-fractal-daily')
+    shutil.copy(repo / 'scripts/release-fractal-manifest.py', checkout / 'scripts/release-fractal-manifest.py')
     shutil.copy(repo / 'scripts/compat-baseline-release', checkout / 'scripts/compat-baseline-release')
     (checkout / '.github').mkdir()
     pin = {'commit': 'a' * 40, 'tag': 'v0.3.17', 'why': 'Previous stable release fixture',
@@ -125,17 +128,23 @@ with tempfile.TemporaryDirectory() as temporary:
 
     receipt = root / 'receipt.json'
 
-    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None):
+    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None, artifact='fractal-release'):
         receipt.unlink(missing_ok=True)
         (root / 'notes.md').write_text(notes)
         (root / 'impact.json').write_text(json.dumps(impact or {'fragments': [], 'change_links': {}}))
         env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', GH_TOKEN=token, GH_REPO='example/project',
                    FAKE_SHA=shas[1], FAKE_DIST=str(root / 'dist'), FAKE_FAILURE=failure,
                    FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt),
-                   FAKE_IMPACT=str(root / 'impact.json'))
-        args = ['python3', 'scripts/release-smalltalk-daily']
+                   FAKE_IMPACT=str(root / 'impact.json'), FAKE_ARTIFACT=artifact)
+        args = ['python3', 'scripts/release-fractal-daily']
         return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
                               text=True, capture_output=True, timeout=60)
+
+    # Both current and pre-rename successful runs reach full checksum/source validation.
+    for artifact in ('fractal-release', 'smalltalk-release'):
+        done = daily(dry_run=True, artifact=artifact)
+        assert done.returncode == 0 and 'Validated both release targets' in done.stdout, done
+        assert 'would publish v0.3.18' in done.stdout, done
 
     # The Oct 10-11 shape: every earlier step passes, then gh release create fails with a cause.
     cause = 'HTTP 403: Resource not accessible by integration (https://api.example.invalid/releases)'
@@ -214,7 +223,7 @@ with tempfile.TemporaryDirectory() as temporary:
 
 # run() still returns a successful command's output unchanged.
 from importlib.machinery import SourceFileLoader
-module = SourceFileLoader('daily', str(repo / 'scripts/release-smalltalk-daily')).load_module()
+module = SourceFileLoader('daily', str(repo / 'scripts/release-fractal-daily')).load_module()
 assert module.run('printf', 'ok\n') == 'ok'
 
 # Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.
