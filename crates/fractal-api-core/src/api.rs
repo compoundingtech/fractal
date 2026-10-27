@@ -5935,6 +5935,7 @@ pub fn remote_read_error(host: &str, error: anyhow::Error) -> ApiError {
             | "stale-fence"
             | "validation-failed"
             | "forbidden"
+            | "peer-too-old"
             | "idempotency-conflict"
     ) {
         return remote_unavailable(host);

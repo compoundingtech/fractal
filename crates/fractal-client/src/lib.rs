@@ -963,6 +963,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::UnsupportedCapability => {
             format!("this {product} does not do that yet ({message})")
         }
+        ErrorCode::PeerTooOld => {
+            "This host runs an older Fractal version; update it to open subagent conversations.".into()
+        }
         ErrorCode::NotFound => format!("it is gone: {message}"),
         ErrorCode::Forbidden => format!("not allowed: {message}"),
         ErrorCode::Internal => format!("{product} hit a problem: {message}"),

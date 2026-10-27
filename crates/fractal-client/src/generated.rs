@@ -91,6 +91,7 @@ pub enum ErrorCode {
     NotFound,
     Forbidden,
     UnsupportedCapability,
+    PeerTooOld,
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
