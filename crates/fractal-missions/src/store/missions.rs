@@ -1755,6 +1755,17 @@ pub trait MissionsStore {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error>;
+    /// [`Self::work_action_with_handoff`]. A renewal answers with the step's row view alone unless
+    /// `enrich_renewal`: its queue, timing, summaries and wake are folded from a reader after COMMIT.
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
     fn set_step_state(
@@ -5650,6 +5661,18 @@ impl MissionsStore for Store {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error> {
+        self.work_action_answering(subject, action, request, extend_ms, handoff, true)
+    }
+
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error> {
         if action == "extend" {
             if !extend_ms.is_some_and(|by| (1..=MAX_STEP_EXTENSION_MS).contains(&by)) {
                 return Err(St3Error::new(
@@ -5753,7 +5776,7 @@ impl MissionsStore for Store {
                 }
                 // A revision carries a claim into the successor generation. Its worker may still name the
                 // step by the predecessor subject.
-                let (subject, current) = match (action != "claim")
+                let (subject, mut current) = match (action != "claim")
                     .then(|| carried_claim_successor_tx(transaction, &current, &actor))
                     .transpose()
                     .map_err(internal)?
@@ -5762,6 +5785,9 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject, current),
                 };
+                if handoff.is_some() {
+                    enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
+                }
                 let (run_status, run_phase, current_generation, generation_status, root_status, root_phase): (
                     String,
                     String,
@@ -6151,6 +6177,9 @@ impl MissionsStore for Store {
                         )
                         .map_err(internal)?;
                 }
+                if let Some(input) = handoff {
+                    adhoc_work::clear_eta_tx(transaction, &self.origin, &current, input)?;
+                }
                 let mut view = transaction.query_row(
                     "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                             lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
@@ -6177,7 +6206,7 @@ impl MissionsStore for Store {
             })
             .map_err(|error| St3Error::new("internal", error))?;
         let mut view = committed?;
-        if action == "renew" {
+        if action == "renew" && enrich_renewal {
             // An exact retry of a renewal also replays a view cached without these fields.
             self.enrich_work_response(&mut view)
                 .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;

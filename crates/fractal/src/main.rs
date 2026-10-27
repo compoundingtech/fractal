@@ -3715,7 +3715,7 @@ enum WorkCommand {
     ///
     /// Records progress in the graph without messaging another agent; people read it in stui.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
-    Progress(WorkActionArgs),
+    Progress(WorkProgressArgs),
     /// Add time to the execution budget of claimed work that ran out of it.
     Extend(WorkExtendArgs),
     /// Stop the execution clock while claimed work waits for something outside this agent.
@@ -3965,6 +3965,19 @@ struct WorkWaitArgs {
     /// What the step waits for, such as "build slot" or "merge queue".
     #[arg(long)]
     reason: String,
+}
+
+#[derive(Args)]
+struct WorkProgressArgs {
+    #[command(flatten)]
+    action: WorkActionArgs,
+    /// Estimated finish: a positive duration from now or a future RFC3339 timestamp.
+    ///
+    /// Adds a self-reported ETA to this progress note, not an execution deadline.
+    /// The next nonempty summary replaces it. Use --summary without --eta to withdraw it.
+    /// Handoff clears it; revisions do not carry it. Work show prints its age and author.
+    #[arg(long)]
+    eta: Option<String>,
 }
 
 #[derive(Args)]
@@ -5656,8 +5669,9 @@ fn guard_mutating_cli_actor(
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
             WorkCommand::Acknowledge(args) => Some(args.actor.as_str()),
-            WorkCommand::Claim(args) | WorkCommand::Renew(args) | WorkCommand::Progress(args)
+            WorkCommand::Claim(args) | WorkCommand::Renew(args)
             | WorkCommand::Complete(args) | WorkCommand::Fail(args) | WorkCommand::Release(args) => args.actor.as_deref(),
+            WorkCommand::Progress(args) => args.action.actor.as_deref(),
             WorkCommand::Wake(args) => args.actor.as_deref(),
             WorkCommand::PublishMission(args) => args.actor.as_deref(),
             WorkCommand::Revise(args) => args.actor.as_deref(),
@@ -5733,6 +5747,7 @@ fn gh_watch_line(view: &Value, with_agent: bool) -> String {
     let state = match text("state") {
         "ended" => format!("ended ({})", text("ended")),
         "degraded" => format!("degraded: {}", text("reason")),
+        "active" if !text("reason").is_empty() => format!("active ({})", text("reason")),
         state => state.to_owned(),
     };
     let until = view
@@ -6372,6 +6387,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             .map(|relay| relay.with_links(store.clone())),
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
+        assistant_receipts: Default::default(),
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));
@@ -6602,20 +6618,55 @@ async fn run_up(args: UpArgs) -> Result<()> {
     ).await?;
     let web_status = axum::Extension(web.status.clone());
     let web_state = state.clone();
-    tokio::try_join!(
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            local_reserved,
-            router(state.clone()).layer(web_status.clone()),
-            Some(state.store.clone()),
-            ready
-        ),
-        fractal_daemon::api::serve_reserved_unix_with_ready(
-            gateway_reserved, fabric_router(state).layer(web_status), None, ready,
-        ),
-        web.serve(web_state),
-    )?;
+    let receipts = state.assistant_receipts.clone();
+    // A stop signal first commits the assistant read receipts of reads that already returned,
+    // then ends the process by that signal as it did before the daemon handled it.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let serving = async {
+        tokio::try_join!(
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                local_reserved,
+                router(state.clone()).layer(web_status.clone()),
+                Some(state.store.clone()),
+                ready
+            ),
+            fractal_daemon::api::serve_reserved_unix_with_ready(
+                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+            ),
+            web.serve(web_state),
+        )
+    };
+    let stopped = tokio::select! {
+        served = serving => Err(served),
+        _ = terminate.recv() => Ok(libc::SIGTERM),
+        _ = interrupt.recv() => Ok(libc::SIGINT),
+    };
+    // Shutdown refuses receipts from connections still being served, then waits for the writer
+    // to commit every admitted one however long it takes. Only a second stop signal, an
+    // explicit forced stop, ends the daemon before they commit.
+    tokio::select! {
+        flushed = receipts.shutdown() => if let Err(error) = flushed {
+            eprintln!("st3: assistant read receipts failed to commit at shutdown: {}", error.message);
+        },
+        _ = terminate.recv() => eprintln!("st3: forced stop before assistant read receipts committed"),
+        _ = interrupt.recv() => eprintln!("st3: forced stop before assistant read receipts committed"),
+    }
     telemetry.shutdown();
-    Ok(())
+    match stopped {
+        Ok(signal) => end_by_signal(signal),
+        Err(served) => served.map(|_| ()),
+    }
+}
+
+/// Ends this process by `signal` with its default disposition, as if no handler had caught it.
+fn end_by_signal(signal: libc::c_int) -> Result<()> {
+    // SAFETY: both calls take a valid signal number and no pointers.
+    unsafe {
+        libc::signal(signal, libc::SIG_DFL);
+        libc::raise(signal);
+    }
+    anyhow::bail!("signal {signal} did not end the daemon")
 }
 
 /// Links `git` and `gh` to this executable for the daemon and its members. The daemon still
@@ -12116,7 +12167,12 @@ fn agent_start_document(
             ));
         }
         let harness = body.get_mut("harness").expect("harness was inserted");
-        if let Some(driver) = &args.harness {
+        if let Some(driver) = &args.harness
+            && harness.entries()[0].value().as_string() != Some(driver.as_str())
+        {
+            // Models, effort and native arguments belong to their provider. A harness
+            // replacement starts with its own body, then takes the explicit options below.
+            harness.set_children(KdlDocument::new());
             harness.entries_mut()[0] = KdlEntry::new(driver.as_str());
         }
         let harness_body = harness.ensure_children();
@@ -13443,6 +13499,12 @@ fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bo
     }
     for blocker in &work.blockers {
         let _ = writeln!(output, "Blocker: {blocker}");
+    }
+    if let Some(progress) = &work.last_progress {
+        let age = work.progress_at.as_deref()
+            .map(|at| ago(at, now_ms()))
+            .unwrap_or_else(|| "age unknown".to_owned());
+        let _ = writeln!(output, "Progress ({age}): {progress}");
     }
     for goal in &work.goals {
         let _ = writeln!(output, "Goal: {goal}");
@@ -16676,9 +16738,10 @@ async fn renew_claimed_work(
         .into_iter()
         .filter(|step| work_claim_has_active_harness(step, subject, harness))
     {
+        // Nothing here reads the answer, so ask for the lease view: the step's row alone.
         let renewed: Result<StepRunView> = client
             .post(
-                &format!("/v1/work/renew/{}", urlencoding::encode(&step.subject)),
+                &format!("/v1/work/renew/{}?view=lease", urlencoding::encode(&step.subject)),
                 &WorkRequest {
                     wait_ms: None,
                     actor: Some(subject.into()),

@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn github_watch_line_shows_throttling_without_a_new_wire_state() {
+    let view = serde_json::json!({
+        "thread": "acme/garden#12", "state": "active",
+        "reason": "throttled: local observer budget reached, next slot at 1000 (Unix ms)"
+    });
+    let line = gh_watch_line(&view, false);
+    assert!(line.contains("active (throttled: local observer budget reached"));
+    assert!(line.contains("next slot at 1000"));
+    assert!(!line.contains("degraded"));
+}
+
+#[test]
 fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
     let value = "fabric://devbox/st3-client-v0";
     let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
@@ -393,7 +405,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         node: "todo-liveness".into(), state_dir: root.path().into(),
         pty_root: root.path().join("pty"), pty_binary: "pty".into(),
         fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(),
+        native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
     };
     let path = root.path().join("api.sock");
     let socket = path.clone();
@@ -2295,6 +2307,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2388,6 +2401,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -2464,6 +2478,7 @@ async fn trace_wait_starts_after_existing_events() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
@@ -4897,6 +4912,18 @@ fn wait_timeout_accepts_bounded_units_and_zero() {
 }
 
 #[test]
+fn progress_eta_flag_is_not_an_execution_action_flag() {
+    assert!(Cli::try_parse_from([
+        "fractal", "work", "progress", "step-run/example", "--eta", "2h"
+    ]).is_ok());
+    for action in ["claim", "renew", "complete", "fail", "release", "resume"] {
+        assert!(Cli::try_parse_from([
+            "fractal", "work", action, "step-run/example", "--eta", "2h"
+        ]).is_err(), "{action}");
+    }
+}
+
+#[test]
 fn wait_reads_resource_status_from_observed_facts() {
     let resource = json!({
         "baseline": true,
@@ -5591,6 +5618,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
@@ -5680,6 +5708,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
         pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
         client_relay: None, native_session_home: None, owning_person: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
@@ -7584,6 +7613,7 @@ async fn serve_test_store(
         client_relay: None,
         native_session_home: None,
         planner_default: PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
