@@ -17,6 +17,72 @@
         "id": "mission/example/atlas/search-test-flake",
         "kind": "mission",
         "mission_revision": "sha256:atlas-mission-1",
+        "presentation": {
+          "actions": [],
+          "card": null,
+          "last_progress": null,
+          "progress": {
+            "done": 1,
+            "total": 3
+          },
+          "queued_behind": null,
+          "settled_at": null,
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/search-test-flake/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-1",
+              "title": "Reproduce and reject the three hypotheses",
+              "word": "done"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/search-test-flake/1/step-2",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-2",
+              "title": "Isolate the test abort signal",
+              "word": "working"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/search-test-flake/1/step-3",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-3",
+              "title": "Verify shuffled test orders",
+              "word": "ready"
+            }
+          ],
+          "stuck": null,
+          "system": false,
+          "who": {
+            "agent": "agent/example/atlas/builder",
+            "kind": "agent",
+            "label": "Atlas Builder"
+          },
+          "word": "working"
+        },
         "revision": "mr-3",
         "run_details": [
           {
@@ -267,6 +333,72 @@
           "id": "mission/example/atlas/search-test-flake",
           "kind": "mission",
           "mission_revision": "sha256:atlas-mission-1",
+          "presentation": {
+            "actions": [],
+            "card": null,
+            "last_progress": null,
+            "progress": {
+              "done": 2,
+              "total": 3
+            },
+            "queued_behind": null,
+            "settled_at": null,
+            "steps": [
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/search-test-flake/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-1",
+                "title": "Reproduce and reject the three hypotheses",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/search-test-flake/1/step-2",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-2",
+                "title": "Isolate the test abort signal",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/search-test-flake/1/step-3",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-3",
+                "title": "Verify shuffled test orders",
+                "word": "working"
+              }
+            ],
+            "stuck": null,
+            "system": false,
+            "who": {
+              "agent": "agent/example/atlas/builder",
+              "kind": "agent",
+              "label": "Atlas Builder"
+            },
+            "word": "working"
+          },
           "revision": "mr-3",
           "run_details": [
             {
@@ -402,6 +534,70 @@
           "id": "mission/example/atlas/search-test-flake",
           "kind": "mission",
           "mission_revision": "sha256:atlas-mission-1",
+          "presentation": {
+            "actions": [],
+            "card": null,
+            "last_progress": null,
+            "progress": {
+              "done": 3,
+              "total": 3
+            },
+            "queued_behind": null,
+            "settled_at": "2030-01-01T12:00:22.000Z",
+            "steps": [
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/search-test-flake/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-1",
+                "title": "Reproduce and reject the three hypotheses",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/search-test-flake/1/step-2",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-2",
+                "title": "Isolate the test abort signal",
+                "word": "done"
+              },
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/atlas/search-test-flake/1/step-3",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/atlas/builder",
+                  "kind": "agent",
+                  "label": "Atlas Builder"
+                },
+                "path": "step-3",
+                "title": "Verify shuffled test orders",
+                "word": "done"
+              }
+            ],
+            "stuck": null,
+            "system": false,
+            "who": {
+              "kind": "nobody"
+            },
+            "word": "done"
+          },
           "revision": "mr-complete",
           "run_details": [
             {
@@ -588,6 +784,10 @@
     {
       "codec": "timestamp",
       "pointer": "/timeline/1/upserts/1/run_details/0/steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/1/presentation/settled_at"
     }
   ],
   "variant": "default",

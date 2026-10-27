@@ -2,6 +2,7 @@ import type { Mission, MissionRunSummary, MissionStep, Work } from '@fractal/cli
 
 import type { FactoryContext } from './context.ts'
 import { foldSlice } from './fold.ts'
+import { missionPresentation } from './missionPresentation.ts'
 import type { DetailsState, Slice } from './slice.ts'
 
 const finished = (state: string): boolean => ['completed', 'failed', 'cancelled'].includes(state)
@@ -41,16 +42,21 @@ const withRunDetails = (ctx: FactoryContext, mission: Mission, work: readonly Wo
 }
 
 /** Recorded slices remain exact captures; synthetic changes publish their joined mission row too. */
-export const missionDetails = (ctx: FactoryContext, slice: Slice<'details'>): Slice<'details'> => {
+export const missionDetails = (ctx: FactoryContext, slice: Slice<'details'>, roster: Slice<'roster'>, attention: Slice<'attention'>): Slice<'details'> => {
   if (slice.source._tag === 'recorded') return slice
-  const project = (state: DetailsState): DetailsState => ({
-    ...state, missions: state.missions.map((mission) => withRunDetails(ctx, mission, state.work)),
-  })
-  const state = project(slice.state)
+  const project = (state: DetailsState, atMs: number): DetailsState => {
+    const agents = foldSlice(roster, atMs).state.agents
+    const alerts = foldSlice(attention, atMs).state.attention
+    return { ...state, missions: state.missions.map((mission) => {
+      const joined = withRunDetails(ctx, mission, state.work)
+      return { ...joined, presentation: missionPresentation(joined, agents, alerts) }
+    }) }
+  }
+  const state = project(slice.state, 0)
   let current: Slice<'details'> = { ...slice, state, timeline: [] }
   const timeline = slice.timeline.map((event) => {
     const next = foldSlice({ ...current, timeline: [event] }, event.at_ms)
-    const projected = project(next.state)
+    const projected = project(next.state, event.at_ms)
     const changedIds = new Set([...event.upserts.map((item) => item.id), ...event.removes])
     const affected = new Set([...current.state.work, ...next.state.work]
       .filter((item) => changedIds.has(item.id)).map((item) => item.mission_id))

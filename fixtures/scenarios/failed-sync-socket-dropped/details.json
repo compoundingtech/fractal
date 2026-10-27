@@ -120,6 +120,125 @@
         "id": "mission/example/atlas/load-user-rename",
         "kind": "mission",
         "mission_revision": "sha256:atlas-mission-1",
+        "presentation": {
+          "actions": [
+            {
+              "action": "message.send",
+              "confirm": false,
+              "id": "chat",
+              "target": "agent/example/atlas/migrator"
+            },
+            {
+              "action": "mission.cancel",
+              "confirm": true,
+              "id": "cancel-run",
+              "target": "mission-run/example/atlas/load-user-rename/1"
+            }
+          ],
+          "card": "what-you-can-do",
+          "last_progress": null,
+          "progress": {
+            "done": 1,
+            "total": 5
+          },
+          "queued_behind": null,
+          "settled_at": null,
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-1",
+              "title": "Rename fetchUser in packages/api",
+              "word": "done"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-2",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/migrator",
+                "kind": "agent",
+                "label": "Atlas Migrator"
+              },
+              "path": "step-2",
+              "title": "Update call sites in packages/web",
+              "word": "working"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-5",
+              "keep_open": false,
+              "note": "queued for Atlas Migrator, which is busy with example/atlas/load-user-rename › step-2",
+              "owner": {
+                "agent": "agent/example/atlas/migrator",
+                "kind": "agent",
+                "label": "Atlas Migrator"
+              },
+              "path": "step-5",
+              "title": "Update the users API reference",
+              "word": "ready"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-3",
+              "keep_open": false,
+              "note": "syncAvatars calls loadUser without the session",
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-3",
+              "title": "Fix the worker after the rename",
+              "word": "waiting"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-4",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/reviewer",
+                "kind": "agent",
+                "label": "Atlas Reviewer"
+              },
+              "path": "step-4",
+              "title": "Review the rename",
+              "word": "pending"
+            }
+          ],
+          "stuck": {
+            "agent": {
+              "id": "agent/example/atlas/migrator",
+              "label": "Atlas Migrator",
+              "state": "running"
+            },
+            "attempts": 1,
+            "blockers": [],
+            "step": "step-run/example/atlas/load-user-rename/1/step-5",
+            "word": "ready"
+          },
+          "system": false,
+          "who": {
+            "agent": "agent/example/atlas/migrator",
+            "kind": "agent",
+            "label": "Atlas Migrator"
+          },
+          "word": "stalled"
+        },
         "revision": "mr-5",
         "run_details": [
           {

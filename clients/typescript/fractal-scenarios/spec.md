@@ -215,6 +215,10 @@ Synthetic details missions include `run_details`, derived from the same work inv
 the baseline and after every details change. Each run's progress, step states and claimants
 match its work rows; the cast maps each `work/...` ID to its `step-run/...` identity.
 This is the cast `work` ↔ `stepRun` mapping: Work keeps `work`; run details use `stepRun`.
+Synthetic missions also include `presentation`, using the daemon's mission/step word
+precedence, display ordering, roster ownership and queue facts, open human gates, action
+offers and progress. Its step IDs are the same `stepRun` IDs as `run_details`, and its
+done count is the number of completed steps, not a client fallback.
 Work-only changes also publish the affected mission's joined run details. Recorded slices
 remain unmodified captures.
 

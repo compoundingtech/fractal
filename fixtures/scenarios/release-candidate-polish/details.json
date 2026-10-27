@@ -17,6 +17,70 @@
         "id": "mission/example/meadow/release-candidate",
         "kind": "mission",
         "mission_revision": "sha256:meadow-mission-1",
+        "presentation": {
+          "actions": [],
+          "card": null,
+          "last_progress": null,
+          "progress": {
+            "done": 3,
+            "total": 3
+          },
+          "queued_behind": null,
+          "settled_at": "2030-01-01T11:58:00.000Z",
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/meadow/release-candidate/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/meadow/builder",
+                "kind": "agent",
+                "label": "Meadow Builder"
+              },
+              "path": "step-1",
+              "title": "Bump the patch version",
+              "word": "done"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/meadow/release-candidate/1/step-2",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/meadow/reviewer",
+                "kind": "agent",
+                "label": "Meadow Reviewer"
+              },
+              "path": "step-2",
+              "title": "Write the changelog",
+              "word": "done"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/meadow/release-candidate/1/step-3",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/meadow/docs",
+                "kind": "agent",
+                "label": "Meadow Docs"
+              },
+              "path": "step-3",
+              "title": "Verify the release matrix",
+              "word": "done"
+            }
+          ],
+          "stuck": null,
+          "system": false,
+          "who": {
+            "kind": "nobody"
+          },
+          "word": "done"
+        },
         "revision": "mr-3",
         "run_details": [
           {
@@ -201,6 +265,10 @@
     {
       "codec": "timestamp",
       "pointer": "/state/missions/0/run_details/0/steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/presentation/settled_at"
     },
     {
       "codec": "timestamp",

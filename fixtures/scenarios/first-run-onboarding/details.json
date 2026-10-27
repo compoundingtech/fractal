@@ -51,6 +51,42 @@
           "id": "mission/example/sprout/first-smoke",
           "kind": "mission",
           "mission_revision": "sha256:sprout-mission-1",
+          "presentation": {
+            "actions": [],
+            "card": null,
+            "last_progress": null,
+            "progress": {
+              "done": 0,
+              "total": 1
+            },
+            "queued_behind": null,
+            "settled_at": null,
+            "steps": [
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/sprout/first-smoke/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/sprout/builder",
+                  "kind": "agent",
+                  "label": "Sprout Builder"
+                },
+                "path": "step-1",
+                "title": "Run the project smoke check",
+                "word": "working"
+              }
+            ],
+            "stuck": null,
+            "system": false,
+            "who": {
+              "agent": "agent/example/sprout/builder",
+              "kind": "agent",
+              "label": "Sprout Builder"
+            },
+            "word": "working"
+          },
           "revision": "mr-1",
           "run_details": [
             {
@@ -146,6 +182,40 @@
           "id": "mission/example/sprout/first-smoke",
           "kind": "mission",
           "mission_revision": "sha256:sprout-mission-1",
+          "presentation": {
+            "actions": [],
+            "card": null,
+            "last_progress": null,
+            "progress": {
+              "done": 1,
+              "total": 1
+            },
+            "queued_behind": null,
+            "settled_at": "2030-01-01T12:00:16.000Z",
+            "steps": [
+              {
+                "attempts": 1,
+                "blockers": [],
+                "id": "step-run/example/sprout/first-smoke/1/step-1",
+                "keep_open": false,
+                "note": null,
+                "owner": {
+                  "agent": "agent/example/sprout/builder",
+                  "kind": "agent",
+                  "label": "Sprout Builder"
+                },
+                "path": "step-1",
+                "title": "Run the project smoke check",
+                "word": "done"
+              }
+            ],
+            "stuck": null,
+            "system": false,
+            "who": {
+              "kind": "nobody"
+            },
+            "word": "done"
+          },
           "revision": "mr-1",
           "run_details": [
             {
@@ -233,6 +303,10 @@
     {
       "codec": "timestamp",
       "pointer": "/timeline/1/upserts/1/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/timeline/1/upserts/1/presentation/settled_at"
     }
   ],
   "variant": "default",

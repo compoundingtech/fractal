@@ -17,6 +17,42 @@
         "id": "mission/example/atlas/forward-compatibility",
         "kind": "mission",
         "mission_revision": "sha256:atlas-mission-1",
+        "presentation": {
+          "actions": [],
+          "card": null,
+          "last_progress": null,
+          "progress": {
+            "done": 0,
+            "total": 1
+          },
+          "queued_behind": null,
+          "settled_at": null,
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/forward-compatibility/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-1",
+              "title": "Preserve future daemon observations",
+              "word": "working"
+            }
+          ],
+          "stuck": null,
+          "system": false,
+          "who": {
+            "agent": "agent/example/atlas/builder",
+            "kind": "agent",
+            "label": "Atlas Builder"
+          },
+          "word": "working"
+        },
         "revision": "mr-1",
         "run_details": [
           {

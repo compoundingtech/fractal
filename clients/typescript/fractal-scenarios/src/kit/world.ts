@@ -144,7 +144,7 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
     seed: definition.seed,
     now,
     cast,
-    slices: assignStores({ ...selected, details: missionDetails(ctx, selected.details) }),
+    slices: assignStores({ ...selected, details: missionDetails(ctx, selected.details, selected.roster, selected.attention) }),
     ...(definition.recording === undefined ? {} : { recording: definition.recording }),
     variants,
     available,
