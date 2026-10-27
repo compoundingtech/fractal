@@ -81,7 +81,7 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
-With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.7.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.15.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
 
 `app.config.js` selects the installed identity with `APP_VARIANT`:
 
@@ -179,7 +179,7 @@ verify the installed build independently of pairing or proof-only UI.
 The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
 also appears in connected-client diagnostics.
 
-Prerequisites are Python 3, Git, Node 24, pnpm 12.7.0, CocoaPods, Xcode, and `gate-slot`
+Prerequisites are Python 3, Git, Node 24, pnpm 12.15.0, CocoaPods, Xcode, and `gate-slot`
 in the scheduler's PATH. The build takes a heavy admission slot, runs under
 `taskpolicy -c utility` and `nice -n 19`, and caps Xcode parallelism at four jobs.
 Utility QoS yields to interactive work without restricting a native build to
