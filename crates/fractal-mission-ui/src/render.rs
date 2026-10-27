@@ -255,6 +255,12 @@ pub fn steps(
             width: inner as u16,
             hit: Intent::ToggleStep(key),
         });
+        let owner = match &step.owner {
+            Some(_) if identities => step.owner_identity().unwrap_or_default(),
+            Some(name) => name.clone(),
+            None => NOBODY.into(),
+        };
+        let owner_padding = owner_column.saturating_sub(text::width(&owner));
         steps.line(Line::from(vec![
             span(
                 if open {
@@ -275,15 +281,7 @@ pub fn steps(
             ),
             span(format!("{:<11}", word), fg(color)),
             span(
-                format!(
-                    "{:<w$} ",
-                    match &step.owner {
-                        Some(_) if identities => step.owner_identity().unwrap_or_default(),
-                        Some(name) => name.clone(),
-                        None => NOBODY.into(),
-                    },
-                    w = owner_column
-                ),
+                format!("{owner}{:owner_padding$} ", ""),
                 if step.owner.is_some() {
                     palette.soft()
                 } else {
@@ -445,6 +443,10 @@ mod tests {
 
     /// The step rows of a mission held by an agent and by Fractal, as drawn `inner` wide.
     fn owner_rows(inner: usize) -> Vec<String> {
+        named_owner_rows(inner, "Maintainer")
+    }
+
+    fn named_owner_rows(inner: usize, owner: &str) -> Vec<String> {
         let mission = Mission {
             id: "mission/example/release".into(),
             title: "Release".into(),
@@ -456,7 +458,7 @@ mod tests {
                 step(
                     "review",
                     StepState::Working,
-                    "Maintainer",
+                    owner,
                     Some("agent/example/maintainer"),
                 ),
                 step("watch", StepState::Working, "Fractal", None),
@@ -526,5 +528,23 @@ mod tests {
             "{rows:#?}"
         );
         assert_eq!(text::width(&rows[0]), text::width(&rows[1]), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_wide_character_owner_fits_exactly_at_the_identity_boundary() {
+        let wide = named_owner_rows(100, "維");
+        let boundary = text::width(&wide[0]);
+        let rows = named_owner_rows(boundary, "維");
+        assert!(
+            rows[0].contains(" 維 · agent/example/maintainer 4m"),
+            "{rows:#?}"
+        );
+        assert_eq!(text::width(&rows[0]), boundary, "{rows:#?}");
+        assert_eq!(text::width(&rows[1]), boundary, "{rows:#?}");
+        let narrow = named_owner_rows(boundary - 1, "維");
+        assert!(
+            narrow.iter().all(|row| !row.contains("agent/")),
+            "{narrow:#?}"
+        );
     }
 }

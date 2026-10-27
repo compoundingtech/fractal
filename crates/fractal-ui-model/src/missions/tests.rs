@@ -133,7 +133,7 @@ fn a_row_without_a_presentation_reads_unknown_and_derives_nothing() {
     // An older st serves no presentation.
     let missions = read(&model, &model.missions);
     assert_eq!(missions[0].word, Word::Unknown);
-    assert_eq!(missions[0].label(), "running · st does not say");
+    assert_eq!(missions[0].label(), "running · Fractal does not say");
     assert_eq!(
         (missions[0].steps[0].state, &missions[0].steps[0].owner),
         (StepState::Unknown, &None)

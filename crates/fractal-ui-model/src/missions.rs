@@ -69,17 +69,17 @@ impl Word {
             Word::Decision => "a step is waiting for your answer",
             Word::Stalled => "a step has an owner who is not moving",
             Word::Unstaffed => "a step is ready but its agent is stopped or broken",
-            Word::Unclaimed => "a step is ready; st has not said which agent takes it",
+            Word::Unclaimed => "a step is ready; Fractal has not said which agent takes it",
             Word::Queued => "a step is waiting its turn on a busy agent; nothing to do",
             Word::Working => "an agent is doing a step now",
-            Word::Watching => "st keeps this open and starts other missions when something happens",
+            Word::Watching => "Fractal keeps this open and starts other missions when something happens",
             Word::Held => "waiting on something outside the fleet",
             Word::Idle => "running, with nothing ready",
             Word::Done => "every step finished",
             Word::Failed => "a step failed and nothing retried it",
             Word::Cancelled => "it was stopped before it finished",
             Word::NotStarted => "published, and never started",
-            Word::Unknown => "st does not say: an older st, or one that has not read its agents yet",
+            Word::Unknown => "Fractal does not say: an older Fractal, or one that has not read its agents yet",
         }
     }
 }
@@ -178,7 +178,7 @@ impl Mission {
     /// that has not read its agents yet), its raw state and that st does not say.
     pub fn label(&self) -> String {
         match self.word {
-            Word::Unknown if !self.state.is_empty() => format!("{} · st does not say", self.state),
+            Word::Unknown if !self.state.is_empty() => format!("{} · Fractal does not say", self.state),
             word => word.name().into(),
         }
     }
