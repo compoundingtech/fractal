@@ -3,7 +3,7 @@
 A tile is one agent as its own Unix user, in its own namespaces and its own root-owned cgroup.
 Another tile cannot read its files, see or signal its processes, reach its sockets or loopback
 ports, or pass for it. A tile is a process group and private directories on the host's kernel,
-not a VM and not a full container image. Linux first; the approved design is the st document
+not a VM and not a full container image. Linux first; the approved design is the Fractal document
 `doc/fleet/smalltalk/agent-tiles/design`.
 
 This document describes what is built: the first step of that design, launching a tile with a
@@ -13,7 +13,7 @@ signed handoffs and network egress come next and are listed at the end.
 ## Registry
 
 Root's registry, `/etc/st-tiles/tiles.toml`, is the only source of a tile's identity. Root owns
-the file and every directory above it; st refuses one anyone else can change. Root names each
+the file and every directory above it; Fractal refuses one anyone else can change. Root names each
 tile's agent, person, supervisor and ceilings; the launcher gives it a user ID.
 
 ```toml
@@ -78,8 +78,8 @@ sudo st tiles remove atlas                                # end it, remove its s
 ceilings (`TasksMax`, `MemoryMax`, optional `MemoryHigh`, `CPUWeight`) and
 `KillMode=control-group`. Only one runs per tile. systemd owns the cgroup: nothing is delegated,
 so a tile cannot write to it, and the unit ends when its main process ends, for any reason. The
-st executable runs as root in that unit, so root must control it and every directory above it;
-install st where only root can change it.
+Fractal executable runs as root in that unit, so root must control it and every directory above it;
+install Fractal where only root can change it.
 
 The unit's main process, `st tiles enter`, checks it runs in that unit, makes new mount, PID,
 IPC, network, UTS and cgroup namespaces, and forks the tile's first process, PID 1 of the new
@@ -134,7 +134,7 @@ the only host directory where a tile can reach a socket. A server there learns t
 the kernel: `SO_PEERCRED` gives the Unix user and process, and the process's cgroup and the
 registry give the tile and its agent.
 
-The supervisor's st daemon serves `st.sock` there, the tile's restricted st endpoint, at
+The supervisor's Fractal daemon serves `st.sock` there, the tile's restricted Fractal endpoint, at
 `/run/st/st.sock` inside the tile. The daemon follows root's registry and serves every tile
 whose `supervisor_uid` is its own Unix user, from the moment root makes the tile's endpoint
 directory (`st tiles run` or `st tiles prepare`); a registry change starts or stops endpoints
@@ -189,7 +189,7 @@ that will run tiles; that gate is part of step 2.
   port or System V shared memory, see its files or processes, or signal any host process; the
   host's own loopback port and abstract socket are unreachable too. Outside the namespaces, one
   tile's user cannot read another's state.
-- Keys: a node key written as st writes it, and every path of the supervisor's state, are
+- Keys: a node key written as Fractal writes it, and every path of the supervisor's state, are
   unreadable by the tile's user and absent inside the tile.
 - Escape: every namespace flag, `setns`, mounts and `chroot` are refused, and so are io_uring,
   `bpf`, `userfaultfd`, `perf_event_open`, the keyring calls, `kcmp` and
@@ -204,7 +204,7 @@ that will run tiles; that gate is part of step 2.
   the ID back. An ID that still owns a directory under the state root is skipped. A range that
   holds an account is refused.
 - Refusals: a non-root caller, `enter` outside its unit, an account that took a tile's user ID,
-  a registry or st executable someone other than root can change.
+  a registry or Fractal executable someone other than root can change.
 - Endpoint: a real tile, through `/run/st/st.sock`, is told its own agent, sends as itself, and is
   refused sending as its sibling, reading its sibling's mailbox and the administrative API; the
   graph holds its message from its own agent and never the forged one. The sibling's endpoint

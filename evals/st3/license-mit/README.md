@@ -1,6 +1,6 @@
 # License MIT — the smallest team loop
 
-This st3 eval runs the license MIT task with two native Claude Sonnet agents.
+This Fractal eval runs the license MIT task with two native Claude Sonnet agents.
 
 - **Task** (`task.md`): one immutable instruction referenced by the graph-owned delegation step.
 - **Team/persona mechanism**: the fixture pre-seeds `CLAUDE.md` and `PERSONA.md` in both workspaces.
