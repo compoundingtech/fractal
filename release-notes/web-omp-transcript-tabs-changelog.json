@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Merge the sidebar count changelog and announce OMP subagent transcript tabs",
+  "replay": {"status": "none", "detail": "Changelog copy only; no replay change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Carries the sidebar changelog and adds a transcript tab entry using the existing source format."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Revert to remove the changelog entries."}
+}
