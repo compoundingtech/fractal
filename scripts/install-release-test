@@ -73,7 +73,7 @@ grep -q 'A daemon is running; it keeps its current build until you restart it:' 
 grep -Fq "$work/running/bin/st service restart" "$work/running.err"
 grep -q 'docs/guides/upgrading' "$work/running.err"
 # Package-manager-owned links, including dangling Home Manager links, are never replaced.
-for target in /nix/store/missing-fractal/bin/st3 "$HOME/.nix-profile/bin/st3"; do
+for target in /nix/store/missing-fractal/bin/st3 /nix/var/nix/profiles/per-user/alice/bin/st3 "$HOME/.nix-profile/bin/st3"; do
   mkdir -p "$work/nix/bin"
   ln -s "$target" "$work/nix/bin/st3"
   if install_fixture --bin-dir "$work/nix/bin" > "$work/nix.out" 2> "$work/nix.err"; then exit 1; fi
@@ -83,6 +83,13 @@ for target in /nix/store/missing-fractal/bin/st3 "$HOME/.nix-profile/bin/st3"; d
   test ! -e "$work/nix/bin/pty"
   test ! -e "$work/nix/bin/.smalltalk-install.lock"
   rm "$work/nix/bin/st3"
+done
+# Similar directory names outside Nix's actual roots are ordinary archive targets.
+for relative in profiles/per-user/alice/bin profiles/home-manager/bin unmanaged/.nix-profile/bin; do
+  bin="$work/non-nix/$relative"
+  install_fixture --bin-dir "$bin" > "$work/non-nix.out" 2> "$work/non-nix.err"
+  test "$("$bin/st3")" = new-st3
+  test ! -s "$work/non-nix.err"
 done
 # Upgrading a prior read-only installation must also clean up its replaced tree.
 chmod -R a-w "$work/share/fractal-web"

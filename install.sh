@@ -40,7 +40,7 @@ refuse_nix_path() (
     hops=0
     while :; do
         case "$path" in
-            /nix/store/*|*/.nix-profile|*/.nix-profile/*|*/profiles/home-manager|*/profiles/home-manager/*|*/profiles/per-user/*)
+            /nix/store|/nix/store/*|/nix/var/nix/profiles|/nix/var/nix/profiles/*|"$HOME/.nix-profile"|"$HOME/.nix-profile/"*)
                 printf 'install: refusing to overwrite Nix-owned path %s. Upgrade through the Home Manager configuration that owns this installation: https://fractal.how/docs/reference/home-manager\n' "$1" >&2
                 exit 1 ;;
         esac
