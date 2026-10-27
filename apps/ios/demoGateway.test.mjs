@@ -110,10 +110,12 @@ test('capture mode freezes world timestamps and updates at the kit anchor', { ti
   const read = async (base, route) => {
     const response = await fetch(`${base}/v1/client/${route}`, { headers: { authorization: 'Bearer demo-credential' } });
     assert.equal(response.status, 200);
-    return decodeUnknownSync(Envelope, 'strict')(await response.json());
+    const wire = await response.json();
+    decodeUnknownSync(Envelope, 'strict')(wire);
+    return wire;
   };
   const initial = await read(first, 'agents');
-  assert.equal(initial.snapshot.created_at.epochMilliseconds, ANCHOR_MS);
+  assert.equal(initial.snapshot.created_at, new Date(ANCHOR_MS).toISOString());
   await delay(100);
   const later = await read(first, 'agents');
   assert.deepEqual(later.value, initial.value);
