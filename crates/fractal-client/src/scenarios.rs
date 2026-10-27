@@ -286,8 +286,8 @@ fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Val
             .with_format("st-timestamp", timestamp_codec)
             // The kit deliberately treats uri-reference as an unconstrained string.
             .with_format("uri-reference", |_| true)
-            .with_keyword("minLength", utf16_length_keyword)
-            .with_keyword("maxLength", utf16_length_keyword)
+            .with_keyword("minLength", |parent, _, location| Ok(utf16_length_keyword(parent, location)))
+            .with_keyword("maxLength", |parent, _, location| Ok(utf16_length_keyword(parent, location)))
             .should_validate_formats(true).build(&schema)?);
     }
     Ok(out)
@@ -461,16 +461,15 @@ struct Utf16Length {
     location: jsonschema::paths::Location,
 }
 
-fn utf16_length_keyword<'a>(
-    parent: &'a serde_json::Map<String, Value>,
-    _: &'a Value,
+fn utf16_length_keyword(
+    parent: &serde_json::Map<String, Value>,
     location: jsonschema::paths::Location,
-) -> Result<Box<dyn jsonschema::Keyword>, jsonschema::ValidationError<'a>> {
-    Ok(Box::new(Utf16Length {
+) -> Box<dyn jsonschema::Keyword> {
+    Box::new(Utf16Length {
         minimum: parent.get("minLength").and_then(Value::as_u64),
         maximum: parent.get("maxLength").and_then(Value::as_u64),
         location,
-    }))
+    })
 }
 
 impl jsonschema::Keyword for Utf16Length {
