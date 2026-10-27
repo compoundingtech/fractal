@@ -16313,7 +16313,7 @@ impl PiFamilyReports {
                 }
                 None => {
                     let recovered = (driver == "omp").then(|| {
-                        fractal_daemon::external_sessions::omp_process_transcript(
+                        fractal_daemon::omp_process_transcript(
                             subject,
                             incarnation,
                             &native,
