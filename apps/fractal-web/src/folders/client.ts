@@ -2,6 +2,7 @@ import { FractalClient } from '@fractal/client'
 import type { ActionOf, ActionResult, Arrangement, ArrangementOperation, ArrangementPage, Capabilities, EnvelopeOf } from '@fractal/client'
 import { Schema } from 'effect'
 import { Arrangement as ArrangementSchema, ArrangementPage as ArrangementPageSchema, ArrangementEditParameters as ArrangementEditSchema, Capabilities as CapabilitiesSchema } from '@fractal/client/schema'
+import { formatDuration } from '@fractal/ui/human-time/format'
 const isArrangement = Schema.is(Schema.toEncoded(ArrangementSchema))
 const isArrangementPage = Schema.is(Schema.toEncoded(ArrangementPageSchema))
 const isCapabilities = Schema.is(Schema.toEncoded(CapabilitiesSchema))
@@ -186,7 +187,7 @@ export const sidebarFolders = ({ gateway, socket }: {
             publish({ ...current, phase: 'unavailable', detail: `Arrangement read failed: ${event.error.message}`, readOnly: true })
             return
           case 'Interrupted':
-            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${Math.ceil(event.retryInMs / 1000)}s.`, readOnly: true })
+            publish({ ...current, phase: 'unavailable', detail: `Arrangement updates interrupted; reconnecting in ${formatDuration(Math.ceil(event.retryInMs / 1000) * 1000)}.`, readOnly: true })
             return
           case 'Refused':
             publish({ ...current, phase: 'unavailable', detail: `Arrangement updates refused: ${event.error.message}`, readOnly: true })

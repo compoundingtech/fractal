@@ -25,6 +25,7 @@ function SchemesStory({ title, state }: PanelArgs) {
 
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Declaration Panel',
   render: Frame,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Read-only canonical declaration for one agent or mission: KDL tinted with kit tokens, sticky line numbers, copy-all and an optional provenance line. Ready, loading, unavailable and failed states; a `json` language marks the labelled structured fallback used where Fractal serves no KDL. Presentational and host-agnostic: the web app hosts it in a modal today and can host it in a tab later.' } } },
@@ -32,6 +33,17 @@ const meta = {
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<PanelArgs>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AgentKdl:contract-fixture',
+  'AgentKdlLight:contract-fixture',
+  'Failed:contract-fixture',
+  'LongFile:contract-fixture',
+  'MissionKdl:contract-fixture',
+  'Schemes:contract-fixture',
+  'Unavailable:contract-fixture',
+]
 type Story = StoryObj<PanelArgs>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Authored KDL, gutter, copy and error-state contracts require exact local declaration text.' } } } satisfies Story
 

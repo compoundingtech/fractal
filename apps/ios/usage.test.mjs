@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { accounts, byOf, cost, groups, label, limitLine, money, nextBy, periodName, tokens, totalOf } from './usage.ts';
+import { accounts, byOf, cost, creditsLine, groups, label, limitLine, money, nextBy, periodName, tokens, totalOf } from './usage.ts';
 
 // The same day of invented spend the Fractal terminal UI's demo shows (crates/fractal-tui/src/ui/demo.rs).
 const row = (agent, run, step, model, host, account, total, output, cost) => ({
@@ -55,3 +55,29 @@ assert.deepEqual(line.weekly, { text: '92%', tone: 'fault' });
 assert.equal(line.resets, 'resets in 3d');
 assert.equal(line.measured, 'measured 3m ago');
 assert.deepEqual(limitLine(limits[1], now).fiveHour, { text: '?', tone: 'quiet' });
+
+// Declared accounts: the same five on every panel, named, in name order, with nothing left out.
+const declared = [
+  { name: 'ada/claude-1', account: 'claude/aaaaaaaaaaaaaaaa', driver: 'claude', provider: 'anthropic', kind: 'subscription' },
+  { name: 'ada/claude-2', account: 'claude/bbbbbbbbbbbbbbbb', driver: 'claude', provider: 'anthropic', kind: 'subscription' },
+  { name: 'ada/codex', account: 'codex/cccccccccccccccc', driver: 'codex', provider: 'openai', kind: 'subscription' },
+  { name: 'ada/key', account: 'omp/dddddddddddddddd', driver: 'omp', provider: 'anthropic', kind: 'api-key',
+    credits: { budget_microusd: 200_000_000, used_microusd: 154_000_000, unpriced_tokens: 0, period_start_ms: 0 } },
+];
+const declaredRows = [
+  row('agent/example/a', undefined, undefined, 'claude-opus-5-5', 'lark', 'claude/aaaaaaaaaaaaaaaa', 1_000_000, 1000, 5_000_000),
+  row('agent/example/b', undefined, undefined, 'gpt-5.5', 'wren', 'codex/cccccccccccccccc', 1_000_000, 1000, 3_000_000),
+  row('agent/example/c', undefined, undefined, 'claude-opus-5-5', 'wren', 'claude/ffffffffffffffff', 1_000_000, 1000, 1_000_000),
+];
+const declaredLimits = [{ account: 'claude/aaaaaaaaaaaaaaaa', account_ref: 'ada/claude-1', driver: 'claude', weekly_percent: 24, measured_at_unix_ms: now, measured_by: 'agent/example/a', host: 'lark', seats: [] }];
+const five = accounts(declaredRows, declaredLimits, declared);
+assert.deepEqual(five.map(entry => entry.id), [
+  'account/claude/aaaaaaaaaaaaaaaa', 'account/claude/bbbbbbbbbbbbbbbb', 'account/codex/cccccccccccccccc', 'account/omp/dddddddddddddddd',
+  'account/claude/ffffffffffffffff',
+], 'declared accounts first, even with no spend; an undeclared account is still listed after them');
+assert.equal(five[0].limit?.weekly_percent, 24);
+assert.equal(five[1].total.tokens, 0);
+assert.equal(label(five[0].id, names, declaredRows, declared), 'ada/claude-1');
+assert.equal(label(five[4].id, names, declaredRows, declared), 'claude · ffffffff');
+assert.deepEqual(creditsLine(declared[3].credits), { used: '$154', budget: '$200', tone: 'warning' });
+assert.equal(creditsLine({ ...declared[3].credits, unpriced_tokens: 3 }).used, '$154+');

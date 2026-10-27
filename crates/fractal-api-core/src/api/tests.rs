@@ -463,6 +463,155 @@ async fn suspend_waits_for_a_quiet_seat_with_a_native_session() {
     }
 }
 
+#[tokio::test]
+async fn native_session_revisit_rebinds_todos_and_deduplicates_current_reports() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subject = "agent/test/todo-seat";
+    let incarnation = "4242:2026-10-04T20:00:00.000Z";
+    state.store.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "runtime.observed".into(),
+        actor: Some(subject.into()),
+        fields: serde_json::from_value(json!({
+            "status":"running", "runtime_id":"todo-seat", "incarnation_id":incarnation,
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let app = router(state.clone());
+    let report = |session: &str| {
+        json!({"subject": subject, "actor": subject, "incarnation_id": incarnation,
+               "harness": "omp", "session_id": session})
+    };
+    let (status, first) = json_request(
+        app.clone(), "/v1/agents/native-session", report("native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, other) = json_request(
+        app.clone(), "/v1/agents/native-session", report("native-b"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{other}");
+    let (status, revisited) = json_request(
+        app.clone(), "/v1/agents/native-session", report("native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{revisited}");
+    assert_ne!(first["id"], revisited["id"]);
+    let current = state.store.latest_claim(subject, Some("harness.session-file"))
+        .unwrap().unwrap();
+    assert_eq!(current.id, revisited["id"].as_str().unwrap());
+    let todo = state.store.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "harness.todo.observed".into(),
+        actor: Some(subject.into()),
+        fields: serde_json::from_value(json!({
+            "harness":"omp", "session_id":"native-a", "incarnation_id":incarnation,
+            "observed_at":"2026-10-04T20:00:00Z", "source_op":"hydrate",
+            "phases":[{"name":"Current", "tasks":[{"content":"Native task", "status":"pending"}]}],
+            "totals":{"pending":1,"in_progress":0,"completed":0,"blocked":0,"abandoned":0},
+            "truncated":false
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert_eq!(client_v0::agent_todo_value(
+        Some(&todo), Some(&current), Some(incarnation),
+    )["stale"], false);
+    let mut repeats = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        let app = app.clone();
+        let request = report("native-a");
+        repeats.spawn(async move {
+            json_request(app, "/v1/agents/native-session", request).await
+        });
+    }
+    while let Some(response) = repeats.join_next().await {
+        let (status, repeated) = response.unwrap();
+        assert_eq!(status, StatusCode::OK, "{repeated}");
+        assert_eq!(repeated["id"], revisited["id"]);
+    }
+    assert_eq!(state.store.claims_for(subject, Some("harness.session-file")).unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn native_session_reports_cannot_replace_a_successor_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subject = "agent/test/native-authority";
+    let app = router(state.clone());
+    let runtime = |incarnation: &str, status: &str| {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: serde_json::from_value(json!({
+                "status":status, "runtime_id":"native-authority", "incarnation_id":incarnation,
+            })).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    };
+    let report = |incarnation: &str, session: &str| {
+        json!({"subject":subject, "actor":subject, "incarnation_id":incarnation,
+               "harness":"omp", "session_id":session})
+    };
+    let (status, unbound) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-a", "native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{unbound}");
+    assert_eq!(unbound["code"], "stale-harness-event-session");
+    runtime("runtime-a", "running");
+    let (status, predecessor) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-a", "native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{predecessor}");
+    runtime("runtime-b", "running");
+    let (status, successor) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-b", "native-b"),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{successor}");
+    let (status, stale) = json_request(
+        app.clone(), "/v1/agents/native-session", report("runtime-a", "native-a"),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{stale}");
+    assert_eq!(stale["code"], "stale-harness-event-session");
+    let mut reports = tokio::task::JoinSet::new();
+    for _ in 0..8 {
+        for (incarnation, session, accepted) in [
+            ("runtime-a", "native-a", false), ("runtime-b", "native-b", true),
+        ] {
+            let app = app.clone();
+            let request = report(incarnation, session);
+            reports.spawn(async move {
+                (accepted, json_request(app, "/v1/agents/native-session", request).await)
+            });
+        }
+    }
+    while let Some(response) = reports.join_next().await {
+        let (accepted, (status, body)) = response.unwrap();
+        if accepted {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["id"], successor["id"]);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(body["code"], "stale-harness-event-session");
+        }
+    }
+    runtime("runtime-b", "exited");
+    let (status, ended) = json_request(
+        app, "/v1/agents/native-session", report("runtime-b", "native-b"),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{ended}");
+    assert_eq!(ended["code"], "stale-harness-event-session");
+    let current = state.store.latest_claim(subject, Some("harness.session-file"))
+        .unwrap().unwrap();
+    assert_eq!(current.id, successor["id"].as_str().unwrap());
+    assert_eq!(state.store.claims_for(subject, Some("harness.session-file")).unwrap().len(), 2);
+}
+
 #[test]
 fn doctor_flags_low_descriptor_limits_and_high_usage() {
     let low = descriptor_usage_check(256, 8192, Some(92));
@@ -4452,6 +4601,26 @@ async fn replication_worker_status_changes_only_local_memory() {
     assert_eq!(response["peers"][0]["worker"]["next_retry_at_unix_ms"], json!(retry));
     assert!(response["peers"][0]["last_error"].is_null());
     assert_eq!(state.store.index().unwrap(), index);
+}
+
+#[tokio::test]
+async fn a_worker_process_report_feeds_the_member_cpu_minutes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let report = |cpu_ns: u64| json!({"process": {"pid": 4242, "started_at_unix_ms": 7, "cpu_ns": cpu_ns}});
+    let boundary = |minute| {
+        request_latency().lock().unwrap().cpu_minutes().boundary(minute, Instant::now(), 0, 1)
+    };
+    let (status, response) = json_request(app.clone(), "/v1/internal/replication/worker-status", report(6_000_000_000)).await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    // Minutes long past, apart from the live hour the other tests read.
+    assert_eq!(boundary(10), None);
+    json_request(app, "/v1/internal/replication/worker-status", report(12_000_000_000)).await;
+    assert_eq!(boundary(11), Some(10));
+    let minutes = request_latency().lock().unwrap().cpu_minutes().report(11 * 60_000);
+    // The daemon's own CPU did not move: what the minute holds is the worker's.
+    assert!(minutes["windows"]["1m"]["cores"].as_f64().is_some_and(|cores| cores > 0.0), "{minutes}");
 }
 
 #[tokio::test]
@@ -12001,6 +12170,15 @@ async fn renamed_agent_restart_and_native_report_resolve_aliases_before_lookup()
         if claim_id.is_null() { claim_id = claim["id"].clone(); }
         assert_eq!(claim["id"], claim_id);
     }
+    state.store.append_claim(&ClaimInput {
+        subject: "agent/example-restart-original/worker".into(),
+        kind: "runtime.observed".into(),
+        actor: None,
+        fields: serde_json::from_value(json!({
+            "status":"running", "incarnation_id":"native-incarnation",
+        })).unwrap(),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
     let mut report_id = Value::Null;
     for (subject, actor) in [
         ("agent/example-restart-renamed/worker", "agent/example-restart-original/worker"),

@@ -37,6 +37,7 @@ const styles = stylex.create({
 })
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Details Recovery',
   component: Workbench,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Mounted production Details recovery. Host controls change decoded observations, content variants and actual pane widths. Plays retain the inherited pending geometry, header, keyboard and accessibility batteries; schemes are args and viewports are owned by the canonical browser matrix.' } } },
@@ -59,6 +60,17 @@ const meta = {
   },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'FailureTransitions:contract-fixture',
+  'HeaderFeedback:contract-fixture',
+  'KeyboardRecovery:contract-fixture',
+  'KnownLoadingIdentity:contract-fixture',
+  'NonRetryableFailures:contract-fixture',
+  'PendingFootprints:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 type Play = { canvasElement: HTMLElement }
 

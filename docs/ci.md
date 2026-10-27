@@ -13,6 +13,12 @@ older pushes must not keep consuming runners after their source is superseded. M
 (Performance runs only by dispatch) and merge-group runs retain independent `github.run_id` groups.
 The five required queue checks and complete test partitions are retained.
 
+When a trusted note covers a pull request's web check, `fractal-web-execution` skips at job
+level and allocates no runner. The always-emitted `fractal-web` collector accepts that skip
+only for a pull request with an explicit evidence decision and successful change detection;
+failure and cancellation still fail. Merge-group and manual execution never take this shortcut,
+and the queue retains complete shard receipts.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
@@ -1258,7 +1264,8 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in:
+The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in. It is
+the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
 stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.

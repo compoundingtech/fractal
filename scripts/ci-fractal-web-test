@@ -266,6 +266,13 @@ gate = [
     (("failure", "", "skipped"), False, "failed detection"),
     (("cancelled", "", "skipped"), False, "cancelled detection"),
     (("success", "", "skipped"), False, "detection without a decision"),
+    (("success", "true", "skipped", "true", "pull_request"), True, "trusted PR evidence skips execution"),
+    (("success", "true", "skipped", "true", "merge_group"), False, "queue evidence never replaces execution"),
+    (("success", "true", "skipped", "true", "workflow_dispatch"), False, "manual evidence never replaces execution"),
+    (("success", "true", "skipped", "false", "pull_request"), False, "negative evidence never permits skip"),
+    (("success", "true", "failure", "true", "pull_request"), False, "evidence never hides execution failure"),
+    (("success", "true", "cancelled", "true", "pull_request"), False, "evidence never hides cancellation"),
+    (("failure", "true", "skipped", "true", "pull_request"), False, "evidence never hides detection failure"),
 ]
 for args, passes, name in gate:
     assert (verdict(*args) is None) == passes, (name, verdict(*args))
