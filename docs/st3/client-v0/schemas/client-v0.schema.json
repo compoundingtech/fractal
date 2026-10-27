@@ -3917,7 +3917,21 @@
       "sessions",
       "terminals"
     ] },
-    "ResourceCollectionName": { "description": "Collections whose windows hold resources.", "enum": ["missions", "attention", "agents", "work", "glasses", "arrangements", "summary", "clients", "usage", "machines", "devices", "sessions", "terminals"] },
+    "ResourceCollectionName": { "description": "Collections whose windows hold resources.", "enum": [
+      "missions",
+      "attention",
+      "agents",
+      "work",
+      "glasses",
+      "arrangements",
+      "summary",
+      "clients",
+      "usage",
+      "machines",
+      "devices",
+      "sessions",
+      "terminals"
+    ] },
     "CollectionCommand": {
       "oneOf": [
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
