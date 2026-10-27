@@ -5680,6 +5680,47 @@ fn launch_decision_responses_preserve_type_membership_uniqueness_and_rank_order(
 }
 
 #[test]
+fn mission_uri_publication_preserves_authored_resource_aliases() {
+    let source = r#"version 2
+mission "planned/work" state="ready" {
+ goal "Work."
+ resource "tracker" uri="urn:example:tracker"
+ agent "worker" {
+  workspace "."
+  command "true"
+  resource "worker" uri="urn:example:one" reason="worker"
+  resource "agent/worker" uri="urn:example:two" reason="agent/worker"
+  resource "explicit" subject="resource/worker" reason="worker"
+ }
+}"#;
+    let intent = parse_intent(source, "node").unwrap();
+    assert!(launch_candidate_mission(&intent, "planned/work").is_ok());
+    let target = intent.missions["planned/work"].resources[0].subject
+        .strip_prefix("resource/").unwrap();
+    let explicit = format!(
+        "version 2\nresource {target:?} {{ kind \"uri.reference\"; uri \"urn:example:tracker\" }}\n{}",
+        source.strip_prefix("version 2\n").unwrap(),
+    );
+    let explicit = parse_intent(&explicit, "node").unwrap();
+    assert!(!mission_only_subjects(&explicit));
+    assert_eq!(
+        launch_candidate_mission(&explicit, "planned/work").unwrap_err().code,
+        "wrong-launch-mission",
+    );
+    let execution = crate::graph::parse_execution_intent(
+        intent.missions["planned/work"].declarations_kdl.as_deref().unwrap(), "node", "example",
+    ).unwrap();
+    let edges = crate::graph::declared_resources(
+        &execution.subjects["agent/example/worker"].desired,
+    );
+    assert_eq!(edges[0].name, "worker");
+    assert_eq!(edges[0].reason.as_deref(), Some("worker"));
+    assert_eq!(edges[1].name, "agent/worker");
+    assert_eq!(edges[1].reason.as_deref(), Some("agent/worker"));
+    assert_eq!(edges[2].subject, "resource/worker");
+}
+
+#[test]
 fn launch_candidates_accept_durable_seats_and_implicit_loop_missions() {
     let source = r#"
 version 2
@@ -7272,12 +7313,16 @@ host "local" { document "doc/hosts/eval@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
     let mut fixture = parse_intent(
         r#"version 2
 resource "eval/fixture" { kind "filesystem.file" }
-agent "eval/fixture/worker" { workspace "/tmp"; command "true"; restart "never" }
+agent "eval/fixture/worker" { workspace "/tmp"; command "true"; restart "never"; resource "goal" uri="https://example.com/shared"; }
 "#,
         "node",
     )
     .unwrap();
     scope_eval_desired_subjects(&mut fixture, &current, "mission-run/eval-run").unwrap();
+    let resource = crate::graph::declared_resources(
+        &fixture.subjects["agent/eval/fixture/worker"].desired,
+    );
+    assert_eq!(fixture.subjects[&resource[0].subject].owner_run, None);
     assert_eq!(
         fixture.subjects["resource/eval/fixture"]
             .owner_run
@@ -10272,6 +10317,7 @@ version 2
 
   mission "revision" state="ready" {
     goal "Complete mission revision."
+    resource "tracker" uri="urn:example:revision"
      agent "sup" {
        workspace "."
        command "true"
@@ -10301,7 +10347,9 @@ version 2
     assert_ne!(revised["mission_run"]["revision"], run.revision);
     assert_eq!(revised["mission_run"]["root_revision"], run.root_revision);
     assert_eq!(revised["mission_run"]["steps"][0]["status"], "pending");
-    assert_eq!(state.store.desired_subjects().unwrap().len(), 1);
+    let published = state.store.mission_spec("revision", None).unwrap().unwrap();
+    let uris = state.store.declared_resource_uris(&published.resources).unwrap();
+    assert_eq!(uris[&published.resources[0].subject], "urn:example:revision");
 }
 
 #[tokio::test]
@@ -10855,6 +10903,7 @@ version 2
 
   mission "project/work" state="ready" {
     goal "Complete mission project/work."
+    resource "tracker" uri="urn:example:output"
     step "inspect" { title "Inspect the project" }
     step "implement" { depends-on { step "inspect" completed } }
   }
@@ -10950,6 +10999,9 @@ version 2
         .expect("attempt-bound mission output");
     assert_eq!(bound.revision, revision);
     assert_eq!(bound.claim_id, output["claim_id"]);
+    let published = state.store.mission_spec("project/work", Some(revision)).unwrap().unwrap();
+    let uris = state.store.declared_resource_uris(&published.resources).unwrap();
+    assert_eq!(uris[&published.resources[0].subject], "urn:example:output");
 }
 
 #[test]

@@ -561,6 +561,8 @@ roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "packages/fractal-sdk
 assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
 composer_story = ["apps/fractal-web/src/web/ComposerImages.stories.tsx", "apps/fractal-web/src/web/composerSend.ts"]
 assert detector_kit_paths(composer_story) == composer_story, "the composer image integration story and live adapter select kit plays"
+native_transcript_story = ["apps/fractal-web/src/web/NativeTranscript.stories.tsx", "apps/fractal-web/src/web/ConversationPane.tsx"]
+assert detector_kit_paths(native_transcript_story) == native_transcript_story, "the native transcript story and production pane select kit plays"
 transcript_story = ["apps/fractal-web/src/web/TranscriptImages.stories.tsx", "apps/fractal-web/src/web/transcriptImages.ts"]
 assert detector_kit_paths(transcript_story) == transcript_story, "the transcript image integration story and production image cache select kit plays"
 workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
@@ -575,8 +577,9 @@ with tempfile.TemporaryDirectory() as scratch:
                     "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx",
                     "./../../apps/fractal-web/src/telemetry/inputPaint.ts",
                     "./../../apps/fractal-web/src/web/ComposerImages.stories.tsx",
+                    "./../../apps/fractal-web/src/web/NativeTranscript.stories.tsx",
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
-    assert covered.returncode == 0 and "6 repository files, 0 outside" in covered.stdout, covered
+    assert covered.returncode == 0 and "7 repository files, 0 outside" in covered.stdout, covered
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):
