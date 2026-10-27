@@ -1,5 +1,5 @@
 use super::*;
-use crate::private_notes::{NotesFence, NotesWrite, operation_key};
+use crate::private_notes::{NotesFence, NotesWrite, WriteContext, operation_key};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -139,7 +139,7 @@ pub(super) async fn write(state: &AppState, session: &ClientSession, request: &m
     let request_digest = request_digest.to_owned();
     let mut result = super::super::blocking_action(move || {
         writer.private_notes.write_with_audit(
-            &writer.node, &writer.state_dir, &actor, &key, &write,
+            WriteContext { node: &writer.node, state_dir: &writer.state_dir, actor: &actor, key: &key }, &write,
             || {
                 // Reserve the shared key before any private mutation. Even an indeterminate
                 // completion must exclude other actions until exact-key recovery succeeds.

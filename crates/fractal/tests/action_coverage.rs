@@ -858,6 +858,7 @@ async fn dispatch(
         "mission.approve-revision" => mission_approve_revision, "mission.cancel" => mission_cancel,
         "mission.cancel-revision" => mission_cancel_revision, "mission.revise" => mission_revise,
         "mission.start" => mission_start, "pairing.revoke" => pairing_revoke,
+        "private-notes.write" => private_notes_write,
         "review.approve" => review_approve, "review.reject" => review_reject, "review.request-changes" => review_request_changes,
         "runtime.context-clear" => runtime_context_clear, "runtime.reset" => runtime_reset,
         "runtime.restart" => runtime_restart, "runtime.signal" => runtime_signal, "runtime.stop" => runtime_stop,

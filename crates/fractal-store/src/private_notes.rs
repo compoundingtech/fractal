@@ -41,6 +41,13 @@ pub struct NotesWrite {
     pub fence: NotesFence,
 }
 
+pub struct WriteContext<'a> {
+    pub node: &'a str,
+    pub state_dir: &'a Path,
+    pub actor: &'a str,
+    pub key: &'a str,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Notes {
     pub uri: String,
@@ -141,16 +148,17 @@ impl Authority {
     }
 
     pub fn write(&self, node: &str, state_dir: &Path, actor: &str, key: &str, write: &NotesWrite) -> Result<serde_json::Value, St3Error> {
-        self.write_with_audit(node, state_dir, actor, key, write, || Ok(()), || Ok(()))
+        self.write_with_audit(WriteContext { node, state_dir, actor, key }, write, || Ok(()), || Ok(()))
     }
 
     /// Hold owner-local serialization through both immutable audit publications.
     /// A failed completion leaves this URI blocked until the original key recovers.
     pub fn write_with_audit(
-        &self, node: &str, state_dir: &Path, actor: &str, key: &str, write: &NotesWrite,
+        &self, context: WriteContext<'_>, write: &NotesWrite,
         requested: impl FnOnce() -> Result<(), St3Error>,
         completed: impl FnOnce() -> Result<(), St3Error>,
     ) -> Result<serde_json::Value, St3Error> {
+        let WriteContext { node, state_dir, actor, key } = context;
         if !fits_client_response(&write.markdown) { return Err(refusal("validation-failed", "notes exceed the encoded client response limit")); }
         let uri = PrivateNotesUri::parse(&write.uri).map_err(|error| refusal("validation-failed", &error.message))?;
         // A cross-process owner-local lock coordinates both ledger transitions and all supported writers.

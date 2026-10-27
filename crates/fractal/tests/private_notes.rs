@@ -1,4 +1,4 @@
-use fractal_daemon::private_notes::{Authority, NotesWrite};
+use fractal_daemon::private_notes::{Authority, NotesWrite, WriteContext};
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
@@ -140,7 +140,7 @@ fn requested_audit_refusal_never_changes_private_bytes() {
     let initial = fixture.authority.read("node", &fixture.uri).unwrap();
     let write = NotesWrite { uri: fixture.uri.clone(), markdown: "not admitted\n".into(), fence: initial.fence };
     let result = fixture.authority.write_with_audit(
-        "node", fixture.root.path(), "person/operator", "refused", &write,
+        WriteContext { node: "node", state_dir: fixture.root.path(), actor: "person/operator", key: "refused" }, &write,
         || Err(fractal_daemon::model::St3Error::new("forbidden", "injected requested audit refusal")),
         || panic!("completion cannot run without requested audit"),
     );
@@ -156,7 +156,7 @@ fn completion_audit_failure_survives_restart_and_requires_exact_key_recovery() {
     let initial = fixture.authority.read("node", &fixture.uri).unwrap();
     let write = NotesWrite { uri: fixture.uri.clone(), markdown: "durable private replacement\n".into(), fence: initial.fence };
     let result = fixture.authority.write_with_audit(
-        "node", fixture.root.path(), "person/operator", "original", &write, || Ok(()),
+        WriteContext { node: "node", state_dir: fixture.root.path(), actor: "person/operator", key: "original" }, &write, || Ok(()),
         || Err(fractal_daemon::model::St3Error::new("internal", "injected completion audit refusal")),
     );
     assert_eq!(result.unwrap_err().code, "private-notes-indeterminate");
@@ -167,7 +167,7 @@ fn completion_audit_failure_survives_restart_and_requires_exact_key_recovery() {
     assert_eq!(restarted.write("node", fixture.root.path(), "person/operator-two", "original", &write).unwrap_err().code, "private-notes-indeterminate");
     let changed = NotesWrite { markdown: "different request\n".into(), ..write.clone() };
     assert_eq!(fixture.write("original", &changed).unwrap_err().code, "idempotency-conflict");
-    restarted.write_with_audit("node", fixture.root.path(), "person/operator", "original", &write, || Ok(()), || Ok(())).unwrap();
+    restarted.write_with_audit(WriteContext { node: "node", state_dir: fixture.root.path(), actor: "person/operator", key: "original" }, &write, || Ok(()), || Ok(())).unwrap();
     let after = fs::metadata(fixture.carrier()).unwrap();
     assert_eq!((before.ino(), before.mtime(), before.mtime_nsec()), (after.ino(), after.mtime(), after.mtime_nsec()));
     assert_eq!(fs::read_to_string(fixture.carrier()).unwrap(), write.markdown);
