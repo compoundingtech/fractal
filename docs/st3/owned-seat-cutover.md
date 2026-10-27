@@ -1,7 +1,7 @@
 # Owned-seat rollout
 
 A publisher can opt an owned set into draining changed and omitted seats before restarting or
-retiring them. st performs and reports the cutover. The publisher still supplies the complete KDL
+retiring them. Fractal performs and reports the cutover. The publisher still supplies the complete KDL
 bundle, an immutable Git SHA, a strictly increasing source sequence and exact set/member fences.
 Publication alone does not watch a repository or automatically apply its contents.
 

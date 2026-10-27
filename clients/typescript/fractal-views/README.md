@@ -43,7 +43,7 @@ The tree retains stored `parent`, resolved `shownUnder`, position `key` and
 `revision`. Folder and subject sibling orders remain separate: folders first,
 then placed subjects, each ordered by key and identity; inventory-only subjects
 follow in identity order. Renderers still own labels, filtering, collapse state,
-host groups and stui's flat folder presentation. `nodeKey` encodes identity
+host groups and the Fractal terminal UI's flat folder presentation. `nodeKey` encodes identity
 without changing it. The inventory is additive: placements absent from it,
 including dormant and non-agent subjects, remain in the tree. A partial
 inventory never removes a placement or changes its resolved ancestry.

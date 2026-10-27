@@ -17,15 +17,15 @@ test('wall setting accepts absent/empty values and rejects malformed limits', ()
 })
 
 test('single frozen CPU anchor derives exactly ten percent headroom', () => {
-  assert.equal(KIT_CPU_ANCHOR_SECONDS, 413.9)
-  const limit = 455.29
-  assert.equal(result(limit).maxCpuSeconds, 455.29)
+  assert.equal(KIT_CPU_ANCHOR_SECONDS, 413.1)
+  const limit = Math.round(KIT_CPU_ANCHOR_SECONDS * 1.1 * 1000) / 1000
+  assert.equal(result(limit).maxCpuSeconds, limit)
   assert.equal(result(limit).overCpuBudget, false)
   assert.equal(result(limit + 0.01).overCpuBudget, true)
 })
 
-test('all measured 162-case runs pass, while the 187-case pre-fix regression fails', () => {
-  for (const cpuSeconds of [348.77, 423.31, 413.93, 404.91, 416.91]) {
+test('all measured post-3982 171-case runs pass, while the 187-case pre-fix regression fails', () => {
+  for (const cpuSeconds of [413.1, 379.94, 367.74, 381.97, 396.26, 394.16]) {
     assert.equal(result(cpuSeconds).overBudget, false, `${cpuSeconds} CPU seconds`)
   }
   assert.equal(result(469.55).overCpuBudget, true)

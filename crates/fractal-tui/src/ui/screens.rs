@@ -2899,7 +2899,7 @@ pub fn peek(world: &World, subject: &str, width: usize, spinner: &'static str) -
                 span(format!("{} ", step.name), theme::text()),
                 span(word, theme::fg(color)),
                 span(
-                    format!("  {}", step.owner.as_deref().unwrap_or("nobody")),
+                    format!("  {}", step.owner_identity().as_deref().unwrap_or("nobody")),
                     theme::dim(),
                 ),
             ]));
@@ -3512,12 +3512,45 @@ mod tree_tests {
         let shown = mission_detail(&world, Some(&id), 120, "", None, &Default::default())
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
         assert!(shown.contains("Fractal keeps this open"), "{shown}");
-        assert!(shown.contains("Fractal           "), "{shown}");
+        assert!(shown.contains(" Fractal "), "{shown}");
         let Load::Ready(missions) = &world.missions else {
             unreachable!();
         };
         let mission = missions.iter().find(|mission| mission.id == id).unwrap();
         assert_eq!(serde_json::to_value(mission).unwrap(), serialized);
+    }
+
+    #[test]
+    fn identity_labels_in_mission_steps_show_fallback_ids_only_once() {
+        for (owner_id, label) in [
+            ("person/ada", "person/ada"),
+            ("agent/example/unnamed", "agent/example/unnamed"),
+            ("agent/example/maintainer", "Maintainer"),
+        ] {
+            let mut world = crate::ui::demo::world();
+            let Load::Ready(missions) = &mut world.missions else {
+                panic!("the demo world has missions");
+            };
+            let mission = missions.iter_mut().find(|mission| !mission.steps.is_empty()).unwrap();
+            mission.steps.truncate(1);
+            let step = &mut mission.steps[0];
+            step.owner = Some(label.into());
+            step.owner_id = Some(owner_id.into());
+            step.owner_is_system = false;
+            let expected = if label == owner_id {
+                owner_id.to_owned()
+            } else {
+                format!("{label} · {owner_id}")
+            };
+            assert_eq!(step.owner_identity().as_deref(), Some(expected.as_str()));
+            let id = mission.id.clone();
+            for width in [80, 120] {
+                let shown = mission_detail(&world, Some(&id), width, "", None, &Default::default())
+                    .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+                assert!(shown.contains(&expected), "{shown}");
+                assert_eq!(shown.matches(owner_id).count(), 1, "{shown}");
+            }
+        }
     }
 
     #[test]
@@ -3766,6 +3799,8 @@ mod mission_golden {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    // Regenerate after intended rendering changes with:
+    // STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui mission_golden
     #[test]
     fn mission_stories_golden() {
         let world = super::super::demo::world();
@@ -3796,6 +3831,14 @@ mod mission_golden {
                     }
                 }
             }
+        }
+        if std::env::var_os("STUI_UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                test_env!("CARGO_MANIFEST_DIR", "/tests/fixtures/mission-stories.golden"),
+                &actual,
+            )
+            .unwrap();
+            return;
         }
         assert_eq!(
             actual,

@@ -548,22 +548,19 @@ impl Daemon {
     }
 
     fn state(root: &Path, node: &str) -> AppState {
-        AppState {
-            owning_person: None,
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.into(),
-            pty_root: root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: Some(root.join("native")),
-            planner_default: Default::default(),
-            assistant_receipts: Default::default(),
-        }
+        AppState { owning_person: None,
+        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.join("native")),
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     fn socket(&self) -> PathBuf {
@@ -693,7 +690,7 @@ impl Daemon {
         let mut fence = self.fence(WORKER).await;
         fence.mission_generation = Some(work.generation);
         fence.step_definition = Some(work.definition_hash);
-        fence.attempt = Some(work.attempt);
+        fence.attempt = Some(u64::from(work.attempt));
         fence.readiness_epoch = Some(u64::from(work.readiness_epoch));
         fence.runtime_incarnation = Some("4242:fixture".into());
         fence
@@ -861,6 +858,7 @@ async fn dispatch(
         "mission.approve-revision" => mission_approve_revision, "mission.cancel" => mission_cancel,
         "mission.cancel-revision" => mission_cancel_revision, "mission.revise" => mission_revise,
         "mission.start" => mission_start, "pairing.revoke" => pairing_revoke,
+        "private-notes.write" => private_notes_write,
         "review.approve" => review_approve, "review.reject" => review_reject, "review.request-changes" => review_request_changes,
         "runtime.context-clear" => runtime_context_clear, "runtime.reset" => runtime_reset,
         "runtime.restart" => runtime_restart, "runtime.signal" => runtime_signal, "runtime.stop" => runtime_stop,
