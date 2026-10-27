@@ -365,7 +365,22 @@ pub(super) async fn run_agents(
                     )
                     .await?
             } else {
-                let kdl = agent_start_document(&args, existing.as_ref())?;
+                let mut uris = BTreeMap::new();
+                if let Some(existing) = &existing {
+                    for reference in fractal_daemon::graph::declared_resources(&existing.desired) {
+                        let status = status_for(&client, &reference.subject).await?;
+                        if let Some(uri) = status
+                            .subjects
+                            .iter()
+                            .find(|subject| subject.subject == reference.subject)
+                            .and_then(|subject| subject.desired.as_ref())
+                            .and_then(fractal_daemon::graph::declared_uri)
+                        {
+                            uris.insert(reference.subject, uri.to_owned());
+                        }
+                    }
+                }
+                let kdl = agent_start_document(&args, existing.as_ref(), &uris)?;
                 if args.print_kdl {
                     print!("{kdl}");
                     return Ok(());

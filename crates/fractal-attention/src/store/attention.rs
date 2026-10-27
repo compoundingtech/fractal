@@ -179,7 +179,7 @@ impl AttentionStore for Store {
     fn discard_desired_owned_by(&self, owner_run: &str) -> Result<usize> {
         let mut connection = self.connection.write();
         let transaction = connection.transaction()?;
-        let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h3507293382fe owner=fractal_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1", [owner_run])?;
+        let removed = transaction.execute(/* sqlite-large-value: allow-for-now lv-h345fc67acafe owner=fractal_attention::store::attention TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE owner_run=?1 AND subject NOT LIKE 'resource/uri/%'", [owner_run])?;
         transaction.commit()?;
         Ok(removed)
     }

@@ -1342,7 +1342,10 @@ actor and triggering actor are known; the head commit is present or fetchable; t
 (or the head itself); the opener, the actor and the triggering actor are on `.st/evidence-authors.json` at the base and every non-merge commit of
 the branch has a listed author and committer (the signing guard's own `check_authors`, loaded from the base's `ci-evidence-signing`); and no
 protected file differs between the branch point and the base, or the current tip of the merge's first parent (main moved one since the
-branch: that is about which tree, so it still falls back). The protected files the branch ITSELF changes no longer make it fall back: they are
+branch: that is about which tree, so it still falls back), except the three the gate and verifier only ever read at the base when they judge
+a note (`BASE_READ` in the gate: `.st/evidence-keys`, `.st/evidence-authors.json` and `.st/evidence-log-key`). The head tree's copy of
+those decides nothing, so a key rotation or an author-list change on main no longer voids head signatures made before it. A note the
+change distrusts (a dropped key, say) is still refused, by the lists as they are at the base. The protected files the branch ITSELF changes no longer make it fall back: they are
 the run's protected changes, and a protected change skips only on a `pull_request` run whose note is a host level's (`OWN_LEVELS` in the gate),
 since 2026-10-26 (Nathan: our pull requests skip CI entirely). That is safe because the run is judged by the gate and verifier the workflow
 fetches from `BASE_SHA`, never the pull request's copies, and the merge queue runs every check in full, so a change to the machinery is tested
@@ -1475,6 +1478,10 @@ including transport configuration supplied through `GIT_CONFIG_*`. `EVIDENCE_PUS
 that configuration. The child `evidence-wrap` argv is echoed before each signed check (never the token).
 Only the selected checks' covering records are sent, not the checkout's cached evidence namespace; per-crate publication batches at most
 40 explicit refs per push. Repeating `scripts/st-test --check CHECK --push origin` publishes already-covered evidence without rerunning that check.
+
+**Break-glass for a broken `st-test` on main:** `ST_TEST_REEXEC` set to any value skips st-test's re-execution of the base's copy, so the
+branch's own copy runs. It is only for signing and pushing a fix to `st-test` itself, only on the coordinating lead's word for that one run, and
+never otherwise.
 Without `--push`, the run keeps its records in this repository's local refs: per record a tag `refs/tags/evidence/<tree>/<record>` and a note
 `refs/notes/evidence/<tree>/<record>` (per-crate test records add `refs/tags/evidence/input/rust-tests/<key>/<record>` and
 `refs/notes/evidence-input/rust-tests/<key>/<record>`). Run `scripts/st-test --status` to see each check's coverage, not the tree ID.
