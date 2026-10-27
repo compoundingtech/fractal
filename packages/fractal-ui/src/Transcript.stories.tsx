@@ -155,8 +155,15 @@ export const HarnessEvents: Story = {
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exercises native harness notice row rendering and runtime adoption with exact local notice fixtures.' } },
   render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={harnessEventData} onRetry={() => {}} /></main>,
   play: async ({ canvasElement }) => {
-    const notices = await within(canvasElement).findAllByTestId('harness-notice')
+    const canvas = within(canvasElement)
+    const initial = await canvas.findAllByTestId('harness-notice')
+    await expect(initial).toHaveLength(6)
+    await expect(initial.map(notice => notice.dataset.itemId)).toEqual(harnessWeightExamples.slice(-6).map(item => item.id))
+    await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
+    await waitFor(() => expect(canvas.getByTestId('transcript-history-controls')).toHaveAttribute('data-state', 'complete'))
+    const notices = canvas.getAllByTestId('harness-notice')
     await expect(notices).toHaveLength(harnessWeightExamples.length)
+    await expect(notices.map(notice => notice.dataset.itemId)).toEqual(harnessWeightExamples.map(item => item.id))
     for (const notice of notices) await expect(notice).toHaveAttribute('data-harness-weight', 'row')
     const failed = notices.find(notice => notice.dataset.itemId === 'weight/failed-job')!
     await expect(within(failed).getByTestId('harness-kind')).toHaveTextContent('failed')
@@ -981,6 +988,10 @@ const semanticData: TranscriptStoryData = {
 }
 export const SemanticItems: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={semanticData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  const history = await canvas.findByTestId('transcript-history-controls')
+  await expect(mountedSourceIds(canvas.getByTestId('transcript-turn'))).toEqual(['semantic/prompt', ...semanticItems.slice(-6).map(item => item.id)])
+  await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
+  await waitFor(() => expect(history).toHaveAttribute('data-state', 'complete'))
   await userEvent.click(await canvas.findByRole('button', { name: /Worked for 24s/ }))
   await userEvent.click(canvas.getByRole('button', { name: 'Thinking' }))
   await expect(canvas.getByTestId('tool-detail-preview')).toBeVisible()
