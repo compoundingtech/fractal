@@ -58,8 +58,10 @@ struct ScenarioStrictWireShape {
         ])
         let states: [String: JSONValue] = [
             "roster": object(["agents": resourceList, "machines": resourceList, "runtimes": resourceList,
+                "sessions": array(ref("Session")), "devices": array(ref("Device")),
                 "arrangements": resourceList, "resources": resourceList, "order": array(string)]),
-            "details": object(["missions": resourceList, "work": resourceList]),
+            "details": object(["missions": resourceList, "work": resourceList,
+                "launches": array(ref("Launch")), "launch_variants": array(ref("LaunchVariant"))]),
             "attention": object(["attention": resourceList, "messages": resourceList]),
             "conversation": object(["threads": array(thread)]),
             "terminal": object(["terminals": array(terminal)]),

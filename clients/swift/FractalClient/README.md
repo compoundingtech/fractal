@@ -67,14 +67,9 @@ let roster = try scenarios.loadSlice(
     slice: "roster",
     now: Date(timeIntervalSince1970: 1_893_499_200)
 )
-struct RosterState: Decodable {
-    let agents: [AgentResource]
-    let machines: [MachineResource]
-    let runtimes: [RuntimeResource]
-    let arrangements: [ArrangementResource]?
-    let order: [String]
-}
-let agents = try roster.decodeState(RosterState.self).agents
+let state = try roster.decodeState(ScenarioRosterState.self)
+let sessions = state.sessions
+let devices = state.devices
 ```
 
 `loadSlice(at:nowMilliseconds:)` accepts an exact integer epoch-millisecond clock; the `Date`
@@ -89,8 +84,10 @@ precision, truncate to milliseconds **before** shifting, and emit exactly three 
 affected location. Content, ids, durations, timeline `at_ms`, cast offsets, and diagnostic
 `unknown.known_value` witnesses remain untouched.
 
-`ScenarioSlice.state` and `.timeline` retain their kit envelopes; use `decodeState` and
-`decodeTimeline` with your own small envelope structs containing the real client wire models.
+`ScenarioSlice.state` and `.timeline` retain their kit envelopes. `ScenarioRosterState` and
+`ScenarioDetailsState` are Codable envelopes with required, typed session/device and
+launch/launch-variant inventories, including explicitly empty inventories. Other envelopes
+can use `decodeState` and `decodeTimeline` with small structs containing the real wire models.
 For conversation thread `items`, use `ScenarioConversationEntry`: `.known(TimelineEntry)` for
 recognized types and `.unknown(JSONValue)` for genuinely future types. Recognized-but-malformed
 entries throw; future entries remain opaque rather than being replaced by diagnostic witnesses.

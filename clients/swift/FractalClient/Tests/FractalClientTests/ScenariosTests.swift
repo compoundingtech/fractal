@@ -138,6 +138,54 @@ final class ScenariosTests: XCTestCase {
         )
     }
 
+    func testTypedInventoriesDecodeAndRoundTrip() throws {
+        let reader = ScenarioReader(directory: fixtures)
+        let roster = try reader.loadSlice(world: "fleet-mid-refactor", slice: "roster")
+            .decodeState(ScenarioRosterState.self)
+        let details = try reader.loadSlice(world: "fleet-mid-refactor", slice: "details")
+            .decodeState(ScenarioDetailsState.self)
+        XCTAssertEqual(roster.sessions.count, 4)
+        XCTAssertEqual(roster.devices.count, 2)
+        XCTAssertEqual(details.launches.count, 1)
+        XCTAssertEqual(details.launchVariants.count, 2)
+        XCTAssertTrue(roster.sessions.allSatisfy { $0.kind == "session" })
+        XCTAssertTrue(roster.devices.allSatisfy { $0.kind == "device" })
+        let launch = try XCTUnwrap(details.launches.first)
+        XCTAssertEqual(Set(launch.variants), Set(details.launchVariants.map(\.id)))
+        XCTAssertTrue(details.launchVariants.allSatisfy { $0.launchID == launch.id })
+        let encoder = JSONEncoder()
+        let decoder = JSONDecoder()
+        XCTAssertEqual(try decoder.decode(ScenarioRosterState.self, from: encoder.encode(roster)).sessions.map(\.id), roster.sessions.map(\.id))
+        XCTAssertEqual(try decoder.decode(ScenarioDetailsState.self, from: encoder.encode(details)).launchVariants.map(\.id), details.launchVariants.map(\.id))
+    }
+
+    func testInventoriesAreRequiredAndStrictlyValidated() throws {
+        for (sliceName, fields) in [("roster", ["sessions", "devices"]), ("details", ["launches", "launch_variants"])] {
+            for field in fields {
+                try assertStrictMutationRejected(slice: sliceName) { root in
+                    var state = try object(root.required("state"))
+                    var values = try array(state.required(field))
+                    var value = try object(values[0])
+                    value["future_inventory_field"] = .bool(true)
+                    values[0] = .object(value)
+                    state[field] = .array(values)
+                    root["state"] = .object(state)
+                }
+                let data = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/\(sliceName).json"))
+                var root = try object(JSONDecoder().decode(JSONValue.self, from: data))
+                var state = try object(root.required("state"))
+                state.removeValue(forKey: field)
+                root["state"] = .object(state)
+                let slice = try decode(ScenarioSlice.self, .object(root))
+                if sliceName == "roster" {
+                    XCTAssertThrowsError(try slice.decodeState(ScenarioRosterState.self), field)
+                } else {
+                    XCTAssertThrowsError(try slice.decodeState(ScenarioDetailsState.self), field)
+                }
+            }
+        }
+    }
+
     func testStrictSlicesRejectExcessKeysAndFutureKnownObjectEnums() throws {
         try assertStrictMutationRejected(slice: "sync") { root in
             var state = try object(root.required("state"))
@@ -211,13 +259,17 @@ final class ScenariosTests: XCTestCase {
         let state = try object(slice.state)
         switch slice.slice {
         case "roster":
-            try keys(state, required: ["agents", "machines", "runtimes", "order"], optional: ["arrangements", "resources"])
-            _ = try decode([String].self, state.required("order"))
+            try keys(state, required: ["agents", "machines", "runtimes", "sessions", "devices", "order"], optional: ["arrangements", "resources"])
+            _ = try slice.decodeState(ScenarioRosterState.self)
             for key in ["agents", "machines", "runtimes", "arrangements", "resources"] {
                 if let values = state[key] { try resources(values, at: "/state/\(key)", slice: slice) }
             }
-        case "details", "attention":
-            let fields = slice.slice == "details" ? ["missions", "work"] : ["attention", "messages"]
+        case "details":
+            try keys(state, required: ["missions", "work", "launches", "launch_variants"])
+            _ = try slice.decodeState(ScenarioDetailsState.self)
+            for key in ["missions", "work"] { try resources(state.required(key), at: "/state/\(key)", slice: slice) }
+        case "attention":
+            let fields = ["attention", "messages"]
             try keys(state, required: Set(fields))
             for key in fields { try resources(state.required(key), at: "/state/\(key)", slice: slice) }
         case "conversation":
