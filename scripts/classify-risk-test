@@ -89,7 +89,6 @@ class Classify(unittest.TestCase):
     # moving its glob fails here instead of silently dropping the class (the crate split caught this).
     ZERO_MATCH_ALLOWED = {
         "clients/**/generated/**",
-        "crates/smallclaims/src/**/migrat*",
         "crates/smallclaims/src/**/replay*",
         "crates/fractal-api-core/src/api/client_web*",
         "crates/fractal-secrets/src/sekrets.rs",
