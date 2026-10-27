@@ -129,3 +129,93 @@ async fn agents_publication_queued_wake_cannot_refresh_without_demand() {
     let _subscriber = store.subscribe_agents_publications();
     assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
 }
+
+#[tokio::test]
+async fn agents_publication_summary_request_after_idle_registers_demand_and_recovers_reset() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    roster_resilience_runtime(store, "agent/summary-demand", "old");
+    refresh_agent_roster(store, false).unwrap();
+    let request = serde_json::from_value(json!({
+        "kind":"subscribe", "id":"summary-demand", "collection":"summary"
+    })).unwrap();
+    let session = client_v0::ClientSession::local(None).unwrap();
+    for reset in [false, true] {
+        roster_resilience_runtime(store, "agent/summary-demand", if reset { "reset" } else { "new" });
+        if reset {
+            store.forget_current_views();
+        }
+        store.fractal.agent_roster_read_at.store(
+            (client_now_ms() as u64).saturating_sub(300_001),
+            std::sync::atomic::Ordering::Release,
+        );
+        assert!(!store.agents_publication_demand());
+        let summary = || {
+            client_v0::summary::shared(&app, &session, &request,
+                &client_snapshot_at(&app, store.index().unwrap()), client_now_ms(), None, None, None)
+        };
+        let before = summary();
+        assert_eq!(before.is_err(), reset);
+        assert!(store.agents_publication_demand(), "a summary-style refresh request is demand");
+        refresh_agent_roster_admitted(Arc::clone(store), false).await.unwrap().unwrap();
+        assert!(summary().is_ok(), "the summary recovers after a projection reset");
+        let publication = publication_current(store);
+        assert_eq!(publication.metadata().status_watermark.store_index, store.index().unwrap());
+        assert_eq!(publication.rows()[0]["runtime_ids"],
+            json!([if reset { "runtime/reset" } else { "runtime/new" }]));
+    }
+}
+
+#[tokio::test]
+async fn agents_publication_last_subscriber_leaving_during_admission_skips_materialization() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let _wake = store.start_agent_roster_refresher().unwrap();
+    roster_resilience_runtime(store, "agent/admission-demand", "new");
+    let subscriber = store.subscribe_agents_publications();
+    let held = store.admit_agent_resources("other").await;
+    let before = store.agent_resources_builds_for_test();
+    let mut refresh = std::pin::pin!(refresh_agent_roster_admitted(Arc::clone(store), false));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(Future::poll(refresh.as_mut(), &mut context).is_pending(), "the real owner iteration waits for admission");
+    drop(subscriber);
+    drop(held);
+    refresh.await.unwrap().unwrap();
+    assert_eq!(store.agent_resources_builds_for_test(), before);
+    assert!(store.agents_publication().is_none());
+}
+
+#[test]
+fn agents_publication_last_subscriber_leaving_in_blocking_queue_skips_materialization() {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all()
+        .max_blocking_threads(1).build().unwrap();
+    runtime.block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let app = state(root.path());
+        let store = &app.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        roster_resilience_runtime(store, "agent/worker-demand", "new");
+        let subscriber = store.subscribe_agents_publications();
+        let (entered, started) = std::sync::mpsc::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let occupying = tokio::task::spawn_blocking(move || {
+            entered.send(()).unwrap();
+            blocked.recv().unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let before = store.agent_resources_builds_for_test();
+        let mut refresh = std::pin::pin!(refresh_agent_roster_admitted(Arc::clone(store), false));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(Future::poll(refresh.as_mut(), &mut context).is_pending(), "the real owner iteration queues behind the occupied blocking worker");
+        assert!(store.try_admit_agent_resources("other").is_none(), "the queued worker owns admission");
+        drop(subscriber);
+        release.send(()).unwrap();
+        refresh.await.unwrap().unwrap();
+        occupying.await.unwrap();
+        assert_eq!(store.agent_resources_builds_for_test(), before);
+        assert!(store.agents_publication().is_none());
+    });
+}

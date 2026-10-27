@@ -2554,12 +2554,15 @@ Rows, order, metadata and the encoded body belong to the same publication. Start
 a current publication revision. A failed refresh retains the previous publication and its
 original metadata. The failed-only `fresh=true` fallback described above is unchanged.
 
-An active revisioned subscription or a recent agents list read keeps source, presence and
-presentation refreshes active. The single existing paced owner checks time-sensitive presentation
-at a one-second scheduling bound (plus admission and fold time), rather than adding a timer per
-subscriber. A new revisioned subscription requests a complete view. Without demand, including
-after queued notifications are consumed, inputs remain dirty but catch-up and trim do not refold
-the roster. Full projection reset clears the current publication and changes its epoch even while idle.
+An active revisioned subscription, a recent agents list read, or an explicit roster refresh
+request keeps source, presence and presentation refreshes active. Summary and assistant reads
+register demand through the refresh request itself; dropping the last subscription does not
+create an ordinary-read grace period. The single existing paced owner checks time-sensitive
+presentation at a one-second scheduling bound (plus admission and fold time), rather than adding
+a timer per subscriber. It rechecks demand after admission and again when its blocking worker
+starts. A new revisioned subscription requests a complete view. Without demand, including after
+queued notifications are consumed, inputs remain dirty but catch-up and trim do not refold the
+roster. Full projection reset clears the current publication and changes its epoch even while idle.
 
 `AgentsPublicationMetadata` identifies the publication with an opaque UUID `node_epoch` and
 an increasing epoch-local `revision`. Restart, full projection reset or revision exhaustion starts a new epoch;

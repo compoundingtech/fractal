@@ -109,7 +109,9 @@ impl EvidenceStore for Store {
 
     fn subscribe_agents_publications(&self) -> tokio::sync::watch::Receiver<u64> {
         let receiver = self.fractal.presented_agents.subscribe();
-        self.request_agent_roster_refresh();
+        // The receiver itself is demand; dropping the last receiver must not leave a
+        // five-minute ordinary-read grace period behind.
+        self.fractal.wake_read_roster();
         receiver
     }
 
