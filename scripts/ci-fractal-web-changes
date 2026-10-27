@@ -76,6 +76,7 @@ KIT_PATTERNS = (
     "packages/fractal-ui/**",
     # Changelog stories render the app's changelog view and seen state.
     "apps/fractal-web/src/changelog/**",
+    "apps/fractal-web/src/embed/**",
     "apps/fractal-web/src/web/ColdOpen.stories.tsx",
     "apps/fractal-web/src/web/coldOpen.fixtures.ts",
     # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
@@ -156,6 +157,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/shell/sidebar/Toolbar.tsx",
     "apps/fractal-web/src/shell/threadHeaderSlot.tsx",
     "apps/fractal-web/src/state/persistence.ts",
+    "apps/fractal-web/src/state/storageAdapter.ts",
     # ConversationPane registers composer/tail commit regions even when no telemetry producer is installed.
     "apps/fractal-web/src/telemetry/inputPaint.ts",
     "apps/fractal-web/src/telemetry/measurement/counters.ts",
