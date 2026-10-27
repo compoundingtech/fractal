@@ -41,7 +41,7 @@ const startGateway = async (t, { capture = false } = {}) => {
   return started.promise;
 };
 
-test('fleet-mid-refactor HTTP and collections decode for iOS Now and conversation', { timeout: 15000 }, async t => {
+test('fleet-mid-refactor HTTP and collections decode for iOS Fleet, Now and conversation', { timeout: 15000 }, async t => {
   const baseUrl = await startGateway(t);
   const decodedFrames = [];
   const decodeErrors = [];
@@ -72,6 +72,20 @@ test('fleet-mid-refactor HTTP and collections decode for iOS Now and conversatio
   const builder = agents.value.items.find(item => item.id === 'agent/example/atlas/builder');
   assert.ok(builder, 'the capture agent is supplied by the kit world');
   assert.equal(builder.name, 'Atlas Builder');
+  const sessions = await client.sessionsList();
+  assert.equal(sessions.value.items.length, 4, 'Fleet receives the kit session inventory');
+  assert.ok(sessions.value.items.some(item => item.kind === 'session' && item.id === builder.current_session_id && item.owner_id === builder.id));
+  const devices = await client.devicesList();
+  assert.equal(devices.value.items.length, 2, 'Fleet receives the kit device inventory');
+  assert.ok(devices.value.items.every(item => item.kind === 'device' && item.person_id.startsWith('person/')));
+  const launches = await client.launchesList();
+  assert.equal(launches.value.items.length, 1, 'Fleet receives the kit launch inventory');
+  const launch = launches.value.items[0];
+  assert.equal(launch.kind, 'launch');
+  const variants = await client.launchVariantsList(launch.id);
+  assert.equal(variants.value.items.length, 2, 'Fleet receives both kit launch variants');
+  assert.ok(variants.value.items.every(item => item.kind === 'launch-variant' && item.launch_id === launch.id));
+  assert.deepEqual(variants.value.items.map(item => item.id).sort(), [...launch.variants].sort());
   const timeline = await client.timelineList(builder.current_session_id);
   assert.ok(timeline.value.items.length > 0, 'HTTP conversation history decodes');
 
