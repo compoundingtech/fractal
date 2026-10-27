@@ -13,7 +13,7 @@ const server = await createServer({
   server: { middlewareMode: true },
 })
 after(() => server.close())
-const { Transcript, LiveActivity } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
+const { Transcript, LiveActivity, transcriptInitialSourceRowCount } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
 const { EmbraceRuntimeProvider } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
 const { SendUnconfirmed } = await server.ssrLoadModule('/src/assistant-ui/composition/TranscriptFeedback.tsx')
 const { ThinkingRun } = await server.ssrLoadModule('/src/assistant-ui/composition/ThinkingEntry.tsx')
@@ -182,8 +182,127 @@ for (const withTool of [false, true]) test(`server-rendered transcript groups re
     options: { messages: turns.flatMap(turn => turn.items), isRunning: false, onNew: async () => {} },
   }, React.createElement(Transcript, { turns, title: 'Reasoning', sync: { _tag: 'Live', since: now }, now, observedAt: now })))
   assert.equal((render([makeTurn('grouped', items)]).match(/data-testid="thinking-entry"/g) ?? []).length, 1)
-  assert.equal((render([makeTurn('first', items.slice(0, 3)), makeTurn('second', items.slice(3))]).match(/data-testid="thinking-entry"/g) ?? []).length, 2)
+  // Six source rows stay within the initial bound, so both turns mount and the control isolates grouping.
+  assert.equal((render([makeTurn('first', items.slice(0, 3)), makeTurn('second', items.slice(3, 6))]).match(/data-testid="thinking-entry"/g) ?? []).length, 2)
   assert.doesNotMatch(render([makeTurn('empty', [{ _tag: 'Reasoning', id: 'blank', text: '  ', streaming: false, at }])]), /data-testid="thinking-entry"/)
   assert.match(render([makeTurn('empty', [{ _tag: 'Reasoning', id: 'blank', text: '  ', streaming: false, at }])]), /data-testid="transcript-scroll" role="group" aria-label="Conversation history"/)
   assert.doesNotMatch(render([makeTurn('none', [])]), /data-testid="thinking-entry"/)
+})
+
+// Initial source-row bound. Server rendering is the first commit: no viewport fill or reveal has run.
+const sourceAt = new Date(now).toISOString()
+const answerRow = id => ({ _tag: 'Text', id, role: 'assistant', text: `Answer ${id}`, attachments: [], streaming: false, at: sourceAt })
+const thought = id => ({ _tag: 'Reasoning', id, text: `Thought ${id}`, streaming: false, at: sourceAt })
+const userPrompt = id => ({ _tag: 'Text', id, role: 'user', text: `Prompt ${id}`, attachments: [], streaming: false, at: sourceAt })
+const sourceTurn = (id, items, prompt) => ({ id, ...(prompt === undefined ? {} : { prompt }), items, work: workLogTurnFromItems(items, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true }) })
+const renderSource = turns => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+  options: { messages: turns.flatMap(turn => turn.prompt === undefined ? turn.items : [turn.prompt, ...turn.items]), isRunning: false, onNew: async () => {} },
+}, React.createElement(Transcript, { turns, title: 'Source bound', sync: { _tag: 'Live', since: now }, now, observedAt: now })))
+// Each mounted turn names its mounted source ids, prompt first, in source order.
+const mountedSourceIds = markup => [...markup.matchAll(/<section\b[^>]*data-testid="transcript-turn"[^>]*>/g)].flatMap(([tag]) => {
+  const ids = tag.match(/data-source-ids="([^"]*)"/)
+  assert.ok(ids, `mounted turn lacks data-source-ids: ${tag}`)
+  return ids[1].split(' ').filter(id => id !== '')
+})
+const mountedTurnIds = markup => [...markup.matchAll(/<section\b[^>]*data-testid="transcript-turn"[^>]*>/g)].map(([tag]) => tag.match(/data-item-id="([^"]*)"/)?.[1])
+// Prompt and prose rows actually rendered, independent of the turn marker.
+const renderedMessageIds = markup => [...markup.matchAll(/data-testid="(?:user|agent)-message" data-item-id="([^"]+)"/g)].map(match => match[1])
+const range = (prefix, from, to) => Array.from({ length: to - from }, (_, index) => `${prefix}/${from + index}`)
+
+test('the initial source-row bound is six rows', () => {
+  assert.equal(transcriptInitialSourceRowCount, 6)
+})
+
+for (const shape of ['one oversized turn', '1000 two-row turns']) test(`a 2000-row transcript first mounts only the newest six source rows (${shape})`, () => {
+  const rows = range('row', 0, 2000).map(answerRow)
+  const turns = shape === 'one oversized turn'
+    ? [sourceTurn('long-turn', rows)]
+    : Array.from({ length: 1000 }, (_, index) => sourceTurn(`pair/${index}`, rows.slice(index * 2, index * 2 + 2)))
+  const markup = renderSource(turns)
+  const newest = range('row', 1994, 2000)
+  assert.deepEqual(mountedSourceIds(markup), newest)
+  assert.deepEqual(renderedMessageIds(markup), newest)
+  assert.deepEqual(mountedTurnIds(markup), shape === 'one oversized turn' ? ['long-turn'] : ['pair/997', 'pair/998', 'pair/999'])
+  assert.doesNotMatch(markup, /data-item-id="row\/1993"/)
+})
+
+test('a short history mounts whole at six source rows and is bounded at seven, with no whole-mount slack', () => {
+  for (const count of [6, 7, 10]) {
+    const rows = range('short', 0, count)
+    const markup = renderSource([sourceTurn('short-turn', rows.map(answerRow))])
+    assert.deepEqual(mountedSourceIds(markup), rows.slice(-transcriptInitialSourceRowCount), `${count} rows`)
+    assert.deepEqual(renderedMessageIds(markup), rows.slice(-transcriptInitialSourceRowCount), `${count} rows`)
+  }
+})
+
+test('the newest prompt stays mounted above the six newest rows of its oversized turn without the rows between', () => {
+  const rows = range('row', 0, 2000)
+  const markup = renderSource([sourceTurn('older-turn', [answerRow('older/answer')], userPrompt('older/prompt')), sourceTurn('long-turn', rows.map(answerRow), userPrompt('newest-prompt'))])
+  const expected = ['newest-prompt', ...range('row', 1994, 2000)]
+  assert.deepEqual(mountedSourceIds(markup), expected)
+  assert.deepEqual(renderedMessageIds(markup), expected)
+  assert.equal((markup.match(/data-testid="user-message"/g) ?? []).length, 1)
+  assert.doesNotMatch(markup, /data-item-id="row\/0"/)
+  assert.doesNotMatch(markup, /data-item-id="row\/1993"/)
+  assert.doesNotMatch(markup, /data-item-id="older\/prompt"/)
+})
+
+test('a prompt inside the newest six rows is counted once, not pinned as a seventh row', () => {
+  const markup = renderSource([sourceTurn('before', range('before', 0, 4).map(answerRow)), sourceTurn('recent', range('recent', 0, 3).map(answerRow), userPrompt('recent/prompt'))])
+  const expected = ['before/2', 'before/3', 'recent/prompt', ...range('recent', 0, 3)]
+  assert.deepEqual(mountedSourceIds(markup), expected)
+  assert.deepEqual(renderedMessageIds(markup), expected)
+})
+
+test('a contiguous reasoning run cut by the six-row edge mounts whole, and only that run extends the bound', () => {
+  const run = range('run', 0, 5)
+  const items = [...range('before', 0, 10).map(answerRow), ...run.map(thought), ...range('after', 0, 3).map(answerRow)]
+  const markup = renderSource([sourceTurn('reasoning-turn', items)])
+  assert.deepEqual(mountedSourceIds(markup), [...run, ...range('after', 0, 3)])
+  assert.deepEqual(renderedMessageIds(markup), range('after', 0, 3))
+  assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, 1)
+  assert.doesNotMatch(markup, /data-item-id="before\/9"/)
+})
+
+for (const trailingRows of [2, 3, 6]) test(`a work-log reasoning disclosure stays whole across an interleaved tool with ${trailingRows} trailing rows`, () => {
+  const tool = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
+  const early = range('early', 0, 2)
+  const later = range('run', 0, 3)
+  const after = range('after', 0, trailingRows)
+  const items = [...range('before', 0, 6).map(answerRow), ...early.map(thought), tool, ...later.map(thought), ...after.map(answerRow)]
+  const markup = renderSource([sourceTurn('split-turn', items)])
+  const crossesDisclosure = trailingRows < transcriptInitialSourceRowCount
+  const suffix = items.slice(-transcriptInitialSourceRowCount)
+  const expected = items.filter(item => suffix.includes(item) || (crossesDisclosure && item._tag === 'Reasoning')).map(item => item.id)
+  assert.deepEqual(mountedSourceIds(markup), expected)
+  assert.deepEqual(renderedMessageIds(markup), after)
+  assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, crossesDisclosure ? 1 : 0)
+  assert.doesNotMatch(markup, /data-item-id="before\/5"/)
+  // Completing a disclosure adds only thoughts; its tool mounts only when inside the six-row suffix.
+  assert.equal(/data-tool-status=/.test(markup), suffix.includes(tool))
+})
+
+for (const thoughtCount of [2, 11]) test(`a disclosure with ${thoughtCount} thoughts across 2000 tools mounts only its reasoning plus the six-row suffix`, () => {
+  const reasoning = range('large/thought', 0, thoughtCount).map(thought)
+  const tools = range('large/tool', 0, 2000).map(id => ({ _tag: 'ToolCall', id, callId: id, name: 'read', input: { path: 'large.ts' }, status: 'success', callSeen: true, at: sourceAt }))
+  const answers = range('large/answer', 0, 3).map(answerRow)
+  const items = [reasoning[0], ...tools, ...reasoning.slice(1), ...answers]
+  const markup = renderSource([sourceTurn('large-turn', items)])
+  const suffix = items.slice(-transcriptInitialSourceRowCount)
+  const expected = items.filter(item => item._tag === 'Reasoning' || suffix.includes(item)).map(item => item.id)
+  const mounted = mountedSourceIds(markup)
+  assert.deepEqual(mounted, expected)
+  assert.equal(mounted.length, thoughtCount === 2 ? 7 : 14)
+  assert.deepEqual(renderedMessageIds(markup), answers.map(item => item.id))
+  assert.equal((markup.match(/data-testid="thinking-entry"/g) ?? []).length, 1)
+  assert.equal((markup.match(/data-tool-status=/g) ?? []).length, thoughtCount === 2 ? 2 : 0)
+  assert.doesNotMatch(markup, /data-item-id="large\/tool\/1997"/)
+})
+
+test('the newest prompt and a cut reasoning run combine without mounting the rows between them', () => {
+  const run = range('run', 0, 4)
+  const items = [...range('before', 0, 20).map(answerRow), ...run.map(thought), ...range('after', 0, 4).map(answerRow)]
+  const markup = renderSource([sourceTurn('combined-turn', items, userPrompt('combined/prompt'))])
+  assert.deepEqual(mountedSourceIds(markup), ['combined/prompt', ...run, ...range('after', 0, 4)])
+  assert.doesNotMatch(markup, /data-item-id="before\/19"/)
 })
