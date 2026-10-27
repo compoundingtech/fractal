@@ -1,0 +1,259 @@
+#[macro_use]
+#[path = "../../../scripts/ci-test-paths.rs"]
+mod ci_test_paths;
+
+use fractal_client::scenarios::{self, DecodeMode, TimePointer, WireValue};
+use serde::Deserialize;
+use serde_json::Value;
+use std::{fs, path::PathBuf};
+
+fn fixtures() -> PathBuf {
+    PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/scenarios")
+}
+
+#[derive(Deserialize)]
+struct Vectors {
+    vectors: Vec<Vector>,
+}
+#[derive(Deserialize)]
+struct Vector {
+    name: String,
+    input: Value,
+    times: Vec<TimePointer>,
+    anchor: String,
+    now: i64,
+    expected: Value,
+}
+
+#[test]
+fn scenarios_shared_rebase_vectors() {
+    let vectors: Vectors = serde_json::from_slice(&fs::read(fixtures().join("_vectors/rebase.json")).unwrap()).unwrap();
+    assert!(!vectors.vectors.is_empty());
+    for vector in vectors.vectors {
+        let mut value = vector.input;
+        let result = scenarios::rebase(&mut value, &vector.times, &vector.anchor, vector.now);
+        match vector.expected["_tag"].as_str().unwrap() {
+            "ok" => {
+                result.unwrap_or_else(|error| panic!("{}: {error:#}", vector.name));
+                assert_eq!(value, vector.expected["value"], "{}", vector.name);
+            }
+            "range-error" => {
+                let error = result.expect_err(&vector.name).to_string();
+                assert!(error.contains("out of range"), "{}: {error}", vector.name);
+                assert!(error.contains(vector.expected["pointer"].as_str().unwrap()), "{}: {error}", vector.name);
+            }
+            other => panic!("unknown vector expectation {other}"),
+        }
+    }
+}
+
+#[test]
+fn scenarios_decode_every_committed_slice() {
+    let root = fixtures();
+    let index = scenarios::load_index(root.join("index.json")).unwrap();
+    assert_eq!(index.anchor, scenarios::ANCHOR);
+    let anchor = 1_893_499_200_000;
+    let mut worlds = 0;
+    let mut slices = 0;
+    let mut tolerant = 0;
+    // Enumerate the filesystem, not a pinned world list or only the index.
+    for world in fs::read_dir(&root).unwrap() {
+        let world = world.unwrap();
+        if !world.file_type().unwrap().is_dir() || world.file_name().to_string_lossy().starts_with('_') { continue; }
+        worlds += 1;
+        let entry = index.worlds.iter().find(|entry| entry.id == world.file_name().to_string_lossy()).expect("world missing from index");
+        let mut files = 0;
+        for file in fs::read_dir(world.path()).unwrap() {
+            let path = file.unwrap().path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") { continue; }
+            files += 1;
+            slices += 1;
+            let slice = scenarios::load_slice(&path).unwrap();
+            assert_eq!(slice.world, entry.id);
+            let indexed = entry.slices.get(&slice.slice).expect("slice missing from index");
+            assert_eq!(root.join(indexed), path);
+            if slice.decode == DecodeMode::Tolerant { tolerant += 1; }
+            let original = serde_json::to_value(&slice).unwrap();
+            let identity = slice.clone().rebased(anchor).unwrap();
+            assert_eq!(serde_json::to_value(&identity).unwrap(), original, "{}", path.display());
+            for now in [anchor, anchor + 86_400_123] {
+                slice.clone().rebased(now).unwrap().decode().unwrap_or_else(|error| panic!("{} at {now}: {error:#}", path.display()));
+            }
+        }
+        assert_eq!(files, entry.slices.len(), "{}", world.path().display());
+    }
+    assert_eq!(worlds, index.worlds.len());
+    assert!(slices > 0);
+    assert!(tolerant > 0, "exercise declared tolerant slices too");
+}
+
+#[test]
+fn scenarios_declared_mode_is_enforced_without_repairing_wire_values() {
+    let mut slice = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
+    slice.state["agents"][0]["state"] = Value::String("reconciling".into());
+    assert!(slice.decode().is_err(), "strict must reject unknown enum strings");
+    slice.decode = DecodeMode::Tolerant;
+    let values = slice.decode().unwrap();
+    let agent = values.iter().find(|value| value.pointer == "/state/agents/0").unwrap();
+    let WireValue::Resource(resource) = &agent.value else { panic!("expected resource") };
+    let fractal_client::Resource::Agent(agent) = resource.as_ref() else { panic!("expected typed agent") };
+    assert_eq!(agent.state, "reconciling");
+
+    let mut slice = scenarios::load_slice(fixtures().join("fleet-mid-refactor/roster.json")).unwrap();
+    slice.state["agents"][0]["protocol_features"] = serde_json::json!(["future-protocol"]);
+    assert!(slice.decode().is_err(), "strict must reject extra keys");
+    slice.decode = DecodeMode::Tolerant;
+    assert!(slice.decode().is_ok());
+
+    // The fixture's repair witnesses must never replace its real transport values.
+    let slice = scenarios::load_slice(fixtures().join("unknown-fields/roster.json")).unwrap();
+    assert_eq!(slice.decode, DecodeMode::Tolerant);
+    let decoded = slice.decode().unwrap();
+    assert!(decoded.iter().any(|value| matches!(
+        &value.value,
+        WireValue::Resource(resource) if matches!(resource.as_ref(), fractal_client::Resource::Unknown(_))
+    )));
+}
+
+#[test]
+fn scenarios_invalid_instants_name_the_pointer() {
+    for (input, codec) in [(serde_json::json!({"at": "not-a-time"}), "timestamp"), (serde_json::json!({"at": 1.5}), "epoch-ms"), (serde_json::json!({}), "timestamp")] {
+        let times: Vec<TimePointer> = serde_json::from_value(serde_json::json!([{ "pointer": "/at", "codec": codec }])).unwrap();
+        let error = scenarios::rebase(&mut input.clone(), &times, scenarios::ANCHOR, 1_893_499_200_000).unwrap_err();
+        assert!(error.to_string().contains("/at"), "{error:#}");
+    }
+    for now in [i64::MIN, i64::MAX] {
+        let times: Vec<TimePointer> = serde_json::from_value(serde_json::json!([{ "pointer": "/at", "codec": "timestamp" }])).unwrap();
+        let mut input = serde_json::json!({ "at": scenarios::ANCHOR });
+        let error = scenarios::rebase(&mut input, &times, scenarios::ANCHOR, now).unwrap_err();
+        assert!(error.to_string().contains("/at"), "{error:#}");
+    }
+}
+
+#[test]
+fn scenarios_rebase_accepts_lowercase_rfc3339_separators() {
+    let times: Vec<TimePointer> = serde_json::from_value(serde_json::json!([
+        { "pointer": "/at", "codec": "timestamp" }
+    ])).unwrap();
+    let mut input = serde_json::json!({ "at": "2030-01-01t11:59:00.250999z" });
+    scenarios::rebase(&mut input, &times, "2030-01-01t12:00:00.000z", 1_893_499_201_500).unwrap();
+    assert_eq!(input["at"], "2030-01-01T11:59:01.750Z");
+}
+
+#[test]
+fn scenarios_wire_definition_registry_matches_the_kit() {
+    let source = fs::read_to_string(
+        PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
+            .join("../../clients/typescript/fractal-scenarios/src/kit/wire.ts"),
+    ).unwrap();
+    let declaration = source.split_once("export type WireDefinition =").unwrap().1
+        .split_once("export interface WireValue").unwrap().0;
+    let expected: std::collections::BTreeSet<_> = declaration.lines()
+        .filter_map(|line| line.trim().strip_prefix("| '").and_then(|name| name.strip_suffix('\'')))
+        .collect();
+    let actual: std::collections::BTreeSet<_> = scenarios::WIRE_DEFINITIONS.iter().copied().collect();
+    assert!(!expected.is_empty(), "kit wire declaration format changed");
+    assert_eq!(actual, expected, "update Rust wire discovery when the kit adds a wire root");
+}
+
+#[test]
+fn scenarios_strict_rejects_unknown_error_codes() {
+    let mut slice = scenarios::load_slice(fixtures().join("failed-sync-rate-limited/sync.json")).unwrap();
+    let envelope = slice.timeline.iter_mut()
+        .find(|event| event["_tag"] == "http-error").unwrap();
+    envelope["envelope"]["code"] = Value::String("future-scenario-error".into());
+    assert!(slice.decode().is_err());
+    slice.decode = DecodeMode::Tolerant;
+    let decoded = slice.decode().unwrap();
+    assert!(decoded.iter().any(|value| matches!(
+        &value.value,
+        WireValue::ErrorEnvelope(envelope) if envelope.code == fractal_client::ErrorCode::Unknown
+    )));
+}
+
+fn client_fixture(name: &str) -> Value {
+    serde_json::from_slice(&fs::read(
+        PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/st3/client-v0/fixtures").join(name),
+    ).unwrap()).unwrap()
+}
+
+#[test]
+fn scenarios_strict_rejects_inline_future_union_views() {
+    // Read the committed client-v0 timeline fixture, without pinning its payload bytes.
+    let timeline = client_fixture("timeline-views.json");
+    let entry = timeline["value"]["items"][1].clone();
+    let mut slice = scenarios::load_slice(fixtures().join("empty/conversation.json")).unwrap();
+    slice.state = serde_json::json!({ "threads": [{ "items": [entry] }] });
+    slice.decode().expect("a known view must pass strict decoding");
+    slice.state["threads"][0]["items"][0]["body"]["blocks"][0]["view"] =
+        serde_json::json!({ "type": "future-view" });
+    assert!(slice.decode().is_err(), "strict must reject inline unknown union arms");
+    slice.decode = DecodeMode::Tolerant;
+    slice.decode().expect("tolerant mode must retain future views");
+}
+
+#[test]
+fn scenarios_strict_preserves_explicit_error_detail_maps() {
+    let envelope = client_fixture("cursor-gap-error.json");
+    let mut slice = scenarios::load_slice(fixtures().join("empty/sync.json")).unwrap();
+    slice.timeline = vec![serde_json::json!({
+        "_tag": "http-error", "envelope": envelope, "at_ms": 0
+    })];
+    let decoded = slice.decode().expect("strict must accept the committed cursor-gap details");
+    assert!(decoded.iter().any(|value| matches!(
+        &value.value,
+        WireValue::ErrorEnvelope(error)
+            if error.details.len() == envelope["details"].as_object().unwrap().len()
+                && error.details.iter().all(|(key, value)| envelope["details"].get(key) == Some(value))
+    )));
+    // Opaque JSON bags must not be mistaken for unknown union/enum cases.
+    slice.timeline[0]["envelope"]["details"]["opaque"] =
+        serde_json::json!({ "_tag": "Unknown", "raw": "user-data" });
+    slice.decode().expect("strict must leave arbitrary map values opaque");
+    // Declared fields of an open map still retain their own constraints.
+    slice.timeline[0]["envelope"]["details"]["applied"] = Value::String("future-applied".into());
+    assert!(slice.decode().is_err(), "an explicit map does not disable known-field validation");
+}
+
+#[test]
+fn scenarios_strict_accepts_shared_producer_conformance_entries() {
+    // Same input as schema.test.cjs's producer conformance strict-codec test.
+    let conformance = client_fixture("timeline-conformance.json");
+    let items = conformance["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    let mut slice = scenarios::load_slice(fixtures().join("empty/conversation.json")).unwrap();
+    slice.state = serde_json::json!({ "threads": [{ "items": items }] });
+    slice.decode().expect("the shared kit producer vectors must pass strict decoding");
+}
+
+#[test]
+fn scenarios_decode_all_committed_inventory_roots() {
+    for (kind, field) in [
+        ("roster", "sessions"), ("roster", "devices"),
+        ("details", "launches"), ("details", "launch_variants"),
+    ] {
+        let mut slice = scenarios::load_slice(
+            fixtures().join("fleet-mid-refactor").join(format!("{kind}.json")),
+        ).unwrap();
+        let inventory = slice.state[field].as_array().unwrap();
+        assert!(!inventory.is_empty(), "exercise populated {field}");
+        let decoded = slice.decode().unwrap();
+        let prefix = format!("/state/{field}/");
+        let values: Vec<_> = decoded.iter().filter(|value| value.pointer.starts_with(&prefix)).collect();
+        assert_eq!(values.len(), inventory.len(), "decode every {field} record");
+        for value in values {
+            let WireValue::Resource(resource) = &value.value else { panic!("expected inventory resource") };
+            assert!(matches!((field, resource.as_ref()),
+                ("sessions", fractal_client::Resource::Session(_))
+                | ("devices", fractal_client::Resource::Device(_))
+                | ("launches", fractal_client::Resource::Launch(_))
+                | ("launch_variants", fractal_client::Resource::LaunchVariant(_))
+            ));
+        }
+        slice.state[field][0]["unexpected_inventory_field"] = Value::Bool(true);
+        assert!(slice.decode().is_err(), "strict must validate {field}");
+        slice.decode = DecodeMode::Tolerant;
+        slice.decode().expect("tolerant inventories must accept future fields");
+    }
+}
