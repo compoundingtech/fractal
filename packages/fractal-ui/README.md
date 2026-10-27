@@ -60,8 +60,14 @@ The dev server binds to localhost on a fixed port (53705). To view it from anoth
 The **Scenario** toolbar uses the shared `@fractal/scenarios` catalog.
 `scenario` selects the world and `scenarioNow` fixes its clock. Markdown prose,
 SyncLine's scenario previews, SystemState's roster and connection geometry,
-TranscriptComposer's column examples, TranscriptPress's scenario examples and
-DeclarationPanel's structured mission fallback consume declared slices.
+TranscriptComposer's column examples, TranscriptPress's scenario examples,
+Transcript's tool-call, tool-result, reasoning, streaming-revision and failed/cancelled
+families, and DeclarationPanel's structured mission fallback consume declared slices.
+The Transcript family stories pin `transcript-families` by default, project native
+conversation facts through the live timeline projection, and retain separate light variants.
+The streaming-revision plays reset the kit's manual clock, advance it past the catalog's
+2-second revision event, and assert one finalized row replaces the initial text in both themes.
+The existing Transcript contract-fixture stories remain unchanged.
 Composer and connection geometry checks pin populated data; separate scenario
 stories follow the toolbar. `OwnSendFollows` / `OwnSendFollowsLight` retain their
 30-turn contract fixture: the play needs a genuinely new incoming reply. Reusing
@@ -440,7 +446,11 @@ Publish the sidebar search query through `SidebarQueryContext` rather than each 
 
 The Markdown boundary renders CommonMark and GFM prose — emphasis, nested lists, tables, linked headings — while preserving resource-chip and inline-reference seams. Fenced code uses the pinned `refractor@5.0.0` dependency with fixed, eagerly imported grammars for the explicit set (TypeScript, TSX, JavaScript, JSON, Bash, diff, Rust, Nix, Python, YAML, Markdown, CSS); authored fences cannot trigger grammar requests, and unknown language labels stay visible above plain source. Each code `<pre>` is keyboard-focusable (`tabIndex={0}`), named **Code, language** (or **Code, text**), and shows an inset semantic-token focus ring. `SemanticItems` exercises an overflowing code block, Tab from Copy code, its accessible name and the visible ring in dark and light. Wrap and copy are local to the stable code-block identity, so streaming text updates do not reset them. Unfinished streaming link tails complete through a linear backward scan of the current line, including escape-run handling, before label brackets are matched. Settled reasoning uses a muted `Thinking` disclosure whose expanded content renders through the same Markdown seam.
 
-`Markdown` takes `tone: 'default' | 'muted' | 'foreground'`. Paragraphs, list items and tables inherit their ink from the Markdown root (soft by default, muted for `muted`, foreground for input Card bodies per C27/E04–E12) or from a quote, so a tone is one themed `color` declaration. `EmbraceMarkdownPreview` forwards the same tone. `Markdown/InputForeground…` covers that forwarding and an in-play soft-ink control at 440/1440 in both schemes. It never re-points theme variables, which would freeze them at the dark default. Quotes and the `muted` tone keep strong text muted; Thinking uses `muted`. A run's Copy follows the Copy primitive: a missing clipboard, a thrown or rejected write is swallowed, and only a completed write sets `data-copied` for 3s. A write that completes after the Copy unmounts or changes message scope is ignored.
+`useCopyFeedback` is shared by fenced-code and answer copy actions, including a prose run's single header Copy, which writes the whole run's text. Only a fulfilled clipboard or host operation swaps the copy glyph to a check, sets `data-copied` on answer Copy, announces **Copied** through a polite live region and opens the tooltip reading **Copied**, for pointer and keyboard copies alike. The acknowledgement lasts 1.5 seconds and applies only to the copied source version; once the source changes, code copy announces that the code changed since the last copy. A missing clipboard, a thrown or a rejected write never announces success: the action names the failure and asks to check clipboard permissions. A write that settles after the Copy unmounts or changes message scope is ignored. Copy buttons stay enabled and focused while copying; the hook ignores repeat presses. `CopyAnswerButton` accepts `text` and an optional `onCopy` callback; a host callback must resolve only after the real copy succeeds. Code-copy accessible names retain their visible labels during Copying and Copied states. `Composer copy feedback` stories exercise pointer, keyboard and rejected copies across both schemes at 440/1440.
+
+Successful fenced-code copy uses the accessible name `Copy code: Copied`. The composer-copy matrix declares its local clipboard/focus/timer contract fixtures explicitly; streaming-control stories retain their source-invalidation assertions against this name.
+
+`Markdown` takes `tone: 'default' | 'muted' | 'foreground'`. Paragraphs, list items and tables inherit their ink from the Markdown root (soft by default, muted for `muted`, foreground for input Card bodies per C27/E04–E12) or from a quote, so a tone is one themed `color` declaration. `EmbraceMarkdownPreview` forwards the same tone. `Markdown/InputForeground…` covers that forwarding and an in-play soft-ink control at 440/1440 in both schemes. It never re-points theme variables, which would freeze them at the dark default. Quotes and the `muted` tone keep strong text muted; Thinking uses `muted`.
 
 ### Floating failure layer
 
@@ -463,7 +473,7 @@ Overlays — Tooltip, Popover/Menu, Modal/Dialog — must render inside the them
 
 `DockedSplit.minMainSize` optionally reserves a usable main lane. A ResizeObserver measures the actual split container (including sidebar changes), subtracts that lane and the separator, and updates the effective dock bounds/CSS/ARIA directly. End uses the available maximum. When space cannot fit both configured minima, the main lane takes priority and the dock minimum temporarily decreases. Automatic constraint/restoration never rewrites the saved preference: wider containers restore it.
 
-The composer preserves kit send, cancellation, byte-limit and token-history contracts while adding adaptive pill/slab geometry, grouped mention/command popovers, effort selection, and the recipient/model toolbar. `ComposerSession` owns only device-local draft persistence and composer interaction policy; transports and runtime facts remain host-owned. Its toolbar tooltips retain viewport-clamped, wrapping contents; Workbench/DiffPanel use the shared 500ms Controls tooltip.
+The composer preserves kit send, cancellation, byte-limit and token-history contracts while adding adaptive pill/slab geometry, grouped mention/command popovers, effort selection, and the recipient/model toolbar. `ComposerSession` owns only device-local draft persistence and composer interaction policy; transports and runtime facts remain host-owned. Recipient/model toolbar tooltips use the shared 500ms surface with viewport-clamped, wrapping contents; their selection menus share the composition primitives. Focusing the textarea draws no frame outline; it changes only the frame's 1px border to the scheme-specific 40% accent token. C1 and C2 keep their geometry on focus; C3's focus-to-slab expansion is the pending shape candidate and is unchanged. Send and Recall retain their focus rings.
 
 The Workbench thread dock uses the reviewed route's composition composer policy, distinct from `ComposerSession`'s R3 choice: idle Enter sends immediately; during a run Enter queues and modified Enter explicitly steers. `IdleSample` seeds the route's exact `designItems('idle', 'sample')` messages with explicit idle host facts. `RunningQueueAndSteer` keeps the running case separate and asserts both actions without changing the queue. Neither fixture infers a runtime state from a header label.
 
@@ -476,6 +486,20 @@ The `Geometry` story is a non-interacting fixture for the reusable composer and 
 The exported legacy Folio, Relay and Orbit palettes also avoid green: `good` is the direction's 80% ink foreground; `added` is a non-green wash whose luminance difference from the panel is within 20% of the direction's removed wash. Run `pnpm --filter @fractal/ui test:palettes` to check all six direction/scheme combinations without a browser. The public names and palette-selection API are unchanged.
 
 The shared diff tint assertion identifies a token through its causal effect on both the row wash and gutter, letting the browser resolve CSS layers, specificity and conditional rules. It restores exact inline styles and verifies computed paint restoration after each probe. Every dark/light tint story also rejects the original neutral pre-tint paint and an equal-blue wash backed by an unrelated variable, then verifies the restored positive result.
+
+### Composer send
+
+`EmbraceComposer` renders the send surface from host facts and reports intent through callbacks. It makes no network calls and holds no keys; upload, retry, session and transport stay with the host.
+
+- `recipient` (`{ ref, label, sessionId?, sessionChanged? }`) shows "To <label>" in the footer. Its accessible name starts with that visible text, and the ref and session are exposed to assistive technology and in the tooltip. With `recipients` and `onRecipientChange`, the readout opens a single-select "Recipient" menu. Picking the current recipient reports nothing. An @mention only inserts a token and never changes the recipient. `sessionChanged` shows a note and announces it once through an always-mounted polite status region.
+- `reply` (`{ messageId, sender, subject?, excerpt? }`) with `onClearReply`, and `subject` with `onSubjectChange`, are controlled. Clearing the reply keeps the text and images. Enter in the subject moves to the message field and never sends.
+- `images` (`ComposerImage[]`, each `Ready`, `Uploading` or `Failed`) with `onRemoveImage` and `onRetryImage` render the image tray. Paste and the "Attach image" picker share one intake. It screens files against `imagePolicy`, the limits the attachments adapter declares, and announces each refusal with those limits, then calls the runtime attachment adapter. Without `imagePolicy` the kit uses `composerImagePolicy` (four PNG, JPEG, GIF or WebP images, 10 MiB each). The picker and paste appear only when the runtime has an attachments adapter. Send waits while an image is uploading or failed; images alone may be sent.
+- `availability` (`Ready`, `Offline`, `MissingGrant`, `Revoked` or `Unavailable`) holds send and shows one recovery action (Reconnect, Check access or Set up again; none for Unavailable). The draft stays editable, and recovery never sends by itself.
+- Enter never sends during IME composition.
+
+`Transcript` and `EmbraceThread` render `Sending…` and `Sent` under user prompts. A `Failed` send state may carry `code` and `retryable`; Retry appears only for retryable failures, and only while `sendAvailability` is absent or `Ready`. The `Composer send` stories play the host for each case.
+
+Composer-send stories declare `contract-fixture` ownership and a sorted co-located exemption list: their upload, recipient and recovery transitions are controlled host fixtures, not scenario-world observations.
 
 ## Clean-room note
 

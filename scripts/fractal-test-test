@@ -123,6 +123,8 @@ class StTest(unittest.TestCase):
         self.work = tmp / 'work'
         git(tmp, 'clone', '-q', str(tmp / 'origin.git'), str(self.work))
         git(self.work, 'checkout', '-q', '-b', 'main')
+        git(self.work, 'config', 'user.name', 't')  # st-test drops the GIT_* identity variables: a merge it makes takes the checkout's
+        git(self.work, 'config', 'user.email', 't@example.invalid')
         (self.work / 'scripts').mkdir()
         for name in st_test.BASE_SCRIPTS:
             shutil.copy(ROOT / 'scripts' / name, self.work / 'scripts' / name)
@@ -1010,29 +1012,35 @@ class StTest(unittest.TestCase):
         git(self.work, 'checkout', '-q', '-B', 'feature')
         self.commit('b.txt', 'two')
 
-    def test_when_protected_files_moved_on_main_the_merge_tree_is_what_is_signed_and_what_status_asks_about(self):
+    def test_when_protected_files_moved_on_main_status_asks_about_the_merge_and_a_run_merges_main_into_the_branch(self):
         self.branch_from_a_base_with_the_gate()
-        head_tree = git(self.work, 'rev-parse', 'HEAD^{tree}')
+        head = git(self.work, 'rev-parse', 'HEAD')
         self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))  # a protected file, after the branch point
         git(self.work, 'fetch', '-q', 'origin')
         expected = git(self.work, 'merge-tree', '--write-tree', '--no-messages', 'HEAD', 'origin/main').split()[0]
-        self.assertNotEqual(expected, head_tree)
+        self.assertNotEqual(expected, git(self.work, 'rev-parse', 'HEAD^{tree}'))
         code, out, err = self.run_st_test('--status')
         self.assertEqual(code, 3, out + err)  # not covered: the head tree is not what CI will judge
         self.assertIn('protected files differ from the branch point', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)  # --status changes nothing
         code, out, err = self.run_st_test('--check', 'demo')
         self.assertEqual(code, 0, out + err)
-        self.assertIn('CI will judge the merge of this branch with origin/main', out)
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        self.assertIn(f'fractal-test: protected files differ from the branch point: merged origin/main', out)
+        self.assertIn(f'as {merge}; the head tree is what is signed', out)
+        self.assertNotIn('CI will judge the merge', out)
+        self.assertEqual(git(self.work, 'rev-list', '--parents', '-n1', 'HEAD').split(), [merge, head, git(self.work, 'rev-parse', 'origin/main')])
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD^{tree}'), expected)  # the branch's head is now the merge
+        self.assertIn('not pushed', out)  # no --push: the merge stays here
         statement, = self.statements()
-        self.assertIn(expected, json.dumps(statement))  # the note is for the merge tree
+        self.assertIn(expected, json.dumps(statement))
         code, out, err = self.run_st_test('--status', '--check', 'demo')
-        self.assertEqual(code, 0, out + err)  # now the tree CI judges is covered
-        # the pool tree was the merge, at no cost to the branch: HEAD of the clone did not move
-        self.assertEqual(git(self.work, 'rev-parse', 'HEAD^{tree}'), head_tree)
+        self.assertEqual(code, 0, out + err)  # the head tree, which CI now judges, is covered
+        self.assertNotIn('CI will judge the merge', out)
 
-    def test_a_base_that_moves_while_the_run_waits_for_a_tree_is_signed_at_its_new_tip(self):
+    def test_a_base_that_moves_while_the_run_waits_for_a_tree_is_merged_at_its_new_tip(self):
         self.branch_from_a_base_with_the_gate()
-        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))  # a protected file: the merge is what is signed
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))  # a protected file: main is merged in
         real_acquire = st_test.acquire_tree
         def main_moves_while_waiting(*args, **kwargs):
             self.main_commits('later.txt', 'merged while the run waited')
@@ -1040,11 +1048,84 @@ class StTest(unittest.TestCase):
         with mock.patch.object(st_test, 'acquire_tree', side_effect=main_moves_while_waiting):
             code, out, err = self.run_st_test('--check', 'demo')
         self.assertEqual(code, 0, out + err)
-        expected = git(self.work, 'merge-tree', '--write-tree', '--no-messages', 'HEAD', 'origin/main').split()[0]
-        git(self.work, 'cat-file', '-e', f'{expected}:later.txt')  # the merge holds the tip that landed during the wait
+        git(self.work, 'cat-file', '-e', 'HEAD:later.txt')  # the merge holds the tip that landed during the wait
         statement, = self.statements()
-        self.assertIn(expected, json.dumps(statement))
+        self.assertIn(git(self.work, 'rev-parse', 'HEAD^{tree}'), json.dumps(statement))
         self.assertEqual(self.run_st_test('--status', '--check', 'demo')[0], 0, 'the tree CI judges now is the one signed')
+
+    def branch_behind(self, count):
+        self.branch_from_a_base_with_the_gate()
+        for i in range(count):
+            self.main_commits(f'main-{i}.txt', str(i))
+        return git(self.work, 'rev-parse', 'HEAD')
+
+    def test_a_branch_past_the_head_tree_bound_merges_main_signs_its_head_tree_and_pushes_the_branch(self):
+        head = self.branch_behind(30)
+        git(self.work, 'push', '-q', 'origin', 'feature')
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        merge = git(self.work, 'rev-parse', 'HEAD')
+        self.assertNotEqual(merge, head)
+        self.assertIn('fractal-test: the branch is 30 commits behind main, more than 24: merged origin/main', out)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD^2'), git(self.work, 'rev-parse', 'origin/main'))
+        statement, = self.statements()
+        self.assertIn(git(self.work, 'rev-parse', 'HEAD^{tree}'), json.dumps(statement))  # the head tree, not an st-test merge-tree commit
+        self.assertNotIn('st-test@example.invalid', git(self.work, 'log', '-1', '--format=%ae %ce'))
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], merge)
+        self.assertIn(f'pushed feature at the merge {merge[:12]} to origin', out)
+
+    def test_a_branch_within_the_bound_is_not_merged(self):
+        head = self.branch_behind(20)
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
+        self.assertNotIn('merged origin/main', out)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')  # st-test pushes a branch only when it merged
+
+    def test_a_merge_that_conflicts_stops_the_run_with_the_branch_as_it_was(self):
+        head = self.branch_behind(0)
+        self.main_commits('b.txt', 'main wrote it too')
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))
+        ran = Path(self.tmp.name) / 'ran'
+        with mock.patch.object(st_test, 'target_commit', return_value=head):  # past the early merge check, as when main moves during the wait
+            code, out, err = self.run_st_test('--check', 'demo', command=['sh', '-c', f'touch {ran}'])
+        self.assertIn('failure: protected files differ from the branch point, so fractal-test merges origin/main into the branch before it signs, '
+                      'and it does not merge cleanly (b.txt)', str(code))
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
+        self.assertEqual(git(self.work, 'status', '--porcelain', '--untracked-files=no'), '')
+        self.assertFalse((self.work / '.git/MERGE_HEAD').exists())
+        self.assertFalse(ran.exists())
+
+    def test_a_checkout_changed_during_the_wait_is_not_merged(self):
+        head = self.branch_behind(0)
+        self.main_commits('.st/evidence-skip-policy.json', json.dumps(POLICY, indent=1))
+        real_acquire = st_test.acquire_tree
+        def edits_while_waiting(*args, **kwargs):
+            (self.work / 'a.txt').write_text('edited during the wait\n')
+            return real_acquire(*args, **kwargs)
+        with mock.patch.object(st_test, 'acquire_tree', side_effect=edits_while_waiting):
+            code, out, err = self.run_st_test('--check', 'demo')
+        self.assertIn('the checkout now has uncommitted changes to tracked files', str(code))
+        self.assertEqual(git(self.work, 'rev-parse', 'HEAD'), head)
+
+    def test_a_remote_branch_with_commits_the_branch_lacks_is_not_pushed(self):
+        self.branch_behind(25)
+        git(self.work, 'push', '-q', 'origin', 'feature')
+        git(self.work, 'commit', '-q', '--allow-empty', '-m', 'only on the remote')
+        theirs = git(self.work, 'rev-parse', 'HEAD')
+        git(self.work, 'push', '-q', 'origin', 'feature')
+        git(self.work, 'reset', '-q', '--hard', 'HEAD^')
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertIn(f'origin/feature has commits this branch lacks ({theirs[:12]})', str(code))
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature').split()[0], theirs)  # never forced
+
+    def test_a_detached_head_is_merged_and_signed_but_not_pushed(self):
+        self.branch_behind(25)
+        git(self.work, 'checkout', '-q', '--detach')
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertIn('is not pushed (a detached HEAD); push it yourself', out)
+        self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')
 
     def test_a_branch_runs_the_self_contained_base_copy_once(self):
         stub = ('import json, os, sys\n'
