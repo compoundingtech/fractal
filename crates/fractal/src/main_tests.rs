@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn github_watch_line_shows_throttling_without_a_new_wire_state() {
+    let view = serde_json::json!({
+        "thread": "acme/garden#12", "state": "active",
+        "reason": "throttled: local observer budget reached, next slot at 1000 (Unix ms)"
+    });
+    let line = gh_watch_line(&view, false);
+    assert!(line.contains("active (throttled: local observer budget reached"));
+    assert!(line.contains("next slot at 1000"));
+    assert!(!line.contains("degraded"));
+}
+
+#[test]
 fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
     let value = "fabric://devbox/st3-client-v0";
     let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
