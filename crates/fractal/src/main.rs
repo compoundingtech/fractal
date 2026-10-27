@@ -6390,7 +6390,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
         assistant_receipts: Default::default(),
-        private_notes: Arc::new(fractal_store::private_notes::Authority {
+        private_notes: Arc::new(fractal_daemon::private_notes::Authority {
             catalogs: config.private_notes_catalogs.clone(),
         }),
     };

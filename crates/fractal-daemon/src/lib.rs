@@ -81,6 +81,7 @@ pub use fractal_peer::peer;
 pub use fractal_reconcile::placement;
 pub use fractal_store::person_request;
 pub use fractal_kernel::pricing;
+pub use fractal_store::private_notes;
 pub use smallclaims::{performance, profile};
 pub use fractal_kernel::projection;
 pub use fractal_store::provenance;

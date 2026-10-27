@@ -204,7 +204,7 @@ pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
-    pub private_notes: Arc<fractal_store::private_notes::Authority>,
+    pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
     pub node: String,

@@ -4179,7 +4179,7 @@ pub struct Fence {
     pub runtime_desired_revision: Option<String>,
     pub terminal_sequence: Option<u64>,
     pub preview_token: Option<String>,
-    pub private_notes: Option<fractal_store::private_notes::NotesFence>,
+    pub private_notes: Option<crate::private_notes::NotesFence>,
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {

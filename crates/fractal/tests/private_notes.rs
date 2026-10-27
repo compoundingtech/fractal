@@ -1,4 +1,4 @@
-use fractal_store::private_notes::{Authority, NotesWrite};
+use fractal_daemon::private_notes::{Authority, NotesWrite};
 use std::fs;
 use std::os::unix::fs::{PermissionsExt as _, symlink};
 
@@ -18,7 +18,7 @@ impl Fixture {
         Self { root, authority: Authority { catalogs: vec![catalog] }, uri }
     }
     fn carrier(&self) -> std::path::PathBuf { self.authority.catalogs[0].join("agents/node/worker/resources/private-notes.md") }
-    fn write(&self, key: &str, write: &NotesWrite) -> Result<serde_json::Value, fractal_store::model::St3Error> {
+    fn write(&self, key: &str, write: &NotesWrite) -> Result<serde_json::Value, fractal_daemon::model::St3Error> {
         self.authority.write("node", self.root.path(), "person/operator", key, write)
     }
 }
@@ -141,7 +141,7 @@ fn requested_audit_refusal_never_changes_private_bytes() {
     let write = NotesWrite { uri: fixture.uri.clone(), markdown: "not admitted\n".into(), fence: initial.fence };
     let result = fixture.authority.write_with_audit(
         "node", fixture.root.path(), "person/operator", "refused", &write,
-        || Err(fractal_store::model::St3Error::new("forbidden", "injected requested audit refusal")),
+        || Err(fractal_daemon::model::St3Error::new("forbidden", "injected requested audit refusal")),
         || panic!("completion cannot run without requested audit"),
     );
     assert_eq!(result.unwrap_err().code, "forbidden");
@@ -157,7 +157,7 @@ fn completion_audit_failure_survives_restart_and_requires_exact_key_recovery() {
     let write = NotesWrite { uri: fixture.uri.clone(), markdown: "durable private replacement\n".into(), fence: initial.fence };
     let result = fixture.authority.write_with_audit(
         "node", fixture.root.path(), "person/operator", "original", &write, || Ok(()),
-        || Err(fractal_store::model::St3Error::new("internal", "injected completion audit refusal")),
+        || Err(fractal_daemon::model::St3Error::new("internal", "injected completion audit refusal")),
     );
     assert_eq!(result.unwrap_err().code, "private-notes-indeterminate");
     let before = fs::metadata(fixture.carrier()).unwrap();

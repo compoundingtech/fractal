@@ -1,5 +1,5 @@
 use super::*;
-use fractal_store::private_notes::{NotesFence, NotesWrite, operation_key};
+use crate::private_notes::{NotesFence, NotesWrite, operation_key};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,7 +112,7 @@ pub(super) async fn write(state: &AppState, session: &ClientSession, request: &m
     // A graph failure after local completion remains an error; exact-key retry
     // recovers the private receipt and idempotently publishes completion.
     let audit = ClaimInput {
-        subject: format!("resource/{}", crate::graph::uri_reference_name(&write.uri)),
+        subject: format!("resource/{}", crate::declaration_syntax::uri_reference_name(&write.uri)),
         kind: "resource.observed".into(),
         actor: Some(session_claim_actor(session)),
         fields: BTreeMap::from([
@@ -173,7 +173,7 @@ mod tests {
             "agent \"worker\" {{\n host \"example\"\n resource \"notes\" uri=\"{URI}\"\n}}\n"
         )).unwrap();
         let mut state = super::super::tests::test_state_named(root, "example");
-        state.private_notes = Arc::new(fractal_store::private_notes::Authority { catalogs: vec![catalog] });
+        state.private_notes = Arc::new(crate::private_notes::Authority { catalogs: vec![catalog] });
         state
     }
 
@@ -225,7 +225,7 @@ mod tests {
             stale.idempotency_key = format!("notes-stale-{index}-00000001");
             stale.parameters["markdown"] = "stale replacement".into();
             assert_eq!(invoke(&state, &session, stale).await.unwrap_err().code, "stale-fence");
-            let resource = format!("resource/{}", crate::graph::uri_reference_name(URI));
+            let resource = format!("resource/{}", crate::declaration_syntax::uri_reference_name(URI));
             let claims = state.store.claims_for(&resource, Some("resource.observed")).unwrap();
             let completed = claims.iter().filter(|claim| claim.body["fields"]["stage"] == "completed"
                 && claim.body["fields"]["session_actor"] == actor).collect::<Vec<_>>();
@@ -283,7 +283,7 @@ mod tests {
         use std::os::unix::fs::MetadataExt as _;
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
-        let mut session = ClientSession::for_tests_scoped("client/paired-example", "person/ada", &["read.projections", "control.work"]);
+        let mut session = ClientSession::for_tests_scoped("client/paired-example", "person/ada", &["read.projections", "control.work", "control.messages"]);
         let notes = read(&state, &session).await;
         let request = action(&notes, "notes-audit-recovery-0001", "Private durable context.\n");
         let graph = rusqlite::Connection::open(root.path().join("graph.db")).unwrap();
@@ -321,7 +321,7 @@ mod tests {
         assert_eq!(recovered["private_notes"], repeated["private_notes"]);
         let after = std::fs::metadata(&carrier).unwrap();
         assert_eq!((before.ino(), before.mtime(), before.mtime_nsec()), (after.ino(), after.mtime(), after.mtime_nsec()));
-        let resource = format!("resource/{}", crate::graph::uri_reference_name(URI));
+        let resource = format!("resource/{}", crate::declaration_syntax::uri_reference_name(URI));
         let claims = state.store.claims_for(&resource, Some("resource.observed")).unwrap();
         assert_eq!(claims.len(), 2);
         for claim in claims {
