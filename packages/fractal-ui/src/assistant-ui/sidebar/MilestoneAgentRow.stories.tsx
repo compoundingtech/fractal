@@ -136,8 +136,28 @@ function AllStatesSidebar({ scheme }: { readonly scheme: Scheme }) {
   </ThemePortal></main>
 }
 
-const meta = { title: 'Fractal UI/Sidebar/Milestone agent row', component: MilestoneAgentRow, parameters: { layout: 'fullscreen', docs: { description: { component: 'RM1 SR-2 row (48px, two lines) with SG-1 · G3 glyphs. Frozen rows mute every tone and draw a shape cue for every state, so working and idle stay apart; stale is never the danger red.' } } } } satisfies Meta<typeof MilestoneAgentRow>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Sidebar/Milestone agent row', component: MilestoneAgentRow, parameters: { layout: 'fullscreen', docs: { description: { component: 'RM1 SR-2 row (48px, two lines) with SG-1 · G3 glyphs. Frozen rows mute every tone and draw a shape cue for every state, so working and idle stay apart; stale is never the danger red.' } } } } satisfies Meta<typeof MilestoneAgentRow>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'GlyphStates:contract-fixture',
+  'NativeOverlaysThemed:contract-fixture',
+  'NativeOverlaysThemedLight:contract-fixture',
+  'PhoneFocusNoHover:contract-fixture',
+  'PhoneFocusNoHoverLight:contract-fixture',
+  'PhoneTouchTargets:contract-fixture',
+  'PhoneTouchTargetsLight:contract-fixture',
+  'PointerSizing:contract-fixture',
+  'PointerSizingLight:contract-fixture',
+  'ReportedDetails:contract-fixture',
+  'RowActions:contract-fixture',
+  'TitleReach:contract-fixture',
+  'TitleReachLight:contract-fixture',
+  'TwoLineAndNesting:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 const glyph = (row: Element) => row.querySelector<SVGElement>('[data-row-column="status"] svg')!

@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
         client_relay: None,
         native_session_home: Some(root.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     };
     let server_socket = socket.clone();
     let server =

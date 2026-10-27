@@ -1604,12 +1604,17 @@ and does not substitute ordinary person grants on older servers.
 The original slice-B proof-gated mode remains a legacy branch capability; the standalone
 adapter does not use it, does not send its proof header, and has no SCG dependency.
 In consent-at-grant mode, the same six scoped reads authorize against the current grant on
-every request and revalidate it immediately before returning the response. Envelope budgets
+every request and revalidate it immediately before returning the response. The response does not
+wait for their read-used and read-outcome receipts: after that final check they are queued in a
+bounded queue that a single writer commits in batches without a timer; a crash can lose receipts
+still queued. Proof-gated
+`approval-once` reads keep writing both receipts before the response. See
+[read receipts](../external-assistants.md#read-receipts). Envelope budgets
 default to 4096 bytes with a 16384-byte ceiling. Over-budget responses return an explicit
 `response-budget-exceeded` error, mapped by MCP to `incomplete`, never silently clipped data.
 
 `attention` and `attention-rich` accept optional `agent_id` for one exact canonical agent.
-`st_alerts_list` exposes this selector and already returns the rich actionable request,
+`fractal_alerts_list` exposes this selector and already returns the rich actionable request,
 episode, target and evidence when present; an extra detail call is not routinely required.
 Matching uses the same agent association disclosed in each row's `agent_id`, never title
 search or alias resolution. Only matching owner-visible published alerts are paged, with
@@ -1619,7 +1624,7 @@ An empty page means no matching published alerts, not absence of work or priorit
 This narrows output pagination, not native publication scanning, and adds no read authority.
 
 `agents` and `agents-rich` accept an optional `agent_id` containing an exact canonical
-`agent/...` identifier. `st_agents_list` exposes the same selector: for a known agent,
+`agent/...` identifier. `fractal_agents_list` exposes the same selector: for a known agent,
 `{"agent_id":"agent/chief-of-staff"}` returns at most that agent's existing metadata row,
 or an empty page if it is absent from the assistant-visible publication. This is not alias
 resolution or an assertion that an absent agent has no work. Filtering precedes page
@@ -2600,6 +2605,29 @@ ST3_TERMINALS_COMPAT_BIN=/path/to/older/st3 cargo test -p fractal --test integra
 
 Choose a binary built before these terminal filters. The fake legacy-server refusal
 and escaping test, server filter/paging tests, and TypeScript client checks run in CI.
+
+### Message author and recipients
+
+Capability `conversation-message-participants` v1 and
+`X-St3-Features: conversation-message-participants.v1` opt into optional message
+body `author: ActorRef` and `recipients: ParticipantRef[]`. Prefer these when
+present; otherwise retain the existing from/to fallback. The scalar from/to
+properties retain their optional SenderRef/TimelineRecipientRef scalar types,
+including existing assistant principals. A runtime-authored wake or
+fault has author `daemon/runtime`; it omits the invalid legacy from value rather
+than relabeling that daemon as an agent/person. Absent or unprovable canonical
+claim actors supply no author. The typed owner relay preserves both fields;
+unnegotiated gateway/cache clients receive neither.
+
+Recipients currently contains the one ParticipantRef destination proven by this
+canonical message.sent claim. Assistant destinations keep their existing legacy
+scalar without an invented recipient. Legacy broadcasts stored as multiple distinct message
+subjects remain distinct: neither matching text nor temporal proximity proves
+one shared send. This slice adds truthful optional identities without changing
+SEND, receipt, idempotency, grouping, ordering or paging semantics. Native turns
+without an authoritative graph message claim do not invent these fields.
+Daemons roll out first; unnegotiated clients receive neither addition and keep
+working against the unchanged scalar types. New consumers opt in explicitly.
 
 ### Native delivery receipt links
 
