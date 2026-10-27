@@ -1,6 +1,6 @@
 import type { ArrangementPage, EnvelopeOf } from '@fractal/client'
 import { describe, expect, it, vi } from 'vitest'
-import { st3InventoryGateway } from './arrangements.ts'
+import { fractalInventoryGateway } from './arrangements.ts'
 import { testCapabilities, testSelection, testSnapshot } from '../folders/testGateway.ts'
 
 interface PendingRequest {
@@ -14,7 +14,7 @@ const harness = async (order: 'editor-first' | 'follow-first') => {
   const requests: PendingRequest[] = []
   let discoveries = 0
   const envelope = <T>(value: T): EnvelopeOf<T> => ({ api_version: 'st3.client.v0', request_id: 'request/example', snapshot: testSnapshot, value })
-  const gateway = st3InventoryGateway({
+  const gateway = fractalInventoryGateway({
     baseUrl: 'https://gateway.example.test',
     fetchImpl: async (input, init) => {
       if (String(input).endsWith('/capabilities')) { discoveries++; return Response.json(envelope(testCapabilities)) }

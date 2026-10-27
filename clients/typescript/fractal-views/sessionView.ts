@@ -77,36 +77,36 @@ export async function listSessionPages(
 
 type Entry = { id: string; sequence: number; type: string; body: unknown; timestamp?: string };
 
-/** Reading back past the live window, one page of st's session timeline at a time. */
+/** Reading back past the live window, one page of Fractal's session timeline at a time. */
 export type Older = {
   /** At least one earlier page was read: these entries are not in the live window. */
   paged: boolean;
-  /** st said there is nothing before the oldest entry held: the session's start. */
+  /** Fractal said there is nothing before the oldest entry held: the session's start. */
   start: boolean;
-  /** st's cursor for the page before the oldest one read, and when (ms) it was read. */
+  /** Fractal's cursor for the page before the oldest one read, and when (ms) it was read. */
   cursor?: { value: string; at: number };
   loading: boolean;
   /** Why the last page could not be read; scrolling up tries again. */
   failed?: string;
 };
-export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; historyVersion: number; /** The conversation header st last sent (`conversation-blocks.v1`), register fields first. */ header?: ConversationHeader; older: Older };
+export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; historyVersion: number; /** The conversation header Fractal last sent (`conversation-blocks.v1`), register fields first. */ header?: ConversationHeader; older: Older };
 /** The session and history snapshot an older-page request started from. */
 export type OlderRequest = { sessionId: string; historyVersion: number };
 const noOlder: Older = { paged: false, start: false, loading: false };
 
-// Everything a person reads in a conversation: the harness's turns, tool calls and results, Small
-// Talk st joins in, and st's diagnostics. Status heartbeats and usage are not conversation.
+// Everything a person reads in a conversation: the harness's turns, tool calls and results, Fractal
+// messages joined into the stream, and Fractal's diagnostics. Status heartbeats and usage are not conversation.
 export function isConversational(entry: Entry): boolean {
   return entry.type !== 'status' && entry.type !== 'usage';
 }
 
-/** st's order: by time, then by sequence. */
+/** Fractal's order: by time, then by sequence. */
 function before(a: Entry, b: Entry): number {
   const at = (a.timestamp ?? '').localeCompare(b.timestamp ?? '');
   return at !== 0 ? at : a.sequence - b.sequence;
 }
 
-/** Whether st holds entries before the oldest one held. */
+/** Whether Fractal holds entries before the oldest one held. */
 function moreBefore(older: Older, live: boolean): boolean {
   return older.paged ? !older.start : live;
 }
@@ -176,14 +176,14 @@ export function olderFailed<T extends Entry>(conversation: Conversation<T>, requ
   return { ...conversation, older: { ...conversation.older, loading: false, failed: reason } };
 }
 
-/** st keeps a page cursor for five minutes; one older than this starts again from the newest. */
+/** Fractal keeps a page cursor for five minutes; one older than this starts again from the newest. */
 const CURSOR_LIFE_MS = 240_000;
-/** Entries per page read back: st's largest, so a long session takes few requests. */
+/** Entries per page read back: Fractal's largest, so a long session takes few requests. */
 export const OLDER_PAGE = 200;
 
 /**
  * The page before `oldest`. A live cursor continues where the last page ended. Without one (or
- * once st has let it go), pages are read again from the newest until one reaches past `oldest`,
+ * once Fractal has let it go), pages are read again from the newest until one reaches past `oldest`,
  * so nothing between is skipped.
  */
 export async function readOlder<T extends Entry>(

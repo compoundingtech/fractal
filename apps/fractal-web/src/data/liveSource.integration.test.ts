@@ -28,7 +28,7 @@ const snapshot: Snapshot = {
   store_index: 1,
 }
 
-/** st's action digest: the whole request but its fence, with object keys in a stable order. */
+/** Fractal's action digest: the whole request but its fence, with object keys in a stable order. */
 const actionDigest = ({ fence: _fence, ...request }: { readonly fence?: unknown }): string =>
   JSON.stringify(request, (_key, value: unknown) =>
     value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -77,11 +77,11 @@ class Gateway {
   rejectSend = false
   currentSnapshot: Snapshot | undefined = snapshot
   staleSendFence = false
-  /** Take the send, then answer st's 503 `message-send-unconfirmed` instead of its result. */
+  /** Take the send, then answer Fractal's 503 `message-send-unconfirmed` instead of its result. */
   unconfirmSend = false
   capabilityReads = 0
   readonly messageActions: MessageSendAction[] = []
-  /** st's durable answer per idempotency key, with the digest of the request that earned it. */
+  /** Fractal's durable answer per idempotency key, with the digest of the request that earned it. */
   private readonly sendReceipts = new Map<string, { readonly digest: string; readonly value: unknown }>()
   /** Resolves once the gateway has derived the send action's message identity. */
   readonly nextAction = (count = 1) =>
@@ -221,7 +221,7 @@ class Gateway {
           snapshot_id: snapshot.id,
         }
         this.sendReceipts.set(action.idempotency_key, { digest: actionDigest(action), value })
-        // The send completes, but st could not confirm it within its deadline.
+        // The send completes, but Fractal could not confirm it within its deadline.
         if (this.unconfirmSend) return Response.json({
           api_version: 'st3.client.v0', error_version: 'st3.client.error.v0',
           code: 'message-send-unconfirmed', message: 'st could not confirm the send in time',
@@ -1544,7 +1544,7 @@ describe('optimistic conversation sends', () => {
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [{ _tag: 'Text', sendState: { _tag: 'Sent' } }] },
         })
-        // st refuses the rebuilt request itself: the same key with a different action.
+        // Fractal refuses the rebuilt request itself: the same key with a different action.
         const conflict = yield* Effect.promise(() => gateway.fetch('http://gateway.example/v1/client/actions', {
           method: 'POST',
           body: JSON.stringify({ ...first, id: rebuilt.id, parameters: rebuilt.parameters }),

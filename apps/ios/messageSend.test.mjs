@@ -4,11 +4,11 @@ import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
 import { resendMessage, sendMessage } from './messageSend.ts';
 
 const refused = (code, status, details = {}, retryable = false) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable, details }, status);
-// st could not confirm the send in time; it may still complete.
+// Fractal could not confirm the send in time; it may still complete.
 const unconfirmed = () => refused('message-send-unconfirmed', 503, { applied: 'unknown', action_id: 'action/1', idempotency_key: 'action/1' });
 const rateLimited = () => refused('rate-limited', 429, { applied: 'none' }, true);
 
-// A scripted st: each send answers the next step. Each built request is new: its own id, key and
+// A scripted Fractal: each send answers the next step. Each built request is new: its own id, key and
 // signature nonce, as the app signs one.
 function world(steps) {
   const log = { sent: [], built: 0, fences: 0, waited: [] };
@@ -30,14 +30,14 @@ function world(steps) {
   return { ports, log };
 }
 
-test('a send st confirms at once is sent, once', async () => {
+test('a send Fractal confirms at once is sent, once', async () => {
   const { ports, log } = world(['ok']);
   assert.deepEqual(await sendMessage(ports), { how: 'sent' });
   assert.equal(log.sent.length, 1);
   assert.equal(log.built, 1);
 });
 
-test('a send st leaves unconfirmed twice is unconfirmed and carries the exact request it sent', async () => {
+test('a send Fractal leaves unconfirmed twice is unconfirmed and carries the exact request it sent', async () => {
   const { ports, log } = world([unconfirmed(), unconfirmed()]);
   const outcome = await sendMessage(ports);
   assert.equal(outcome.how, 'unconfirmed');
@@ -48,7 +48,7 @@ test('a send st leaves unconfirmed twice is unconfirmed and carries the exact re
   assert.deepEqual(log.waited, [1000]);
 });
 
-test('an unconfirmed send whose repeat st confirms is sent', async () => {
+test('an unconfirmed send whose repeat Fractal confirms is sent', async () => {
   const { ports, log } = world([unconfirmed(), 'ok']);
   assert.deepEqual(await sendMessage(ports), { how: 'sent' });
   assert.equal(log.built, 1);
@@ -71,7 +71,7 @@ test('sending again repeats the unconfirmed request with only its fence read ane
   assert.equal(fence.snapshot_id, 'snapshot/fresh-1');
 });
 
-test('sending again that st still does not confirm stays unconfirmed with the same request', async () => {
+test('sending again that Fractal still does not confirm stays unconfirmed with the same request', async () => {
   const { ports, log } = world([unconfirmed()]);
   const request = (await world([]).ports.build());
   const outcome = await resendMessage(ports, request);

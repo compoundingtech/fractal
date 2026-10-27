@@ -1,7 +1,7 @@
 /**
  * Deterministic `TerminalScreen` frame generator for the renderer bake-off.
  *
- * Scenes reproduce what st republishes from real agent PTYs: Claude Code and Codex TUIs mid-turn
+ * Scenes reproduce what Fractal republishes from real agent PTYs: Claude Code and Codex TUIs mid-turn
  * (truecolor + 256-colour + ANSI, box drawing, an animated 10 Hz spinner with shimmer, streaming
  * text, a drawn inverse cursor vs a real terminal cursor), a Unicode/width probe, and a worst-case
  * frame that restyles every cell. Frames are pure functions of `(scene, frame, size)`.
