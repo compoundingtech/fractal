@@ -1127,6 +1127,67 @@ pub const SEALED_IDENTITY_TOMBSTONES_SQL: &str = "SELECT writer, sequence, envel
      ORDER BY writer, sequence, envelope_hash
      LIMIT ?5";
 
+/// The seal-identity digest this store last walked, and what it was walked against.
+///
+/// `checkpoint_sealed_identities` returns it again, without walking, when one snapshot shows the
+/// same cut, the same `checkpoint_capture_epoch` value, and no envelope dated before the cut among
+/// the rowids between `base_rowid`, the seal row asked for, and the guard's frontier. That answer
+/// is exactly what a walk in that snapshot would return:
+///
+/// 1. The set is a function of four tables: the identities of `replica_envelopes` rows at or
+///    below the seal row, dated before the cut, with no record that is not repaired whose claim
+///    is dated at or after the cut (`SEALED_IDENTITY_ENVELOPES_SQL`, reading `replica_records`
+///    identity, state and claim reference, and `claims` id and accepted time), together with the
+///    `checkpoint_envelopes` tombstones dated before the cut (`SEALED_IDENTITY_TOMBSTONES_SQL`).
+/// 2. A digest is kept only when the guard covers it: its registered cut is at or above the
+///    memo's cut, and its frontier at or above `base_rowid`. Both only grow (registration writes
+///    `MAX`, nothing else writes them), so the guard covers the memo for its whole life.
+/// 3. While the guard covers it, every committed change that can alter the set over rows at or
+///    below `base_rowid` increments the epoch in its own transaction, on every connection
+///    (`checkpoint_capture_epoch.rs`, whose predicates are monotone in the cut and frontier):
+///    - an envelope inserted dated before the guard's cut at any rowid; one deleted, or changed
+///      in identity, accepted time or rowid, while at or below the frontier and before the cut
+///      on either side of the change; a REPLACE colliding with such an envelope;
+///    - a record inserted, deleted or changed in identity, state or claim reference while its
+///      envelope is such an envelope, so repairs and their undoing;
+///    - a claim inserted, deleted or changed in id or accepted time while a record of such an
+///      envelope references it, so a late claim that excludes its envelope, and its removal;
+///    - a tombstone dated before the cut inserted, deleted or changed: trims and adoption;
+///    - but not a change confined to an envelope dated at or after the cut, which is outside the
+///      set whatever its records say.
+/// 4. Rows above the frontier are fenced only on insert: an update can move one before the cut
+///    without moving the epoch. The quiet check reads their dates in the reusing snapshot itself,
+///    so the rows between `base_rowid` and the seal row add nothing to the set there. A seal pass
+///    registers its seal row before reading, so those rows are the few that arrived since.
+/// 5. A walk is kept only if the epoch read after it equals the one read in the snapshot before
+///    it. The epoch only grows, so no fenced change committed while it ran, and every page it
+///    read held the same set as that snapshot.
+///
+/// The memo is in memory. An open (and with it a trigger migration) and an offline restore start
+/// without one, so a restored file that repeats an epoch value never meets a memo of another.
+/// The epoch also moves for history the set does not read (bodies, projections): that costs a
+/// walk, never a wrong digest.
+#[derive(Clone, Debug)]
+pub(crate) struct SealedIdentityMemo {
+    cut: i64,
+    /// The walk read `replica_envelopes` up to this row; the guard's frontier is at or above it.
+    base_rowid: i64,
+    epoch: i64,
+    digest: String,
+    count: usize,
+}
+
+struct SealProbe {
+    seal_rowid: i64,
+    epoch: i64,
+    frontier: i64,
+    /// The guard covers the cut and the rows between the seal row and the frontier are quiet,
+    /// so a walk up to the lower of them can be kept.
+    memoizable: bool,
+    /// The memo holds in this snapshot.
+    reuses: bool,
+}
+
 #[derive(Debug)]
 pub(super) struct CheckpointCaptureChanged;
 
@@ -1513,22 +1574,65 @@ impl Store {
 
     /// The identities `checkpoint_sealed_set_through` would read, without the claims: what a
     /// seal and the status need, every few minutes, on a store of any size.
+    ///
+    /// The walk reads every envelope this node holds, so this reuses the digest it last walked
+    /// while nothing it covers has changed: a seal pass on an unchanged store costs a few rows,
+    /// not the whole history. See `SealedIdentityMemo` for why the reused digest is exact, and
+    /// `checkpoint_sealed_identities_paged` for the walk itself, which never reuses.
     pub fn checkpoint_sealed_identities(
         &self,
         cut_unix_ms: u128,
         through_rowid: Option<i64>,
     ) -> Result<SealedIdentities> {
-        self.checkpoint_sealed_identities_paged(cut_unix_ms, through_rowid, SEALED_ENVELOPE_PAGE)
+        self.runtime.checkpoint_preflight()?;
+        self.seal_local_batches()?;
+        let cut = i64::try_from(cut_unix_ms)?;
+        let memo = self
+            .sealed_identity_memo
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .filter(|memo| memo.cut == cut);
+        let probe = self.seal_probe(cut, through_rowid, memo.as_ref())?;
+        if let (Some(memo), true) = (memo, probe.reuses) {
+            let digest = memo.digest.clone();
+            let count = memo.count;
+            // Every rowid between the memo's base and the frontier is quiet, so the frontier
+            // is a base too, and the next quiet check starts there.
+            self.keep_sealed_identity_memo(SealedIdentityMemo { base_rowid: probe.frontier, ..memo });
+            return Ok(SealedIdentities { digest, count, seal_rowid: probe.seal_rowid });
+        }
+        if probe.memoizable {
+            let base_rowid = probe.seal_rowid.min(probe.frontier);
+            let (digest, count) = self.sealed_identity_walk(cut, base_rowid, SEALED_ENVELOPE_PAGE)?;
+            let epoch: i64 = self.read_snapshot_unindexed(|| {
+                Ok(self.readers.get().query_row(
+                    "SELECT value FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0),
+                )?)
+            })?;
+            if epoch == probe.epoch {
+                self.keep_sealed_identity_memo(SealedIdentityMemo {
+                    cut,
+                    base_rowid,
+                    epoch,
+                    digest: digest.clone(),
+                    count,
+                });
+                return Ok(SealedIdentities { digest, count, seal_rowid: probe.seal_rowid });
+            }
+            if base_rowid == probe.seal_rowid {
+                // The walk was the full walk of the seal, read as it always was; only the
+                // captured history it covers changed while it ran, so it is not kept.
+                return Ok(SealedIdentities { digest, count, seal_rowid: probe.seal_rowid });
+            }
+        }
+        let (digest, count) = self.sealed_identity_walk(cut, probe.seal_rowid, SEALED_ENVELOPE_PAGE)?;
+        Ok(SealedIdentities { digest, count, seal_rowid: probe.seal_rowid })
     }
 
-    /// `checkpoint_sealed_identities`, reading at most `envelope_page` rows of each identity table
-    /// per read. The digest is over identities in key order, and both `replica_envelopes` and
-    /// `checkpoint_envelopes` are keyed by identity, so the pass walks the two keys together and
-    /// digests each identity as it passes: it holds one page, not the set (#2492). Each read
-    /// takes the next page of both tables in one snapshot and consumes the key range both pages
-    /// cover, so a trim moving an identity from an envelope to its tombstone between reads can
-    /// neither drop nor repeat it. Reads are separate snapshots, so the WAL can be checkpointed
-    /// between them; one read of the whole set held the WAL pinned for 35 seconds.
+    /// `checkpoint_sealed_identities`, always walking both identity tables and reading at most
+    /// `envelope_page` rows of each per read. It never reuses a digest, so it is also what the
+    /// reused digest is checked against.
     pub fn checkpoint_sealed_identities_paged(
         &self,
         cut_unix_ms: u128,
@@ -1548,7 +1652,69 @@ impl Store {
             )?;
             through_rowid.map_or(high, |through| through.min(high))
         };
-        let cut = i64::try_from(cut_unix_ms)?;
+        let (digest, count) = self.sealed_identity_walk(i64::try_from(cut_unix_ms)?, seal_rowid, page)?;
+        Ok(SealedIdentities { digest, count, seal_rowid })
+    }
+
+    fn keep_sealed_identity_memo(&self, memo: SealedIdentityMemo) {
+        *self.sealed_identity_memo.lock().unwrap_or_else(PoisonError::into_inner) = Some(memo);
+    }
+
+    /// One snapshot of the seal row, the capture guard, and whether `memo` still holds there.
+    fn seal_probe(
+        &self,
+        cut: i64,
+        through_rowid: Option<i64>,
+        memo: Option<&SealedIdentityMemo>,
+    ) -> Result<SealProbe> {
+        self.read_snapshot_unindexed(|| {
+            let connection = self.readers.get();
+            let (high, epoch, frontier, guarded_cut): (i64, i64, i64, i64) = connection.query_row(
+                "SELECT (SELECT COALESCE(MAX(rowid), 0) FROM replica_envelopes),
+                        value, envelope_frontier, cut_unix_ms
+                 FROM checkpoint_capture_epoch WHERE id=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            let seal_rowid = through_rowid.map_or(high, |through| through.min(high));
+            // No envelope with a rowid in (low, high] is dated before the cut, so none of them
+            // is in the set, whichever of those rows the set is read up to.
+            let quiet = |rowids: &[i64]| -> Result<bool> {
+                let low = rowids.iter().copied().min().unwrap_or_default();
+                let high = rowids.iter().copied().max().unwrap_or_default();
+                if low >= high {
+                    return Ok(true);
+                }
+                Ok(connection.query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM replica_envelopes
+                     WHERE rowid > ?1 AND rowid <= ?2
+                       AND CAST(accepted_at_unix_ms AS INTEGER) < ?3)",
+                    params![low, high, cut],
+                    |row| row.get(0),
+                )?)
+            };
+            // The guard's triggers fence this cut only while it is active and covers it.
+            let guarded = cut > 0 && guarded_cut >= cut;
+            let memoizable = guarded && quiet(&[seal_rowid, frontier])?;
+            let reuses = match memo {
+                Some(memo) if guarded && memo.cut == cut && memo.epoch == epoch => {
+                    quiet(&[memo.base_rowid, seal_rowid, frontier])?
+                }
+                _ => false,
+            };
+            Ok(SealProbe { seal_rowid, epoch, frontier, memoizable, reuses })
+        })
+    }
+
+    /// The digest and count of the identities before `cut` up to the `seal_rowid` row. The
+    /// digest is over identities in key order, and both `replica_envelopes` and
+    /// `checkpoint_envelopes` are keyed by identity, so the pass walks the two keys together and
+    /// digests each identity as it passes: it holds one page, not the set (#2492). Each read
+    /// takes the next page of both tables in one snapshot and consumes the key range both pages
+    /// cover, so a trim moving an identity from an envelope to its tombstone between reads can
+    /// neither drop nor repeat it. Reads are separate snapshots, so the WAL can be checkpointed
+    /// between them; one read of the whole set held the WAL pinned for 35 seconds.
+    fn sealed_identity_walk(&self, cut: i64, seal_rowid: i64, page: i64) -> Result<(String, usize)> {
         let identity = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(EnvelopeKey, bool)> {
             Ok((
                 EnvelopeKey {
@@ -1566,7 +1732,8 @@ impl Store {
         // negative.
         let mut after = (String::new(), -1_i64, String::new());
         loop {
-            let (envelopes, tombstones) = self.read_snapshot(|_| {
+            // The page's first statement starts its snapshot; both tables are read in it.
+            let (envelopes, tombstones) = self.read_snapshot_unindexed(|| {
                 let connection = self.readers.get();
                 let envelopes = connection
                     .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3247614039e2 owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ SEALED_IDENTITY_ENVELOPES_SQL)?
@@ -1617,11 +1784,7 @@ impl Store {
                 None => break,
             }
         }
-        Ok(SealedIdentities {
-            digest: hex::encode(digest.finalize()),
-            count,
-            seal_rowid,
-        })
+        Ok((hex::encode(digest.finalize()), count))
     }
 
     /// What the readers a checkpoint must preserve answer for each of `subjects` at

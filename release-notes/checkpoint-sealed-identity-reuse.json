@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "A node waiting for peer checkpoint seals reuses its sealed-identity digest until a change it covers lands, instead of walking every envelope on every pass",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index, trigger or migration change; the existing capture epoch and guard rows are used."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged: a reused digest equals a fresh walk, and any change the capture epoch fences forces a new walk."},
+  "compatibility": {"status": "none", "detail": "Same checkpoint status and seals; a waiting step registers its cut with the existing capture guard before reading."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy; the digest memo is in memory and starts empty."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores the per-pass walk; nothing is stored."}
+}

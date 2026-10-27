@@ -882,6 +882,9 @@ pub struct Store {
     pub trim_pause_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
+    /// The last seal-identity digest, and the capture epoch it holds for; see
+    /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
+    pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1224,6 +1227,7 @@ impl Store {
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
+            sealed_identity_memo: Mutex::new(None),
             runtime,
         })
     }
@@ -5724,12 +5728,29 @@ impl Store {
 
     #[track_caller]
     pub fn read_snapshot<T>(&self, read: impl FnOnce(u64) -> Result<T>) -> Result<T> {
+        self.read_snapshot_starting(current_index, read)
+    }
+
+    /// `read_snapshot` for a read that needs no claim index. The snapshot starts at the first
+    /// statement `read` runs, so every statement in it still reads one snapshot, without a
+    /// `current_index` read nobody uses.
+    #[track_caller]
+    pub fn read_snapshot_unindexed<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.read_snapshot_starting(|_| Ok(()), |()| read())
+    }
+
+    #[track_caller]
+    fn read_snapshot_starting<I, T>(
+        &self,
+        start: impl FnOnce(&Connection) -> Result<I>,
+        read: impl FnOnce(I) -> Result<T>,
+    ) -> Result<T> {
         let key = self.readers.key();
         // Reentry joins this thread's existing snapshot of this store, even when another
         // store's pin is newer: that connection is already inside its read transaction, so
         // BEGINning it again is both wrong and refused by SQLite.
         if let Some(connection) = crate::sqlite::pinned_reader_for(key) {
-            let index = current_index(&connection)?;
+            let index = start(&connection)?;
             return read(index);
         }
         // The snapshot's own entry: the guard below is lent out and dropped at once.
@@ -5754,7 +5775,7 @@ impl Store {
         let timing = crate::sqlite::ReaderTiming::start();
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5f4a6691287 owner=smallclaims::store TODO=trace-statement-and-value-representation */ "BEGIN")?;
         // The first read starts the snapshot; every later read in `read` sees the same one.
-        let index = current_index(&connection)?;
+        let index = start(&connection)?;
         drop(timing);
         live.snapshot_started(&connection);
         crate::sqlite::push_pinned_reader(key, connection);
