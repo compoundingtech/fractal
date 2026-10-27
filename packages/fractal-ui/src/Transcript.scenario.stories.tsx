@@ -1,6 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, waitFor } from 'storybook/test'
+import { ANCHOR_MS, manualClock } from '@fractal/scenarios'
 import { useScenarioSlice, type WireSlice } from '@fractal/scenarios/react'
 import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { Transcript } from './assistant-ui/composition/Transcript'
@@ -58,7 +60,38 @@ export const ScenarioToolResults: Story = { args: { family: 'tool-result' } }
 export const ScenarioToolResultsLight: Story = { ...ScenarioToolResults, args: { ...ScenarioToolResults.args, scheme: 'light' } }
 export const ScenarioReasoning: Story = { args: { family: 'reasoning' } }
 export const ScenarioReasoningLight: Story = { ...ScenarioReasoning, args: { ...ScenarioReasoning.args, scheme: 'light' } }
-export const ScenarioStreamingRevisions: Story = { args: { family: 'streaming' } }
+export const ScenarioStreamingRevisions: Story = {
+  args: { family: 'streaming' },
+  globals: { scenarioNow: ANCHOR_MS },
+  parameters: { scenarioClock: manualClock(ANCHOR_MS) },
+  beforeEach: ({ parameters }) => {
+    // Each browser play/replay starts from revision 1, using the kit's clock.
+    parameters.scenarioClock = manualClock(ANCHOR_MS)
+  },
+  play: async ({ canvasElement, parameters }) => {
+    const id = 'timeline-entry/scenario-transcript-families-builder-21'
+    const partial = 'The report totals are retained; checking the handoff summary.'
+    const final = 'All 18 checks passed. The export failed and its retry was cancelled; hand off the report totals, not an export artifact.'
+    const row = () => canvasElement.querySelectorAll<HTMLElement>(`[data-testid="agent-message"][data-item-id="${id}"]`)
+    await waitFor(async () => {
+      await expect(row()).toHaveLength(1)
+      await expect(row()[0]).toHaveTextContent(partial)
+      await expect(row()[0]?.querySelector('[data-testid="message-time"]')).toBeNull()
+      await expect(row()[0]?.closest('[data-testid="transcript-turn"]')?.querySelector('[data-testid="live-work"]')).not.toBeNull()
+    })
+    const clock: unknown = parameters.scenarioClock
+    if (typeof clock !== 'object' || clock === null || !('advance' in clock) || typeof clock.advance !== 'function') throw new Error('Streaming story requires the kit manual clock')
+    clock.advance(2_001)
+    await waitFor(async () => {
+      await expect(row()).toHaveLength(1)
+      await expect(row()[0]).toHaveTextContent(final)
+      await expect(canvasElement).not.toHaveTextContent(partial)
+      await expect(row()[0]?.querySelector('[data-testid="message-time"]')).not.toBeNull()
+      await expect(row()[0]?.closest('[data-testid="transcript-turn"]')?.querySelector('[data-testid="live-work"]')).toBeNull()
+      await expect(canvasElement.querySelector('[data-item-kind="Status"][data-item-id="timeline-entry/scenario-transcript-families-builder-22"]')).toHaveTextContent('completed')
+    })
+  },
+}
 export const ScenarioStreamingRevisionsLight: Story = { ...ScenarioStreamingRevisions, args: { ...ScenarioStreamingRevisions.args, scheme: 'light' } }
 export const ScenarioFailed: Story = { args: { family: 'failed' } }
 export const ScenarioFailedLight: Story = { ...ScenarioFailed, args: { ...ScenarioFailed.args, scheme: 'light' } }

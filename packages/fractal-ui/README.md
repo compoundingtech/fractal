@@ -65,6 +65,8 @@ Transcript's tool-call, tool-result, reasoning, streaming-revision and failed/ca
 families, and DeclarationPanel's structured mission fallback consume declared slices.
 The Transcript family stories pin `transcript-families` by default, project native
 conversation facts through the live timeline projection, and retain separate light variants.
+The streaming-revision plays reset the kit's manual clock, advance it past the catalog's
+2-second revision event, and assert one finalized row replaces the initial text in both themes.
 The existing Transcript contract-fixture stories remain unchanged.
 Composer and connection geometry checks pin populated data; separate scenario
 stories follow the toolbar. `OwnSendFollows` / `OwnSendFollowsLight` retain their
