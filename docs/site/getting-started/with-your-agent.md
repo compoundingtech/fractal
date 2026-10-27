@@ -14,6 +14,13 @@ Confirm the user has authorized installation, background execution, local harnes
 
 Check the [platform requirements](install.md). A Claude Code installation with completed native welcome, login, and workspace trust is required for the example below. Do not manufacture credentials, change permission modes, or try to answer provider authentication without the user. If authentication is missing, finish reachable installation steps and report that prerequisite precisely; the mission is not successful until it runs.
 
+Claude Enterprise and Team organizations must allow channels: ask an administrator to set
+`channelsEnabled: true` in Claude Code managed settings. Fractal's
+`--dangerously-load-development-channels plugin:st-channel@st` launch flag does not bypass
+organization policy. If Claude reports “blocked by org policy,” Fractal stops automatic
+restarts and reports the policy refusal on the agent. After the administrator enables
+channels, explicitly restart the agent.
+
 If Fractal is already installed or has working state, inspect it first and follow [upgrading](../guides/upgrading.md). Do not overwrite identities, reinstall over a different package manager, delete state, or start a second daemon on the same store.
 
 ## 2. Install without opening a UI
