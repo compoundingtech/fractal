@@ -4311,12 +4311,35 @@ async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
 }
 
 #[test]
+fn agents_subagents_are_reported_only_for_observing_drivers() {
+    let store = Store::open_memory("subagent-observers").unwrap();
+    let mut agents = vec![
+        json!({"id": "agent/claude", "driver": "claude"}),
+        json!({"id": "agent/codex", "driver": "codex"}),
+        json!({"id": "agent/omp", "driver": "omp"}),
+        json!({"id": "agent/pi", "driver": "pi"}),
+        json!({"id": "agent/opencode", "driver": "opencode"}),
+        json!({"id": "agent/other", "driver": "other"}),
+        json!({"id": "agent/no-driver"}),
+    ];
+
+    overlay_subagents(&store, &mut agents).unwrap();
+
+    for agent in &agents[..3] {
+        assert_eq!(agent.get("subagents"), Some(&json!([])), "{agent}");
+    }
+    for agent in &agents[3..] {
+        assert!(agent.get("subagents").is_none(), "{agent}");
+    }
+}
+
+#[test]
 fn agents_list_the_subagents_their_harness_runs_now() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let source = format!(
-        "version 2\nagent \"busy\" {{ workspace {0:?}; command \"true\" }}\n\
-             agent \"quiet\" {{ workspace {0:?}; command \"true\" }}\n",
+        "version 2\nagent \"busy\" {{ workspace {0:?}; harness \"claude\" {{}} }}\n\
+             agent \"quiet\" {{ workspace {0:?}; harness \"claude\" {{}} }}\n",
         root.path().display().to_string()
     );
     let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
