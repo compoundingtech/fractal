@@ -51,7 +51,7 @@ The rest are not causes:
 | `queued` | Ready, waiting its turn behind other work on a busy seat. |
 | `watching` | st's keep-open step. |
 
-The quiet limit is 30 minutes by default: the time st waits before it nudges an idle holder.
+The quiet limit is 15 minutes by default: the time st waits before it nudges an idle holder.
 `--quiet` changes it for one read.
 
 ## A run's verdict

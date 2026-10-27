@@ -1212,7 +1212,7 @@ enum MissionViewCommand {
     WaitingOn {
         #[arg(add = ArgValueCompleter::new(Complete(Entity::MissionRun { unfinished_only: true })))]
         run: String,
-        /// How long a step may go quiet before it counts as stuck, such as 45m (default 30m).
+        /// How long a step may go quiet before it counts as stuck, such as 45m (default 15m).
         #[arg(long)]
         quiet: Option<String>,
     },
