@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How long the per-PR suite takes on a dev box: scripts/st-test's own run records against the time objective.
 
-  scripts/st-test-report [RUNS.jsonl ...] [--hours 24 | --since 2026-10-24T00:00:00Z] [--slo-s 720] [--max-s 900] [--markdown]
+  scripts/fractal-test-report [RUNS.jsonl ...] [--hours 24 | --since 2026-10-24T00:00:00Z] [--slo-s 720] [--max-s 900] [--markdown]
 
 Reads the lines scripts/st-test appends after every run (default ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl, or ST_TEST_RUNS) and
 prints JSON, or with --markdown a short table. Nothing is written and nothing is run.
@@ -181,7 +181,7 @@ def main(argv, now=None):
     try:
         records, unreadable = read_records(args.files or [default_path()])
     except OSError as error:  # an unreadable file is an error, never zeros
-        print(f'st-test-report: cannot read the runs: {error}', file=sys.stderr)
+        print(f'fractal-test-report: cannot read the runs: {error}', file=sys.stderr)
         return 1
     result = report(records, since, until, args.slo_s, args.max_s, unreadable)
     print(markdown(result) if args.markdown else json.dumps(result, indent=2))

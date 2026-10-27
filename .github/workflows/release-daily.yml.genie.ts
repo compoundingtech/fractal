@@ -3,7 +3,7 @@ import { auditCaches } from './cache-audit.ts'
 import { githubWorkflow } from '../../repos/effect-utils/genie/external.ts'
 
 // Publishes once a day, only when main changed since the last release. It builds nothing: it
-// takes the archives that the newest successful main run of release-smalltalk.yml uploaded.
+// takes the archives that the newest successful main run of release-fractal.yml uploaded.
 // Tags made with this workflow's token do not start the tag workflow, so there is no second build.
 export default githubWorkflow(auditCaches({
   actionlint: linuxActionlintConfig,
@@ -37,7 +37,7 @@ export default githubWorkflow(auditCaches({
         ...fullHistoryCheckoutSteps(),
         {
           name: 'Publish the verified archives of main when it changed',
-          run: 'scripts/release-smalltalk-daily ${TAG:+--tag "$TAG"}',
+          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"}',
         },
       ],
     },

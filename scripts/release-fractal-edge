@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Move the rolling `edge` pre-release to a main commit whose release archives are verified.
 
-Usage: scripts/release-smalltalk-edge --source SHA --dist DIRECTORY [--run-url URL] [--dry-run]
+Usage: scripts/release-fractal-edge --source SHA --dist DIRECTORY [--run-url URL] [--dry-run]
 Environment: GH_TOKEN and GH_REPO (as for gh). Run from a full-history checkout with tags.
 Needs contents: write.
 
@@ -28,12 +28,12 @@ LISTED = 30
 def run(*cmd, cwd=None, check=True):
     done = subprocess.run(cmd, check=False, text=True, capture_output=True, cwd=cwd)
     if check and done.returncode != 0:
-        raise SystemExit(f'release-smalltalk-edge: {" ".join(cmd[:3])} failed: {done.stderr.strip() or done.stdout.strip()}')
+        raise SystemExit(f'release-fractal-edge: {" ".join(cmd[:3])} failed: {done.stderr.strip() or done.stdout.strip()}')
     return done
 
 
 def say(message):
-    print(f'release-smalltalk-edge: {message}', flush=True)
+    print(f'release-fractal-edge: {message}', flush=True)
 
 
 def current_edge(repo):
@@ -78,7 +78,7 @@ def assets_in(dist):
     names += ['SHA256SUMS', 'RELEASE.json']
     missing = [n for n in names if not (dist / n).is_file()]
     if missing or not any(n.endswith('.tar.gz') for n in names):
-        raise SystemExit(f'release-smalltalk-edge: {dist} lacks release files: {missing or ["*.tar.gz"]}')
+        raise SystemExit(f'release-fractal-edge: {dist} lacks release files: {missing or ["*.tar.gz"]}')
     return names
 
 
@@ -109,13 +109,13 @@ def main():
     repo = pathlib.Path(__file__).resolve().parent.parent
     repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
     if not SHA.fullmatch(args.source):
-        raise SystemExit('release-smalltalk-edge: --source must be a full lowercase commit hash')
+        raise SystemExit('release-fractal-edge: --source must be a full lowercase commit hash')
 
     dist = args.dist.resolve()
     names = assets_in(dist)
     # The checks the tag workflow makes, so edge carries only bytes that main already proved.
     run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
-    say(run('python3', str(repo / 'scripts/release-smalltalk-manifest.py'), args.source, cwd=dist).stdout.strip())
+    say(run('python3', str(repo / 'scripts/release-fractal-manifest.py'), args.source, cwd=dist).stdout.strip())
 
     previous = current_edge(repo)
     if previous and previous != args.source and is_ancestor(repo, args.source, previous):
@@ -150,7 +150,7 @@ def main():
     final = tag_commit(repository)
     published = release_assets(repository)
     if final != args.source or published != set(names):
-        raise SystemExit(f'release-smalltalk-edge: {TAG} is at {final} with assets {sorted(published or [])}, '
+        raise SystemExit(f'release-fractal-edge: {TAG} is at {final} with assets {sorted(published or [])}, '
                          f'expected {args.source} with {names}')
     say(f'{TAG} now at {args.source} with {len(names)} assets')
     return 0

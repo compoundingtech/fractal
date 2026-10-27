@@ -51,7 +51,7 @@ summary row says how long a check waited.
 
 Every run that gets as far as its summary appends one JSON line (version 1: start, end and total seconds, host, tree, the checks, every
 summary row and, when scripts/ci-local printed its stage table, linux-gate's stages) to ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl,
-or to the path in ST_TEST_RUNS (`off` records nothing); scripts/st-test-report reads it against the per-PR suite's time objective
+or to the path in ST_TEST_RUNS (`off` records nothing); scripts/fractal-test-report reads it against the per-PR suite's time objective
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
@@ -1832,7 +1832,7 @@ def main(argv):
                 if line:
                     print(f'  {line}')
             code = 1 if failed else (4 if unsigned else 0)
-            # One line per run for the time objective (scripts/st-test-report): only a run of the whole suite (no --check, no --crate) counts.
+            # One line per run for the time objective (scripts/fractal-test-report): only a run of the whole suite (no --check, no --crate) counts.
             record_run({'v': 1, 'started': utc(started_wall), 'ended': utc(time.time()), 'total_s': round(time.monotonic() - started),
                         'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
                         'full': not args.check and not args.crate, 'checks': checks, 'pool_tree': n, 'warm': warm,

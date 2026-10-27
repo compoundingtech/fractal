@@ -168,7 +168,7 @@ author, channel, text, reference and nonce when present:
 python3 -I scripts/st3-discord-bridge status --agent agent/example/discord-test
 python3 -I scripts/st3-discord-bridge resolve --agent agent/example/discord-test \
   --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock" \
-  --st-message message/0123456789abcdef --discord-message 505 --part 0
+  --fractal-message message/0123456789abcdef --discord-message 505 --part 0
 ```
 
 Then restart `run`. If no matching message exists, retain the held state for

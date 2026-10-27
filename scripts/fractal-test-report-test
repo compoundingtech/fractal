@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""scripts/st-test-report on written run records: nearest-rank percentiles, the runs left out and why, the breach rules, hosts, markdown."""
+"""scripts/fractal-test-report on written run records: nearest-rank percentiles, the runs left out and why, the breach rules, hosts, markdown."""
 import contextlib
 import datetime
 import importlib.machinery
@@ -15,7 +15,7 @@ from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
-loader = importlib.machinery.SourceFileLoader('st_test_report', str(ROOT / 'scripts/st-test-report'))
+loader = importlib.machinery.SourceFileLoader('st_test_report', str(ROOT / 'scripts/fractal-test-report'))
 st_report = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
 loader.exec_module(st_report)
 NOW = datetime.datetime(2026, 10, 24, 12, 0, tzinfo=datetime.timezone.utc)

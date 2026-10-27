@@ -28,7 +28,7 @@ def load(name, filename):
 
 
 baseline = load('compat_release', 'compat-baseline-release')
-daily = load('compat_daily', 'release-smalltalk-daily')
+daily = load('compat_daily', 'release-fractal-daily')
 SOURCE = 'a' * 40
 
 
@@ -128,7 +128,7 @@ class Policy(unittest.TestCase):
         self.assertIsNone(json.loads(updates[baseline.BASELINES[0]])['exception_reason'])
 
     def test_generated_publication_tokens_do_not_gain_maintenance_writes(self):
-        for filename, publisher in [('release-smalltalk.yml', 'publish'), ('release-daily.yml', 'release')]:
+        for filename, publisher in [('release-fractal.yml', 'publish'), ('release-daily.yml', 'release')]:
             workflow = (ROOT / '.github/workflows' / filename).read_text()
             jobs = dict(re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
                                    workflow.split('\njobs:\n', 1)[1]))
@@ -262,7 +262,7 @@ class Publication(unittest.TestCase):
              patch.object(daily, 'newest_verified_main_run', return_value=(1, SOURCE)), \
              patch.object(daily, 'latest_release_tag', return_value='v0.3.17'), \
              patch.object(daily.subprocess, 'run') as process, patch('sys.stdout', new=io.StringIO()), \
-             patch('sys.argv', ['release-smalltalk-daily']):
+             patch('sys.argv', ['release-fractal-daily']):
             process.return_value.returncode = 1
             self.assertEqual(daily.main(), 0)
         self.assertFalse(any('advance' in args for args in calls))

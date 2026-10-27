@@ -97,7 +97,7 @@ with tempfile.TemporaryDirectory() as temporary:
     root = Path(temporary)
     checkout = root / 'checkout'
     (checkout / 'scripts').mkdir(parents=True)
-    for name in ('release-smalltalk-edge', 'release-smalltalk-manifest.py'):
+    for name in ('release-fractal-edge', 'release-fractal-manifest.py'):
         shutil.copy(repo / 'scripts' / name, checkout / 'scripts' / name)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
@@ -119,7 +119,7 @@ with tempfile.TemporaryDirectory() as temporary:
     def publish(source, marker, *extra):
         dist = root / f'dist-{marker}'
         build_dist(dist, source, marker)
-        return subprocess.run(['python3', 'scripts/release-smalltalk-edge', '--source', source, '--dist', str(dist),
+        return subprocess.run(['python3', 'scripts/release-fractal-edge', '--source', source, '--dist', str(dist),
                                '--run-url', 'https://example.invalid/run/1', *extra],
                               cwd=checkout, env=env, text=True, capture_output=True)
 
@@ -177,11 +177,11 @@ with tempfile.TemporaryDirectory() as temporary:
     dist = root / 'dist-bad'
     build_dist(dist, commits[2], 'bad')
     (dist / 'SHA256SUMS').write_text('0' * 64 + f'  smalltalk-{TARGETS[0]}.tar.gz\n' + (dist / 'SHA256SUMS').read_text().splitlines()[1] + '\n')
-    done = subprocess.run(['python3', 'scripts/release-smalltalk-edge', '--source', commits[2], '--dist', str(dist)],
+    done = subprocess.run(['python3', 'scripts/release-fractal-edge', '--source', commits[2], '--dist', str(dist)],
                           cwd=checkout, env=env, text=True, capture_output=True)
     assert done.returncode != 0 and len(current()['calls']) == calls, done
     build_dist(root / 'dist-wrong-source', commits[0], 'wrong')
-    done = subprocess.run(['python3', 'scripts/release-smalltalk-edge', '--source', commits[2], '--dist', str(root / 'dist-wrong-source')],
+    done = subprocess.run(['python3', 'scripts/release-fractal-edge', '--source', commits[2], '--dist', str(root / 'dist-wrong-source')],
                           cwd=checkout, env=env, text=True, capture_output=True)
     assert done.returncode != 0 and len(current()['calls']) == calls, done
 
@@ -196,7 +196,7 @@ with tempfile.TemporaryDirectory() as temporary:
     digest = hashlib.sha256((mismatch / name).read_bytes()).hexdigest()
     (mismatch / 'SHA256SUMS').write_text('\n'.join(
         f'{digest}  {name}' if line.endswith('  ' + name) else line for line in lines) + '\n')
-    done = subprocess.run(['python3', 'scripts/release-smalltalk-edge', '--source', commits[2], '--dist', str(mismatch)],
+    done = subprocess.run(['python3', 'scripts/release-fractal-edge', '--source', commits[2], '--dist', str(mismatch)],
                           cwd=checkout, env=env, text=True, capture_output=True)
     assert done.returncode != 0 and len(current()['calls']) == calls, done
 

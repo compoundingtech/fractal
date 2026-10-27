@@ -463,6 +463,21 @@ class BridgeScenarios(unittest.TestCase):
 
 
 class TransportScenarios(unittest.TestCase):
+    def test_resolve_accepts_preferred_and_legacy_message_options(self):
+        for option in ('--fractal-message', '--st-message'):
+            with self.subTest(option=option), tempfile.TemporaryDirectory() as folder:
+                argv = ['bridge', 'resolve', '--agent', AGENT, '--state', str(Path(folder) / 'state.sqlite'),
+                        option, 'message/0123456789abcdef', '--discord-message', '505']
+                output = io.StringIO()
+                with patch('sys.argv', argv), patch.object(bridge, 'route_file', return_value=ROUTE), \
+                        patch('sys.stdin.isatty', return_value=True), \
+                        patch.object(bridge.getpass, 'getpass', return_value=TOKEN), \
+                        patch.object(bridge.Discord, 'validate'), \
+                        contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    self.assertEqual(bridge.main(), 1)
+                self.assertIn('No matching unconfirmed send was found.', output.getvalue())
+                self.assertNotIn(TOKEN, output.getvalue())
+
     def test_local_api_envelopes_accept_old_and_fractal_transport_labels(self):
         path = Mock()
         path.lstat.return_value = Mock(st_mode=bridge.stat.S_IFSOCK | 0o600, st_uid=os.geteuid())

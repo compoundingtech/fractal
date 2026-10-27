@@ -95,4 +95,4 @@ with tempfile.TemporaryDirectory() as temporary:
 
 print('Native release build stamp tests passed')
 
-subprocess.run(['python3', str(repo / 'scripts/release-smalltalk-pty-test')], check=True)
+subprocess.run(['python3', str(repo / 'scripts/release-fractal-pty-test')], check=True)

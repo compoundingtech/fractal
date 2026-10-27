@@ -106,7 +106,7 @@ take_lock() {
     return 0
   fi
   if [[ -d $1 ]]; then
-    echo "st install: the lock $1 exists. Another install may be running. If none is, an earlier one was killed: remove the lock with rmdir '$1' and run the installer again." >&2
+    echo "fractal install: the lock $1 exists. Another install may be running. If none is, an earlier one was killed: remove the lock with rmdir '$1' and run the installer again." >&2
     exit 1
   fi
   mkdir "$1"

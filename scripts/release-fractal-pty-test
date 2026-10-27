@@ -7,7 +7,7 @@ import tempfile
 import sys
 
 repo = Path(__file__).resolve().parent.parent
-script = (repo / 'scripts/release-smalltalk').read_text()
+script = (repo / 'scripts/release-fractal').read_text()
 # Exercise the production command, not a second copy of its directory policy.
 build = script[script.index('pty_build_dir='):script.index('install -m 0755 "$pty_build_dir/')]
 
