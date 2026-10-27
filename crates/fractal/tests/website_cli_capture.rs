@@ -9,8 +9,9 @@
 //!
 //! CAPTURE_SCENARIO picks the seed. `marrowpine` (the default) is Robin's: the CLI transcript and
 //! the TUI's Now and palette screens. `app` is the website's own example, Ada's: the maintainer
-//! updates acme/app's dependencies, asked Ada about parser 3.0 and is migrating the CLI, with its
-//! conversation in progress, for the TUI's agent and mission screens.
+//! updates acme/app's dependencies while the reviewer reads the changelogs. Ada chose parser 3.0
+//! in her own step, and the maintainer, a working Codex agent with its native session, migrates the
+//! CLI. It feeds the TUI's agent and mission screens.
 
 #[macro_use]
 #[path = "../../../scripts/ci-test-paths.rs"]
@@ -26,6 +27,7 @@ use fractal_daemon::api::AppState;
 use fractal_daemon::model::{ClaimInput, IntentInput, MissionRunRequest, WorkRequest};
 use fractal_daemon::store::Store;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, watch};
 
 const MARROWPINE: &str = r#"version 2
@@ -114,7 +116,8 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         fleet_id: None,
         configured_peers: Vec::new(),
         client_relay: None,
-        native_session_home: None,
+        // The app seed's maintainer runs Codex. The daemon reads its native session from here.
+        native_session_home: app.then(|| dir.join("home")),
         planner_default: fractal_daemon::model::PlannerSpec::default(),
     };
     let store = state.store.clone();
@@ -208,6 +211,10 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
         store
             .set_step_state(&audit.subject, "completed", None)
             .unwrap();
+        // With the audit done, Ada's step is ready for her, as that loop would make it.
+        store
+            .set_step_state(&step("choose-parser").subject, "ready", None)
+            .unwrap();
         work(
             &step_update.subject,
             &maintainer,
@@ -237,29 +244,75 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
             "changelogs-progress",
             "vitest and zod are minor. Parser 3.0 drops the old flag syntax.",
         );
-        // The maintainer's harness is running, so the TUI shows its conversation (with
-        // "Conversation first" on): the timeline its driver reports, merged with its messages.
+        // The maintainer runs Codex, working, so the TUI shows its conversation (with
+        // "Conversation first" on): its native Codex session, merged with its messages. Like a
+        // managed Codex agent, its driver state binds the runtime's provider incarnation to the
+        // native thread, and the session file is the conversation's source.
         let incarnation = format!("{maintainer}:1");
-        store
-            .append_claim(&ClaimInput {
-                subject: maintainer.clone(),
-                kind: "runtime.observed".into(),
-                actor: Some(maintainer.clone()),
-                fields: serde_json::from_value(json!({
-                    "status": "running", "runtime_id": "maintainer-runtime",
-                    "incarnation_id": incarnation, "terminal": false
-                }))
-                .unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some("maintainer-runtime".into()),
-            })
-            .unwrap();
-        let mut entries = Timeline {
-            store: store.clone(),
-            agent: maintainer.clone(),
-            incarnation,
-            sequence: 0,
+        let provider_incarnation = "codex:maintainer-1";
+        let native_id = "website-app-maintainer";
+        let home = dir.join("home");
+        let _ = std::fs::remove_dir_all(&home);
+        let now = chrono::Utc::now();
+        let transcript = home
+            .join(".codex/sessions")
+            .join(now.format("%Y/%m/%d").to_string())
+            .join(format!("rollout-{native_id}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({"type": "session_meta", "timestamp": now.to_rfc3339(),
+                       "payload": {"id": native_id, "cwd": "/work/app", "source": "test"}})
+            ),
+        )
+        .unwrap();
+        let driver = dir
+            .join("drivers")
+            .join(&hex::encode(Sha256::digest(maintainer.as_bytes()))[..24])
+            .join("state");
+        let _ = std::fs::remove_dir_all(dir.join("drivers"));
+        std::fs::create_dir_all(&driver).unwrap();
+        let agent = maintainer.trim_start_matches("agent/");
+        std::fs::write(
+            driver.join("runtime.json"),
+            json!({"agent": agent, "incarnation": provider_incarnation}).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            driver.join("binding.json"),
+            json!({"agent": agent, "runtimeIncarnation": provider_incarnation, "threadId": native_id})
+                .to_string(),
+        )
+        .unwrap();
+        for (kind, fields) in [
+            (
+                "runtime.observed",
+                json!({"status": "running", "runtime_id": "maintainer-runtime",
+                       "incarnation_id": incarnation, "terminal": false}),
+            ),
+            (
+                "harness.observed",
+                json!({"state": "working", "driver": "codex", "incarnation_id": incarnation,
+                       "evidence_incarnation": provider_incarnation}),
+            ),
+        ] {
+            store
+                .append_claim(&ClaimInput {
+                    subject: maintainer.clone(),
+                    kind: kind.into(),
+                    actor: Some(maintainer.clone()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("maintainer-{kind}")),
+                })
+                .unwrap();
+        }
+        let mut entries = CodexSession {
+            path: transcript,
+            calls: 0,
         };
         entries.say(
             "user",
@@ -461,57 +514,47 @@ fn fractal(dir: &Path, socket: &Path, args: &[&str]) -> Output {
     output
 }
 
-/// An agent's harness timeline, as its driver reports it: entries in order, each a local observation.
-struct Timeline {
-    store: Arc<Store>,
-    agent: String,
-    incarnation: String,
-    sequence: u64,
+/// A native Codex session file, as Codex writes it: one `response_item` record per line.
+struct CodexSession {
+    path: PathBuf,
+    calls: u64,
 }
 
-impl Timeline {
-    fn append(&mut self, role: &str, entry_type: &str, body: Value) {
-        self.sequence += 1;
-        let entry = format!("entry-{}", self.sequence);
-        self.store
-            .append_claim(&ClaimInput {
-                subject: self.agent.clone(),
-                kind: "harness.timeline".into(),
-                actor: Some(self.agent.clone()),
-                fields: serde_json::from_value(json!({
-                    "operation": "append", "entry_id": entry, "revision": 1, "role": role,
-                    "entry_type": entry_type, "final": true, "body": body, "driver": "codex",
-                    "incarnation_id": self.incarnation, "sequence": self.sequence,
-                }))
-                .unwrap(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: Some(format!("timeline:{}:{entry}", self.agent)),
-            })
+impl CodexSession {
+    fn append(&mut self, payload: Value) {
+        use std::io::Write as _;
+        let record = json!({
+            "type": "response_item", "timestamp": chrono::Utc::now().to_rfc3339(), "payload": payload,
+        });
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)
             .unwrap();
+        writeln!(file, "{record}").unwrap();
     }
 
     fn say(&mut self, role: &str, text: &str) {
-        self.append(
-            role,
-            "content",
-            json!({ "media_type": "text/plain", "text": text }),
-        );
+        let part = if role == "user" {
+            "input_text"
+        } else {
+            "output_text"
+        };
+        self.append(json!({
+            "type": "message", "role": role, "content": [{ "type": part, "text": text }],
+        }));
     }
 
     /// A shell call. Without output it is still running.
     fn shell(&mut self, command: &str, output: Option<&str>) {
-        let call = format!("call/{}", self.sequence + 1);
-        self.append(
-            "assistant",
-            "tool_call",
-            json!({ "call_id": call, "name": "shell", "arguments": { "command": command } }),
-        );
+        self.calls += 1;
+        let call = format!("call-{}", self.calls);
+        self.append(json!({
+            "type": "function_call", "call_id": call, "name": "shell",
+            "arguments": json!({ "command": command }).to_string(),
+        }));
         if let Some(output) = output {
             self.append(
-                "tool",
-                "tool_result",
-                json!({ "call_id": call, "status": "success", "media_type": "text/plain", "content": output }),
+                json!({ "type": "function_call_output", "call_id": call, "output": output }),
             );
         }
     }
