@@ -82,7 +82,7 @@ describe('controlled native sidebar observations', () => {
     expect(result.lastTurn).toEqual({_tag:'Unknown'})
     expect(result.needsMe).toBeUndefined()
     expect(result.unread).toBeUndefined()
-    expect(result.subagentObservation).toEqual({ _tag: 'NotReported' })
+    expect(result.subagentObservation).toEqual({ _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } })
     expect(result.terminal).toBeUndefined()
   })
   it('keeps generic activity distinct from a completed turn', () => {
@@ -147,28 +147,39 @@ describe('controlled native sidebar observations', () => {
     expect(row().subagentCount).toBeUndefined()
     expect(sidebarRowAccessibleName(row())).toBe('Reported name, Idle')
   })
-  it('shows unknown counts only for subagent-capable OMP observations', () => {
-    for (const harness of [undefined, 'codex', 'claude'] as const) {
-      expect(row({ harness }).subagentObservation).toEqual({ _tag: 'NotReported' })
-      expect(sidebarRowAccessibleName(row({ harness }))).toBe('Reported name, Idle')
+  it('distinguishes harness capability from omitted reports on older daemons', () => {
+    for (const [harness, cause, text] of [
+      ['opencode', 'Harness', 'Not reported by this harness'],
+      ['pi', 'Harness', 'Not reported by this harness'],
+      ['claude', 'DaemonVersion', 'Not reported by this daemon version'],
+      ['codex', 'DaemonVersion', 'Not reported by this daemon version'],
+      ['omp', 'DaemonVersion', 'Not reported by this daemon version'],
+    ] as const) {
+      const result = row({ harness })
+      expect(result.subagentObservation).toEqual({ _tag: 'NotReported', reason: { _tag: cause } })
+      expect(sidebarRowAccessibleName(result)).toBe('Reported name, Idle')
+      const details = renderToStaticMarkup(createElement(AgentRowDetails, { row: result }))
+      expect(details.match(/>Subagents<\/dt><dd[^>]*>([^<]*)/)?.[1]).toBe(text)
+      expect(sidebarRowDescription(result)).toBe(`Reported name. Host: build-1. Status: Idle; live observation. Harness: ${harness}. ${text}. ID: ${agent.ref}.`)
     }
-    const missing = row({ harness: 'omp' })
-    expect(missing.subagentObservation).toEqual({ _tag: 'Unavailable' })
-    expect(sidebarRowAccessibleName(missing)).toBe('Reported name, ? subagents, Idle')
-    const stale = row({ harness: 'omp', subagents: [] }, true)
-    expect(stale.subagentObservation).toEqual({ _tag: 'Reported' })
-    expect(stale.subagentCount).toBe(0)
-    expect(sidebarRowAccessibleName(stale)).toBe('Reported name, Last verified · Idle')
-    expect(sidebarRowAccessibleName(row({ harness: 'omp', subagents: [] }))).toBe('Reported name, Idle')
   })
-  it('does not invent zero subagents in Claude Reported details or the row description', () => {
-    const claude = row({ harness: 'claude' })
-    expect(claude.subagentObservation).toEqual({ _tag: 'NotReported' })
-    const details = renderToStaticMarkup(createElement(AgentRowDetails, { row: claude }))
-    expect(details).toContain('Subagent observations unavailable')
-    expect(details).not.toContain('0 collapsed children')
-    expect(sidebarRowDescription(claude)).toContain('Subagent observations unavailable')
-    expect(sidebarRowDescription(claude)).not.toContain('Subagents: 0')
+  it('treats explicit empty Claude, Codex and OMP rosters as reported zero', () => {
+    for (const harness of ['claude', 'codex', 'omp'] as const) {
+      const result = row({ harness, subagents: [] })
+      expect(result.subagentObservation).toEqual({ _tag: 'Reported' })
+      expect(result.subagentCount).toBe(0)
+      expect(sidebarRowAccessibleName(result)).toBe('Reported name, Idle')
+      expect(sidebarRowDescription(result)).toBe(`Reported name. Host: build-1. Status: Idle; live observation. Harness: ${harness}. Subagents: 0. ID: ${agent.ref}.`)
+      const details = renderToStaticMarkup(createElement(AgentRowDetails, { row: result }))
+      expect(details.match(/>Subagents<\/dt><dd[^>]*>([^<]*)/)?.[1]).toBe('0 collapsed children')
+    }
+  })
+  it('describes not-yet-reported observations separately from absent capability', () => {
+    const result = { ...row({ harness: 'omp' }), subagentObservation: { _tag: 'Unavailable' } } as const
+    expect(sidebarRowAccessibleName(result)).toBe('Reported name, ? subagents, Idle')
+    expect(sidebarRowDescription(result)).toBe(`Reported name. Host: build-1. Status: Idle; live observation. Harness: omp. Not reported yet. ID: ${agent.ref}.`)
+    const details = renderToStaticMarkup(createElement(AgentRowDetails, { row: result }))
+    expect(details.match(/>Subagents<\/dt><dd[^>]*>([^<]*)/)?.[1]).toBe('Not reported yet')
   })
   it('retains stale OMP children and their count as last-verified facts', () => {
     const stale = row({ harness: 'omp', subagents: [{
