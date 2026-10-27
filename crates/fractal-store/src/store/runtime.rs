@@ -85,6 +85,9 @@ pub struct FractalRuntime {
     /// Counts complete current roster publications, same graph index or not, so collection
     /// streams that read an earlier one reread the newer.
     pub agent_roster_published: tokio::sync::watch::Sender<u64>,
+    /// Complete presented current rosters share the existing generation-fenced list owner.
+    pub presented_agents: published_list::PublishedList<agents_publication::PresentedAgents>,
+    pub presented_agents_epoch: agents_publication::NodeEpoch,
     /// Every other collection's published view revisions, for the same rereads.
     pub published_views: published_views::PublishedViews,
     /// The attention list a daemon's refresher publishes for collection windows.
@@ -511,6 +514,7 @@ impl Runtime for FractalRuntime {
     }
 
     fn forget_views(&self) {
+        self.presented_agents.forget();
         self.forget_reductions();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
@@ -702,11 +706,14 @@ impl FractalRuntime {
     /// store. Where agents lists are being read, start it here rather than when the next read
     /// finds no roster and waits for it. A node nobody reads keeps folding only on demand, so a
     /// long catch-up or trim that forgets once per chunk does not refold it once per chunk.
-    fn wake_read_roster(&self) {
+    pub fn agents_publication_demand(&self) -> bool {
         let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
-        let read_lately = read_at != 0
-            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64;
-        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| read_lately) {
+        self.presented_agents.has_subscribers() || (read_at != 0
+            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64)
+    }
+
+    pub fn wake_read_roster(&self) {
+        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| self.agents_publication_demand()) {
             let _ = self.agent_roster_requested_at.compare_exchange(
                 0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,
