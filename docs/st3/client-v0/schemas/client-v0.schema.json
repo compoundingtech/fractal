@@ -193,9 +193,9 @@
       "required": ["api_version", "capabilities"],
       "properties": {
         "api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]},
-        "capabilities": {"type": "array", "minItems": 1, "maxItems": 1, "items": {
+        "capabilities": {"type": "array", "minItems": 1, "maxItems": 2, "items": {
           "type": "object", "additionalProperties": false, "required": ["id", "version", "state"],
-          "properties": {"id": {"const": "device-key-proofs"}, "version": {"const": 1}, "state": {"const": "granted"}}
+          "properties": {"id": {"enum": ["device-key-proofs", "fabric-gateway-grant"]}, "version": {"const": 1}, "state": {"const": "granted"}}
         }}
       }
     },
@@ -3547,6 +3547,7 @@
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "person_id": { "type": "string", "pattern": "^person/[^/]+$" },
         "full_control": { "type": "boolean" },
+        "fabric_gateway": { "type": "boolean", "description": "Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing." },
         "scopes": {
           "type": "array",
           "minItems": 1,
@@ -3586,7 +3587,8 @@
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "device_public_key": { "type": "string", "minLength": 32 },
-        "key_storage": { "enum": ["secure-enclave", "software"] }
+        "key_storage": { "enum": ["secure-enclave", "software"] },
+        "fabric_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "AssistantPairedSession": {
@@ -3623,7 +3625,19 @@
         "expires_at": { "$ref": "#/$defs/Timestamp" },
         "device_key_chain": { "type": "array", "items": { "type": "string" } },
         "device_key_proofs": { "type": "array", "items": { "type": "object" }, "maxItems": 2 },
-        "person_root_key_proof": { "type": "object" }
+        "person_root_key_proof": { "type": "object" },
+        "fabric_grant": { "$ref": "#/$defs/FabricGrant" }
+      }
+    },
+    "FabricGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["granted", "already-trusted", "not-enabled", "not-requested", "failed"] },
+        "service": { "type": "string" },
+        "peer": { "type": "string" },
+        "detail": { "type": "string" }
       }
     },
     "DeviceSignature": {

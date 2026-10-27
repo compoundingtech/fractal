@@ -394,6 +394,25 @@ fn input(runs: Vec<Value>) -> Inputs {
     }
 }
 
+#[test]
+fn human_system_owner_is_distinct_from_a_person_named_st() {
+    let model = input(vec![run("mission-run/audit", "running", vec![step("scan", "working", true)])]);
+    for (owner, system) in [
+        (json!({"kind": "st"}), true),
+        (json!({"kind": "person", "person": "person/other", "label": "st"}), false),
+    ] {
+        let mut served = serve(&model);
+        served[0].presentation.as_mut().unwrap()["steps"][0]["owner"] = owner;
+        let rows = read(&model, &served);
+        let shown = &rows[0].steps[0];
+        assert_eq!(shown.owner.as_deref(), Some("st"));
+        assert_eq!(shown.human_owner(), Some(if system { "Fractal" } else { "st" }));
+        let serialized = serde_json::to_value(shown).unwrap();
+        assert_eq!(serialized["owner"], "st");
+        assert!(serialized.get("owner_is_system").is_none());
+    }
+}
+
 fn metadata_case(
     state: &str,
     reason: Option<&str>,
