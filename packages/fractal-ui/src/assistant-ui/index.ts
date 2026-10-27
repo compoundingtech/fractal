@@ -8,6 +8,7 @@ export type { TranscriptSkeletonProps } from './composition/TranscriptSkeleton.t
 export * from './composition/TranscriptFeedback.tsx'
 export type { TranscriptAttachmentImageState, TranscriptAttachmentImages } from './composition/TranscriptAttachments.tsx'
 export * from './EmbraceComposer.tsx'
+export * from './embrace-composer/send.ts'
 export * from './EmbraceToolCall.tsx'
 export * from './EmbraceToolPreview.tsx'
 export * from './EmbraceVirtualConversation.tsx'
