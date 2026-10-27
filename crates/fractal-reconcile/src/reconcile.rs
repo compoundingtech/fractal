@@ -7088,7 +7088,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() {
+        if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }
         let selected_token = self.store.selected_desired_token(&subject.subject)?;
@@ -8128,7 +8128,6 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// A failed launch is not a durable grant to restart after later lifecycle intent.
     /// Keep its unresolved producer fenced, but consume the obsolete restart request.
     fn retire_obsolete_failed_restart(&self, subject: &DesiredSubject, now: u128) -> Result<bool> {
-        const MAX_FAILED_RESTART_AGE_MS: u128 = 60 * 60 * 1000;
         let Some(pending) = self.store.runtime_start_for(&subject.subject)? else {
             return Ok(false);
         };
@@ -8160,7 +8159,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             .is_some_and(|suspension| suspension.holds_seat())
         {
             "later lifecycle control or suspension superseded the restart request"
-        } else if now.saturating_sub(request.accepted_at_unix_ms) > MAX_FAILED_RESTART_AGE_MS {
+        } else if now.saturating_sub(request.accepted_at_unix_ms) > crate::restart::FAILED_START_RETRY_MAX_AGE_MS {
             "the failed-start restart request exceeded its one-hour retry authority"
         } else {
             return Ok(false);
@@ -8195,16 +8194,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(true)
     }
 
-    /// A requester-authored action replicates to the runtime owner. The declaration and old
-    /// incarnation fence it, so a delayed request cannot stop a replacement or revive a stop.
-    /// A start that FAILED and whose producer closure was never proven stays pending, and while it
-    /// does an explicit restart is swallowed (the seat looks parked for good). Once the failed start
-    /// is older than any launcher could still publish a session, no runtime of the seat is observed
-    /// running, and no launch worker holds the start lock, the failure is final: close the operation
-    /// so the request makes a new attempt. Returns whether it did.
-    fn supersede_stale_failed_start(
+    /// Preflight the stale producer and runtime evidence. This never releases admission;
+    /// the replacement's writer transaction fences intent and closes the old hold together.
+    fn stale_failed_start_ready(
         &self,
-        subject: &DesiredSubject,
         pending: &RuntimeStartOperation,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
@@ -8238,33 +8231,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         if observation.is_some_and(|item| !matches!(item.status.as_str(), "exited" | "vanished" | "stopped")) {
             return Ok(false);
         }
-        // The kernel lock, not a PID guess, says no launch worker holds admission.
-        let Some(_lock) = self.store.try_runtime_start_lock(&subject.subject)? else {
-            return Ok(false);
-        };
-        if self.retire_obsolete_failed_restart(subject, now_ms())? {
-            return Ok(false);
-        }
-        if pending.revoked_by.is_none() {
-            self.revoke_start(&subject.subject)?;
-        }
-        self.store.retain_runtime_start_producer_closed(&pending.id)?;
-        self.record_once(
-            &subject.subject,
-            "runtime.reconcile-decision",
-            BTreeMap::from([
-                ("key".into(), Value::String(format!("restart-superseded-failed-start:{}", pending.id))),
-                ("decision".into(), Value::String("restart-superseded-failed-start".into())),
-                (
-                    "reason".into(),
-                    Value::String(format!(
-                        "the failed runtime start {} never proved its producer closed; it is older than any launcher could still publish and no runtime is running, so a new restart request makes a new attempt",
-                        pending.id
-                    )),
-                ),
-            ]),
-        )?;
-        self.start_changed(&subject.subject);
+        // This is only physical preflight. The admission writer must fence lifecycle intent,
+        // release this exact failed operation and admit its replacement atomically.
         Ok(true)
     }
 
@@ -8311,8 +8279,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .operation_claim(&format!("agent-restart-attempt:{}", request.id))?;
         if let Some(pending) = self.store.runtime_start_for(&subject.subject)? {
-            if self.supersede_stale_failed_start(subject, &pending, observation)? {
-                // The failed start no longer holds the seat: this request makes the new attempt.
+            if self.stale_failed_start_ready(&pending, observation)? {
+                // Admission will release this exact failed operation with the replacement.
             } else {
                 // The request is not lost: it waits for this start. Say so (once per request and
                 // start), so a restart that is never consumed is visible and not a silent success.
@@ -8569,7 +8537,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
         if attempted.is_some() {
             return self.fail_requested_restart(
                 subject,
