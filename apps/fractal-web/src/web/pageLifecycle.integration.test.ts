@@ -1,5 +1,5 @@
-import type { CollectionSocket } from '@smalltalk/st3-client'
-import { St3, St3Live } from '@st3/sdk/effect'
+import type { CollectionSocket } from '@fractal/client'
+import { St3, St3Live } from '@fractal/sdk/effect'
 import { Effect, Stream } from 'effect'
 import { expect, it } from 'vitest'
 import { installPageLifecycle } from './pageLifecycle.ts'

@@ -1,0 +1,7 @@
+[package]
+name = "fractal-build-stamp"
+version = "0.1.0"
+edition = "2024"
+description = "This checkout's build identity, baked only into the final binaries"
+license = "MIT"
+build = "build.rs"

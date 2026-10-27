@@ -4,22 +4,16 @@
  * Cold mounting and switching agents follow through the real SDK and live source
  * (scripted gateway, real socket commands). Nothing here mocks the data hooks.
  */
-import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@smalltalk/st3-client'
+import type { Agent, CollectionCommand, CollectionFrame, CollectionSocket, Snapshot, TimelineEntry } from '@fractal/client'
 import { webcrypto } from 'node:crypto'
 import { setTimeout as yieldIo } from 'node:timers/promises'
-import * as Native from '@smalltalk/st3-client/schema'
+import * as Native from '@fractal/client/schema'
 import { flushSync } from 'react-dom'
 import type { ComponentProps } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
-  props: () => ({}),
-}))
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 import { liveSource, type LiveSource } from '../data/liveSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { ConversationPane } from './ConversationPane.tsx'
@@ -380,12 +374,16 @@ describe('ConversationPane conversation demand', () => {
     const workspace = container.querySelector('section[aria-label="Agent workspace"]')!
     expect(workspace.querySelector('[data-testid="transcript-turn"]')).not.toBeNull()
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
+    const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
+    expect(raw).toBeDefined()
+    flushSync(() => raw.click())
     const button = container.querySelector('button[aria-label="Open Reading information tool detail"]') as HTMLButtonElement
     expect(button).not.toBeNull()
     flushSync(() => button.click())
     const panel = container.querySelector('aside[aria-label="Tool detail"]')!
     expect(panel.textContent).toContain('export const rows = []')
-    expect(panel.parentElement).toBe(workspace.parentElement)
+    // The workspace now sits inside the stable Changes split; tool detail stays outside it.
+    expect(panel.parentElement).toBe(workspace.closest('[data-testid="live-agent-workspace"]'))
     expect(workspace.contains(panel)).toBe(false)
     flushSync(() => (panel.querySelector('button[aria-label="Close tool detail"]') as HTMLButtonElement).click())
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
@@ -442,7 +440,7 @@ describe('ConversationPane conversation demand', () => {
     expect(container.innerHTML).not.toContain('Unknown')
     expect(container.querySelector('[data-testid="sync-line"]')).toBeNull()
     const recovery = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="transcript-unavailable"] button')]
-      .filter(button => button.textContent === 'Try again')
+      .filter(button => button.textContent === 'Retry')
     expect(recovery).toHaveLength(1)
     expect(recovery[0]!.disabled).toBe(false)
     flushSync(() => recovery[0]!.click())
@@ -458,12 +456,14 @@ describe('LiveAgentWorkspace retained panes', () => {
   const ux: UxTelemetry = {
     activeSpan: () => undefined,
     traceContext: () => undefined,
+    beginOpen: () => ({ phase: () => {}, contentCommitted: () => () => {}, cancel: () => {} }),
     shellCommitted: () => () => {},
     rosterCommitted: () => () => {},
     beginSwitch: () => {},
     switchDataReady: () => {},
     transcriptCommitted: (ref) => { committed.push(ref); return () => {} },
     beginSendEcho: () => ({ committed: () => () => {}, cancel: () => {} }),
+    beginAlertAnswer: () => ({ landed: () => () => {}, cancel: () => {} }),
     observeSync: () => {},
     dispose: () => {},
   }
@@ -654,9 +654,11 @@ describe('ConversationPane composer/send binding', () => {
     { echoFirst: false, affectedId: 'message/gateway-assigned' },
   ])('keeps the own-send row and turn mounted through acknowledgement ($echoFirst, $affectedId)', async ({ echoFirst, affectedId }) => {
     // The real kit scroller runs against deterministic jsdom dimensions; browser replay
-    // separately checks measured row geometry in a fully styled lane.
-    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockReturnValue(2000)
-    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(400)
+    // separately checks measured row geometry in a fully styled lane. Only the lane is
+    // stubbed: rows keep jsdom's unmeasured 0/0, so a two-word message does not overflow.
+    const isLane = (element: HTMLElement) => element.dataset.testid === 'transcript-scroll'
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) { return isLane(this) ? 2000 : 0 })
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) { return isLane(this) ? 400 : 0 })
     await prepareSendPane()
     gateway!.sendMessageId = affectedId
     const send = vi.spyOn(live!.source.attachments!, 'send')

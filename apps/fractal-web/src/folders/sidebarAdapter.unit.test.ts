@@ -1,9 +1,10 @@
 import { describe, expect, it } from '@effect/vitest'
-import { ArrangementEditParameters } from '@smalltalk/st3-client/schema'
+import { ArrangementEditParameters, ArrangementKey } from '@fractal/client/schema'
 import { Effect, Schema } from 'effect'
 import * as fc from 'fast-check'
+import { generateNKeysBetween } from 'fractional-indexing'
 import { arrangementSidebarDoc } from './client.ts'
-import { drawnParents, liveAncestor, type FolderDoc } from './core.mts'
+import { drawnParents, liveAncestor } from './core.mts'
 import { optimisticArrangement, type SidebarOperation } from './edit.ts'
 import { boundRows, canDrop, filterSidebarTree, nativeInsertAt, operationsForCreate, operationsForDelete, operationsForMove, operationsForRename, restageBoundMove, restageCreate, restageDelete, restageMove, restageRename, rowStatus, sidebarProjection, sidebarTree, type SidebarDocument, type SidebarSeat } from './sidebarAdapter.ts'
 import type { SidebarMove } from './sidebarContract.ts'
@@ -41,6 +42,38 @@ const apply = (doc: SidebarDocument, operations: readonly SidebarOperation[]): S
 const move = (id: string, target: SidebarMove['target']): SidebarMove => ({ items: [id], target })
 const admissible = (operations: readonly SidebarOperation[]) =>
   Schema.is(Schema.toEncoded(ArrangementEditParameters))({ owner: 'person/example', subject: 'arrangement/person/example/00000000-0000-7000-8000-000000000001', operations })
+const expectCanonicalKey = (key: string) => {
+  expect(Schema.is(ArrangementKey)(key)).toBe(true)
+  expect(new TextEncoder().encode(key).length).toBeLessThanOrEqual(128)
+  const head = key.charCodeAt(0)
+  const integerLength = head >= 97 ? head - 97 + 2 : 90 - head + 2
+  expect(key.length).toBeGreaterThanOrEqual(integerLength)
+  expect(key.length === integerLength || !key.endsWith('0')).toBe(true)
+  expect(key[0] === 'A' && /^0+$/.test(key.slice(1, integerLength))).toBe(false)
+}
+
+it('groups unfiled agents by reported project without moving explicitly filed agents', () => {
+  const doc = setup()
+  const rows = doc.roster.map(row => ({ ...row, host: 'build-1', project: 'example/product' }))
+  const tree = sidebarTree(sidebarProjection({ ...doc, roster: rows }), rows, new Map())
+  expect(tree[0]).toMatchObject({ _tag: 'Folder', id: a })
+  expect(tree.at(-1)).toMatchObject({ _tag: 'Group', id: 'wf/project/example%2Fproduct', label: 'example/product', children: [{ id: 'alpha.new' }] })
+  expect(doc.placements['agent/new']).toBeUndefined()
+})
+
+it('keeps native children under their canonical parent seat without independent arrangement membership', () => {
+  const doc = setup()
+  const nested = { _tag: 'Agent' as const, id: 'wf/subagent/reviewer', subject: 'agent/one', parent: 'beta.one', childId: 'reviewer', label: 'Review changes' }
+  const rows = doc.roster.map(seat => seat.id === 'beta.one' ? { ...seat, children: [nested] } : seat)
+  const state = { ...doc, roster: rows }
+  const tree = sidebarTree(sidebarProjection(state), rows, new Map())
+  const filtered = filterSidebarTree(tree, 'Review')
+  expect(filtered).toMatchObject([{ id: a, collapsed: false, children: [{ id: 'beta.one', collapsed: false, children: [{ id: nested.id }] }] }])
+  expect(canDrop(state, move(nested.id, { _tag: 'Into', folder: b }))).toHaveProperty('refused')
+  expect(operationsForMove(state, move('beta.one', { _tag: 'Into', folder: b }))).toMatchObject([{ op: 'subject.place', subject: 'agent/one', folder: b }])
+  const parentFolder = tree[0]!
+  expect(parentFolder.children?.find(node => node.id === 'beta.one')).toMatchObject({ collapsed: true, children: [nested] })
+})
 
 describe('sidebar matrix operations', () => {
   it('Create folder appends, normalizes blank names and falls back from a missing parent', () => {
@@ -229,6 +262,43 @@ describe('sidebar matrix operations', () => {
     expect(admissible(operations)).toBe(true)
     expect(sidebarProjection(apply(doc, operations)).folders[0]?.members).toEqual(['agent/one', 'agent/new', 'agent/two'])
     expect(admissible(operationsForCreate(setup(), { parent: null, name: 'Next' }, fresh))).toBe(true)
+  })
+  it('Below-bound native insertion vectors remain unchanged', () => {
+    for (const [keys, index, key] of [
+      [[], 0, 'a0'],
+      [['a0'], 0, 'Zz'],
+      [['a0'], 1, 'a1'],
+      [['Zz', 'a0'], 1, 'ZzV'],
+      [['a0', 'a1'], 1, 'a0V'],
+      [['a0', 'a0V'], 1, 'a0G'],
+    ] as const) expect(nativeInsertAt(keys, index)).toEqual({ key, rekeyed: [] })
+    expect(nativeInsertAt(['a0', 'a0'], 1)).toEqual({ key: 'a1', rekeyed: [[1, 'a2']] })
+  })
+  it('Accepts a 128-byte output unchanged and fully rekeys a would-be 129-byte output', () => {
+    const prefix = `a0${'0'.repeat(125)}`
+    expect(nativeInsertAt(['a0', `${prefix}2`], 1)).toEqual({ key: `${prefix}1`, rekeyed: [] })
+    expectCanonicalKey(`${prefix}1`)
+    expect(nativeInsertAt(['a0', `${prefix}1`], 1)).toEqual({ key: 'a1', rekeyed: [[0, 'a0'], [1, 'a2']] })
+  })
+  it('Repeated same-gap insertion rekeys the full partition before exceeding the st key bound', () => {
+    const siblings = [{ id: 0, key: 'a0' }, { id: 1, key: 'a1' }]
+    let rekeyed = false
+    let inserted = 0
+    for (; inserted < 800 && !rekeyed; inserted++) {
+      const insertion = nativeInsertAt(siblings.map(({ key }) => key), 1)
+      for (const key of [insertion.key, ...insertion.rekeyed.map(([, key]) => key)]) expectCanonicalKey(key)
+      if (insertion.rekeyed.length > 0) {
+        expect(insertion.rekeyed.map(([index]) => index)).toEqual(siblings.map((_, index) => index))
+        const keys = generateNKeysBetween(null, null, siblings.length + 1)
+        expect(insertion).toEqual({ key: keys[1], rekeyed: siblings.map((_, index) => [index, keys[index < 1 ? index : index + 1]]) })
+        rekeyed = true
+      }
+      for (const [index, key] of insertion.rekeyed) siblings[index]!.key = key
+      siblings.splice(1, 0, { id: inserted + 2, key: insertion.key })
+    }
+    expect(rekeyed).toBe(true)
+    expect(siblings.toSorted((left, right) => left.key < right.key ? -1 : left.key > right.key ? 1 : 0).map(({ id }) => id))
+      .toEqual([0, ...Array.from({ length: inserted }, (_, index) => inserted + 1 - index), 1])
   })
   it('Dormant stored placements reserve their keys, so appending or rekeying never collides with them', () => {
     const doc = setup()

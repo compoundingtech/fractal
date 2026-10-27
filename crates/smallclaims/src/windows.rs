@@ -14,6 +14,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+pub mod cpu_minutes;
+pub mod holds;
+mod intervals;
+pub mod wal;
+pub use intervals::{IntervalSeries, MinuteSummary, histogram_upper_ms, histogram_lower_ms};
+
 /// The windows every series keeps: name, slot width and slot count.
 const TIERS: [(&str, u64, usize); 3] = [("1m", 5, 12), ("5m", 30, 10), ("1h", 300, 12)];
 
@@ -50,9 +56,10 @@ fn upper(bucket: u16) -> u64 {
 struct Histogram {
     count: u64,
     over: u64,
+    /// Histogram unit: microseconds for Series, integer milliseconds for IntervalSeries.
     max_us: u64,
     /// Sorted by bucket.
-    buckets: Vec<(u16, u32)>,
+    buckets: Vec<(u16, u64)>,
 }
 
 impl Histogram {
@@ -84,7 +91,7 @@ impl Histogram {
         let rank = (self.count * percent).div_ceil(100).max(1);
         let mut seen = 0;
         for &(bucket, count) in &self.buckets {
-            seen += u64::from(count);
+            seen += count;
             if seen >= rank {
                 return upper(bucket).min(self.max_us);
             }
@@ -209,14 +216,23 @@ pub enum StoreWork {
     WriteTransaction,
     /// The single writer held by one batch or one lent write.
     WriterHold,
+    /// Waiting for the replication snapshot's build lock, which one build holds at a time.
+    SnapshotBuildWait,
+    /// Reading the envelope inventory for a replication snapshot.
+    SnapshotInventory,
+    /// Hashing a replication snapshot's inventory, graph and projection digests.
+    SnapshotDigest,
 }
 
 impl StoreWork {
-    pub const ALL: [StoreWork; 4] = [
+    pub const ALL: [StoreWork; 7] = [
         StoreWork::Statement,
         StoreWork::ReadTransaction,
         StoreWork::WriteTransaction,
         StoreWork::WriterHold,
+        StoreWork::SnapshotBuildWait,
+        StoreWork::SnapshotInventory,
+        StoreWork::SnapshotDigest,
     ];
 
     pub fn name(self) -> &'static str {
@@ -225,6 +241,9 @@ impl StoreWork {
             StoreWork::ReadTransaction => "read-transaction",
             StoreWork::WriteTransaction => "write-transaction",
             StoreWork::WriterHold => "writer-hold",
+            StoreWork::SnapshotBuildWait => "snapshot-build-wait",
+            StoreWork::SnapshotInventory => "snapshot-inventory",
+            StoreWork::SnapshotDigest => "snapshot-digest",
         }
     }
 }
@@ -235,14 +254,14 @@ struct StoreSeries {
     series: Series,
 }
 
-static STORE: [Mutex<StoreSeries>; 4] = [const {
+static STORE: [Mutex<StoreSeries>; StoreWork::ALL.len()] = [const {
     Mutex::new(StoreSeries {
         target: None,
         series: Series {
             rings: [Vec::new(), Vec::new(), Vec::new()],
         },
     })
-}; 4];
+}; StoreWork::ALL.len()];
 
 fn store(kind: StoreWork) -> &'static Mutex<StoreSeries> {
     &STORE[StoreWork::ALL.iter().position(|k| *k == kind).unwrap_or(0)]
@@ -256,11 +275,13 @@ pub fn set_store_target(kind: StoreWork, target: Option<Duration>) {
         .target = target;
 }
 
-pub fn record_store(kind: StoreWork, duration: Duration) {
+/// Count one sample of the store's work, and say whether it missed its target.
+pub fn record_store(kind: StoreWork, duration: Duration) -> bool {
     let now = Instant::now();
     let mut store = store(kind).lock().unwrap_or_else(PoisonError::into_inner);
     let over = store.target.is_some_and(|target| duration > target);
     store.series.record(now, duration, over);
+    over
 }
 
 /// A copy of one store series, to read or to merge with another.
@@ -293,60 +314,8 @@ impl Drop for Timer {
     }
 }
 
-/// Process CPU over each window, from a CPU reading taken when each slot opens.
-#[derive(Default)]
-pub struct Cpu {
-    rings: [Vec<Option<(u64, Instant, u64)>>; 3],
-}
-
-impl Cpu {
-    /// Note the process's CPU at the start of each slot. Reads the clock only when a slot opens.
-    pub fn note(&mut self, now: Instant) {
-        let since = now.saturating_duration_since(origin()).as_secs();
-        let mut reading = None;
-        for (ring, (_, width, slots)) in self.rings.iter_mut().zip(TIERS) {
-            let epoch = since / width;
-            if ring.is_empty() {
-                ring.resize(slots, None);
-            }
-            let slot = &mut ring[(epoch % slots as u64) as usize];
-            if slot.is_none_or(|(at, _, _)| at != epoch) {
-                let cpu = *reading.get_or_insert_with(process_cpu_ns);
-                *slot = Some((epoch, now, cpu));
-            }
-        }
-    }
-
-    /// Cores used over each window, measured from its oldest reading to now.
-    pub fn snapshot(&mut self, now: Instant) -> Value {
-        self.note(now);
-        let cpu_now = process_cpu_ns();
-        let since = now.saturating_duration_since(origin()).as_secs();
-        let mut windows = serde_json::Map::new();
-        for (ring, (name, width, slots)) in self.rings.iter().zip(TIERS) {
-            let epoch = since / width;
-            let oldest = ring
-                .iter()
-                .flatten()
-                .filter(|(at, _, _)| at + slots as u64 > epoch && *at <= epoch)
-                .min_by_key(|(_, at, _)| *at);
-            let (cores, seconds) = oldest
-                .map(|(_, at, cpu)| {
-                    let wall = now.saturating_duration_since(*at).as_secs_f64();
-                    let used = cpu_now.saturating_sub(*cpu) as f64 / 1e9;
-                    (if wall > 0.0 { used / wall } else { 0.0 }, wall)
-                })
-                .unwrap_or((0.0, 0.0));
-            windows.insert(
-                name.into(),
-                json!({"cores": (cores * 1000.0).round() / 1000.0, "measured_seconds": seconds.round()}),
-            );
-        }
-        Value::Object(windows)
-    }
-}
-
-fn process_cpu_ns() -> u64 {
+/// This process's CPU so far, in nanoseconds: every thread's, from the process clock.
+pub fn process_cpu_ns() -> u64 {
     let mut time = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,
@@ -463,20 +432,5 @@ mod tests {
         assert_eq!(report["5m"]["count"], 3);
         assert_eq!(report["5m"]["over_target"], 1);
         assert_eq!(report["1h"]["max_ms"], 300.0);
-    }
-
-    #[test]
-    fn cpu_windows_measure_from_their_oldest_reading() {
-        let mut cpu = Cpu::default();
-        cpu.note(Instant::now());
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_millis(30) {
-            std::hint::black_box((0..1000).sum::<u64>());
-        }
-        let report = cpu.snapshot(Instant::now());
-        for window in ["1m", "5m", "1h"] {
-            let cores = report[window]["cores"].as_f64().unwrap();
-            assert!(cores > 0.0 && cores < 64.0, "{window}: {cores}");
-        }
     }
 }

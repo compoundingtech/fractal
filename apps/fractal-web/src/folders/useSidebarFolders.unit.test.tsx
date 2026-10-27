@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import { RegistryContext } from '@effect/atom-react'
-import type { ActionOf, Arrangement, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@smalltalk/st3-client'
-import { ActionResult, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import { ActionRefused } from '@st3/sdk/effect'
+import type { ActionOf, Arrangement, ArrangementPage, CollectionStreamOptions, EnvelopeOf } from '@fractal/client'
+import { ActionResult, decodeUnknownSync } from '@fractal/client/schema'
+import { ActionRefused } from '@fractal/sdk/effect'
 import { Effect } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
@@ -48,7 +48,7 @@ const mount = async ({ items: startingItems = [initial()], editable = true }: { 
     collectionStream: async (options) => {
       streamOptions = options
       const noop = () => undefined
-      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
+      return { subscribeGlasses: noop, subscribeArrangements: noop, subscribe: noop, subscribeAgent: async () => undefined, subscribeTerminal: noop, subscribeConversation: noop, unsubscribe: noop, close: () => { closes++ } }
     },
     actions: {
       snapshot: Effect.sync(() => `snapshot/fresh/${++snapshots}`),
@@ -95,6 +95,20 @@ const mount = async ({ items: startingItems = [initial()], editable = true }: { 
     close: () => { flushSync(() => root.unmount()); registry.dispose(); container.remove(); expect(closes).toBe(1) },
   }
 }
+
+it('retains arrangement and binding identity on unrelated renders, but observes changed inputs', async () => {
+  const h = await mount()
+  try {
+    const before = h.binding()
+    h.updateRoster(seats)
+    expect(h.binding()).toBe(before)
+    expect(h.binding().orderingTree).toBe(before.orderingTree)
+    h.query('example')
+    expect(h.binding().orderingTree).toBe(before.orderingTree)
+    h.updateRoster([...seats, { id: 'gamma.other', subject: 'agent/other', host: 'gamma', label: 'Other' }])
+    expect(h.binding().orderingTree).not.toBe(before.orderingTree)
+  } finally { h.close() }
+})
 
 it('Optimistic move rolls back with fixed refusal reasons on every seat row', async () => {
   const h = await mount()

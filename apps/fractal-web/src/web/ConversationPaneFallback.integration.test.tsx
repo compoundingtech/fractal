@@ -2,16 +2,13 @@
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { EmbraceRuntimeProvider, Transcript } from '@smalltalk/fractal-ui/assistant-ui'
+import { EmbraceRuntimeProvider, Transcript } from '@fractal/ui/assistant-ui'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 
 // Keep the real kit/runtime DOM. Expose StyleX's precompiled declarations as test metadata
 // so a changed header, lane or skeleton dimension is caught along with structural drift.
-vi.mock('@stylexjs/stylex', () => ({
-  create: (styles: unknown) => styles,
-  defineVars: (variables: unknown) => variables,
-  createTheme: () => ({}),
-  keyframes: () => 'test-animation',
+vi.mock('@stylexjs/stylex', async () => ({
+  ...await import('../testStylex.ts'),
   props: (...styles: unknown[]) => ({
     'data-test-layout': JSON.stringify(Object.fromEntries(styles.flatMap(style =>
       typeof style === 'object' && style !== null ? Object.entries(style) : [],
@@ -53,7 +50,7 @@ describe('conversation code-loading fallback', () => {
 
     expect(shape(fallback)).toEqual(shape(waiting))
     expect([...fallback.querySelectorAll('[data-testid]')].map(node => node.getAttribute('data-testid')))
-      .toEqual(['transcript-header', 'transcript-scroll', 'transcript-history-slot', 'transcript-placeholder', 'sync-line'])
+      .toEqual(['transcript-header', 'transcript-scroll', 'transcript-placeholder', 'sync-line'])
     expect(fallback.querySelector('[data-testid="transcript-placeholder"]')?.getAttribute('aria-label')).toBe('Loading conversation')
     expect(fallback.querySelector('[data-testid="transcript-scroll"]')?.getAttribute('aria-label')).toBe('Conversation history')
     expect(fallback.querySelector('header')?.textContent).toBe('Example Agent')

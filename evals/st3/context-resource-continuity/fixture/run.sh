@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 set -euo pipefail
 
 runtime_root="$(mktemp -d "${TMPDIR:-/tmp}/st3-continuity.XXXXXX")"
@@ -32,7 +33,8 @@ trap cleanup EXIT
 
 start_daemon
 printf '%s\n' CONTEXT-NOW-7b9d | ST_AGENT=cr.agent st3 --endpoint "$socket" context write cr.agent
-ST_AGENT=cr.agent st3 --endpoint "$socket" context append cr.agent --decision DECISION-7b9d --why DECISION-WHY-7b9d >/dev/null
+# arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+FRACTAL_AGENT=cr.agent ST_AGENT=cr.agent st3 --endpoint "$socket" context append cr.agent --decision DECISION-7b9d --why DECISION-WHY-7b9d >/dev/null
 ref="$(st3 --endpoint "$socket" resource add https://example.invalid/context-resource-7b9d --as cr.agent --title CONTINUITY-RESOURCE-7b9d --tag continuity,restart --relation output)"
 printf '%s\n' "$ref" >resource-ref
 stop_daemon

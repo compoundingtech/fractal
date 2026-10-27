@@ -1,6 +1,6 @@
-import { ago } from '@smalltalk/st3-views';
-export { ago } from '@smalltalk/st3-views';
-import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep, WorkState } from '../../clients/typescript/st3-client';
+import { ago, alertsHeading } from '@fractal/views';
+export { ago } from '@fractal/views';
+import type { Agent, Attention, ClientConnection, Device, Mission, MissionStep } from '../../clients/typescript/fractal-client';
 
 // The daemon annotates every resource with its operational layer. It is not part of the
 // generated resource types, so read it at the UI boundary.
@@ -16,9 +16,9 @@ export function words(slug: string): string {
 function titleCase(text: string): string { return text.charAt(0).toUpperCase() + text.slice(1); }
 
 export function attentionHeadline({ count, loaded, error }: { count: number; loaded: boolean; error?: string }): { text: string; warning: boolean } {
-  if (error) return count ? { text: `${count} actionable items from the last load · refresh failed: ${error}`, warning: true } : { text: `Attention could not be loaded: ${error}`, warning: true };
-  if (!loaded) return { text: 'Attention has not loaded yet.', warning: true };
-  return { text: count ? `${count} actionable items` : 'Nothing needs your attention.', warning: false };
+  if (error) return count ? { text: `${alertsHeading(count)} from the last load · refresh failed: ${error}`, warning: true } : { text: `Alerts could not be loaded: ${error}`, warning: true };
+  if (!loaded) return { text: 'Alerts have not loaded yet.', warning: true };
+  return { text: alertsHeading(count), warning: false };
 }
 
 const actionLabels: Record<Attention['actions'][number], string> = {
@@ -73,41 +73,6 @@ export function currentWorkSummary(agent: Pick<Agent, 'current_work'>): string |
 // A mission row carries its runs with their steps: every open run, and the latest run.
 export function missionSteps(mission: Pick<Mission, 'run_details'>): MissionStep[] {
   return (mission.run_details ?? []).flatMap(run => run.steps ?? []);
-}
-
-export const missionGroups = ['Blocked', 'Waiting', 'Running', 'Drafts', 'Archive'] as const;
-export type MissionGroup = typeof missionGroups[number];
-// All contract states have a presentation; held and verifying steps take precedence
-// over dependent steps that are still waiting. Keep aliases for cached older projections.
-const stepGroups: Record<WorkState, MissionGroup | null> = {
-  'waiting-person': 'Waiting', waiting: 'Waiting', ready: 'Running', claimed: 'Running', blocked: 'Blocked',
-  verifying: 'Running', completed: null, failed: 'Blocked', cancelled: null,
-};
-function stepGroup(state: string): MissionGroup | null {
-  if (state === 'working' || state === 'running') return 'Running';
-  if (state === 'pending') return 'Waiting';
-  return stepGroups[state as WorkState] ?? null;
-}
-export function missionGroup(mission: Pick<Mission, 'run_details' | 'state'>): MissionGroup {
-  if (['completed', 'failed', 'cancelled', 'retired'].includes(mission.state)) return 'Archive';
-  const groups = missionSteps(mission).map(step => stepGroup(step.state));
-  if (groups.includes('Blocked')) return 'Blocked';
-  if (groups.includes('Running')) return 'Running';
-  if (groups.includes('Waiting')) return 'Waiting';
-  if (mission.state === 'running' || mission.state === 'standing') return 'Running';
-  if (mission.state === 'ready' || mission.state === 'draft') return 'Drafts';
-  return 'Archive';
-}
-
-export function missionDetail(mission: Pick<Mission, 'run_details' | 'runs' | 'visualization'>): string {
-  const planned = mission.visualization?.nodes.filter(node => node.kind === 'step').length;
-  const steps = missionSteps(mission);
-  const current = steps.find(step => step.state === 'blocked') ?? steps.find(step => stepGroup(step.state) === 'Running') ?? steps[0];
-  // Someone set the latest run's outcome after it finished: say what, who, and why.
-  const runs = mission.run_details ?? [];
-  const outcome = runs[runs.length - 1]?.outcome;
-  const set = outcome ? ` · set ${outcome.status}${outcome.previous_status ? ` (was ${outcome.previous_status})` : ''} by ${outcome.actor}: ${outcome.reason}` : '';
-  return `${mission.runs.length} runs${planned === undefined ? '' : ` · ${planned} planned steps`}${current ? ` · ${current.path} (${current.state})` : ''}${set}`;
 }
 
 type HealthAgent = Pick<Agent, 'state' | 'harness_state'>;
@@ -205,9 +170,9 @@ export function pingPresentation(text: string): { from: string | null; text: str
   return ping ? { from: senderName(ping[1]), text: ping[2].trim() } : { from: null, text: withoutReference };
 }
 
-// st joins Small Talk to or from an agent into its conversation: who wrote to whom, and the title.
-export function smallTalkPresentation(body: unknown): { from: string; text: string } {
+// st joins Fractal to or from an agent into its conversation: who wrote to whom, and the title.
+export function fractalPresentation(body: unknown): { from: string; text: string } {
   const message = (body && typeof body === 'object' ? body : {}) as { from?: unknown; to?: unknown; title?: unknown };
   const name = (id: unknown) => typeof id === 'string' ? senderName(id) : 'someone';
-  return { from: `${name(message.from)} → ${name(message.to)}`, text: typeof message.title === 'string' && message.title.trim() ? message.title : 'Small Talk' };
+  return { from: `${name(message.from)} → ${name(message.to)}`, text: typeof message.title === 'string' && message.title.trim() ? message.title : 'Fractal' };
 }

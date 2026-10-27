@@ -1,5 +1,5 @@
-import type { St3Client } from '../../clients/typescript/st3-client';
-import type { Fence, TerminalScreen } from '../../clients/typescript/st3-client/Models.generated';
+import type { FractalClient } from '../../clients/typescript/fractal-client';
+import type { Fence, TerminalScreen } from '../../clients/typescript/fractal-client/Models.generated';
 
 const FENCE_ATTEMPTS = 8;
 
@@ -22,7 +22,7 @@ export function wantsScreenSequence(error: unknown): boolean {
 // fence or a prior action's screen sequence, and never redirect input into a
 // new process that happens to reuse the same terminal ID.
 export async function withFreshTerminalFence<T>(
-  client: Pick<St3Client, 'terminalScreen'>,
+  client: Pick<FractalClient, 'terminalScreen'>,
   terminalId: string,
   expectedIncarnation: string,
   action: (fence: TerminalFence) => Promise<T>,
@@ -52,6 +52,8 @@ export type TerminalFollowHandlers = {
   onScreen: (screen: TerminalScreen) => void;
   /** A problem to show; an empty string clears it. */
   onIssue: (issue: string) => void;
+  /** Local, content-free attach/stream transitions. */
+  onQuality?: (event: 'attempt' | 'attached' | 'error' | 'dead') => void;
 };
 
 /** The app's foreground state, such as `ForegroundGate`. */

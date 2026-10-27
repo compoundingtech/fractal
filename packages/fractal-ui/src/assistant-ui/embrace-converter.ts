@@ -29,12 +29,12 @@ const completed: MessageStatus = { type: 'complete', reason: 'stop' }
 const running: MessageStatus = { type: 'running' }
 const cancelled: MessageStatus = { type: 'incomplete', reason: 'cancelled' }
 
+/** The thread's usage line shows tokens, context and model only: spend stays out of the conversation lane. */
 const usageSummary = (item: UsageItem): string => {
   const fields = [
     item.inputTokens === undefined ? undefined : `${item.inputTokens.toLocaleString('en-US')} input`,
     item.outputTokens === undefined ? undefined : `${item.outputTokens.toLocaleString('en-US')} output`,
     item.cachedTokens === undefined ? undefined : `${item.cachedTokens.toLocaleString('en-US')} cached`,
-    item.cost === undefined ? undefined : `${item.cost} ${item.currency ?? 'cost units'}`,
     item.contextUsedPercent === undefined ? undefined : `${item.contextUsedPercent}% context`,
     item.model,
   ].filter((field) => field !== undefined)
@@ -167,7 +167,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       diagnostics.push('semantic-row-as-text')
       return {
         ...common, role: 'system',
-        content: [{ type: 'text', text: `Unsupported event · ${item.eventType}` }],
+        content: [{ type: 'text', text: item.mixedContent === true ? 'Message with internal records' : `Unsupported event · ${item.eventType}` }],
       }
     default: {
       const unhandled: never = item

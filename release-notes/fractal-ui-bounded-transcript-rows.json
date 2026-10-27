@@ -1,32 +1,11 @@
 {
   "version": 1,
-  "summary": "fractal-ui transcripts first mount at most six source rows plus the newest prompt and whole reasoning runs, fill an underfull lane before paint, and keep that first page stable: older loaded rows appear only at the history top, through Show earlier messages, or with browser find. Switching live conversations paints no stale or partial timeline",
-  "replay": {
-    "status": "none",
-    "detail": "No replay or rebuild."
-  },
-  "schema": {
-    "status": "none",
-    "detail": "No tables, columns, indexes or triggers."
-  },
-  "rules": {
-    "status": "none",
-    "detail": "Checkpoint rules and digests are unchanged."
-  },
-  "compatibility": {
-    "status": "none",
-    "detail": "Only packages/fractal-ui and apps/fractal-web change; no protocol, harness or CLI change. Runtime adoption records the source snapshot before Transcript may classify its missing ids as stranded. The live host keeps its lane empty while publication waits, reserves the history-control slot and composer dock, and preserves the same composer instance, draft, focus and caret. Transcript adds an optional loadingState body; hosts that omit it retain the kit skeleton. Unrevealed prefix rows are not reachable by screen readers until revealed."
-  },
-  "downtime": {
-    "status": "none",
-    "detail": "None."
-  },
-  "manual": {
-    "status": "none",
-    "detail": "No manual step."
-  },
-  "recovery": {
-    "status": "none",
-    "detail": "Nothing to recover."
-  }
+  "summary": "Bound the initial transcript mount to six source rows, preserving the newest prompt and complete reasoning runs",
+  "replay": { "status": "none", "detail": "Presentation only; no claim replay or projection rebuild." },
+  "schema": { "status": "none", "detail": "No database, replicated vocabulary or client wire changes." },
+  "rules": { "status": "none", "detail": "No checkpoint or admission rule changes." },
+  "compatibility": { "status": "changed", "detail": "Transcript history initially mounts six source rows rather than two complete turns. The newest prompt remains available and a contiguous reasoning run crossing the boundary remains whole. Existing explicit history controls reveal earlier rows. Current viewport, runtime, retained panes, sidebar and composer ownership remain unchanged." },
+  "downtime": { "status": "none", "detail": "No daemon interruption or startup work." },
+  "manual": { "status": "none", "detail": "No configuration or migration. Use the existing history controls to reveal older rows." },
+  "recovery": { "status": "none", "detail": "No stored state changes. Older builds retain their previous transcript mounting policy." }
 }
