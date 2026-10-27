@@ -1,0 +1,11 @@
+{
+  "sha256": {
+    "attention": "632d3b9afe73b71ce82370b8f799cb74fb8f2661789de76f59fd9bb923957c34",
+    "conversation": "fa3c0deea34ef481ac61ac596d5b65021ea55c43b7bdb109db3e935cfb204730",
+    "details": "ea9fd35f71e1461b8585861ffefcf80e5f9d68a93fc03386f315da0bd0fba380",
+    "roster": "f250de24a142d7e7330b774e9f0c1323ebc6779e83c7e732eb6ae0465b7eb983",
+    "sync": "ab7fad3e23a8cee102032de79575bd5bcb3e4bf505bfc921487be5d88db90ecf",
+    "terminal": "f4b111562c7085eef0325733b3b4a255be4af3147258564911f0da113135412d"
+  },
+  "world": "fleet-mid-refactor"
+}

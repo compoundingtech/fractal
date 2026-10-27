@@ -365,6 +365,7 @@
     "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json",
     "fixtures/clients",
+    "fixtures/scenarios/fleet-mid-refactor",
     "scripts/ci-test-paths.rs",
     "slo"
    ]

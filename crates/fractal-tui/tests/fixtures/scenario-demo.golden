@@ -1,0 +1,204 @@
+=== Now ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  I home:   +
+ ▾ Everything else 7                    │
+ ▾ Agents 4                             │ ✓ No alerts right now.
+   Atlas Builder                        │
+   Atlas Docs                           │ 0 missions are running without you. They are on the Missions tab.
+   Atlas Migrator                       │
+   Atlas Reviewer                       │
+ ▾ Missions 1                           │
+   example/atlas · Rename fetchUser to l│
+ ▾ Machines 2                           │
+   foundry                              │
+   meadow                               │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
+=== Roster ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  list:agents   +
+ ▾ Everything else 7                    │   stopped ─────────────────────────────────────────────────────────────── 4
+ ▾ Agents 4                             │ ▌ ? Atlas Builder                                                codex   1m
+   Atlas Builder                        │ ▌   example/atlas/builder
+   Atlas Docs                           │   ? Atlas Docs                                                  claude  55m
+   Atlas Migrator                       │     example/atlas/docs
+   Atlas Reviewer                       │   ? Atlas Migrator                                              claude   4s
+ ▾ Missions 1                           │     example/atlas/migrator
+   example/atlas · Rename fetchUser to l│   ? Atlas Reviewer                                              claude  12m
+ ▾ Machines 2                           │     example/atlas/reviewer
+   foundry                              │
+   meadow                               │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │ ─────────────────────────────────────────────────────────────────────────────
+                                        │  ◆ needs you ⠋ working   ● idle
+                                        │  ✕ broken    ○ stopped   ? unmanaged
+                                        │  This host's Fractal is older: agent states show as Fractal reports them.
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
+=== Mission ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  M ◆1 example/atlas · Rename fet…  +
+ ▾ Everything else 7                    │  ? running · Fractal does not say   example/atlas · Rename fetchUser to load
+ ▾ Agents 4                             │  mission/example/atlas/load-user-rename  ·  Fractal does not say: an older v
+   Atlas Builder                        │
+   Atlas Docs                           │ ╭─ STEPS ──────────────────────────────────────────────────────────────────╮
+   Atlas Migrator                       │ │                       0/0 done                                           │
+   Atlas Reviewer                       │ │                                                                          │
+ ▾ Missions 1                           │ │ click a step to open it                                                  │
+   example/atlas · Rename fetchUser to l│ ╰──────────────────────────────────────────────────────────────────────────╯
+ ▾ Machines 2                           │ ╭─ AGENTS · 0 ─────────────────────────────────────────────────────────────╮
+   foundry                              │ │ No agents right now.                                                     │
+   meadow                               │ ╰──────────────────────────────────────────────────────────────────────────╯
+                                        │  k The whole declaration
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
+=== Fleet ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  list:fleet   +
+ ▾ Everything else 7                    │ ▌ ● meadow  you are here                                           2 agents
+ ▾ Agents 4                             │ ▌   this machine
+   Atlas Builder                        │   ● foundry                                                        2 agents
+   Atlas Docs                           │     connected · heard 30s ago
+   Atlas Migrator                       │
+   Atlas Reviewer                       │
+ ▾ Missions 1                           │
+   example/atlas · Rename fetchUser to l│
+ ▾ Machines 2                           │
+   foundry                              │
+   meadow                               │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │ ─────────────────────────────────────────────────────────────────────────────
+                                        │  ● connected ◐ through another○ offline
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
+=== Conversation ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  A~ Atlas Builder   +
+ ▾ Everything else 7                    │  ? Atlas Builder  running · older Fractal                    codex · meadow
+ ▾ Agents 4                             │    agent/example/atlas/builder  ·  worktree · branch builder/load-user-renam
+   Atlas Builder                        │    mission example/atlas · Rename fetchUser to loadUser › step-3
+   Atlas Docs                           │ ──────────────────────────────────────────────────────────── ctrl+d details ─
+   Atlas Migrator                       │
+   Atlas Reviewer                       │ ▎ Fractal
+ ▾ Missions 1                           │ ▎ Can you check why the worker typecheck fails after the rename?
+   example/atlas · Rename fetchUser to l│
+ ▾ Machines 2                           │ ▎ Fractal
+   foundry                              │ ▎ The typecheck still fails in packages/worker: syncAvatars calls loadUser
+   meadow                               │ ▎ with one argument. I asked Robin whether to thread the session through.
+                                        │
+                                        │  starting · transcript unavailable until the harness writes its first line
+                                        │
+                                        │ ────── status: running · running
+                                        │                                                                             ┃
+                                        │ ────── delivery paused · channel not verified yet                           ┃
+                                        │                                                                             ┃
+                                        │  starting · transcript unavailable until the harness writes its first line  ┃
+                                        │                                                                             ┃
+                                        │ ▎ Fractal                                                                   ┃
+                                        │ ▎ Can you check why the worker typecheck fails after the rename?            ┃
+                                        │                                                                             ┃
+                                        │  starting · transcript unavailable until the harness writes its first line  ┃
+                                        │                                                                             ┃
+                                        │ ─────────────────────────────────────────────────────────────────────────────
+                                        │ › Message Atlas Builder · type or click
+                                        │
+ Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
+
+=== Terminal ===
+ ● live · ◆ 1 alert · ⠋ 0 working · fleet ●2 · $ usage                                                         ▢ main ▾
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ / Filter:                          +New│  A~ Atlas Builder   +
+ ▾ Everything else 7                    │  ← Return · Ctrl+\   Atlas Builder · demo terminal
+ ▾ Agents 4                             │  Ctrl-C and Ctrl-D need a second press to reach the agent
+   Atlas Builder                        │ scenario harness ready
+   Atlas Docs                           │ $ pnpm -r typecheck
+   Atlas Migrator                       │ packages/api typecheck: Done
+   Atlas Reviewer                       │ packages/web typecheck: Done
+ ▾ Missions 1                           │ packages/worker typecheck: src/jobs/syncAvatars.ts(41,18): error TS2554: Expe
+   example/atlas · Rename fetchUser to l│ d 2 arguments, but got 1.
+ ▾ Machines 2                           │ packages/worker typecheck: Failed
+   foundry                              │
+   meadow                               │ scenario turn 3 output complete
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+                                        │
+ Keys: ctrl+\ back to Fractal TUI   drag copy   ctrl+alt+r reset modes
+
