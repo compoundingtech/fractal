@@ -350,7 +350,7 @@ their tasks end with their test runtime. New process-spawning fixtures should us
 The workspace suite still covers the token-free two-node messaging fault matrix. Its
 previous-release channel archive is pinned in `.github/messaging-compat-baseline.json`. Its
 provider stand-in runs the omp channel hook's TypeScript with Node 24's built-in type stripping;
-the default devShell supplies that `node`. See [the eval contract](../evals/st3/messaging-faults/README.md).
+the default devShell supplies that `node`. See [the eval contract](../evals/fractal/messaging-faults/README.md).
 
 ### Rolling compatibility baselines
 
