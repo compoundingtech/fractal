@@ -3,7 +3,6 @@ import XCTest
 @testable import FractalClient
 
 final class ScenariosTests: XCTestCase {
-    private var strictWire = true
     private lazy var strictSchema = Result {
         try ScenarioStrictWireShape(schema: Data(contentsOf:
             fixtures.deletingLastPathComponent().deletingLastPathComponent()
@@ -140,34 +139,69 @@ final class ScenariosTests: XCTestCase {
     }
 
     func testStrictSlicesRejectExcessKeysAndFutureKnownObjectEnums() throws {
-        let reader = ScenarioReader(directory: fixtures)
-        let sync = try reader.loadSlice(world: "fleet-mid-refactor", slice: "sync")
-        var capabilities = try object(try object(sync.state).required("capabilities"))
-        capabilities["protocol_features"] = .object([:])
-        let capabilitiesValue = JSONValue.object(capabilities)
-        // Ordinary client decoding intentionally remains tolerant.
-        XCTAssertNoThrow(try JSONDecoder().decode(Capabilities.self, from: JSONEncoder().encode(capabilitiesValue)))
-        XCTAssertThrowsError(try decode(Capabilities.self, capabilitiesValue))
+        try assertStrictMutationRejected(slice: "sync") { root in
+            var state = try object(root.required("state"))
+            var capabilities = try object(state.required("capabilities"))
+            capabilities["protocol_features"] = .object([:])
+            state["capabilities"] = .object(capabilities)
+            root["state"] = .object(state)
+        }
+        try assertStrictMutationRejected(slice: "roster") { root in
+            var state = try object(root.required("state"))
+            var agents = try array(state.required("agents"))
+            var agent = try object(agents[0])
+            agent["state"] = .string("reconciling")
+            agents[0] = .object(agent)
+            state["agents"] = .array(agents)
+            root["state"] = .object(state)
+        }
+    }
 
-        let roster = try reader.loadSlice(world: "fleet-mid-refactor", slice: "roster")
-        var agent = try object(try XCTUnwrap(try array(try object(roster.state).required("agents")).first))
-        agent["state"] = .string("reconciling")
-        let agentValue = JSONValue.object(agent)
-        XCTAssertNoThrow(try JSONDecoder().decode(Resource.self, from: JSONEncoder().encode(agentValue)))
-        XCTAssertThrowsError(try decode(Resource.self, agentValue))
+    func testStrictSliceRootRejectsStandaloneUnknownErrorCodes() throws {
+        try assertStrictMutationRejected(slice: "sync") { root in
+            var timeline = try array(root.required("timeline"))
+            timeline.append(.object([
+                "_tag": .string("error"), "at_ms": .number(0), "store": .number(1),
+                "code": .string("future-error"), "message": .string("Future error"),
+                "retryable": .bool(false), "repeat": .bool(false),
+            ]))
+            root["timeline"] = .array(timeline)
+        }
+        let statuses: [JSONValue] = [
+            .object(["_tag": .string("Failed"), "cause": .object([
+                "_tag": .string("Server"), "code": .string("future-error"), "message": .string("Future error"),
+            ])]),
+            .object(["_tag": .string("Stale"), "reason": .object([
+                "_tag": .string("Resync"), "attempt": .number(1),
+                "code": .string("future-error"), "message": .string("Future error"),
+            ])]),
+        ]
+        for status in statuses {
+            try assertStrictMutationRejected(slice: "sync") { root in
+                var state = try object(root.required("state"))
+                var expected = try array(state.required("expected"))
+                var expectation = try object(expected[0])
+                expectation["status"] = status
+                expected[0] = .object(expectation)
+                state["expected"] = .array(expected)
+                root["state"] = .object(state)
+            }
+        }
+    }
 
-        // These exact wire values still decode when a slice explicitly opts into tolerance.
-        strictWire = false
-        defer { strictWire = true }
-        XCTAssertNoThrow(try decode(Capabilities.self, capabilitiesValue))
-        XCTAssertNoThrow(try decode(Resource.self, agentValue))
+    private func assertStrictMutationRejected(slice: String, mutate: (inout [String: JSONValue]) throws -> Void) throws {
+        let data = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/\(slice).json"))
+        var root = try object(JSONDecoder().decode(JSONValue.self, from: data))
+        try mutate(&root)
+        XCTAssertThrowsError(try validate(decode(ScenarioSlice.self, .object(root))))
+        // The exact same original wire values must still decode in tolerant mode.
+        root["decode"] = .string("tolerant")
+        XCTAssertNoThrow(try validate(decode(ScenarioSlice.self, .object(root))))
     }
 
     private func validate(_ slice: ScenarioSlice) throws {
         guard ["strict", "tolerant"].contains(slice.decode) else { throw ShapeError("Unknown decode mode \(slice.decode)") }
-        let previousMode = strictWire
-        strictWire = slice.decode == "strict"
-        defer { strictWire = previousMode }
+        try strictSchema.get().validate(slice)
         let source = try object(slice.source)
         switch try decode(String.self, source.required("_tag")) {
         case "synthetic": try keys(source, required: ["_tag", "seed"]); _ = try decode(Int.self, source.required("seed"))
@@ -369,23 +403,7 @@ final class ScenariosTests: XCTestCase {
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ value: JSONValue) throws -> T {
-        if strictWire {
-            let definition: String?
-            switch ObjectIdentifier(type) {
-            case ObjectIdentifier(Resource.self): definition = "Resource"
-            case ObjectIdentifier(ScenarioConversationEntry.self): definition = "TimelineEntry"
-            case ObjectIdentifier(RuntimeResource.self): definition = "Runtime"
-            case ObjectIdentifier(TerminalScreen.self): definition = "TerminalScreen"
-            case ObjectIdentifier(Capabilities.self): definition = "Capabilities"
-            case ObjectIdentifier(ErrorEnvelope.self): definition = "ErrorEnvelope"
-            case ObjectIdentifier([SyncPeer].self):
-                for peer in try array(value) { try strictSchema.get().validate(peer, definition: "SyncPeer") }
-                definition = nil
-            default: definition = nil
-            }
-            if let definition { try strictSchema.get().validate(value, definition: definition) }
-        }
-        return try JSONDecoder().decode(type, from: JSONEncoder().encode(value))
+        try JSONDecoder().decode(type, from: JSONEncoder().encode(value))
     }
 
     private func object(_ value: JSONValue) throws -> [String: JSONValue] {

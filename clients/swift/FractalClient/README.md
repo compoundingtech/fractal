@@ -101,9 +101,11 @@ pages from the optional thread `history` descriptor.
 `ScenariosTests` runs every shared `_vectors/rebase.json` case and recursively discovers every
 committed slice JSON file, checks index coverage, and decodes state and timeline wire payloads.
 New slice/event shapes and undeclared future resource/entry kinds fail instead of being skipped.
-Strict slices additionally check wire object keys and known enum cases against the committed
-client schema, including nested values; permissive Codable decoding alone is not strict
-validation. Deliberately tolerant slices continue to decode their original contaminated values.
+Strict slices additionally validate their complete state/timeline root once, checking wire
+object keys and known enum cases against the committed client schema. This includes standalone
+timeline, server-failure and resync error codes; no decoded-type switch can omit a field.
+Permissive Codable decoding alone is not strict validation. Deliberately tolerant slices
+continue to decode their original contaminated values.
 Run `swift test --package-path clients/swift/FractalClient --filter ScenariosTests` from the
 repository root on macOS with Swift 6 (macOS 14 or newer).
 

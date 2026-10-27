@@ -15,10 +15,74 @@ struct ScenarioStrictWireShape {
         self.definitions = definitions
     }
 
-    func validate(_ value: JSONValue, definition: String) throws {
-        guard let schema = definitions[definition] else { throw Failure(pointer: "", reason: "Unknown schema \(definition)") }
-        try check(value, schema: schema, pointer: "")
+    func validate(_ slice: ScenarioSlice) throws {
+        guard slice.decode == "strict" else { return }
+        guard let root = Self.sliceRoots[slice.slice] else {
+            throw Failure(pointer: "", reason: "Unknown slice \(slice.slice)")
+        }
+        try check(.object(["state": slice.state, "timeline": .array(slice.timeline)]), schema: root, pointer: "")
     }
+
+    // Kit envelopes are not client wire definitions. Their roots point every
+    // nested transport value (including standalone codes) into the client schema.
+    private static let sliceRoots: [String: JSONValue] = {
+        func ref(_ name: String) -> JSONValue { .object(["$ref": .string("#/$defs/" + name)]) }
+        func array(_ item: JSONValue) -> JSONValue { .object(["type": .string("array"), "items": item]) }
+        func object(_ properties: [String: JSONValue]) -> JSONValue {
+            .object(["type": .string("object"), "properties": .object(properties), "additionalProperties": .bool(false)])
+        }
+        func enumeration(_ values: [String]) -> JSONValue { .object(["enum": .array(values.map(JSONValue.string))]) }
+        let string: JSONValue = .object(["type": .string("string")])
+        let integer: JSONValue = .object(["type": .string("integer")])
+        let boolean: JSONValue = .object(["type": .string("boolean")])
+        let resourceList = array(ref("Resource"))
+        let thread = object([
+            "agent": string, "session_id": string, "has_more": boolean, "page_size": integer,
+            "items": array(ref("TimelineEntry")), "history": .bool(true),
+        ])
+        let terminal = object([
+            "terminal": string, "owner": string, "incarnation": string, "runtime": ref("Runtime"),
+            "screens": array(object(["at_ms": integer, "screen": ref("TerminalScreen")])), "cast": .bool(true),
+        ])
+        let cause = object([
+            "_tag": enumeration(["Server", "Local", "Unknown"]), "code": ref("ErrorCode"),
+            "message": string, "kind": enumeration(["unsupported"]),
+        ])
+        let reason = object([
+            "_tag": enumeration(["Reconnecting", "Resync"]), "code": ref("ErrorCode"),
+            "message": string, "attempt": integer, "issue": string, "nextAt": integer,
+        ])
+        let status = object([
+            "_tag": enumeration(["Live", "Requested", "Failed", "Stale"]), "since": integer,
+            "lastLiveAt": integer, "cause": cause, "reason": reason,
+        ])
+        let states: [String: JSONValue] = [
+            "roster": object(["agents": resourceList, "machines": resourceList, "runtimes": resourceList,
+                "arrangements": resourceList, "resources": resourceList, "order": array(string)]),
+            "details": object(["missions": resourceList, "work": resourceList]),
+            "attention": object(["attention": resourceList, "messages": resourceList]),
+            "conversation": object(["threads": array(thread)]),
+            "terminal": object(["terminals": array(terminal)]),
+            "sync": object(["capabilities": ref("Capabilities"), "expected": array(object([
+                "at_ms": integer, "compare": string, "surface": string, "status": status,
+            ]))]),
+        ]
+        let selector = object(["collection": enumeration(["agents", "missions", "work", "attention", "terminals", "conversation", "terminal"]), "conversation": string, "terminal": string])
+        let timeline = array(object([
+            "_tag": enumeration(["changes", "entries", "replace", "thread-create", "terminal-create", "screen",
+                "http-error", "http-raw", "hold", "close", "open-fail", "error", "reopen", "notice", "notice-clear", "resync"]),
+            "at_ms": integer, "store": integer, "upserts": resourceList, "removes": array(string), "order": array(string),
+            "agent": string, "items": array(ref("TimelineEntry")), "has_more": boolean, "session_id": string,
+            "thread": thread, "record": terminal, "terminal": string, "screen": ref("TerminalScreen"),
+            "envelope": ref("ErrorEnvelope"), "route": string, "status": integer,
+            "when": object(["cursor": enumeration(["present", "absent"])]),
+            "body": string, "content_type": string, "selector": selector,
+            "code": .object(["anyOf": .array([integer, ref("ErrorCode")])]),
+            "reason": string, "opens": string, "message": string, "repeat": boolean, "retryable": boolean,
+            "after_ms": integer, "peers": array(ref("SyncPeer")),
+        ]))
+        return states.mapValues { object(["state": $0, "timeline": timeline]) }
+    }()
 
     private func check(_ value: JSONValue, schema: JSONValue, pointer: String) throws {
         if case .bool(let allowed) = schema {
