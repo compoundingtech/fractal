@@ -83,6 +83,20 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Cold runtime reduction inventory (PR #1706)
+
+The `fractal_store::store` maintainer owns `lv-h5911198f6cf3` and `lv-ha1002d83b7ac`:
+the first selects existing integer claim identities in descending canonical order, and the
+second hydrates one existing kind/body at a time until consumed fields resolve. Claim bodies
+and canonical subject/time keys remain inline; a decoded-row bound is not a byte-size bound.
+The existing reference/chunking representation work remains required. The obsolete full-history
+source reader `lv-hcd8a9be75153` is removed in favor of the existing indexed per-origin reader.
+
+The `fractal_store::store::tests` maintainer owns `lv-h13b02e7126c4` and `lv-hf8af949bb730`.
+These rewrite isolated in-memory claim fixtures to exercise historical sparse/legacy records;
+they do not add a production ingestion path. Body/predecessor preparation remains the owning
+module's representation work, with no new size guarantee or admission relaxation.
+
 ### Person rename and review reassignment inventory review
 
 Owner review for [PR #1185](https://github.com/compoundingtech/fractal/pull/1185):

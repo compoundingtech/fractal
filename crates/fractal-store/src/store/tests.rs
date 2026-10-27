@@ -2522,8 +2522,8 @@ fn cold_runtime_fields_match_sparse_null_and_transition_history() {
         observe_runtime(&store, subject, "running", "fixture");
         let index = store.index().unwrap();
         // Sparse legacy records are reducer inputs, not current admission examples.
-        store.connection.lock().unwrap_or_else(PoisonError::into_inner).execute(
-            "UPDATE claims SET kind=?1, body=?2 WHERE store_index=?3",
+        store.connection.lock().expect("fixture writer connection").execute(
+            /* sqlite-large-value: allow-for-now lv-hf8af949bb730 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET kind=?1, body=?2 WHERE store_index=?3",
             params![kind, body.to_string(), index],
         ).unwrap();
         snapshots.push(index);
@@ -2551,8 +2551,8 @@ fn cold_runtime_fields_stop_decoding_after_a_complete_observation() {
         store.set_write_clock_at(1_800_000_000_000 + step).unwrap();
         observe_runtime(&store, subject, "running", &format!("epoch-{step}"));
         let index = store.index().unwrap();
-        store.connection.lock().unwrap_or_else(PoisonError::into_inner).execute(
-            "UPDATE claims SET body=?1 WHERE store_index=?2",
+        store.connection.lock().expect("fixture writer connection").execute(
+            /* sqlite-large-value: allow-for-now lv-h13b02e7126c4 owner=fractal_store::store::tests TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET body=?1 WHERE store_index=?2",
             params![json!({"fields": {
                 "status": "running", "runtime_id": "one", "incarnation_id": format!("epoch-{step}"),
                 "terminal": true, "reachability": "reachable", "reason": null

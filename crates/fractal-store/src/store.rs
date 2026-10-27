@@ -10543,7 +10543,7 @@ fn latest_actual_fields_at(
     fields: &[&str],
 ) -> Result<Option<Value>> {
     debug_assert!(fields.len() < usize::BITS as usize);
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc01d1706f01d owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5911198f6cf3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.store_index FROM claims INDEXED BY claims_actual_accepted_index
          JOIN batches ON batches.id=claims.batch_id
          WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
@@ -10563,7 +10563,7 @@ fn latest_actual_fields_at(
         seen = true;
         let index: u64 = row.get(0)?;
         let (kind, body): (String, String) =
-            bodies.query_row(/* sqlite-large-value: allow-for-now lv-hc01d1706b0d1 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            bodies.query_row(/* sqlite-large-value: allow-for-now lv-ha1002d83b7ac owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
         #[cfg(any(test, feature = "test-support"))]
         ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
         let value: Value = serde_json::from_str(&body)?;
