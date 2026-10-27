@@ -109,7 +109,7 @@ mod tests {
         let expected = "Material checkpoint\nETA (self-reported by agent/example/alder): 2023-11-15T00:13:20.123Z; reported at 2023-11-14T22:13:20.123Z. Not a deadline.";
         assert_eq!(summary(Some("Material checkpoint"), "2h", AUTHOR, NOW).unwrap(), expected);
         assert_eq!(summary(Some("Material checkpoint"), "2023-11-15T02:13:20.123+02:00", AUTHOR, NOW).unwrap(), expected);
-        assert!(summary(None, "1ms", "person/nathan", NOW).unwrap().starts_with("ETA (self-reported by person/nathan):"));
+        assert!(summary(None, "1ms", "person/ada", NOW).unwrap().starts_with("ETA (self-reported by person/ada):"));
     }
 
     #[test]
