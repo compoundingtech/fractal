@@ -2,6 +2,6 @@
 # guardian is a subreaper: orphaned helpers stay inside the test's process tree.
 # macOS has no prctl; parent-signal fixtures use a launcher-owned request pipe.
 if [[ $(python3 -c 'import sys; print(sys.platform)') == linux ]] &&
-   ! python3 "$(dirname "${BASH_SOURCE[0]}")/st3_test_process.py" --is-supervised; then
-  exec python3 "$(dirname "${BASH_SOURCE[0]}")/st3_test_process.py" -- bash "$0" "$@"
+   ! python3 "$(dirname "${BASH_SOURCE[0]}")/fractal_test_process.py" --is-supervised; then
+  exec python3 "$(dirname "${BASH_SOURCE[0]}")/fractal_test_process.py" -- bash "$0" "$@"
 fi
