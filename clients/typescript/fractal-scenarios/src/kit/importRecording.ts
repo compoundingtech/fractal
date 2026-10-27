@@ -333,13 +333,14 @@ export const importRecording = (script: Pick<RecordingScript, 'format_version' |
   if (knownTerminals.size === 0 || !attachment) fail('/terminal', 'missing captured screen or attachment')
   return { slices: {
     roster: { ...common, kind: 'roster', state: {
+      sessions: [], devices: [],
       agents: rosterResources.filter((item): item is Agent => item.kind === 'agent'),
       runtimes: rosterResources.filter((item): item is Runtime => item.kind === 'runtime'),
       machines: rosterResources.filter((item): item is Machine => item.kind === 'machine'),
       order: rosterResources.filter((item) => item.kind === 'agent').map((item) => item.id),
       recorded_history: rosterHistory,
     }, timeline: roster },
-    details: { ...common, kind: 'details', state: { missions: [], work: [] }, timeline: [] },
+    details: { ...common, kind: 'details', state: { launches: [], launch_variants: [], missions: [], work: [] }, timeline: [] },
     attention: { ...common, kind: 'attention', state: { attention: [], messages: [] }, timeline: [] },
     conversation: { ...common, kind: 'conversation', state: { threads, recorded_history: conversationHistory }, timeline: conversation },
     terminal: { ...common, kind: 'terminal', state: { terminals, recorded_history: screenHistory }, timeline: terminal },

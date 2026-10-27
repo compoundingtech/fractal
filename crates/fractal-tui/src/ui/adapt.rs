@@ -192,7 +192,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             extras
                 .degraded
                 .iter()
-                .map(|why| format!("live stream: {why} · st answers, reconnecting")),
+                .map(|why| format!("live stream: {why} · Fractal answers, reconnecting")),
         )
         .collect();
     World {
@@ -236,6 +236,10 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         },
         usage_limits: match &model.usage {
             Some(Ok(period)) => period.limits.clone(),
+            _ => Vec::new(),
+        },
+        usage_accounts: match &model.usage {
+            Some(Ok(period)) => period.accounts.clone(),
             _ => Vec::new(),
         },
         agent_messages: match &model.usage {
@@ -491,7 +495,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                         "fault" => return None,
                         // A newer st's card: show what st says, never drop it.
                         _ => unplaced(
-                            "st names a card this client does not know: answer it with st alerts.",
+                            "Fractal names a card this client does not know: answer it with fractal alerts.",
                         ),
                     };
                     // A group this client does not know shows where st's alert flag puts it.
@@ -507,7 +511,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                 None => (
                     fallback,
                     unplaced(
-                        "st does not say what this is: this host's st is older, or has not presented it yet. Answer it with st alerts.",
+                        "Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts.",
                     ),
                 ),
             };
@@ -1967,7 +1971,7 @@ mod tests {
         assert!(matches!(live.link, Link::Live));
         assert_eq!(
             live.stale,
-            ["live stream: st closed the connection · st answers, reconnecting"]
+            ["live stream: st closed the connection · Fractal answers, reconnecting"]
         );
     }
 
@@ -2296,7 +2300,7 @@ mod tests {
             panic!("{:#?}", items[0].kind);
         };
         assert_eq!(text, "What st says.");
-        assert!(why.contains("st is older"), "{why}");
+        assert!(why.contains("Fractal is older"), "{why}");
         // The gate keeps the actions st offers; the client offers none of its own.
         assert_eq!(items[0].actions, ["review.approve", "review.reject"]);
         assert!(
@@ -2623,7 +2627,7 @@ mod tests {
         })]);
         let seat = &agents(&model, &[])[0];
         assert_eq!((seat.state, seat.reported.as_deref()), (AgentState::Unknown, Some("running")));
-        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older st");
+        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older Fractal");
         let world = world(&model, "person/avery", &Extras::default());
         let legend = super::super::screens::agents_list(&world, "⠋", 80)
             .legend
@@ -2631,7 +2635,7 @@ mod tests {
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(legend.contains("This host's st is older"), "{legend}");
+        assert!(legend.contains("This host's Fractal is older"), "{legend}");
     }
 
     #[test]
