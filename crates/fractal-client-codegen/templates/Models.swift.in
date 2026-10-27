@@ -64,7 +64,6 @@ public struct AgentsPublication: Codable, Sendable {
     public let hasMore: Bool
     enum CodingKeys: String, CodingKey { case publication, items, order, hasMore = "has_more" }
 }
-}
 
 public struct AgentsSnapshotChunk: Codable, Sendable {
     public let kind, id, collection: String
@@ -121,6 +120,7 @@ public enum AgentsCollectionEvent: Decodable, Sendable {
         default: throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unknown agents collection frame \(kind)"))
         }
     }
+}
 
 public struct ErrorEnvelope: Codable, Error, Sendable {
     public let apiVersion: String

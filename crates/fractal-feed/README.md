@@ -57,6 +57,8 @@ async fn main() {
 data before enabling them. `Offline` retains the last display while the feed retries. The waits
 grow through 1, 2, 5, 10 and 30 seconds with jitter. `Reconnect` interrupts an offline wait.
 Dropping the command sender stops the task.
+Revisioned agents errors or resync refusals with `retryable: false` immediately emit
+`WindowFailed` and cancel automatic window retries; an oversized row is not prepared repeatedly.
 
 The feed resubscribes windows and conversations and reattaches a followed terminal after a
 disconnect. Window resync frames request fresh subscriptions. While connected, projection

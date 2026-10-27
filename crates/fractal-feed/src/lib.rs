@@ -770,10 +770,22 @@ async fn connected(
                     // under it). Asked at once and again on every resync, that is a loop and, at an
                     // upgrade, a herd; so each is asked after a wait that grows and is jittered, and
                     // one good snapshot resets the wait.
-                    CollectionEvent::Resync { id, code, message, .. } => {
+                    CollectionEvent::Resync { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id)
                             && !(left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
                         {
+                            if window == Window::Agents && revisioned_agents && retryable == Some(false) {
+                                agents_sequence = None;
+                                agents_publication = None;
+                                window_retries.loaded(window);
+                                pending_reports.cancel(window);
+                                let message = fractal_client::human_message(code.as_ref(),
+                                    message.as_deref().unwrap_or("st refused the agents publication"));
+                                if updates.send(Update::WindowFailed(window, message)).is_err() {
+                                    return Ended::Closed;
+                                }
+                                continue;
+                            }
                             if matches!(window, Window::Inventory(_)) {
                                 if let Some(message) = message {
                                     let plain = fractal_client::human_message(code.as_ref(), &message);
@@ -811,9 +823,22 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Error { id, code, message, .. } => {
+                    CollectionEvent::Error { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id) {
                             if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
+                                continue;
+                            }
+                            if window == Window::Agents && revisioned_agents && retryable == Some(false) {
+                                // A permanent publication refusal (for example an oversized row)
+                                // cannot clear by preparing the same full roster again.
+                                agents_sequence = None;
+                                agents_publication = None;
+                                window_retries.loaded(window);
+                                pending_reports.cancel(window);
+                                let message = fractal_client::human_message(code.as_ref(), &message);
+                                if updates.send(Update::WindowFailed(window, message)).is_err() {
+                                    return Ended::Closed;
+                                }
                                 continue;
                             }
                             if matches!(window, Window::Inventory(_)) {

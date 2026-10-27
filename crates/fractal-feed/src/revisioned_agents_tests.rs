@@ -173,3 +173,58 @@ async fn revisioned_agents_feed_fences_wrong_base_and_reconnects_with_a_complete
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].header().id, "agent/current");
 }
+
+#[tokio::test]
+async fn revisioned_agents_permanent_error_surfaces_without_resubscribing() {
+    let mut fixture = Fixture::start().await;
+    fixture.send(json!({"kind":"error", "id":"agents", "collection":"agents",
+        "retryable":false, "message":"one agents row exceeds the publication frame limit"}));
+    loop {
+        match fixture.update().await {
+            Update::WindowFailed(Window::Agents, message) => {
+                assert_eq!(message, "one agents row exceeds the publication frame limit");
+                break;
+            }
+            Update::Window { window: Window::Agents, .. } => panic!("a refused roster escaped"),
+            _ => {}
+        }
+    }
+    // The first retry, including its maximum jitter, would arrive before this deadline.
+    assert!(tokio::time::timeout(RETRY_DELAYS[0] * 2, fixture.subscriptions.recv()).await.is_err(),
+        "a permanent refusal must not prepare the full publication again");
+}
+
+#[tokio::test]
+async fn revisioned_agents_permanent_resync_cancels_an_already_scheduled_retry() {
+    let mut fixture = Fixture::start().await;
+    fixture.send(chunk(0, 2, "agent/partial", 42));
+    fixture.send(json!({"kind":"error", "id":"agents", "collection":"agents",
+        "retryable":true, "message":"the source is catching up"}));
+    fixture.send(json!({"kind":"resync", "id":"agents", "collection":"agents",
+        "retryable":false, "message":"the agents publication cannot be served"}));
+    loop {
+        match fixture.update().await {
+            Update::WindowFailed(Window::Agents, message) => {
+                assert_eq!(message, "the agents publication cannot be served");
+                break;
+            }
+            Update::Window { window: Window::Agents, .. } => panic!("a partial roster escaped"),
+            _ => {}
+        }
+    }
+    assert!(tokio::time::timeout(RETRY_DELAYS[0] * 2, fixture.subscriptions.recv()).await.is_err(),
+        "a permanent resync must cancel the previous retry");
+}
+
+#[tokio::test]
+async fn revisioned_agents_retryable_error_resubscribes_and_recovers() {
+    let mut fixture = Fixture::start().await;
+    fixture.send(chunk(0, 2, "agent/partial", 42));
+    fixture.send(json!({"kind":"error", "id":"agents", "collection":"agents",
+        "retryable":true, "message":"the source is catching up"}));
+    fixture.subscribed().await;
+    fixture.send(chunk(0, 1, "agent/recovered", 43));
+    let items = fixture.agents().await;
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].header().id, "agent/recovered");
+}

@@ -1611,6 +1611,7 @@ fn typescript_operation_methods(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::ensure;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1759,6 +1760,136 @@ mod tests {
             }
         }
         assert!(models.contains("export type ErrorCode = (\n  \"recipient-retired\"\n  | "));
+        Ok(())
+    }
+
+    /// Structural guard for the generated models, not a Swift parser. Model declarations
+    /// are column-zero; nested declarations are indented. Ignore ordinary quoted strings
+    /// (including escapes), line comments, and Swift's nested block comments.
+    fn validate_swift_model_structure(source: &str) -> Result<()> {
+        let mut depth = 0usize;
+        let mut block_depth = 0usize;
+        let mut in_string = false;
+        for (line_index, line) in source.lines().enumerate() {
+            let line_number = line_index + 1;
+            let mut code = String::new();
+            let mut chars = line.chars().peekable();
+            while let Some(ch) = chars.next() {
+                if block_depth > 0 {
+                    if ch == '/' && chars.peek() == Some(&'*') {
+                        chars.next();
+                        block_depth += 1;
+                    } else if ch == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        block_depth -= 1;
+                    }
+                    continue;
+                }
+                if in_string {
+                    if ch == '\\' {
+                        chars.next();
+                    } else if ch == '"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '/' if chars.peek() == Some(&'/') => break,
+                    '/' if chars.peek() == Some(&'*') => {
+                        chars.next();
+                        block_depth = 1;
+                        code.push(' ');
+                    }
+                    '"' => {
+                        in_string = true;
+                        code.push(' ');
+                    }
+                    _ => code.push(ch),
+                }
+            }
+            // Balance alone misses a closing brace moved from one declaration to another.
+            for declaration in ["public struct ", "public enum ", "public class ", "extension "] {
+                if code.starts_with(declaration) && depth != 0 {
+                    bail!("Swift declaration boundary at line {line_number} has brace depth {depth}");
+                }
+            }
+            for ch in code.chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth = depth.checked_sub(1).with_context(|| {
+                            format!("unmatched Swift closing brace at line {line_number}")
+                        })?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ensure!(!in_string, "unterminated Swift string");
+        ensure!(block_depth == 0, "unterminated Swift block comment");
+        ensure!(depth == 0, "unclosed Swift braces: {depth}");
+        Ok(())
+    }
+
+    #[test]
+    fn generated_swift_models_keep_balanced_top_level_declarations() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let actions = operations["actions"].as_object().context("actions")?;
+        let swift = render_marker(
+            SWIFT_MODELS_TEMPLATE,
+            "    // @st3-codegen:swift-action-constructors",
+            &swift_action_constructors(actions)?,
+        )?;
+        validate_swift_model_structure(&swift)?;
+
+        let extra_closer = swift.replacen(
+            "\npublic struct AgentsSnapshotChunk:",
+            "\n}\n\npublic struct AgentsSnapshotChunk:",
+            1,
+        );
+        assert_ne!(extra_closer, swift);
+        let original_defect = extra_closer.replacen(
+            "\n}\n\npublic struct ErrorEnvelope:",
+            "\n\npublic struct ErrorEnvelope:",
+            1,
+        );
+        assert_ne!(original_defect, extra_closer);
+        // The reviewed defect has equal total counts, but an unmatched early closer.
+        assert_eq!(original_defect.matches('{').count(), original_defect.matches('}').count());
+        assert!(validate_swift_model_structure(&original_defect)
+            .unwrap_err().to_string().contains("unmatched Swift closing brace"));
+
+        // Moving the event's closer to EOF balances every prefix, but nests ErrorEnvelope.
+        let misplaced_closer = format!("{}\n}}", swift.replacen(
+            "\n}\n\npublic struct ErrorEnvelope:",
+            "\n\npublic struct ErrorEnvelope:",
+            1,
+        ));
+        assert_eq!(misplaced_closer.matches('{').count(), misplaced_closer.matches('}').count());
+        assert!(validate_swift_model_structure(&misplaced_closer)
+            .unwrap_err().to_string().contains("Swift declaration boundary"));
+        Ok(())
+    }
+
+    #[test]
+    fn swift_structure_guard_ignores_strings_and_comments() -> Result<()> {
+        validate_swift_model_structure(r#"
+// } public struct NotADeclaration {
+/* } /* nested { */ }
+public enum AlsoNotADeclaration {
+*/
+public struct Example {
+    let text = "} // /* \" {"
+    enum Nested { case value }
+}
+public enum Next { case value } // {
+"#)?;
+        assert!(validate_swift_model_structure("public struct Open {").is_err());
+        assert!(validate_swift_model_structure("}").is_err());
+        assert!(validate_swift_model_structure("/* unclosed").is_err());
+        assert!(validate_swift_model_structure("\"unclosed").is_err());
         Ok(())
     }
 
