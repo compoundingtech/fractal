@@ -492,6 +492,19 @@ impl Change {
         }
     }
 
+    #[cfg(any(test, not(target_os = "linux")))]
+    fn relevant(event: &notify::Event, directory: &Path, next: &Path) -> bool {
+        // A backend rescan has no trustworthy path list: reload the registry.
+        event.need_rescan()
+            || (matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_)
+            ) && (event.paths.is_empty()
+                || event.paths.iter().any(|path| path == next || path == directory)))
+    }
+
     #[cfg(not(target_os = "linux"))]
     fn watch(path: &Path) -> impl Future<Output = ()> + Send + 'static {
         use notify::Watcher as _;
@@ -501,14 +514,7 @@ impl Change {
             let watched_directory = directory.clone();
             let mut watcher =
                 notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    if event.is_ok_and(|event| {
-                        matches!(
-                            event.kind,
-                            notify::EventKind::Create(_)
-                                | notify::EventKind::Modify(_)
-                                | notify::EventKind::Remove(_)
-                        ) && event.paths.iter().any(|path| path == &next || path == &directory)
-                    }) {
+                    if event.is_ok_and(|event| Self::relevant(&event, &directory, &next)) {
                         signal.notify_one();
                     }
                 })
@@ -546,6 +552,24 @@ use super::*;
     use std::io::{Read as _, Write as _};
     use std::sync::Mutex;
     use std::time::Duration;
+
+    #[test]
+    fn registry_watch_rescans_after_lost_or_unscoped_mutations() {
+        let directory = Path::new("/watched");
+        let target = directory.join("tiles.toml");
+        let rescan = notify::Event::new(notify::EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan);
+        assert!(Change::relevant(&rescan, directory, &target));
+        for kind in [
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+        ] {
+            assert!(Change::relevant(&notify::Event::new(kind), directory, &target));
+        }
+        let read = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
+        assert!(!Change::relevant(&read, directory, &target));
+    }
 
     #[tokio::test]
     async fn registry_watch_follows_a_symlinked_parent() {
