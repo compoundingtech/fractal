@@ -37,8 +37,17 @@ const styles = stylex.create({
   toolbar: { display: 'flex', flexWrap: 'wrap', gap: s.sm },
   reference: { borderColor: interaction.composerFocusBorder, outlineColor: interaction.focusRing, outlineWidth: g.focusRing, outlineStyle: 'solid', position: 'absolute', visibility: 'hidden' },
 })
-const meta = { title: 'Fractal UI/Composer copy feedback', component: ComposerCopyFeedback, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, variant: 'C3' }, argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, width: { control: 'radio', options: [440, 1440] }, variant: { control: 'radio', options: ['C2', 'C3'] } } } satisfies Meta<typeof ComposerCopyFeedback>
+const meta = { title: 'Fractal UI/Composer copy feedback', component: ComposerCopyFeedback, excludeStories: ['scenarioExemptions'], parameters: { scenario: { _tag: 'contract-fixture', reason: 'Local clipboard outcomes, focus geometry and acknowledgement timers isolate host-owned composer and copy contracts.' }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, variant: 'C3' }, argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] }, width: { control: 'radio', options: [440, 1440] }, variant: { control: 'radio', options: ['C2', 'C3'] } } } satisfies Meta<typeof ComposerCopyFeedback>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'Dark1440:contract-fixture',
+  'Dark440:contract-fixture',
+  'Light1440:contract-fixture',
+  'Light440:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 const play: Story['play'] = async ({ canvasElement, args }) => {
