@@ -317,13 +317,8 @@ impl Data {
     fn refuse(&self, message: String) -> c_int {
         let scratch_state = filesystem(&self.guard.scratch);
         let live_state = filesystem(&self.guard.live);
-        let scratch_required = self.guard.budget
-            + if self.guard.shared_device {
-                self.guard.reserve
-            } else {
-                0
-            }
-            + REACTION_MARGIN;
+        // The budget is what admission left of the free bytes it measured after the live reserve
+        // and the margin, not a requirement: free space below it at a refusal is space used since.
         let scratch_available = scratch_state
             .as_ref()
             .map(|state| state.available.to_string())
@@ -331,10 +326,6 @@ impl Data {
         let scratch_allocated = super::existing_scratch_bytes(&self.guard.scratch)
             .map(|value| value.to_string())
             .unwrap_or_else(|error| format!("UNKNOWN ({error})"));
-        let scratch_deficit = scratch_state
-            .as_ref()
-            .map(|state| scratch_required.saturating_sub(state.available).to_string())
-            .unwrap_or_else(|_| "UNKNOWN".into());
         let live_available = live_state
             .as_ref()
             .map(|state| state.available.to_string())
@@ -345,12 +336,11 @@ impl Data {
             .map(|state| required_live.saturating_sub(state.available).to_string())
             .unwrap_or_else(|_| "UNKNOWN".into());
         let reason = format!(
-            "checkpoint scratch refused before SQLite write: {message}; scratch={} observed_st_blocks_bytes={} available={} required={} deficit={} budget={}; live={} available={} reserve={} reaction_margin={} required={} deficit={}; controlling component=proof VFS",
+            "checkpoint scratch refused before SQLite write: {message}; scratch={} observed_st_blocks_bytes={} available={} available_at_admission={} budget={}; live={} available={} reserve={} reaction_margin={} required={} deficit={}; controlling component=proof VFS",
             self.guard.scratch.display(),
             scratch_allocated,
             scratch_available,
-            scratch_required,
-            scratch_deficit,
+            self.guard.initial_available,
             self.guard.budget,
             self.guard.live.display(),
             live_available,
