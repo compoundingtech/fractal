@@ -180,6 +180,8 @@ Each factory takes a generator, the cast and optional overrides, and returns val
 | `diff` | a `toolCall` whose call edits a file and whose result carries a unified diff of the edit |
 | `terminalRun` | an asciicast v2 recording of one command and the `TerminalScreen` values a client sees for it |
 
+Agent rows include `subagents` (empty when none are running) only for observing drivers `claude`, `codex`, and `omp`; other drivers omit the field, matching the daemon.
+
 Each entry gets increasing `sequence`, `revision` 1 unless revised, and a timestamp from the
 time model. A streaming entry is emitted as revisions with `final: false` until its last revision.
 
