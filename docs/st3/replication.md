@@ -633,8 +633,9 @@ The worker atomically records its build, PID and runtime process-start token in
 `STATE/replication-worker-build.json`, outside the replicated store. A failure to write this
 diagnostic file logs a warning without stopping replication.
 `st doctor`'s `replication-worker-build` check warns on a mismatch, a stale process identity,
-or a missing/unreadable report. Older workers do not publish this report, so their build is
-explicitly **unknown**, never assumed to match. The runtime's existing start-token fencing
+or a missing/unreadable report. Missing, empty and `unknown` build identities cannot be
+compared: neither a match nor skew is claimed unless both commits are known. Older workers
+without reports remain explicitly **unknown**. The runtime's existing start-token fencing
 detects PID reuse on Linux; other platforms retain the runtime's PID-based token limitation.
 The check also detects a daemon-only upgrade while the reporting worker keeps running.
 

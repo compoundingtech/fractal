@@ -34,16 +34,21 @@ pub fn startup_warning(daemon: Option<&str>) -> Option<String> {
     warning(fractal_drivers::version::build_commit(), daemon)
 }
 
+fn known_commit(commit: Option<&str>) -> Option<&str> {
+    commit.filter(|commit| !commit.is_empty() && *commit != "unknown")
+}
+
 fn warning(worker: &str, daemon: Option<&str>) -> Option<String> {
-    match daemon {
-        Some(daemon) if daemon == worker => None,
-        Some(daemon) => Some(format!(
+    match (known_commit(Some(worker)), known_commit(daemon)) {
+        (Some(worker), Some(daemon)) if daemon == worker => None,
+        (Some(worker), Some(daemon)) => Some(format!(
             "replication worker build {worker} differs from same-host daemon build {daemon}; \
              deploy the same st build to both services: an older worker can omit replication fixes"
         )),
-        None => Some(format!(
-            "cannot compare replication worker build {worker} with the same-host daemon: \
-             daemon health reports no build.commit; deploy the same st build to both services"
+        (worker, daemon) => Some(format!(
+            "cannot compare replication worker build {} with same-host daemon build {}: \
+             a known build.commit is required from both processes",
+            worker.unwrap_or("unknown"), daemon.unwrap_or("unknown")
         )),
     }
 }
@@ -100,15 +105,47 @@ mod tests {
     }
 
     #[test]
+    fn unstamped_worker_and_stamped_daemon_cannot_be_compared() {
+        let message = warning("unknown", Some("abc123")).unwrap();
+        assert!(message.starts_with("cannot compare"));
+        assert!(!message.contains("differs"));
+    }
+
+    #[test]
+    fn two_unstamped_processes_do_not_match() {
+        let root = tempfile::tempdir().unwrap();
+        record(root.path()).unwrap();
+        let mut report: WorkerBuild =
+            serde_json::from_slice(&fs::read(root.path().join(FILE)).unwrap()).unwrap();
+        report.commit = "unknown".into();
+        fs::write(root.path().join(FILE), serde_json::to_vec(&report).unwrap()).unwrap();
+        let result = check(root.path(), "unknown");
+        assert_eq!(result.status, "warn");
+        assert!(result.message.starts_with("cannot compare"));
+    }
+
+    #[test]
+    fn missing_empty_and_unknown_identities_cannot_be_compared() {
+        for daemon in [None, Some(""), Some("unknown")] {
+            assert!(warning("abc123", daemon).unwrap().starts_with("cannot compare"));
+        }
+        for worker in ["", "unknown"] {
+            assert!(warning(worker, Some("abc123")).unwrap().starts_with("cannot compare"));
+        }
+    }
+
+    #[test]
     fn doctor_distinguishes_live_mismatch_missing_report_and_dead_worker() {
         let root = tempfile::tempdir().unwrap();
-        let daemon = fractal_drivers::version::build_commit();
-        assert_eq!(check(root.path(), &daemon).status, "warn");
+        let daemon = "abc123";
+        assert_eq!(check(root.path(), daemon).status, "warn");
         record(root.path()).unwrap();
-        assert_eq!(check(root.path(), &daemon).status, "pass");
         let mut report: WorkerBuild = serde_json::from_slice(
             &fs::read(root.path().join(FILE)).unwrap()
         ).unwrap();
+        report.commit = daemon.into();
+        fs::write(root.path().join(FILE), serde_json::to_vec(&report).unwrap()).unwrap();
+        assert_eq!(check(root.path(), daemon).status, "pass");
         report.commit = "old".into();
         fs::write(root.path().join(FILE), serde_json::to_vec(&report).unwrap()).unwrap();
         let mismatch = check(root.path(), &daemon);
