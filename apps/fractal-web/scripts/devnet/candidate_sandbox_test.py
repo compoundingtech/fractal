@@ -435,7 +435,7 @@ print(json.dumps(results))
             worktree.mkdir()
             (worktree / 'package.json').write_text(sandbox.json.dumps({
                 'name': 'sandbox-store-fixture', 'version': '1.0.0', 'private': True,
-                'packageManager': 'pnpm@12.7.0',
+                'packageManager': 'pnpm@12.15.0',
                 'dependencies': {'fixture-dependency': 'file:fixture.tgz'}}))
             (worktree / 'pnpm-workspace.yaml').write_text('packages: []\n')
             (worktree / 'pnpm-source-inputs.json').write_text('{"sourceInputPaths": []}')
