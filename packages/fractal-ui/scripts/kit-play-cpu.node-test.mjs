@@ -78,8 +78,9 @@ test('rejects regressing counters rather than clamping deltas', () => {
 
 test('rejects invalid counter snapshots even when another endpoint is unavailable', () => {
   for (const value of [-1, 0.5, NaN, Infinity, undefined, Number.MAX_SAFE_INTEGER + 1]) {
-    assert.throws(() => kitCpuDelta(snapshot(zeroTicks, value), snapshot()), /milliseconds/)
-    assert.throws(() => kitCpuDelta(snapshot(), snapshot(zeroTicks, value)), /milliseconds/)
+    const invalidBusy = { busyMilliseconds: value, procStat: zeroTicks }
+    assert.throws(() => kitCpuDelta(invalidBusy, snapshot()), /milliseconds/)
+    assert.throws(() => kitCpuDelta(snapshot(), invalidBusy), /milliseconds/)
     for (const field of Object.keys(zeroTicks)) {
       const invalid = snapshot({ ...zeroTicks, [field]: value })
       assert.throws(() => kitCpuDelta(invalid, snapshot()), /ticks/)
