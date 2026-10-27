@@ -1203,6 +1203,14 @@ fn resource_specs() -> BTreeMap<String, ResourceSpec> {
     let mut resources = BTreeMap::new();
     resources.insert("arrangement".into(), resource("arrangement", "A person-owned per-register arrangement.", &[("owner", FieldSpec { immutable: true, ..required_reference_to(&["person"]) }), ("body", object())]));
     resources.insert(
+        "uri.reference".into(),
+        resource(
+            "uri.reference",
+            "An external resource addressed by an opaque absolute URI.",
+            &[("uri", immutable_string())],
+        ),
+    );
+    resources.insert(
         "vcs.repository".into(),
         resource(
             "vcs.repository",
@@ -1723,6 +1731,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "work.person-reassigned",
+            &["step-run"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("work"),
+            true,
+            &[],
+        ),
+        (
             "work.person-done",
             &["step-run"],
             WritePolicy::AuthorizedParticipant,
@@ -1830,6 +1847,24 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Some("gates"),
             true,
             &["gate"],
+        ),
+        (
+            "gate.reviewer-reassigned",
+            &["gate-operation"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            Some("gates"),
+            true,
+            &["gate"],
+        ),
+        (
+            "person.rename.completed",
+            &["person"],
+            WritePolicy::AuthorizedRequester,
+            Cardinality::Append,
+            None,
+            false,
+            &[],
         ),
         (
             "gate.result",
@@ -3169,6 +3204,14 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("episode", string()),
             ("answer", object()),
         ],
+        "work.person-reassigned" => &[
+            ("previous_person", reference()),
+            ("person", reference()),
+            ("run", reference()),
+            ("generation", reference()),
+            ("attempt", integer()),
+            ("episode", string()),
+        ],
         "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
         | "work.released" | "work.extended" => &[
             ("attempt", integer()),
@@ -3293,6 +3336,17 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("attempt_receipt", required_string()),
             ("finding_refs", required_array()),
             ("evidence", required_array()),
+        ],
+        "gate.reviewer-reassigned" => &[
+            ("request", string()),
+            ("owner", reference()),
+            ("previous_reviewer", reference()),
+            ("reviewer", reference()),
+        ],
+        "person.rename.completed" => &[
+            ("old_person", reference()),
+            ("new_person", reference()),
+            ("report", object()),
         ],
         "gate.result" => &[
             (
@@ -4652,6 +4706,7 @@ mod tests {
 
     #[test]
 
+
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {
@@ -4783,6 +4838,16 @@ mod tests {
                 BTreeMap::from([
                     ("state".into(), Value::String("unreachable".into())),
                     ("revision".into(), Value::String("claim/revision".into())),
+                    ("next_check_unix_ms".into(), Value::String("1000".into())),
+                ]),
+            ),
+            (
+                "observer/run/throttled",
+                "observer.state",
+                BTreeMap::from([
+                    ("state".into(), Value::String("healthy".into())),
+                    ("error_code".into(), Value::String("local-observer-budget".into())),
+                    ("reason".into(), Value::String("local observer budget reached, next slot at 1000 (Unix ms)".into())),
                     ("next_check_unix_ms".into(), Value::String("1000".into())),
                 ]),
             ),

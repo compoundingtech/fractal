@@ -13,6 +13,7 @@ mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
+pub mod scenarios;
 pub use contract::*;
 pub use generated::*;
 mod identities;
@@ -5681,6 +5682,7 @@ mod device_stream_policy_tests {
                 device_key_chain: vec![],
                 device_key_proofs: vec![],
                 person_root_key_proof: None,
+                fabric_grant: None,
             },
         };
         let mut client = device.client().unwrap();

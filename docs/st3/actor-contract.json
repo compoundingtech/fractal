@@ -660,6 +660,33 @@
         "actor_environment": null,
         "ignores_actor": true
       },
+      "st devices fabric disable": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st devices fabric enable": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st devices fabric status": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st devices grant inspect": {
         "actor": "optional",
         "accepts_person": true,
@@ -1426,6 +1453,15 @@
         "ignores_actor": false
       },
       "st now": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
+      "st persons rename": {
         "actor": "optional",
         "accepts_person": true,
         "can_carry_person": true,

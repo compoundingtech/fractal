@@ -420,7 +420,7 @@ mod tests {
         let id=challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
         let invalid_key = PairingComplete {
             api_version: request.api_version.clone(), code: request.code.clone(),
-            device_public_key: hex::encode([8_u8; 32]), key_storage: None,
+            device_public_key: hex::encode([8_u8; 32]), key_storage: None, fabric_node_id: None,
         };
         assert_eq!(complete(&state, id, &invalid_key, "fabric-loopback").await.unwrap_err().code, "validation-failed");
         let _ = complete(&state,id,&request,"fabric-loopback").await.unwrap().unwrap();

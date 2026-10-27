@@ -121,6 +121,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  resources?: Array<DeclaredResource>;
   rollout?: {
 
 } | null;
@@ -1367,6 +1368,15 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DeclaredResource = {
+  kind: "uri" | "subject";
+  name: string;
+  reason?: string | null;
+  resolution: "resolved" | "unresolved" | "not-applicable";
+  subject: Id;
+  uri?: string;
+};
+
 export type DelegationProof = {
   episode: string;
   message: string;
@@ -1582,6 +1592,13 @@ export type ExchangeTransport = {
   at: Timestamp;
   carrier: string;
   fabric_route?: string;
+};
+
+export type FabricGrant = {
+  detail?: string;
+  peer?: string;
+  service?: string;
+  state: "granted" | "already-trusted" | "not-enabled" | "not-requested" | "failed";
 };
 
 export type Fence = {
@@ -1938,6 +1955,7 @@ export type Mission = ResourceHeader & {
   mission_revision: Revision;
   must_act?: MustAct;
   presentation?: MissionPresentation;
+  resources?: Array<DeclaredResource>;
   run_counts?: {
   [key: string]: number;
 };
@@ -2257,7 +2275,7 @@ export type PairedSession = (PersonPairedSession | AssistantPairedSession);
 export type PairingAdvertisement = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   capabilities: Array<{
-  id: "device-key-proofs";
+  id: "device-key-proofs" | "fabric-gateway-grant";
   state: "granted";
   version: 1;
 }>;
@@ -2298,6 +2316,7 @@ export type PairingComplete = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   code: string;
   device_public_key: string;
+  fabric_node_id?: string;
   key_storage?: "secure-enclave" | "software";
 };
 
@@ -2359,6 +2378,7 @@ export type PersonPairedSession = {
 
 }>;
   expires_at: Timestamp;
+  fabric_grant?: FabricGrant;
   kind: "paired-session";
   person_id: string;
   person_root_key_proof?: {
@@ -2371,6 +2391,7 @@ export type PersonPairedSession = {
 export type PersonPairingBegin = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   device_name: string;
+  fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
   scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
