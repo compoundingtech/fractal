@@ -154,7 +154,7 @@ async fn managed_child_session_detail_resolves_readable_transcript_outside_sessi
         .unwrap();
     let owner = "agent/child-detail-owner";
     let incarnation = "child-detail-runtime:i1";
-    let routing_parent = client_v0::managed_session_id(owner, incarnation);
+    let routing_parent = super::managed_session_id(owner, incarnation);
     let child_id = crate::subagent_sessions::child_session_id(&parent, "task-1", &routing_parent);
     let mut state = state(root.path());
     // The binding must suffice even when native inventory discovery is unavailable.
