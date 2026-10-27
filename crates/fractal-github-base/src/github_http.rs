@@ -447,8 +447,16 @@ pub fn read_auth_for_url(url: &str, auth: &GithubAuth) -> GithubAuth {
 
 /// Only callers that constructed an idempotent GraphQL query use this entrypoint.
 pub async fn send_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
+    if request.try_clone().and_then(|request| request.build().ok()).is_some_and(|request|
+        request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD) {
+        return send(request, auth).await;
+    }
+    send_selected_read(request, auth).await
+}
+
+async fn send_selected_read(request: reqwest::RequestBuilder, auth: &GithubAuth) -> Result<reqwest::Response> {
     let read = request.try_clone().and_then(|request| request.build().ok()).is_some_and(|request| {
-        request.method() == reqwest::Method::GET ||
+        request.method() == reqwest::Method::GET || request.method() == reqwest::Method::HEAD ||
             (request.method() == reqwest::Method::POST && request.url().path().ends_with("/graphql") &&
              request.body().and_then(reqwest::Body::as_bytes)
                 .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
@@ -478,7 +486,7 @@ pub async fn send(
     loop {
         let selected = read_auth_for_url(template.url().as_str(), auth);
         let request = template.try_clone().context("GitHub read body cannot be replayed for a redirect")?;
-        let response = send_read(reqwest::RequestBuilder::from_parts(client.clone(), request), &selected).await?;
+        let response = send_selected_read(reqwest::RequestBuilder::from_parts(client.clone(), request), &selected).await?;
         if !matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
             return Ok(response);
         }
