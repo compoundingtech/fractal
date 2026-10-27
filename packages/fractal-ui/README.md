@@ -63,9 +63,34 @@ SyncLine's scenario previews, SystemState's roster and connection geometry,
 TranscriptComposer's column examples, TranscriptPress's scenario examples and
 DeclarationPanel's structured mission fallback consume declared slices.
 Composer and connection geometry checks pin populated data; separate scenario
-stories follow the toolbar. Long interaction-contract specimens retain their fixtures because
-tail mounting and held-back replies do not satisfy the all-markers SSR check.
+stories follow the toolbar. `OwnSendFollows` / `OwnSendFollowsLight` retain their
+30-turn contract fixture: the play needs a genuinely new incoming reply. Reusing
+an already mounted scenario reply is not an arrival; holding back the last turn
+would exclude content required by the declared production tail window.
+`Placeholder` / `PlaceholderLight` remain empty-field guidance contracts with no
+conversation data to project. SidebarTreeFilter's calibrated interaction fixtures
+retain exact filter counts, row identities, render instrumentation and controlled
+insertion/repositioning rather than presenting a scenario roster.
 Theme, density and rendering pickers remain independent of scenario data.
+
+TranscriptPress's `SameRowsScrolledUp` / `SameRowsScrolledUpLight` pin
+`ci-failing-fix` / `long`, keeping the newest 41 turns and the production mounted
+window. Its remaining interaction specimens retain contract fixtures (including
+their `Light` variants):
+
+- `SameRowsDuringPress`, `NewRowDuringPress`, `BlurEndsPress`,
+  `SecondPointerHoldsDock`, `InsertAbovePressedRow`, `ScrollDuringPress` require
+  an unanswered failed local send and Retry. Scenario conversations have no host
+  outbox; marking an answered projected prompt failed would be false.
+- `SameLengthRevision` holds back a text revision inside an already mounted turn.
+- `ToolResultArrives` holds back a result inside an already mounted tool turn.
+- `HostInsertRetainedRows`, `HostInsertFreshObjects`, `HostInsertShiftedIndex`,
+  `HostInsertDocumentScroll`, `HostInsertAncestorScroll` use synthetic host action
+  rows to test viewport keying and scroll ownership, not conversation presentation.
+
+Scenario exemptions stay beside their stories in sorted `scenarioExemptions`
+exports; scenario-backed stories are not exemptions. This batch adds no story
+exports or per-commit play cases and does not change production Transcript.
 
 For example, open
 `?path=/story/fractal-ui-markdown--all-states&globals=scenario:fleet-mid-refactor&args=conversation:empty`.
