@@ -20,6 +20,8 @@ export type Attachment = {
 export type ToolCallStatus = 'running' | 'success' | 'error' | 'interrupted'
 export type ToolResult = {
   readonly content: unknown
+  readonly metadata?: Readonly<Record<string, unknown>>
+  readonly view?: Readonly<Record<string, unknown>>
   readonly mediaType?: string
   readonly isError: boolean
   readonly at: string
@@ -134,7 +136,9 @@ export type ConversationItem =
       readonly name: string
       readonly server?: string
       readonly input: unknown
+      readonly view?: Readonly<Record<string, unknown>>
       readonly status: ToolCallStatus
+      readonly skipped?: boolean
       readonly result?: ToolResult
       readonly callSeen: boolean
       readonly at: string
