@@ -76,7 +76,7 @@ export const hosts: readonly WorldHost[] = [
   },
 ]
 
-/** The host running the st gateway the workbench is connected to. */
+/** The host running the Fractal gateway the workbench is connected to. */
 export const gatewayHost: HostId = 'build-host-a'
 
 // ── People ────────────────────────────────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ export const repos: readonly WorldRepo[] = [
   }),
   repo({
     id: 'acme/gateway',
-    description: 'st gateway: RPC + collection sockets over the fleet state',
+    description: 'Fractal gateway: RPC + collection sockets over the fleet state',
   }),
   repo({
     id: 'acme/platform',
@@ -512,7 +512,7 @@ export const missions: readonly WorldMission[] = [
   missionOf({
     path: 'webfractal/foundation',
     title: 'webfractal: workbench foundation',
-    goal: 'Ship the IDE workbench shell with sessions, missions and resources wired to the st gateway.',
+    goal: 'Ship the IDE workbench shell with sessions, missions and resources wired to the Fractal gateway.',
     state: 'running',
     mustAct: 'human',
     repo: 'acme/webfractal',

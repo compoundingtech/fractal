@@ -1,6 +1,6 @@
 # Command recorder
 
-st records every `git` and `gh` call that it starts, so the calls can be analyzed each day. The
+Fractal records every `git` and `gh` call that it starts, so the calls can be analyzed each day. The
 recorder observes. It does not enforce, block, or change a command.
 
 ## What goes through it
@@ -10,16 +10,16 @@ recorder observes. It does not enforce, block, or change a command.
 - the daemon's own commands, such as checkout and resource observation;
 - every member it starts: agent seats, terminal (PTY) sessions, gates, and exec steps.
 
-A member's declared `PATH` and the st executable directory are applied first. The recorder
+A member's declared `PATH` and the Fractal executable directory are applied first. The recorder
 directory then goes in front of them, so an authored `PATH` cannot put another `git` ahead of it.
 
-`<state>/recorder/bin` holds `git` and `gh` links to the st executable and a marker file,
+`<state>/recorder/bin` holds `git` and `gh` links to the Fractal executable and a marker file,
 `st3-recorder.json`, that names the host, log, and optional receipts directory. The daemon writes these at startup. It links
 a program only when that program is on the daemon's `PATH` or the login shell's `PATH`, so
 `command -v gh` still fails on a host without `gh`. When the daemon cannot write the directory, it
 prints `st: not recording git and gh calls: ...` and starts anyway.
 
-When st starts as `git` or `gh`, it does not start the async runtime or read any configuration.
+When Fractal starts as `git` or `gh`, it does not start the async runtime or read any configuration.
 It finds the real program, runs it, waits for it, appends one line to the log, and exits the way the
 real program exited.
 
@@ -28,8 +28,8 @@ real program exited.
 The recorder searches `PATH` in order, as `execvp` does. It skips:
 
 - every directory that holds a recorder marker, including this one and the recorder of another
-  st daemon, such as an isolated test daemon;
-- any file that is the running st executable, under any name or directory;
+  Fractal daemon, such as an isolated test daemon;
+- any file that is the running Fractal executable, under any name or directory;
 - anything that is not an executable file.
 
 The first remaining match runs with the caller's arguments, environment, working directory, and
@@ -177,7 +177,7 @@ fresh temporary files are left alone so an active publisher can finish.
   prove that nothing ran.
 - Only `git` and `gh` are recorded.
 - A call is recorded when it ends. A call whose recorder is killed with `SIGKILL` is not recorded.
-- The real program always starts with the default `SIGPIPE` action, as it does when st or most
+- The real program always starts with the default `SIGPIPE` action, as it does when Fractal or most
   other programs start it directly. A caller that ignored `SIGPIPE` cannot pass that on through the
   recorder.
 - A stop signal sent to the real program alone is not reflected in the recorder. A terminal stop

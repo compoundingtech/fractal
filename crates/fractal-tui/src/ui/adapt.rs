@@ -351,7 +351,7 @@ fn tier(id: &str) -> Option<Tier> {
 fn who(actor: &fractal_client::AttentionActor) -> String {
     if actor.label == "st" {
         "Fractal".into()
-    } else if actor.id.starts_with("agent/") {
+    } else if actor.id.starts_with("agent/") && actor.label != actor.id {
         format!("{} · {}", actor.label, actor.id)
     } else {
         actor.label.clone()
@@ -1049,12 +1049,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn human_presentation_keeps_shared_model_spelling_out_of_the_terminal() {
+    fn identity_labels_show_fallback_ids_only_once() {
+        for id in ["agent/example/unnamed", "person/ada"] {
+            let actor = fractal_client::AttentionActor {
+                id: id.into(),
+                label: id.into(),
+            };
+            assert_eq!(who(&actor), id);
+        }
+        let named = fractal_client::AttentionActor {
+            id: "agent/example/maintainer".into(),
+            label: "Maintainer".into(),
+        };
+        assert_eq!(who(&named), "Maintainer · agent/example/maintainer");
+    }
+
+    #[test]
+    fn human_presentation_accepts_current_and_older_shared_model_wording() {
         let word = fractal_ui_model::missions::Word::Watching;
-        assert_eq!(word.explain(), "st keeps this open and starts other missions when something happens");
+        let current = "Fractal keeps this open and starts other missions when something happens";
+        // Shared explanations are human copy, not serialized state identifiers.
+        assert_eq!(word.explain(), current);
+        assert_eq!(serde_json::to_value(word).unwrap(), "watching");
+        assert_eq!(human_presentation(word.explain()), current);
+        // An older daemon or shared model can still supply the previous wording.
         assert_eq!(
-            human_presentation(word.explain()),
-            "Fractal keeps this open and starts other missions when something happens"
+            human_presentation("st keeps this open and starts other missions when something happens"),
+            current
         );
         assert_eq!(human_presentation("st"), "st");
         assert_eq!(human_presentation("blocked · st does not say"), "blocked · Fractal does not say");
@@ -1664,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_skill_model_folds_the_expansion_and_stui_draws_real_lines() {
+    fn claude_skill_model_folds_the_expansion_and_tui_draws_real_lines() {
         let fixture = include_str!("../../../../fixtures/clients/transcripts/claude-skill.json");
         let timeline: Vec<TimelineEntry> = serde_json::from_str(fixture).unwrap();
         let entries = conversation(&timeline, &BTreeMap::new());
@@ -1831,6 +1852,7 @@ mod tests {
         let preview = preview("harbor/audit", &normalized);
         assert_eq!(preview.goals, vec!["Audit dependencies"]);
         assert_eq!(preview.steps[0].assignee, "example/auditor");
+        assert_eq!(preview.steps[1].assignee, "Fractal");
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
         assert_eq!(preview.agents.len(), 1);

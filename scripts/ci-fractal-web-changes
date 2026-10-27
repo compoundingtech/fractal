@@ -166,6 +166,14 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/telemetry/measurement/index.ts",
     "apps/fractal-web/src/telemetry/meters.tsx",
     "apps/fractal-web/src/telemetry/ux.ts",
+    # TerminalDetail stories bundle the raw PTY surface and its runtime dependencies.
+    "apps/fractal-web/src/terminal/RawTerminal.tsx",
+    "apps/fractal-web/src/terminal/actionTerminalInput.ts",
+    "apps/fractal-web/src/terminal/ghosttyVt.ts",
+    "apps/fractal-web/src/terminal/rawTerminalInput.ts",
+    "apps/fractal-web/src/terminal/rawTerminalState.ts",
+    "apps/fractal-web/src/terminal/terminalMetrics.stylex.ts",
+    "apps/fractal-web/src/terminal/terminalTyping.ts",
     "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
     "apps/fractal-web/src/terminal/assets/JetBrainsMono-Regular.woff2",
     "apps/fractal-web/src/terminal/cellWidth.ts",
@@ -207,6 +215,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/detailsSupplement.ts",
     "apps/fractal-web/src/web/lastObserved.tsx",
     "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
+    "apps/fractal-web/src/web/useTabMetadata.ts",
     "apps/fractal-web/src/web/liveSidebarTree.ts",
     "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
     "apps/fractal-web/src/web/NativeTurnFooter.tsx",
@@ -221,6 +230,7 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/web/SidebarEmptyState.tsx",
     "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
     "apps/fractal-web/src/web/sidebarRow.ts",
+    "apps/fractal-web/src/web/subagentThreadFocus.ts",
     "apps/fractal-web/src/web/useNativeDetails.ts",
     "apps/fractal-web/src/web/workspaceView.ts",
     "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
@@ -251,6 +261,14 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/data/source.ts",
     "apps/fractal-web/src/web/LiveRoster.stories.tsx",
     "apps/fractal-web/src/web/LiveRoster.tsx",
+    # The production module suites mount the real LiveAgentWorkspace and ConversationPane over app story states.
+    "apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx",
+    "apps/fractal-web/src/web/ConversationPane.stories.tsx",
+    "apps/fractal-web/src/fixtures/AppStoryHarness.tsx",
+    "apps/fractal-web/src/fixtures/appStoryAssertions.ts",
+    "apps/fractal-web/src/fixtures/appStoryStates.ts",
+    # appStoryStates seeds each state's feed sync from the production initial value.
+    "apps/fractal-web/src/data/feedSync.ts",
 )
 SHA = re.compile(r"[0-9a-f]{40}")
 

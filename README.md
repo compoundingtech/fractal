@@ -67,6 +67,10 @@ contributor's pull requests later, so set it up now.
 **You need** a Linux x86_64 machine with Nix. On our machines a run peaks at about 16 cores and 18 GB of RAM. The kept build
 folder takes 60 to 110 GB of disk. A full warm run takes about 12 minutes (our target is 12 minutes or less).
 
+**Clone without the evidence tags.** Signed records are tags under `refs/tags/evidence/`, tens of thousands of them. Clone with
+`git clone --no-tags https://github.com/compoundingtech/fractal`; `nix develop` (`scripts/install-git-hooks`) then sets a negative
+refspec, so a later `git fetch --tags` brings every other tag and none of these.
+
 **Once, enrol a key.** Run `scripts/evidence-keygen --level agent --name ALIAS`. Use an invented alias, never a machine or account
 name. It prints one line; open a pull request that adds that line to `.st/evidence-keys`. Keys are read from `main`, so the key counts
 once that pull request merges. Deleting the line revokes everything the key signed. The accounts and commit emails that open and
@@ -75,16 +79,16 @@ author your pull requests must be listed in `.st/evidence-authors.json`.
 **Before each push**, from a clean checkout of the commit:
 
 ```sh
-scripts/st-test --all --push origin
+scripts/fractal-test --all --push origin
 ```
 
 - It runs `linux-gate` (tests, clippy, fleet compatibility), `typescript-client`, `genie-freshness`, `fractal-web` (only when a web
   input changed) and the per-crate `rust-tests`, in a clean worktree of `HEAD`. The `rust-tests` notes are signed from the same test
   run; CI starts skipping on them once that check is turned on.
 - It signs each result with your key and pushes the signed notes.
-- It ends with one row per check: `passed` and `covered by ...` is signed. `not signed` names the reason: a branch that changes a
-  check's own definition (for example its script) cannot be pre-signed for that check, so CI runs it. `--status` runs nothing and says
-  whether the tree is already covered.
+- It ends with one row per check: `passed` and `covered by ...` is signed. `not signed` names the reason. A branch that changes a
+  check's own definition (for example its script) is signed like any other. `--status` runs nothing and says whether the tree is
+  already covered.
 
 For a separate publisher, replace `--push origin` with `--out DIR`. This exports `<record>.pack` and `<record>.json` to an
 absolute directory resolved from your current directory, without importing or pushing notes. It reruns the whole selected,
@@ -92,16 +96,25 @@ relevant set (including already-covered crates) so the export is complete. `--ou
 An export's success is not verified coverage: the publisher must publish and verify its records. See
 [the evidence guide](docs/st3/gate-evidence.md) for per-crate and `--seed --out` behavior.
 
+The command remains `scripts/fractal-test`. During the compatibility bridge
+(`arn:lmig:smalltalk:2026-10-27-st-test-shim`), it execs the self-contained implementation in
+`scripts/st-test`, which older base-pinned readers must be able to copy and run alone.
+See [the bridge and contraction sequence](docs/st3/gate-evidence.md#running-the-checks-locally-scriptsfractal-test)
+before changing either path.
 
-**Keep it within 12 minutes.** A full warm run of `scripts/st-test` (build, test and sign) has a budget of 12 minutes on a dev box
-today. Keep your changes, and any tests you add, inside it. The table st-test prints at the end gives each check's time in seconds.
+
+**Keep it within 12 minutes.** A full warm run of `scripts/fractal-test` (build, test and sign) has a budget of 12 minutes on a dev box
+today. Keep your changes, and any tests you add, inside it. The table fractal-test prints at the end gives each check's time in seconds.
 
 The pre-push hook, which `nix develop` installs (`scripts/install-git-hooks`), checks this for you. For an agent whose key is listed,
 it refuses a push whose tree is not covered and prints the command to run.
 
-**What CI does with it.** On a pull request, a check skips when a trusted note covers the head's tree. One run in five still runs for
-real as a canary. The branch must be at most 24 commits behind `main` and must not change a protected file such as the workflow,
-the gate or the keys. The merge queue and `main` always run every check.
+**What CI does with it.** On a pull request, a check skips when a trusted note covers the head's tree. There is no sampling: every
+covered pull request skips. A note from one of our build hosts covers a branch that changes the check's own definition or a protected
+file such as the workflow, the gate or the keys. The gate and verifier that judge it come from `main`, never from the branch. Any
+other signer's note does not cover such a branch, so CI runs it. A branch more than 24 commits behind `main`, or one whose protected
+files `main` has changed since it branched, is judged as merged with `main`, and st-test signs that merge. The merge queue and
+`main` always run every check.
 
 **What runs once a day instead.** `isolation-vm`, the mail redelivery canaries and the long performance lanes do not run per pull
 request. They run once a day on `main`, in the `daily-long` workflow. A red day is reported as a comment on the open issue titled
@@ -113,7 +126,7 @@ Its decision line reads `evidence-decision v1 check=... decision=skip outcome=sa
 
 Details: [the evidence gate and the skip policy](docs/st3/gate-evidence.md#evidence-gate-and-the-skip-policy),
 [agent keys](docs/st3/gate-evidence.md#agent-keys) and
-[running the checks locally](docs/st3/gate-evidence.md#running-the-checks-locally-scriptsst-test). Questions or problems: open an
+[running the checks locally](docs/st3/gate-evidence.md#running-the-checks-locally-scriptsfractal-test). Questions or problems: open an
 issue in this repository.
 
 ## Reference

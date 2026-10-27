@@ -99,7 +99,7 @@ KEPT = {'ci-script-tests', 'genie-freshness'}
 # Edges no static reference shows, each with why. Keep this small: a reference the scanner can see belongs in the code it is in.
 EXTRA = {
     # The recorded argv only reads one crate's result out of a JUnit report; the report is made by the tests stage that
-    # scripts/st-test runs for the crates without a note (RUN_TESTS), so that stage is part of what a rust-tests note says.
+    # scripts/fractal-test runs for the crates without a note (RUN_TESTS), so that stage is part of what a rust-tests note says.
     'rust-tests': {'argv': [['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'tests']]},
 }
 # The tree under test: what the lanes build and test (the Rust workspace, the pnpm workspace packages), their `tree_inputs`. A script
@@ -128,7 +128,7 @@ NOT_DEFINITION = {
 NOT_READ = {
     # Workflow paths as GitHub's API reports them (a run's `path`), matched against API responses; the files are never opened.
     'scripts/ci-build-snapshot': {'.github/workflows/fleet.yml', '.github/workflows/main-upkeep.yml', '.github/workflows/macos.yml',
-                                  '.github/workflows/release-smalltalk.yml'},
+                                  '.github/workflows/release-fractal.yml'},
     # The same, in a fake API response; and the .gitignore it writes into its fixture checkout.
     'scripts/ci-build-snapshot-test': {'.github/workflows/fleet.yml', '.gitignore'},
     'scripts/ci-perf-cache': {'.github/workflows/daily-long.yml', '.github/workflows/perf.yml'},  # the same
@@ -137,7 +137,7 @@ NOT_READ = {
 # Files that are part of a lane but whose references are not followed, each with why: what they name does not run in the lane.
 NOT_FOLLOWED = {
     # The default dev shell's shellHook runs it outside CI; it only writes a pre-push hook stub, which at push time runs the BASE
-    # branch's scripts/evidence-prepush and scripts/st-test (git archive of <remote>/main), never the tree's, and never in the lane.
+    # branch's scripts/evidence-prepush and scripts/fractal-test (git archive of <remote>/main), never the tree's, and never in the lane.
     'scripts/install-git-hooks',
 }
 
@@ -158,7 +158,7 @@ SH_SHEBANG = re.compile(rb'^#!.*\b(?:bash|sh|zsh)\b')
 JS_SHEBANG = re.compile(rb'^#!.*\b(?:node|tsx|bun|deno)\b')
 JS_EXTENSIONS = ('.js', '.mjs', '.cjs', '.ts', '.mts', '.cts', '.tsx', '.jsx')
 # A word that can name a path: delimited by blanks, quotes, `=`, `:` (before), `/` (before: `$(dirname "$0")/x`, `$root/x`) or shell
-# punctuation, so `st-test:config` or `x.y.z()` is not one.
+# punctuation, so `fractal-test:config` or `x.y.z()` is not one.
 WORD = re.compile(r'(?<![^\s\'"`=(;|&<>/{}\[\],:])([A-Za-z0-9_.@+*~#-]*[A-Za-z0-9_*][A-Za-z0-9_.@+*~#/-]*)(?![^\s\'"`);|&<>}\],])')
 ENUMERATING = re.compile(r'\*+(?:\.[A-Za-z0-9]+)*\Z')
 LISTING_ATTRS = {'iterdir', 'glob', 'rglob'}

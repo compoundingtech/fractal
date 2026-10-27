@@ -202,7 +202,7 @@ export const fixtureForState = (state: EmbraceState): readonly ConversationItem[
 
 /**
  * 2,400 actual heterogeneous ConversationItems, not preconverted assistant-ui messages.
- * The app's long-session generator imports generated st3 codecs + the SDK + semantic parsers.
+ * The app's long-session generator imports generated Fractal codecs + the SDK + semantic parsers.
  * Rather than copying that dependency graph into the workshop, deterministically repeat the
  * normalized synthetic-world conversations and their invented semantic continuation. Each repeated
  * item, tool call, message envelope, attachment and timestamp has stable session-local identity.

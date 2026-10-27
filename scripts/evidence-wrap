@@ -30,7 +30,7 @@ In --aggregate mode a dirty workspace does not stop the signature (the job has a
 tests); it is recorded as the input workspace_clean instead.
 
 --input-file NAME=PATH records an input the command itself reports, read after it ends: the sorted, distinct non-empty lines of
-PATH joined by commas (a count and digest past 500 characters), or 'none' when PATH is missing or empty. st-test uses it for env_skips, the tests that skipped because this
+PATH joined by commas (a count and digest past 500 characters), or 'none' when PATH is missing or empty. fractal-test uses it for env_skips, the tests that skipped because this
 host cannot run them (CI_TEST_ENV_SKIPS), so the note says which tests did not run here.
 
 With EVIDENCE_PUSH_TOKEN set, --push uses it as an HTTP authorization header (never printed).
@@ -148,7 +148,7 @@ def run_command(command):
     return process.wait(), digest.hexdigest()
 
 
-# st-test reads this from the base's copy: a base whose wrapper signs a tree that edits its lane (it no longer reports such a check as "not signed").
+# fractal-test reads this from the base's copy: a base whose wrapper signs a tree that edits its lane (it no longer reports such a check as "not signed").
 SIGNS_LANE_EDITS = True
 
 

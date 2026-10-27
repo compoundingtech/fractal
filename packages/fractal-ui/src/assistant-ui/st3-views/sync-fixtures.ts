@@ -13,7 +13,7 @@ const observations: readonly { readonly id: string; readonly status: SyncStatus 
   { id: 'Progress · reading', status: { _tag: 'Progress', stage: 'reading', ...progress } },
   { id: 'Reading · real counts', status: { _tag: 'Progress', stage: 'reading', host: 'owner-1', done: 184, total: 296, ...progress } },
   { id: 'Live', status: { _tag: 'Live', since } },
-  { id: 'Stale · Resync', status: { _tag: 'Stale', reason: { _tag: 'Resync', code: 'internal', message: 'Snapshot read failed; st is retrying.', attempt: 1 }, lastLiveAt: since } },
+  { id: 'Stale · Resync', status: { _tag: 'Stale', reason: { _tag: 'Resync', code: 'internal', message: 'Snapshot read failed; Fractal is retrying.', attempt: 1 }, lastLiveAt: since } },
   { id: 'Stale · Quiet', status: { _tag: 'Stale', reason: { _tag: 'Quiet', lastFrameAt: syncNow - 15000 }, lastLiveAt: older } },
   { id: 'Stale · Reconnecting', status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: syncNow + 4000, issue: 'Connection closed.' }, lastLiveAt: since } },
   { id: 'Stale · Evicted', status: { _tag: 'Stale', reason: { _tag: 'Evicted' }, lastLiveAt: older } },
