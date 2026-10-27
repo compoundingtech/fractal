@@ -1633,6 +1633,21 @@ class EndToEnd(unittest.TestCase):
                     (self.f.repo / name).parent.mkdir(parents=True, exist_ok=True)
                     (self.f.repo / name).write_text('placeholder\n')
                 base = self.commit_base()
+                # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — seed the new counterpart before testing its removal.
+                if path.startswith('.fractal/'):
+                    target = self.f.repo / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    source = self.f.repo / path.replace('.fractal/', '.st/', 1)
+                    valid = {
+                        '.fractal/evidence-authors.json': json.dumps({'logins': [], 'emails': [], 'noreply_logins': [], 'committers_also': []}),
+                        '.fractal/required-lanes.json': json.dumps({'version': 1, 'lanes': {}}),
+                        '.fractal/rust-test-inputs.json': json.dumps({'global': [], 'crates': {}, 'no_tests': []}),
+                        '.fractal/evidence-log-key': f'log/evidence namespaces="git" {self.ci.with_suffix(".pub").read_text()}',
+                    }
+                    target.write_text(valid.get(path, source.read_text()))
+                    self.f.git('add', '-A')
+                    self.f.git('commit', '-q', '-m', 'seed protected new-layout counterpart')
+                    base = self.f.git('rev-parse', 'HEAD')
                 (self.f.repo / 'moved-away').mkdir(exist_ok=True)
                 self.f.git('mv', path, 'moved-away/' + path.replace('/', '_'))
                 commit, tree = self.head()

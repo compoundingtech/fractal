@@ -55,8 +55,11 @@ def main(argv):
         git(tmp, 'init', '-q', str(repo))
         (repo / 'flake.lock').write_text('{"nodes":{}}\n')
         (repo / 'a').write_text('one\n')
+        (repo / '.st').mkdir()
+        (repo / '.st/evidence-keys').write_text(signers.read_text())
         git(repo, 'add', '.')
         git(repo, 'commit', '-q', '-m', 'one')
+        git(repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
         signer = json.dumps([sys.executable, str(SIGN)])
         toolchain = hashlib.sha256(b'drv').hexdigest()
 
@@ -511,9 +514,11 @@ def main(argv):
         lane_argv = ['sh', '-c', 'echo lane']
         (lane_repo / '.st/required-lanes.json').write_text(json.dumps(
             {'version': 1, 'lanes': {'linux-gate': {'argv': lane_argv, 'definition_paths': ['scripts/lane.sh']}}}))
+        (lane_repo / '.st/evidence-keys').write_text(signers.read_text())
         git(lane_repo, 'add', '.')
         git(lane_repo, 'commit', '-q', '-m', 'base')
         base = git(lane_repo, 'rev-parse', 'HEAD')
+        git(lane_repo, 'update-ref', 'refs/remotes/origin/main', base)
 
         def lane_wrap(command, *extra, check='linux-gate'):
             return run([sys.executable, str(WRAP), '--check', check, '--toolchain-sha256', toolchain, '--signer', signer,

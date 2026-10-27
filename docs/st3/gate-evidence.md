@@ -20,9 +20,11 @@ files exist, the new one wins; writers update only the selected layout.
 The configuration remains in `.st/` in this expand stage. Both directories are
 protected equally and included in the script-test projection. The paired `.st`
 and `.fractal` entries in `.st/required-lanes.json` `ci-script-tests.tree_inputs`
-and `.st/evidence-skip-policy.json` `ci-script-tests.inputs` are bridge sites
-under the same migration ARN; their closed JSON schemas do not allow marker
-metadata. Sparse copies accept either layout without requiring both. Required lane definition paths
+and `.st/evidence-skip-policy.json` `ci-script-tests.inputs`, plus the paired
+policy paths in `.st/rust-test-inputs.json` `fractal-kernel.extra`, are bridge
+sites under the same migration ARN. Closed JSON schemas do not allow marker
+metadata. Sparse copies accept either layout without requiring both.
+Required lane definition paths
 still name the existing `.st/` directory: adding an absent definition would
 invalidate accepted-base evidence. Directory names remain part of signed
 projections, so moving identical bytes does not preserve path-sensitive keys.
