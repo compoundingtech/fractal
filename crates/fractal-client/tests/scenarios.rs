@@ -131,3 +131,34 @@ fn scenarios_rebase_accepts_lowercase_rfc3339_separators() {
     scenarios::rebase(&mut input, &times, "2030-01-01t12:00:00.000z", 1_893_499_201_500).unwrap();
     assert_eq!(input["at"], "2030-01-01T11:59:01.750Z");
 }
+
+#[test]
+fn scenarios_wire_definition_registry_matches_the_kit() {
+    let source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../clients/typescript/fractal-scenarios/src/kit/wire.ts"),
+    ).unwrap();
+    let declaration = source.split_once("export type WireDefinition =").unwrap().1
+        .split_once("export interface WireValue").unwrap().0;
+    let expected: std::collections::BTreeSet<_> = declaration.lines()
+        .filter_map(|line| line.trim().strip_prefix("| '").and_then(|name| name.strip_suffix('\'')))
+        .collect();
+    let actual: std::collections::BTreeSet<_> = scenarios::WIRE_DEFINITIONS.iter().copied().collect();
+    assert!(!expected.is_empty(), "kit wire declaration format changed");
+    assert_eq!(actual, expected, "update Rust wire discovery when the kit adds a wire root");
+}
+
+#[test]
+fn scenarios_strict_rejects_unknown_error_codes() {
+    let mut slice = scenarios::load_slice(fixtures().join("failed-sync-rate-limited/sync.json")).unwrap();
+    let envelope = slice.timeline.iter_mut()
+        .find(|event| event["_tag"] == "http-error").unwrap();
+    envelope["envelope"]["code"] = Value::String("future-scenario-error".into());
+    assert!(slice.decode().is_err());
+    slice.decode = DecodeMode::Tolerant;
+    let decoded = slice.decode().unwrap();
+    assert!(decoded.iter().any(|value| matches!(
+        &value.value,
+        WireValue::ErrorEnvelope(envelope) if envelope.code == fractal_client::ErrorCode::Unknown
+    )));
+}

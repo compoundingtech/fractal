@@ -9,6 +9,12 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fs::File, path::Path, sync::LazyLock};
 
 pub const ANCHOR: &str = "2030-01-01T12:00:00.000Z";
+/// Client-v0 roots carried by the kit's wire-value traversal.
+pub const WIRE_DEFINITIONS: &[&str] = &[
+    "Agent", "Arrangement", "Runtime", "Machine", "Mission", "Work", "Attention",
+    "Message", "Resource", "TimelineEntry", "TerminalScreen", "Capabilities",
+    "ErrorEnvelope", "SyncPeer",
+];
 const MIN_MS: i64 = -62_135_596_800_000;
 const MAX_MS: i64 = 253_402_300_799_999;
 
@@ -283,7 +289,7 @@ fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Val
     }
     schema.as_object_mut().context("schema is not an object")?.remove("oneOf");
     let mut out = BTreeMap::new();
-    for name in ["Agent", "Arrangement", "Runtime", "Machine", "Mission", "Work", "Attention", "Message", "Resource", "TimelineEntry", "TerminalScreen", "Capabilities", "ErrorEnvelope", "SyncPeer"] {
+    for &name in WIRE_DEFINITIONS {
         schema["$ref"] = Value::String(format!("#/$defs/{name}"));
         out.insert(name.into(), jsonschema::options().should_validate_formats(true).build(&schema)?);
     }
