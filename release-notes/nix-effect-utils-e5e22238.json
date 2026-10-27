@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Align effect-utils to e5e22238a4586676e4f762b078da50ada9838074, pnpm 12.15.0 and regenerated workspace artifacts and dependency installation hashes; align Effect consumers to the producer's required 4.0.3 cohort.",
+  "summary": "Retarget the effect-utils Nix and source-member pins from ac338ff0249e191ce4af54f050f1ef55a408505d to published revision e5e22238a4586676e4f762b078da50ada9838074 and remeasure the frozen dependency installation.",
   "replay": {"status": "none", "detail": "No claim or replay behavior change."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "none", "detail": "No checkpoint or fleet coordination change; CI runners are unchanged."},
-  "compatibility": {"status": "changed", "detail": "The workspace requires pnpm 12.15.0. Fractal uses a hoisted linker and explicit CI and Nix installation stores, so the upstream GVS task shared-store default does not relocate Fractal stores."},
+  "compatibility": {"status": "changed", "detail": "Nix consumers must resolve effect-utils to e5e22238a4586676e4f762b078da50ada9838074, matching the regenerated installation producer identity. The existing pnpm 12.15.0 and Effect 4.0.3 cohort, CI runners and store paths remain unchanged; no consumer API migration is required."},
   "downtime": {"status": "none", "detail": "The dependency pin refresh does not itself require a daemon restart."},
-  "manual": {"status": "changed", "detail": "Use the pinned web shell or Corepack for pnpm 12.15.0. Remeasure installation hashes with scripts/nix-typescript-client-deps-hash after changing the producer or lockfile."},
-  "recovery": {"status": "none", "detail": "Revert the input pins, generated artifacts and dependency installation pin together to restore the previous packaging cohort."}
+  "manual": {"status": "changed", "detail": "Align consumer effect-utils inputs with revision e5e22238a4586676e4f762b078da50ada9838074; use scripts/nix-typescript-client-deps-hash when remeasuring the installation."},
+  "recovery": {"status": "none", "detail": "Revert this retarget's input pins, locks and dependency installation pin together to restore the ac338ff cohort."}
 }
