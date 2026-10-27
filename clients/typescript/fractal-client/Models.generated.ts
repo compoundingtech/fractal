@@ -1145,6 +1145,7 @@ export type CollectionCommand = ({
   person?: string | null;
   since_ms?: number;
   status?: null;
+  trace?: SubscribeTraceContext;
   until_ms?: number;
 } | {
   actor?: string | null;
@@ -1154,6 +1155,7 @@ export type CollectionCommand = ({
   limit?: number;
   person?: string | null;
   status?: string | null;
+  trace?: SubscribeTraceContext;
 } | {
   actor?: string | null;
   agent?: (AgentId | null);
@@ -1163,6 +1165,7 @@ export type CollectionCommand = ({
   limit?: number;
   person?: string | null;
   status?: string | null;
+  trace?: SubscribeTraceContext;
 } | {
   collection: "arrangements";
   id: string;
@@ -1170,6 +1173,7 @@ export type CollectionCommand = ({
   limit?: number;
   person: ArrangementPerson;
   subject?: ArrangementId;
+  trace?: SubscribeTraceContext;
 } | {
   capability: string;
   collection: "terminal";
@@ -1177,11 +1181,13 @@ export type CollectionCommand = ({
   incarnation?: string | null;
   kind: "subscribe";
   terminal: Id;
+  trace?: SubscribeTraceContext;
 } | {
   collection: "conversation";
   conversation: Id;
   id: string;
   kind: "subscribe";
+  trace?: SubscribeTraceContext;
 } | {
   id: string;
   kind: "unsubscribe";
@@ -2810,6 +2816,8 @@ export type SubjectDefinition = {
   subject: string;
 };
 
+export type SubscribeTraceContext = unknown;
+
 export type Subscription = ResourceHeader & {
   kind: "subscription";
   owner_generation_id: string | null;
@@ -3076,11 +3084,13 @@ export type TimelineErrorBody = {
 export type TimelineMessageBody = {
   assistant_grant_id?: string;
   attachments?: Array<Attachment>;
+  author?: ActorRef;
   blocks?: Array<TimelineBlock>;
   body_bytes?: number;
   from?: SenderRef;
   message_id: string;
   provenance?: MessageProvenance;
+  recipients?: Array<ParticipantRef>;
   reply_to?: string | null;
   sender_class?: "external-assistant";
   tags?: Array<string>;

@@ -54,8 +54,91 @@ function TranscriptStory({ scheme = 'dark', state = 'settled', availability, his
   const retry = React.useCallback(() => setRetried(true), [])
   return <section aria-label={`${state} conversation example`} data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><div {...stylex.props(styles.frame)}><RuntimeTranscript data={cases[state]} onOpenTool={setOpened} onRetry={retry} availability={availability} history={history} emptyState={emptyState} /></div>{opened !== undefined && <section aria-label="Opened tool detail" {...stylex.props(styles.detail)}><strong>{opened.title} {opened.argsSummary}</strong><pre>{opened.detail}</pre></section>}{retried && <p role="status">Retry requested by the host.</p>}</section>
 }
-const meta = { title: 'Fractal UI/Transcript', component: TranscriptStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Explicit Transcript/WorkLog UI model fixtures exercise disclosure, runtime adoption, local send states and host presentation contracts independently of scenario wire projection. Scenario-driven Transcript stories for wire-expressible families: https://github.com/compoundingtech/fractal/issues/3821' }, layout: 'fullscreen' }, args: { scheme: 'dark', state: 'settled' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, state: { options: Object.keys(cases), control: 'select' } } } satisfies Meta<typeof TranscriptStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Transcript', component: TranscriptStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'Explicit Transcript/WorkLog UI model fixtures exercise disclosure, runtime adoption, local send states and host presentation contracts independently of scenario wire projection. Scenario-driven Transcript stories for wire-expressible families: https://github.com/compoundingtech/fractal/issues/3821' }, layout: 'fullscreen' }, args: { scheme: 'dark', state: 'settled' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, state: { options: Object.keys(cases), control: 'select' } } } satisfies Meta<typeof TranscriptStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AdjacentReasoning:contract-fixture',
+  'AdjacentReasoningLight:contract-fixture',
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'AppendedItems:contract-fixture',
+  'AppendedItemsLight:contract-fixture',
+  'CatchingUp:contract-fixture',
+  'CatchingUpLight:contract-fixture',
+  'CompletionUnknown:contract-fixture',
+  'DefaultEmpty:contract-fixture',
+  'Expanded:contract-fixture',
+  'ExpandedLight:contract-fixture',
+  'Failed:contract-fixture',
+  'FailedLight:contract-fixture',
+  'FailedRetry:contract-fixture',
+  'FailedRetryLight:contract-fixture',
+  'FailedSend:contract-fixture',
+  'FailedSendLight:contract-fixture',
+  'HasOlderLight:contract-fixture',
+  'HasOlderWithLoad:contract-fixture',
+  'HasOlderWithLoadLight:contract-fixture',
+  'HasOlderWithoutLoad:contract-fixture',
+  'Interrupted:contract-fixture',
+  'InterruptedLight:contract-fixture',
+  'Loading:contract-fixture',
+  'LoadingLight:contract-fixture',
+  'LongCommandRow:contract-fixture',
+  'LongCommandRowLight:contract-fixture',
+  'MidTurnHistory:contract-fixture',
+  'MidTurnHistoryLight:contract-fixture',
+  'MixedContent:contract-fixture',
+  'NativeToolOutput:contract-fixture',
+  'NativeToolOutputLight:contract-fixture',
+  'NoGreenAllStates:contract-fixture',
+  'NoGreenAllStatesLight:contract-fixture',
+  'NotFoundWithComposer:contract-fixture',
+  'PendingSend:contract-fixture',
+  'PendingSendLight:contract-fixture',
+  'ProseOnly:contract-fixture',
+  'ProseOnlyLight:contract-fixture',
+  'RawInputDefaultDetail:contract-fixture',
+  'RawInputDefaultDetailLight:contract-fixture',
+  'RawInputOnExpand:contract-fixture',
+  'RawInputOnExpandLight:contract-fixture',
+  'RawInputWithoutOutput:contract-fixture',
+  'RawInputWithoutOutputLight:contract-fixture',
+  'ReadOnlyTools:contract-fixture',
+  'ReadOnlyToolsLight:contract-fixture',
+  'ReadableEmpty:contract-fixture',
+  'ReadableEmptyLight:contract-fixture',
+  'Reconnecting:contract-fixture',
+  'SemanticItems:contract-fixture',
+  'SemanticItemsLight:contract-fixture',
+  'SendGenericFailure:contract-fixture',
+  'SendIdentity:contract-fixture',
+  'SendIdentityLight:contract-fixture',
+  'SendInvalid:contract-fixture',
+  'SendRejected:contract-fixture',
+  'SendSnapshotUnavailable:contract-fixture',
+  'SendStaleFence:contract-fixture',
+  'SendUngranted:contract-fixture',
+  'Settled:contract-fixture',
+  'SettledAnswerMeta:contract-fixture',
+  'SettledAnswerMetaLight:contract-fixture',
+  'SettledLight:contract-fixture',
+  'StrandedItem:contract-fixture',
+  'StrandedItemLight:contract-fixture',
+  'Streaming:contract-fixture',
+  'StreamingLight:contract-fixture',
+  'SyncFailed:contract-fixture',
+  'SyncFailedLight:contract-fixture',
+  'Unavailable:contract-fixture',
+  'UnavailableLight:contract-fixture',
+  'UnavailableWithAction:contract-fixture',
+  'UnavailableWithActionLight:contract-fixture',
+  'UnavailableWithComposer:contract-fixture',
+  'UnavailableWithComposerLight:contract-fixture',
+  'UnconfirmedSend:contract-fixture',
+  'UnconfirmedSendLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const adjacentReasoning = Array.from({ length: 11 }, (_, index): ConversationItem => ({
   _tag: 'Reasoning', id: `reasoning-run/${index}`, text: `Check ${index + 1}: keep the observed reasoning in order.`, streaming: false, at,
@@ -468,6 +551,10 @@ function UnavailableComposerStory({ scheme = 'dark' }: { scheme?: Scheme }) {
     <div data-testid="host-composer" {...stylex.props(styles.composerDock)}><EmbraceComposer variant="C1" /></div>
   </section></EmbraceRuntimeProvider></main>
 }
+export const NotFoundWithComposer: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><EmbraceRuntimeProvider options={noMessages}><section aria-label="Conversation" {...stylex.props(styles.thread)}>
+  <Transcript title="Row projection" turns={[]} sync={cases['sync-failed'].sync} now={now} observedAt={now} availability={{ _tag: 'Unavailable', reason: 'Conversation not found', action: { label: 'Try again', onPress: tryAgain } }} />
+  <div {...stylex.props(styles.composerDock)}><EmbraceComposer variant="C1" readingColumn disabledReason="Conversation not found" /></div>
+</section></EmbraceRuntimeProvider></main> }
 export const UnavailableWithComposer: Story = { tags: ['critical'], render: args => <UnavailableComposerStory scheme={args.scheme} />, play: async ({ canvasElement }) => {
   tryAgain.mockClear()
   const state = await expectUnavailableState(canvasElement, 'Try again')

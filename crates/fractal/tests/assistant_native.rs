@@ -65,7 +65,7 @@ impl Harness {
             node: "assistant-native".into(), state_dir: root.path().into(),
             pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
             fleet_id: None, configured_peers: vec![], client_relay: None,
-            native_session_home: None, planner_default: Default::default(),
+            native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
         };
         Self { local: fractal_daemon::api::router(state.clone()), fabric: fractal_daemon::api::fabric_router(state.clone()), root, state }
     }
@@ -106,6 +106,9 @@ impl Harness {
             assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{unavailable}");
             assert_eq!(unavailable["message"], "the attention view is still being prepared; retry shortly");
         }
+        // The unavailable summary read can leave receipts queued after its response.
+        // Drain them before publishing and comparing the fixture's exact claim cut.
+        self.state.assistant_receipts.flush().await.unwrap();
         // Complete the same publications the daemon performs at startup, including
         // an empty owner view. Pairing alone does not make these views ready.
         fractal_daemon::api::refresh_agent_roster_for_test(&self.state.store).unwrap();
@@ -128,6 +131,7 @@ impl Harness {
         let (replay, _) = request(&self.fabric, "POST", &path, None, None, &complete).await;
         assert_eq!(replay, StatusCode::FORBIDDEN);
         self.policy(&paired, scopes()).await;
+        self.state.assistant_receipts.flush().await.unwrap();
         paired
     }
 
@@ -353,11 +357,11 @@ async fn mcp_conversation_discovery_reads_agent_ack_and_rejects_another_grants_h
     std::fs::set_permissions(&other_credential, std::fs::Permissions::from_mode(0o600)).unwrap();
     let other_app = fractal_chatgpt::http_router(fractal_chatgpt::Adapter::new(&socket, &other_credential).unwrap());
 
-    let (error, listed) = mcp_call(&app, "st_conversations_list", json!({})).await;
+    let (error, listed) = mcp_call(&app, "fractal_conversations_list", json!({})).await;
     assert!(!error, "{listed}");
     let conversation = listed["value"]["items"].as_array().unwrap().iter()
         .find(|item| item["agent_id"] == AGENT).expect("the managed agent is discovered");
-    let (error, timeline) = mcp_call(&app, "st_conversation_timeline", json!({
+    let (error, timeline) = mcp_call(&app, "fractal_conversation_timeline", json!({
         "agent_id":conversation["agent_id"],"session_id":conversation["session_id"],
     })).await;
     assert!(!error, "{timeline}");
@@ -365,13 +369,13 @@ async fn mcp_conversation_discovery_reads_agent_ack_and_rejects_another_grants_h
         .find(|item| item["text"].as_str().is_some_and(|text| text.contains(&ack)))
         .expect("the durable agent ACK is present in the actual timeline")["read"].clone();
     assert!(handle.is_object(), "{timeline}");
-    let (error, content) = mcp_call(&app, "st_conversation_read", handle.clone()).await;
+    let (error, content) = mcp_call(&app, "fractal_conversation_read", handle.clone()).await;
     assert!(!error, "{content}");
     assert!(content["value"]["text"].as_str().unwrap().contains(&ack), "{content}");
     for key in ["agent_id", "session_id", "reference", "revision", "start", "end"] {
         assert_eq!(content["value"][key], handle[key], "{key}");
     }
-    let (error, denied) = mcp_call(&other_app, "st_conversation_read", handle).await;
+    let (error, denied) = mcp_call(&other_app, "fractal_conversation_read", handle).await;
     assert!(error, "another valid grant must not redeem the first grant's content handle: {denied}");
     assert_eq!(denied["code"], "daemon-denied");
     assert!(!denied.to_string().contains(&ack));

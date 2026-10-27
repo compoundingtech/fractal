@@ -21,6 +21,7 @@ const styles = stylex.create({ root: { backgroundColor: surface.canvas, width: '
 interface Args extends React.ComponentProps<typeof TabStrip> { scenario: 'resize' | 'scroll'; scheme: 'dark' | 'light' }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Tab Strip Ancestors',
   component: TabStrip,
   parameters: { scenario: { _tag: 'primitive', reason: 'Five local tab labels isolate ancestor-only resize and scroll clipping without a window resize; no conversation, agent or resource data is rendered.' }, layout: 'fullscreen' },
@@ -49,6 +50,12 @@ const meta = {
   },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AncestorResize:primitive',
+  'AncestorScroll:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 function requireContract(condition: boolean, reason: string): asserts condition {

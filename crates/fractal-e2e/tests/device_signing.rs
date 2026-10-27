@@ -1515,6 +1515,7 @@ fn state_on(root: &Path, store: Store) -> AppState {
         client_relay: None,
         native_session_home: None,
         planner_default: fractal_daemon::model::PlannerSpec::default(),
+        assistant_receipts: Default::default(),
     }
 }
 
