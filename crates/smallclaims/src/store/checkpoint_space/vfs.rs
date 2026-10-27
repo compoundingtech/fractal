@@ -419,11 +419,6 @@ impl Data {
             return self
                 .refuse("checkpoint proof VFS refused an unclassified or live-file write".into());
         }
-        if amount > WINDOW {
-            return self.refuse(format!(
-                "checkpoint proof VFS write request {amount} exceeds {WINDOW} byte bound"
-            ));
-        }
         let mut window = self
             .window
             .lock()
@@ -481,6 +476,9 @@ impl Data {
         window.max_request = window.max_request.max(amount);
         window.total_requested = window.total_requested.saturating_add(amount);
         let temp_separate = self.guard.temp_device != self.guard.scratch_device;
+        // Free space is measured again after each WINDOW of requests. A request larger than
+        // the window, such as the size hint for a large commit's new pages, is measured just
+        // before it and charged in full below.
         if !window.ready || window.requests_since_refresh.saturating_add(amount) > WINDOW {
             let started = Instant::now();
             if let Err(error) = self.guard.check_now() {
@@ -1535,5 +1533,55 @@ mod tests {
         drop(db);
         vfs.check_closed().unwrap();
         owner.finish(&copy).unwrap();
+    }
+
+    /// One commit of 24 MiB of new pages makes SQLite hint the whole growth in one request.
+    fn commit_one_large_transaction(vfs: &ProofVfs, copy: &Path) -> rusqlite::Result<()> {
+        let db = Connection::open_with_flags_and_vfs(
+            copy,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+            vfs.name(),
+        )?;
+        db.execute_batch(
+            "PRAGMA mmap_size=0; PRAGMA journal_mode=DELETE; PRAGMA cache_size=-65536;
+             CREATE TABLE payload(bytes BLOB);
+             BEGIN;
+             WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n<6144)
+             INSERT INTO payload SELECT zeroblob(4000) FROM seq;
+             COMMIT;",
+        )
+    }
+
+    #[test]
+    fn a_request_larger_than_the_measurement_window_is_charged_not_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.sqlite3");
+        fs::write(&live, [0; 4096]).unwrap();
+        for (budget, fits) in [(1024 * 1024 * 1024, true), (20 * 1024 * 1024, false)] {
+            let scratch = dir.path().join(format!("scratch-{budget}"));
+            let owner = ProofOwnership::acquire(&scratch).unwrap();
+            let space = guard(&live, &scratch, budget);
+            let vfs = ProofVfs::register(&space).unwrap();
+            vfs.self_test(&owner, &scratch.join("proof-vfs-test.sqlite3"))
+                .unwrap();
+            let copy = scratch.join("proof-large-request.sqlite3");
+            owner.mark(&copy).unwrap();
+            let result = space.explain(
+                commit_one_large_transaction(&vfs, &copy).map_err(anyhow::Error::from),
+            );
+            let (_, refreshes, max_request, ..) = vfs.metrics();
+            if fits {
+                result.unwrap();
+                assert!(max_request > WINDOW, "no request over {WINDOW}: {max_request}");
+                assert!(refreshes > 1, "the large request was charged without measuring again");
+            } else {
+                // A request is still charged in full: one that would cross the budget refuses.
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains("scratch budget refused"), "{message}");
+                assert!(allocated(&copy).unwrap() <= budget, "{message}");
+            }
+            vfs.check_closed().unwrap();
+            owner.finish(&copy).unwrap();
+        }
     }
 }
