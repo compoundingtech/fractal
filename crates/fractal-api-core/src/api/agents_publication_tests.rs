@@ -1,6 +1,6 @@
-// Included in api::tests so the current roster and AppState fixtures remain authoritative.
+use super::*;
 
-type PublicationArc = Arc<fractal_store::store::agents_publication::AgentsPublication>;
+type PublicationArc = Arc<crate::store::agents_publication::AgentsPublication>;
 
 fn publication_current(store: &Store) -> PublicationArc {
     store.agents_publication().expect("the complete roster must be published")
@@ -111,4 +111,21 @@ fn agents_publication_subscription_is_demand_and_uses_the_shared_owner() {
     assert!(!changed.has_changed().unwrap());
     drop(changed);
     assert!(!store.agents_publication_demand());
+}
+
+#[tokio::test]
+async fn agents_publication_queued_wake_cannot_refresh_without_demand() {
+    let root = tempfile::tempdir().unwrap();
+    let app = state(root.path());
+    let store = &app.store;
+    let wake = store.start_agent_roster_refresher().unwrap();
+    let subscriber = store.subscribe_agents_publications();
+    drop(subscriber);
+    wake.notify_one();
+    let mut waiting = std::pin::pin!(wait_for_agent_roster_demand(store, &wake));
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_pending());
+    assert!(!store.agents_publication_demand());
+    let _subscriber = store.subscribe_agents_publications();
+    assert!(Future::poll(waiting.as_mut(), &mut context).is_ready());
 }
