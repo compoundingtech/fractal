@@ -880,6 +880,7 @@ fn step(
         name: s(name),
         state,
         owner: owner.map(s),
+        owner_id: None,
         owner_is_system: false,
         note: note.map(s),
         after: after.iter().map(|name| s(name)).collect(),
