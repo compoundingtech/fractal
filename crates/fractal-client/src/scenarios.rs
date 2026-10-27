@@ -269,19 +269,20 @@ fn build_validators(mode: DecodeMode) -> Result<BTreeMap<String, jsonschema::Val
     schema["$defs"]["UnknownResource"] = Value::Bool(false);
     for definition in schema["$defs"].as_object_mut().context("missing schema definitions")?.values_mut() {
         // Merge the resource header before closing its object, rather than closing each allOf arm.
-        if let Some(parts) = definition.get_mut("allOf").and_then(Value::as_array_mut) {
-            if parts.first().and_then(|part| part["$ref"].as_str()) == Some("#/$defs/ResourceHeader") && parts.len() == 2 {
-                let mut object = parts[1].clone();
-                let properties = object["properties"].as_object_mut().context("missing resource properties")?;
-                for (key, value) in header["properties"].as_object().context("missing header properties")? {
-                    properties.entry(key.clone()).or_insert_with(|| value.clone());
-                }
-                let required = object["required"].as_array_mut().context("missing resource required fields")?;
-                for field in header["required"].as_array().context("missing header required fields")? {
-                    if !required.contains(field) { required.push(field.clone()); }
-                }
-                *definition = object;
+        if let Some(parts) = definition.get_mut("allOf").and_then(Value::as_array_mut)
+            && parts.first().and_then(|part| part["$ref"].as_str()) == Some("#/$defs/ResourceHeader")
+            && parts.len() == 2
+        {
+            let mut object = parts[1].clone();
+            let properties = object["properties"].as_object_mut().context("missing resource properties")?;
+            for (key, value) in header["properties"].as_object().context("missing header properties")? {
+                properties.entry(key.clone()).or_insert_with(|| value.clone());
             }
+            let required = object["required"].as_array_mut().context("missing resource required fields")?;
+            for field in header["required"].as_array().context("missing header required fields")? {
+                if !required.contains(field) { required.push(field.clone()); }
+            }
+            *definition = object;
         }
     }
     close_schema(&mut schema);
@@ -309,12 +310,13 @@ fn close_schema(schema: &mut Value) {
                 return;
             }
             // Open enums are encoded as anyOf(enum, string). Strict mode accepts only known cases.
-            if let Some(arms) = object.get("anyOf").and_then(Value::as_array) {
-                if arms.len() == 2 && arms[0].get("enum").is_some() && arms[1] == serde_json::json!({"type": "string"}) {
-                    let known = arms[0]["enum"].clone();
-                    object.remove("anyOf");
-                    object.insert("enum".into(), known);
-                }
+            if let Some(arms) = object.get("anyOf").and_then(Value::as_array)
+                && arms.len() == 2 && arms[0].get("enum").is_some()
+                && arms[1] == serde_json::json!({"type": "string"})
+            {
+                let known = arms[0]["enum"].clone();
+                object.remove("anyOf");
+                object.insert("enum".into(), known);
             }
             // An explicit schema-valued additionalProperties is a record/map, even when
             // it also declares known keys (for example ErrorEnvelope.details).
