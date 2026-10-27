@@ -23,7 +23,7 @@ by itself.
    tests run on one `--workspace` build, so a feature one member turns on changes a shared dependency's build for all; found in
    skip-ci-sigs-2's read), the `[patch]` paths, `.cargo`, `flake.lock`, the toolchain pin
    (`rust-toolchain` if present, else `flake.nix` and `nix/`), `.config/nextest.toml`, `.config/daily-only.filterset`, and the test-stage
-   scripts: `scripts/ci-local`, `ci-linux`, `ci-nextest`, `ci-nextest-targets`, `ci-nextest-flaky`, `st3_test_process.py`, plus the
+   scripts: `scripts/ci-local`, `ci-linux`, `ci-nextest`, `ci-nextest-targets`, `ci-nextest-flaky`, `fractal_test_process.py`, plus the
    new per-crate runner. Not the whole of `scripts`: that is the largest source of unrelated churn.
 3. **Per-crate extras** from a reviewed file, `.st/rust-test-inputs.json`: `{"global": [...], "crates": {"<crate>": {"extra": [paths]}}}`.
    Extras are what the crate's tests read outside the closure: fixtures, `docs/st2/invariants.md`, `evals`, `slo`, `plugins`,

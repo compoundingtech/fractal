@@ -49,6 +49,7 @@ KEYS_PATH = '.st/evidence-keys'
 LOG_KEY_PATH = '.st/evidence-log-key'
 LOG_REF = 'refs/evidence-log/main'
 LOG_MAX_AGE = 600  # five pulls of the log host; an older head is stale (docs/st3/gate-evidence.md, "The evidence log")
+UNLOGGED_SHOWN = 5  # members an unlogged pass names on the decision line
 POLICY_PATH = '.st/evidence-skip-policy.json'
 LANES_PATH = '.st/required-lanes.json'
 KINDS = ('nix', 'wrapper', 'sekrets', 'observed')
@@ -628,23 +629,36 @@ def members_log_view(repo, log_keys, tree, check, member_records, now=None, max_
     """SHADOW: log_view for a per-crate check, over every member at once. The log head is judged once (absent, unsigned, stale as for one
     record); then each member's own key is read: `missing` when the log lists a record of that key (or of the tree) that is not here,
     else `unlogged_pass` when a member's chosen record is not listed, else `ok`. `member_records` maps crate to (key, chosen record or
-    None); a check that did not hold passes None for every member, so only `missing` can follow, as log_view does without a choice."""
+    None, and optionally that record's observed_at); a check that did not hold passes None for every member, so only `missing` can follow,
+    as log_view does without a choice. An unlogged pass names its members: `log_unlogged_crates`, the first UNLOGGED_SHOWN as
+    crate=record (12 hex), and `log_unlogged_observed_at`, the oldest observed_at among them (the one log lag would have to explain)."""
     view = log_view(repo, log_keys, tree, check, None, None, now, max_age)
     if view['log'] not in ('ok', 'missing'):
         return view  # absent, unsigned or stale: the head itself says it
     head = view['log_head']
     logged_tree = log_lines(repo, head, f'trees/{tree[:2]}/{tree}', check)
-    missing, unlogged = set(logged_tree - {name.rsplit('/', 1)[-1] for name in tree_refs(repo, tree)}), 0
-    for crate, (key, chosen) in sorted(member_records.items()):
+    missing, unlogged = set(logged_tree - {name.rsplit('/', 1)[-1] for name in tree_refs(repo, tree)}), []
+    for crate, (key, chosen, *observed) in sorted(member_records.items()):
         if not OID.fullmatch(key or ''):
             continue
         logged = log_lines(repo, head, f'keys/{check}/{key[:2]}/{key}', check)
         here = {name.rsplit('/', 1)[-1] for name in input_refs(repo, check, key)}
         missing |= logged - here
         if chosen and chosen not in logged and chosen not in logged_tree:
-            unlogged += 1
+            unlogged.append((crate, chosen, observed[0] if observed else None))
     view['log_missing'] = len(missing)
-    view['log_unlogged'] = unlogged
+    view['log_unlogged'] = len(unlogged)
+    if unlogged:
+        view['log_unlogged_crates'] = '+'.join(f'{crate}={chosen[:12]}' for crate, chosen, _ in unlogged[:UNLOGGED_SHOWN]) + (
+            f'+{len(unlogged) - UNLOGGED_SHOWN}_more' if len(unlogged) > UNLOGGED_SHOWN else '')
+        times = []
+        for _, _, observed in unlogged:
+            try:
+                times.append((parse_time(observed), observed))
+            except (AttributeError, TypeError, ValueError):
+                times = None  # one member without a readable time: no time explains them all
+                break
+        view['log_unlogged_observed_at'] = min(times)[1] if times else None
     view['log'] = 'missing' if missing else ('unlogged_pass' if unlogged else 'ok')
     return view
 
@@ -967,7 +981,7 @@ def verify_members(repo, tree, check, keys, command, kinds, bind, max_age, runne
                    'events': events, 'members': len(members), 'crates': {crate: note['record'] for crate, note in sorted(found.items())},
                    'attempts': max(note['attempts'] for note in notes), 'missing': {}})
     if log_keys:
-        result.update(members_log_view(repo, log_keys, tree, check, {crate: (members[crate], note['record']) for crate, note in found.items()}))
+        result.update(members_log_view(repo, log_keys, tree, check, {crate: (members[crate], note['record'], note['observed_at']) for crate, note in found.items()}))
     return result
 
 

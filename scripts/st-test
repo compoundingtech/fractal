@@ -514,7 +514,7 @@ def governed(argv, name):
     memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
 
     No heavy-slot ticket is held for the whole check (`cargo --stage-slot`): the checks' tests run under the test guardian
-    (scripts/st3_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
+    (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
     stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
     evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""

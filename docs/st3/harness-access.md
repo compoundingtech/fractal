@@ -114,7 +114,7 @@ branch's pull request with `gh`; a st-delivered mission step counts as that auth
 those actions and nothing else. It names what stays unauthorized: the default branch, another seat's
 branch, deleting remote branches, merging or closing pull requests, and any other remote or repository.
 With it the push succeeded 10 times in 10. The wording matters ("the operator authorized" was rejected)
-and is a behavior of that model version; `scripts/st3-codex-minimal-eval/push-check` re-runs the probe.
+and is a behavior of that model version; `scripts/fractal-codex-minimal-eval/push-check` re-runs the probe.
 Nothing is opted in by this change; opting a seat in is the operator's decision, made in its declaration.
 Fractal does not restrict who may publish that declaration: in [free mode](../site/reference/configuration.md#free-mode) any person
 or agent may publish a seat declaration as itself, so an agent that can publish can write this entry into a
@@ -130,7 +130,7 @@ declared permissions the launch fails closed (the driver does not guess that the
 replace it) and says so: `saved Codex resume binding has no persisted rollout for thread ...`. Give the
 seat one turn on its previous declaration, which saves the thread, then restart it on the new one.
 
-The live eval `evals/st3/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
+The live eval `evals/fractal/codex-minimal-access` and `scripts/fractal-codex-minimal-eval/resume-check` (a
 restart between two turns, checking the thread id, the daemon socket, the network and the refused
 write) are paid and run by hand; no CI gate proves the real launch path. The argv tests and the
 sandbox tests are the CI evidence.
