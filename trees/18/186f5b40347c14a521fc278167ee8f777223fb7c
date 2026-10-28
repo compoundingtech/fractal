@@ -51,3 +51,6 @@ record f393356f9eee3b79b2f8e24727fd92df4129c312 rust-tests 0 host/spindle 2026-1
 record f5d4e54bdf135cb09302a7a99881a4e3a772013a rust-tests 0 host/spindle 2026-10-28T19:17:29Z
 record fae5025b6ae9f5de981c9b915ca759476ec45db5 rust-tests 0 host/spindle 2026-10-28T19:17:36Z
 record 68161b4857b3e3e7a850c0936f17a62daa3b6920 ci-script-tests 0 host/spindle 2026-10-28T19:26:58Z
+record 1a7f69893159f2269e7532ef8493f7c5ba1a72e6 rust-tests 0 host/spindle 2026-10-28T19:39:26Z
+record 776db3ce4d80767f4f7e52de968c828ef8c03b79 rust-tests 0 host/spindle 2026-10-28T19:39:26Z
+record cb9d09fafaec1336621d99ed9fd4ee3f4a587f2c rust-tests 0 host/spindle 2026-10-28T19:39:26Z
