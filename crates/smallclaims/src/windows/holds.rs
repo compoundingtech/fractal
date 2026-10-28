@@ -178,7 +178,7 @@ fn push(ring: &mut VecDeque<Long>, long: Long) {
 }
 
 impl Record {
-    fn held(&mut self, now: Instant, wall_ms: u64, hold: &mut WriterHold, held: Duration, over: bool) {
+    fn held(&mut self, now: Instant, wall_ms: u64, hold: &WriterHold, held: Duration, over: bool) {
         let holder = hold.holder();
         let epoch = now.saturating_duration_since(super::origin()).as_secs() / SLOT_SECONDS;
         let label = if self.holders.len() < HOLDERS || self.holders.contains_key(&holder.0.label) {
@@ -210,8 +210,8 @@ impl Record {
                 held,
                 writes: hold.writes,
                 longest_write: hold.longest.as_ref().map_or(Duration::ZERO, |(_, took)| *took),
-                stages: hold.stages.take(),
-                rebuilt: std::mem::take(&mut hold.rebuilt),
+                stages: hold.stages.clone(),
+                rebuilt: hold.rebuilt.clone(),
             });
         }
     }
@@ -322,6 +322,23 @@ impl Record {
 
 static RECORD: Mutex<Option<Record>> = Mutex::new(None);
 
+#[derive(Default)]
+pub(crate) struct Ledger(Mutex<Record>);
+
+impl Ledger {
+    fn with_record<T>(&self, work: impl FnOnce(&mut Record) -> T) -> T {
+        work(&mut self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    pub(crate) fn report(&self) -> Value {
+        let mut report = self.with_record(|record| record.report(Instant::now(), unix_ms()));
+        // Waiting counters predate store scopes and are process-wide. Excluding them from
+        // a per-store report prevents another shard's queue from masquerading as this one.
+        report.as_object_mut().expect("hold report is an object").remove("waiting");
+        report
+    }
+}
+
 fn with_record<T>(work: impl FnOnce(&mut Record) -> T) -> T {
     work(RECORD.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(Record::default))
 }
@@ -335,6 +352,7 @@ pub struct WriterHold {
     first: Holder,
     longest: Option<(Holder, Duration)>,
     writes: usize,
+    store: Option<Arc<super::StoreHealth>>,
     /// A staged lend's stages, closed when the hold ends.
     stages: Option<Vec<(&'static str, Duration)>>,
     /// A staged lend's rebuilt aggregates, taken when the hold ends.
@@ -343,6 +361,14 @@ pub struct WriterHold {
 
 impl WriterHold {
     pub fn start(kind: HoldKind, holder: &Holder) -> Self {
+        Self::start_with_store(kind, holder, None)
+    }
+
+    pub fn start_in(kind: HoldKind, holder: &Holder, store: Arc<super::StoreHealth>) -> Self {
+        Self::start_with_store(kind, holder, Some(store))
+    }
+
+    fn start_with_store(kind: HoldKind, holder: &Holder, store: Option<Arc<super::StoreHealth>>) -> Self {
         let started = Instant::now();
         with_record(|record| {
             record.in_progress.insert(std::thread::current().id(), Current {
@@ -352,12 +378,20 @@ impl WriterHold {
                 writes: 0,
             });
         });
+        if let Some(store) = &store {
+            store.holds.with_record(|record| {
+                record.in_progress.insert(std::thread::current().id(), Current {
+                    holder: holder.clone(), kind, started, writes: 0,
+                });
+            });
+        }
         Self {
             kind,
             started,
             first: holder.clone(),
             longest: None,
             writes: 0,
+            store,
             stages: None,
             rebuilt: Vec::new(),
         }
@@ -372,6 +406,14 @@ impl WriterHold {
                 current.writes = writes;
             }
         });
+        if let Some(store) = &self.store {
+            store.holds.with_record(|record| {
+                if let Some(current) = record.in_progress.get_mut(&std::thread::current().id()) {
+                    current.holder = holder.clone();
+                    current.writes = writes;
+                }
+            });
+        }
     }
 
     /// A batched write from `holder` ran for `took` in this hold.
@@ -413,13 +455,22 @@ impl Drop for WriterHold {
         if let Some(observer) = &self.holder().0.observer {
             observer.fetch_max(us(held), Ordering::Relaxed);
         }
-        let over = super::record_store(StoreWork::WriterHold, held);
+        let over = self.store.as_ref().map_or_else(
+            || super::record_store(StoreWork::WriterHold, held),
+            |store| store.record(StoreWork::WriterHold, held),
+        );
         let now = Instant::now();
         let wall = unix_ms();
         with_record(|record| {
             record.in_progress.remove(&std::thread::current().id());
             record.held(now, wall, self, held, over);
         });
+        if let Some(store) = &self.store {
+            store.holds.with_record(|record| {
+                record.in_progress.remove(&std::thread::current().id());
+                record.held(now, wall, self, held, over);
+            });
+        }
     }
 }
 
@@ -428,6 +479,7 @@ impl Drop for WriterHold {
 pub struct ReadHold {
     started: Instant,
     at: &'static Location<'static>,
+    store: Option<Arc<super::StoreHealth>>,
 }
 
 impl ReadHold {
@@ -436,18 +488,31 @@ impl ReadHold {
         Self {
             started: Instant::now(),
             at: Location::caller(),
+            store: None,
         }
+    }
+
+    #[track_caller]
+    pub fn start_in(store: Arc<super::StoreHealth>) -> Self {
+        Self { started: Instant::now(), at: Location::caller(), store: Some(store) }
     }
 }
 
 impl Drop for ReadHold {
     fn drop(&mut self) {
         let held = self.started.elapsed();
-        if super::record_store(StoreWork::ReadTransaction, held) {
+        let over = self.store.as_ref().map_or_else(
+            || super::record_store(StoreWork::ReadTransaction, held),
+            |store| store.record(StoreWork::ReadTransaction, held),
+        );
+        if over {
             let holder = Holder::asked_at(self.at);
             let now = Instant::now();
             let wall = unix_ms();
-            with_record(|record| record.read(now, wall, holder, held));
+            with_record(|record| record.read(now, wall, holder.clone(), held));
+            if let Some(store) = &self.store {
+                store.holds.with_record(|record| record.read(now, wall, holder, held));
+            }
         }
     }
 }
@@ -721,6 +786,7 @@ mod tests {
             first: holder(first),
             longest: None,
             writes: 0,
+            store: None,
             stages: None,
             rebuilt: Vec::new(),
         }
@@ -734,11 +800,11 @@ mod tests {
         batch.ran(&holder("/v1/messages"), Duration::from_millis(2));
         batch.ran(&holder("/v1/internal/replication/receive"), Duration::from_millis(180));
         batch.ran(&holder("/v1/harness-events"), Duration::from_millis(1));
-        record.held(now, 1_000_000, &mut batch, Duration::from_millis(190), true);
+        record.held(now, 1_000_000, &batch, Duration::from_millis(190), true);
         std::mem::forget(batch);
-        let mut lend = hold(HoldKind::Lend, "retention/trim");
-        record.held(now, 1_000_000, &mut lend, Duration::from_millis(30), false);
-        record.held(now, 1_000_000, &mut lend, Duration::from_millis(40), false);
+        let lend = hold(HoldKind::Lend, "retention/trim");
+        record.held(now, 1_000_000, &lend, Duration::from_millis(30), false);
+        record.held(now, 1_000_000, &lend, Duration::from_millis(40), false);
         std::mem::forget(lend);
         let report = record.report(now, 1_000_000);
         let holders = report["holders"].as_array().unwrap();
@@ -779,8 +845,8 @@ mod tests {
         let mut record = Record::default();
         let now = super::super::origin() + Duration::from_secs(7_200);
         for i in 0..200 {
-            let mut hold = hold(HoldKind::Lend, &format!("task-{i}"));
-            record.held(now, 5_000_000, &mut hold, Duration::from_millis(150), true);
+            let hold = hold(HoldKind::Lend, &format!("task-{i}"));
+            record.held(now, 5_000_000, &hold, Duration::from_millis(150), true);
             std::mem::forget(hold);
         }
         for _ in 0..100 {
@@ -929,12 +995,13 @@ mod tests {
         assert!(Holder::current().0.stages.is_none(), "the scope ends with its guard");
         let clock = asked.0.stages.clone().unwrap();
         clock.lock().unwrap().spent = vec![("incremental", Duration::from_millis(150)), ("commit", Duration::from_millis(30))];
-        let mut lend = WriterHold {
+        let lend = WriterHold {
             kind: HoldKind::Lend,
             started: Instant::now(),
             first: asked,
             longest: None,
             writes: 0,
+            store: None,
             stages: Some(clock.lock().unwrap().spent.clone()),
             rebuilt: vec![(
                 "rebuild-tree",
@@ -944,7 +1011,7 @@ mod tests {
                 },
             )],
         };
-        record.held(now, 1_000_000, &mut lend, Duration::from_millis(200), true);
+        record.held(now, 1_000_000, &lend, Duration::from_millis(200), true);
         std::mem::forget(lend);
         let long = &record.report(now, 1_000_000)["long_holds"][0];
         assert_eq!(long["stages"], json!({"incremental": 150.0, "commit": 30.0}));
@@ -954,8 +1021,8 @@ mod tests {
             json!({"rebuild-tree": {"aggregates": 2, "claims": 40}})
         );
         // A batch inside a scope is charged as before, with no stages.
-        let mut batch = hold(HoldKind::Batch, "/v1/messages");
-        record.held(now, 1_000_000, &mut batch, Duration::from_millis(200), true);
+        let batch = hold(HoldKind::Batch, "/v1/messages");
+        record.held(now, 1_000_000, &batch, Duration::from_millis(200), true);
         std::mem::forget(batch);
         let batch = &record.report(now, 1_000_000)["long_holds"][0];
         assert!(batch.get("stages").is_none() && batch.get("unattributed_ms").is_none(), "{batch}");
