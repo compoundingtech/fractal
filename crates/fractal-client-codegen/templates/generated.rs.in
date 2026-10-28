@@ -3156,8 +3156,8 @@ pub struct PersonAnswerInput {
 pub struct PersonAnswer {
     #[serde(rename = "type")]
     pub entry_type: String,
-    /// `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback`, `read`,
-    /// `dismissed` or `timed_out`.
+    /// `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback`, `read` or
+    /// `dismissed`. A default applied at a deadline reads as the answer it stands for.
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,

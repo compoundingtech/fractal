@@ -972,9 +972,20 @@ mission "person-work" state="ready" {{
         let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
         assert!((before + 3_600_000..=now_ms() + 3_600_000).contains(&deadline));
         assert_eq!(claim.body["fields"]["default_answer"], "keep-open");
+        assert_eq!(claim.body["fields"]["deadline_ms"], 3_600_000);
         let mut conflict = input.clone();
         conflict.default_answer = Some("land".into());
         assert_eq!(store.ask_person(&conflict).unwrap_err().code, "idempotency-conflict");
+        // A retry with the same key keeps the first ask's deadline, so it may not name another,
+        // nor fall back to the fleet's default; an identical retry finds the same ask.
+        for deadline_ms in [Some(30 * 24 * 3_600_000), None] {
+            let mut later = input.clone();
+            later.deadline_ms = deadline_ms;
+            assert_eq!(store.ask_person(&later).unwrap_err().code, "idempotency-conflict", "{deadline_ms:?}");
+        }
+        assert_eq!(store.ask_person(&input).unwrap().subject, ask.subject);
+        let retried = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        assert_eq!(retried.body["fields"]["deadline_unix_ms"], claim.body["fields"]["deadline_unix_ms"]);
 
         let early = store.reconcile_person_asks_at(deadline - 1).unwrap();
         assert_eq!(early, PersonAskPass { changed: false, next_deadline: Some(deadline) });
@@ -989,7 +1000,8 @@ mission "person-work" state="ready" {{
             store.attention_items(Some("person/avery")).unwrap().iter().all(|item| item.subject != ask.subject),
             "the resolved ask leaves the person's home"
         );
-        let expected = json!({"type": "decision", "outcome": "timed_out", "id": "keep-open", "label": "Keep it open"});
+        // The default carries the outcome of the answer it stands for; resolved_by says it timed out.
+        let expected = json!({"type": "decision", "outcome": "decline", "id": "keep-open", "label": "Keep it open"});
         let check = |store: &Store| {
             let resumed = store.step_run(&origin.subject).unwrap().unwrap();
             assert_eq!(resumed.status, "ready");
@@ -1060,6 +1072,12 @@ mission "person-work" state="ready" {{
         let ask = store.ask_person(&input).unwrap();
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
         let deadline = u128::from(claim.body["fields"]["deadline_unix_ms"].as_u64().unwrap());
+        // The fleet's default applied, so a retry that names a deadline asks something else.
+        assert!(claim.body["fields"]["deadline_ms"].is_null());
+        let mut named = input.clone();
+        named.deadline_ms = Some(60_000);
+        assert_eq!(store.ask_person(&named).unwrap_err().code, "idempotency-conflict");
+        assert_eq!(store.ask_person(&input).unwrap().subject, ask.subject);
         assert!(store.reconcile_person_asks_at(deadline).unwrap().changed);
         let own = store.step_run(&ask.subject).unwrap().unwrap();
         assert_eq!(own.status, "completed");

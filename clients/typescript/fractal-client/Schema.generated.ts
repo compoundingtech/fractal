@@ -3091,8 +3091,7 @@ export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "custom",
   "feedback",
   "read",
-  "dismissed",
-  "timed_out"
+  "dismissed"
 ]),
   "text": optionalKey(Schema.String),
   "type": Schema.Literals(["decision","choice","feedback","update"])

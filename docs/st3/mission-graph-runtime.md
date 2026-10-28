@@ -1041,9 +1041,13 @@ default_deadline = "24h"   # 1m to 30d
 At the deadline the member that took the ask writes `work.person-done` as `daemon/runtime` with
 `resolved_by: "deadline"`. The ask leaves the person's home and its origin resumes as it would
 after an answer; a `--new-run` asker gets a `Timed out:` message. Its `person_answers` entry has
-`resolved_by: "deadline"`, respondent `daemon/runtime`, and an answer whose outcome is
-`timed_out`, carrying the default's `id` and `label` when one applied; a free-text ask has no
-answer object. A person's answer after that is refused with `stale-fence`. The reconciler arms
+`resolved_by: "deadline"` and respondent `daemon/runtime`. When the ask named a default, its
+answer is that default exactly as the person's choice of it would read (its `id`, `label` and
+own outcome, such as `decline`); without one there is no answer object. No new outcome is added,
+so a client that does not know `resolved_by` still decodes the answer; `work show` prints the
+entry as `timed_out`. A retry with the same idempotency key must name the same deadline
+(recorded as `deadline_ms` when the asker named one) and default, or it is refused with
+`idempotency-conflict`. A person's answer after that is refused with `stale-fence`. The reconciler arms
 one wake for the earliest deadline among the asks it resolves, so nothing polls for them.
 
 An ask made by a build without deadlines carries none. Its deadline is the fleet default counted
@@ -1074,7 +1078,7 @@ requesting changes, a custom choice, or feedback. A reply in words alone does no
 decision or a choice; `answer-required` lists the answer IDs. Feedback also accepts a plain
 `--summary`, so older clients can still send it. The `work.person-done` claim records the typed
 answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decline`,
-`request_changes`, `selected`, `custom`, `feedback`, `dismissed` or, at the deadline, `timed_out`. `--answer dismiss` (with an optional
+`request_changes`, `selected`, `custom`, `feedback` or `dismissed`. `--answer dismiss` (with an optional
 `--text` reason) sets any decision or choice aside without answering it: the asker is told the person
 dismissed it, and a request that defines its own `dismiss` answer keeps that meaning. The resumed origin step lists it in
 `person_answers` with the ask, respondent, time and summary; a person ask's own step does too,

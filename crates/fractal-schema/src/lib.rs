@@ -3210,6 +3210,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("requester_declaration", string()),
             ("request", object()),
             ("deadline_unix_ms", integer()),
+            ("deadline_ms", integer()),
             ("default_answer", string()),
         ],
         "work.person-done" | "work.person-cancelled" => &[

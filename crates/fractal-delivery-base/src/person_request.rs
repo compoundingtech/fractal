@@ -531,17 +531,17 @@ impl StructuredRequest {
         Ok(())
     }
 
-    /// The answer an ask records when its deadline passes unanswered: timed out, with the id and
-    /// label of the default answer that applied, if the ask named one.
-    pub fn timed_out(&self, default: Option<&str>) -> Value {
-        let mut answer = json!({"type": self.request_type.as_str(), "outcome": TIMED_OUT});
-        if let Some(option) =
-            default.and_then(|id| self.answers.iter().find(|option| option.id == id))
-        {
-            answer["id"] = json!(option.id);
-            answer["label"] = json!(option.label);
-        }
-        answer
+    /// The answer an ask records when its deadline passes unanswered: its default answer, exactly
+    /// as if the person had chosen it, or none. The response's `resolved_by` says the deadline
+    /// gave it, so the outcome stays one that every client already reads.
+    pub fn at_deadline(&self, default: Option<&str>) -> Option<Value> {
+        let id = default?;
+        self.check_default(id).ok()?;
+        let input = AnswerInput {
+            id: Some(id.to_owned()),
+            text: None,
+        };
+        self.answer(Some(&input), "").ok()
     }
 
     fn answer_ids(&self) -> String {
@@ -560,19 +560,17 @@ impl StructuredRequest {
 /// The answer id by which a person sets a request aside; the asker reads it as a dismissal.
 pub const DISMISS: &str = "dismiss";
 
-/// The outcome an ask records when its deadline passes before the person answers it.
-pub const TIMED_OUT: &str = "timed_out";
+/// The human-readable history line for an ask its deadline resolved, with the default answer
+/// that applied, if any.
+pub fn deadline_summary(answer: Option<&Value>) -> String {
+    match answer.and_then(|answer| Some((answer["label"].as_str()?, answer["id"].as_str()?))) {
+        Some((label, id)) => format!("Timed out without an answer; the default applied: {label} ({id})"),
+        None => "Timed out without an answer".to_owned(),
+    }
+}
 
 /// The human-readable history line for a typed answer.
 pub fn answer_summary(answer: &Value) -> String {
-    if answer["outcome"] == TIMED_OUT {
-        return match (answer["label"].as_str(), answer["id"].as_str()) {
-            (Some(label), Some(id)) => {
-                format!("Timed out without an answer; the default applied: {label} ({id})")
-            }
-            _ => "Timed out without an answer".to_owned(),
-        };
-    }
     if answer["outcome"] == "dismissed" {
         return match answer["text"].as_str() {
             Some(text) => format!("Dismissed without an answer: {text}"),
@@ -661,25 +659,29 @@ mod tests {
     }
 
     #[test]
-    fn a_default_is_a_named_answer_that_needs_no_words_and_times_out_as_itself() {
+    fn a_default_is_a_named_answer_that_needs_no_words_and_applies_as_itself() {
         let (request, _) = StructuredRequest::parse(&decision()).unwrap();
         request.check_default("land").unwrap();
         request.check_default("keep-open").unwrap();
         assert_eq!(request.check_default("revise-auth").unwrap_err().code, "invalid-default-answer");
         assert_eq!(request.check_default("yes").unwrap_err().code, "invalid-default-answer");
         assert_eq!(request.check_default(DISMISS).unwrap_err().code, "invalid-default-answer");
-        let answer = request.timed_out(Some("keep-open"));
+        // The default applies as the person's own choice of it would: an outcome every client
+        // already reads, never a new one.
+        let answer = request.at_deadline(Some("keep-open")).unwrap();
         assert_eq!(
             answer,
-            json!({"type": "decision", "outcome": "timed_out", "id": "keep-open", "label": "Keep it open"})
+            json!({"type": "decision", "outcome": "decline", "id": "keep-open", "label": "Keep it open"})
         );
+        let chosen = AnswerInput { id: Some("keep-open".into()), text: None };
+        assert_eq!(answer, request.answer(Some(&chosen), "").unwrap());
         assert_eq!(
-            answer_summary(&answer),
+            deadline_summary(Some(&answer)),
             "Timed out without an answer; the default applied: Keep it open (keep-open)"
         );
-        let answer = request.timed_out(None);
-        assert_eq!(answer, json!({"type": "decision", "outcome": "timed_out"}));
-        assert_eq!(answer_summary(&answer), "Timed out without an answer");
+        assert_eq!(request.at_deadline(None), None);
+        assert_eq!(request.at_deadline(Some("revise-auth")), None);
+        assert_eq!(deadline_summary(None), "Timed out without an answer");
         let mut feedback = decision();
         feedback["type"] = json!("feedback");
         feedback.as_object_mut().unwrap().remove("answers");

@@ -3161,7 +3161,8 @@ pub struct PersonAnswerView {
     pub respondent: String,
     pub answered_at_unix_ms: u128,
     /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present. An ask
-    /// that timed out records `timed_out`, with the default answer's `id` and `label` if one applied.
+    /// that timed out carries its default answer as the person's choice of it would read, or no
+    /// answer when it named none; `resolved_by` says the deadline gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<Value>,
     /// `deadline` when the ask resolved by itself at its deadline, not by the person.

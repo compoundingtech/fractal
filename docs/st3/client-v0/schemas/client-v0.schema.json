@@ -2952,8 +2952,7 @@
           "custom",
           "feedback",
           "read",
-          "dismissed",
-          "timed_out"
+          "dismissed"
         ]},
         "id": {"type": "string"},
         "label": {"type": "string"},

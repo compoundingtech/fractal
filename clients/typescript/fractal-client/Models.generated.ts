@@ -2363,7 +2363,6 @@ export type PersonAnswer = {
   | "feedback"
   | "read"
   | "dismissed"
-  | "timed_out"
 ;
   text?: string;
   type: "decision" | "choice" | "feedback" | "update";

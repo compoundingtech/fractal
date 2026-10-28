@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{MessageAttachment, PersonAskRequest, PersonStepResponse};
-use crate::person_request::{StructuredRequest, answer_summary};
+use crate::person_request::{StructuredRequest, answer_summary, deadline_summary};
 pub use fractal_delivery::store::person_work::*;
 pub use fractal_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
@@ -73,7 +73,7 @@ fn deadline_and_default(
     structured: &Value,
     default_ms: u64,
     now: u128,
-) -> Result<(u128, Option<String>), St3Error> {
+) -> Result<AskDeadline, St3Error> {
     let deadline_ms = input.deadline_ms.unwrap_or(default_ms);
     if input.deadline_ms.is_some()
         && !(MIN_ASK_DEADLINE_MS..=MAX_ASK_DEADLINE_MS).contains(&deadline_ms)
@@ -92,16 +92,38 @@ fn deadline_and_default(
         }
         StructuredRequest::parse(structured)?.0.check_default(default)?;
     }
-    Ok((now + u128::from(deadline_ms), input.default_answer.clone()))
+    Ok(AskDeadline {
+        at: now + u128::from(deadline_ms),
+        requested_ms: input.deadline_ms,
+        default: input.default_answer.clone(),
+    })
+}
+
+/// An ask's deadline: when it resolves, the duration the asker named (absent when the fleet's
+/// default applied), and the answer that then applies.
+struct AskDeadline {
+    at: u128,
+    requested_ms: Option<u64>,
+    default: Option<String>,
 }
 
 /// Adds the deadline and default answer to an ask claim body.
-fn with_deadline(mut body: Value, (deadline, default): &(u128, Option<String>)) -> Value {
-    body["fields"]["deadline_unix_ms"] = json!(*deadline as u64);
-    if let Some(default) = default {
+fn with_deadline(mut body: Value, deadline: &AskDeadline) -> Value {
+    body["fields"]["deadline_unix_ms"] = json!(deadline.at as u64);
+    if let Some(requested) = deadline.requested_ms {
+        body["fields"]["deadline_ms"] = json!(requested);
+    }
+    if let Some(default) = &deadline.default {
         body["fields"]["default_answer"] = json!(default);
     }
     body
+}
+
+/// Whether an ask already recorded under a key was asked with the same deadline and default: a
+/// retry with the same key keeps the first ask's absolute deadline, so it must not name another.
+fn same_deadline(existing: &Value, input: &PersonAskRequest) -> bool {
+    existing["fields"]["deadline_ms"] == json!(input.deadline_ms)
+        && existing["fields"]["default_answer"] == json!(input.default_answer)
 }
 
 /// The answer the person gives and the summary history keeps. A free-text ask takes text
@@ -377,7 +399,7 @@ impl PersonWorkStore for Store {
                     || existing.body["fields"]["title"] != input.title
                     || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
-                    || existing.body["fields"]["default_answer"] != json!(input.default_answer) {
+                    || !same_deadline(&existing.body, input) {
                     return Err(St3Error::new("idempotency-conflict", "this ask key already names a different question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask is no longer retained"));
@@ -678,8 +700,8 @@ impl PersonWorkStore for Store {
     fn resolve_at_deadline(&self, tx: &Transaction<'_>, ask: &ClaimRecord, view: &StepRunView) -> Result<bool> {
         // An ask from a newer build whose request this build cannot read waits for that build.
         let Ok(request) = structured_request(ask) else { return Ok(false) };
-        let answer = request.map(|request| request.timed_out(ask_default_answer(ask)));
-        let summary = answer.as_ref().map_or_else(|| "Timed out without an answer".to_owned(), answer_summary);
+        let answer = request.and_then(|request| request.at_deadline(ask_default_answer(ask)));
+        let summary = deadline_summary(answer.as_ref());
         let mut body = json!({"fields": {"attempt": view.attempt, "status": "completed", "summary": summary,
             "key": format!("person-deadline:{}", ask.id), "episode": ask.id, "resolved_by": "deadline"}});
         if let Some(answer) = &answer {
@@ -850,7 +872,7 @@ impl PersonWorkStore for Store {
             if let Some(existing) = request(tx, &subject).map_err(internal)? {
                 if existing.body["fields"]["person"] != input.person || existing.body["fields"]["title"] != input.title || existing.body["fields"]["reason"] != input.reason
                     || existing.body["fields"]["request"] != structured
-                    || existing.body["fields"]["default_answer"] != json!(input.default_answer) {
+                    || !same_deadline(&existing.body, input) {
                     return Err(St3Error::new("idempotency-conflict", "this ask key already names another question"));
                 }
                 return step(tx, &subject).map_err(internal)?.ok_or_else(|| St3Error::new("missing-step-run", "the ask is no longer retained"));

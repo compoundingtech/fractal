@@ -1000,9 +1000,15 @@ pub(crate) fn render_step_run(
         for response in &step.person_answers {
             let answer = response.answer.as_ref();
             let by_deadline = response.resolved_by.as_deref() == Some("deadline");
-            let outcome = answer
-                .and_then(|answer| answer["outcome"].as_str())
-                .unwrap_or(if by_deadline { "timed_out" } else { response.status.as_str() });
+            // A deadline's default carries the outcome of the answer it stands for; the line
+            // says it timed out, and the id names the default that applied.
+            let outcome = if by_deadline {
+                "timed_out"
+            } else {
+                answer
+                    .and_then(|answer| answer["outcome"].as_str())
+                    .unwrap_or(response.status.as_str())
+            };
             let id = answer
                 .and_then(|answer| answer["id"].as_str())
                 .map(|id| format!(" {id}"))
