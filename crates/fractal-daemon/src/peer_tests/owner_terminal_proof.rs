@@ -2,7 +2,7 @@
 use anyhow::{Context as _, Result};
 use crate::config::{Config, PeerConfig};
 use crate::fleet::MemberKey;
-use crate::peer::{ClientRelay, MainBackend, smalltalk_routes};
+use crate::peer::{ClientRelay, MainBackend, fractal_routes};
 use crate::store::Store;
 use serde_json::Value;
 use smallclaims::sync::{FleetAuth, PeerState};
@@ -61,6 +61,8 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
             client_relay: None,
             native_session_home: None,
             planner_default: Default::default(),
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
         })
     };
     let mut gateway = make_state("gateway-demo")?;
@@ -150,6 +152,7 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
             person_id: "person/demo".into(),
             full_control: None,
             scopes: Some(vec!["read.projections".into(), "terminal.read".into()]),
+            fabric_gateway: None,
         }))
         .await?
         .value;
@@ -161,6 +164,7 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
                 code: challenge.code,
                 device_public_key: "isolated-read-only-device-key-00000000".into(),
                 key_storage: None,
+                fabric_node_id: None,
             },
         )
         .await?
@@ -230,7 +234,7 @@ async fn terminal_route_phone_client_isolated_owner_pair() -> Result<()> {
     let peer_address = listener.local_addr()?;
     let peer_task =
         tokio::spawn(
-            async move { axum::serve(listener, peer_router(peer, smalltalk_routes(crate::api::raw_terminal_owner_splice))).await },
+            async move { axum::serve(listener, peer_router(peer, fractal_routes(crate::api::raw_terminal_owner_splice))).await },
         );
     let secret = gateway.state_dir.join("fleet-secret");
     fs::write(&secret, [7; 32])?;
