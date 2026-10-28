@@ -2,3 +2,4 @@ record 788b69546873db9d8afcb4f5cd9b4390709a37ca typescript-client 0 host/forge 2
 record 528f834a7d9c954b9d5b8a8712e88d8d0167d742 genie-freshness 0 host/forge 2026-10-28T02:33:20Z
 record da99a8ff03d85315223b00481d286b8b453a8c33 ci-script-tests 0 host/forge 2026-10-28T02:40:07Z
 record 6fc329f502aaeb1939d6657d8a31029cf2afaa92 linux-gate 0 host/forge 2026-10-28T02:43:41Z
+record b3aba30bf05d6934bbe32d482b070645c14f3036 rust-tests 0 host/forge 2026-10-28T02:45:39Z
