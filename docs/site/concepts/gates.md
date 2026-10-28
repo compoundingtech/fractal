@@ -35,7 +35,7 @@ const ada = Fractal.person({ id: 'ada' })
 
 // Sequence after the prepare step inside the mission.
 export const approve = Fractal.step(
-  { id: 'approve', agentless: true },
+  { id: 'approve' },
   Effect.gen(function* () {
     const answer = yield* Fractal.ask({
       name: 'The operator approves',
@@ -56,7 +56,7 @@ const ada = Fractal.person({ id: 'ada' })
 
 // Await after the prepare step inside the mission.
 export const approve = () => Fractal.step(
-  { id: 'approve', agentless: true },
+  { id: 'approve' },
   async () => {
     const answer = await Fractal.ask({
       name: 'The operator approves',

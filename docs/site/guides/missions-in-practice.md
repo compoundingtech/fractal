@@ -40,7 +40,7 @@ export const mission = Fractal.mission(
     }).pipe(Effect.provide(Fractal.Worker.layer(worker)))
 
     yield* Fractal.step(
-      { id: 'approve', agentless: true },
+      { id: 'approve' },
       Effect.gen(function* () {
         const answer = yield* Fractal.ask({
           name: 'Ada approves the README',
@@ -83,7 +83,7 @@ export const mission = Fractal.mission(
     })
 
     await Fractal.step(
-      { id: 'approve', agentless: true },
+      { id: 'approve' },
       async () => {
         const answer = await Fractal.ask({
           name: 'Ada approves the README',
