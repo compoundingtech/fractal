@@ -124,19 +124,300 @@ fn read_code_without_echo() -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
-/// The one `st-fleet-join-*.code` file in this machine's Fabric inbox.
-fn fabric_inbox_code() -> Result<PathBuf> {
-    let home = std::env::var_os("FABRIC_HOME")
+const FABRIC_PAIRING_UNAVAILABLE: &str = "Fabric invitations need st-fabric-adapter installed and \
+     Fabric running with --runtime-peers; use --via tailscale for a Tailscale-only invitation";
+
+/// The pairing helper beside st, named by ST_FABRIC_ADAPTER, or on PATH. A configured
+/// path that is not a file counts as no helper, so `auto` invitations route around it.
+fn fabric_adapter() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ST_FABRIC_ADAPTER") {
+        let path = PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("st-fabric-adapter")))
+        .filter(|path| path.is_file())
+        .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "st-fabric-adapter"))
+}
+
+/// The `--via` an invitation is created with. Without the pairing helper, a Fabric endpoint
+/// cannot carry a new machine in, so `auto` uses this member's other endpoints, and an
+/// invitation that only Fabric could carry fails here, before any invite exists.
+fn invite_via(requested: &str, endpoints: &[Value], pairing: bool) -> Result<String> {
+    let advertises = |transport: &str| endpoints.iter().any(|endpoint| endpoint["transport"] == transport);
+    if pairing || !matches!(requested, "auto" | "fabric") || !advertises("fabric") {
+        return Ok(requested.to_owned());
+    }
+    if requested == "auto"
+        && let Some(other) = ["tailscale", "loopback"].into_iter().find(|transport| advertises(transport))
+    {
+        return Ok(other.to_owned());
+    }
+    anyhow::bail!(FABRIC_PAIRING_UNAVAILABLE)
+}
+
+/// The Fabric peer `name` names in this machine's own `fabric peers` list, by name or NodeID.
+fn trusted_fabric_peer(fabric: &std::path::Path, name: &str) -> Result<()> {
+    let output = std::process::Command::new(fabric)
+        .arg("peers")
+        .output()
+        .with_context(|| format!("run {} peers", fabric.display()))?;
+    anyhow::ensure!(
+        output.status.success(),
+        "fabric peers failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let listed = String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        let mut fields = line.split('\t');
+        let id = fields.next().unwrap_or_default();
+        let peer = fields.next().unwrap_or_default();
+        id == name || peer == name
+    });
+    anyhow::ensure!(
+        listed,
+        "{name} is not a trusted Fabric peer of this machine (see fabric peers); trust it in \
+         Fabric first or show the code with --code-only"
+    );
+    Ok(())
+}
+
+/// Hand the code to `name`'s Fabric inbox. Fabric answers only after the far side has
+/// committed the file, so success here means it arrived.
+fn send_code_over_fabric(
+    config: &Config,
+    fabric: &std::path::Path,
+    name: &str,
+    created: &fractal_daemon::api::FleetInviteCreated,
+) -> Result<()> {
+    let temporary = config
+        .state_dir
+        .join("fleet")
+        .join(format!(".send-{}.code", std::process::id()));
+    fractal_daemon::fleet::join::write_private(&temporary, created.code.as_bytes())?;
+    let invite_id = created.invite.trim_start_matches("fleet-invite/");
+    let sent = std::process::Command::new(fabric)
+        .args(["send-file", name])
+        .arg(&temporary)
+        .args(["--as", &format!("st-fleet-join-{invite_id}.code")])
+        .stdin(std::process::Stdio::null())
+        .output();
+    let _ = fs::remove_file(&temporary);
+    let sent = sent.with_context(|| format!("run {} send-file", fabric.display()))?;
+    anyhow::ensure!(
+        sent.status.success(),
+        "fabric send-file to {name} failed: {}",
+        String::from_utf8_lossy(&sent.stderr).trim()
+    );
+    Ok(())
+}
+
+/// Revoke an invite whose code never reached the new machine, saying so on `error`. The
+/// flag is whether the revocation took effect.
+async fn revoke_undelivered(
+    client: &Client,
+    invite: &str,
+    person: &str,
+    error: anyhow::Error,
+) -> (anyhow::Error, bool) {
+    let revoked: Result<Value> = client
+        .post(
+            "/v1/internal/fleet/invites/revoke",
+            &fractal_daemon::api::FleetInviteRevokeRequest {
+                invite: invite.to_owned(),
+                reason: "the invitation was not delivered".into(),
+                person: person.to_owned(),
+            },
+        )
+        .await;
+    match revoked {
+        Ok(_) => (error.context(format!("revoked {invite}, which was not delivered")), true),
+        Err(_) => (
+            error.context(format!(
+                "{invite} was not delivered and stays open until it expires; revoke it with \
+                 fractal fleet invites revoke {invite}"
+            )),
+            false,
+        ),
+    }
+}
+
+/// Write a join code to a new 0600 file at `path`, replacing any file there. Unlike the state
+/// directory's private writes, this leaves the person's chosen directory and its mode alone.
+fn write_code_file(path: &std::path::Path, code: &[u8]) -> Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let name = path
+        .file_name()
+        .with_context(|| format!("{} does not name a file", path.display()))?;
+    let directory = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(name);
+    temporary_name.push(format!(".{}.tmp", std::process::id()));
+    let temporary = directory.join(temporary_name);
+    let written = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(code)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    written.with_context(|| format!("write the join code to {}", path.display()))
+}
+
+/// How long `--fabric-inbox` waits for a code: the longest a Fabric invitation lives.
+const FABRIC_INBOX_WAIT: Duration = Duration::from_secs(600);
+
+/// This machine's Fabric home, which holds its inbox.
+fn fabric_home() -> Result<PathBuf> {
+    std::env::var_os("FABRIC_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/fabric"))
         })
-        .context("HOME is not set")?;
+        .context("HOME is not set")
+}
+
+/// The one `st-fleet-join-*.code` file in `home`'s Fabric inbox, waiting up to `wait` for
+/// `fractal fleet invite --send-fabric` on the sponsor to deliver it. Fabric renames a
+/// finished transfer into `inbox/SENDER/`, so a watch on each directory along that path
+/// wakes this when the code lands.
+fn wait_for_fabric_inbox_code(
+    home: &std::path::Path,
+    wait: Duration,
+    json_output: bool,
+) -> Result<PathBuf> {
+    use notify::Watcher as _;
+    let deadline = std::time::Instant::now() + wait;
+    let (events, woken) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(events)?;
+    let mut watched = BTreeMap::new();
+    let mut announced = false;
+    loop {
+        // Watch before looking, so a directory or code that appears after the look raises an
+        // event. A directory made while its parent's watch began raises none, so list again
+        // until no new directory appears.
+        loop {
+            let mut added = false;
+            for (directory, inode) in fabric_inbox_directories(home)? {
+                if watched.get(&directory) == Some(&inode) {
+                    continue;
+                }
+                let _ = watcher.unwatch(&directory);
+                match watcher.watch(&directory, notify::RecursiveMode::NonRecursive) {
+                    // Gone again: its parent's watch reports what replaces it.
+                    Err(error) if matches!(error.kind, notify::ErrorKind::PathNotFound) => {}
+                    watching => {
+                        watching.with_context(|| format!("watch {}", directory.display()))?
+                    }
+                }
+                watched.insert(directory, inode);
+                added = true;
+            }
+            if !added {
+                break;
+            }
+        }
+        if let Some(path) = fabric_inbox_code(home)? {
+            return Ok(path);
+        }
+        let Some(remaining) = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+        else {
+            anyhow::bail!(
+                "no join code arrived in the Fabric inbox within {}s; on the sponsor run \
+                 fractal fleet invite NAME --send-fabric",
+                wait.as_secs()
+            );
+        };
+        if !announced && !json_output {
+            eprintln!("Waiting for a join code in this machine's Fabric inbox…");
+            announced = true;
+        }
+        await_fabric_inbox_event(&woken, remaining)?;
+    }
+}
+
+/// Wait up to `remaining` for the inbox watch to report a change: any event, or the deadline,
+/// means look again. A watch that reports an error may not report the code either, so the
+/// error ends the wait.
+fn await_fabric_inbox_event(
+    woken: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    remaining: Duration,
+) -> Result<()> {
+    let mut events = match woken.recv_timeout(remaining) {
+        Ok(event) => vec![event],
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("the watch on the Fabric inbox stopped")
+        }
+    };
+    events.extend(woken.try_iter());
+    for event in events {
+        event.context("the watch on the Fabric inbox failed")?;
+    }
+    Ok(())
+}
+
+/// The directories a delivered code passes through, with their inodes so a recreated one is
+/// watched again: the Fabric home, its inbox once Fabric has made it, and each sender's
+/// directory in the inbox.
+fn fabric_inbox_directories(home: &std::path::Path) -> Result<Vec<(PathBuf, u64)>> {
+    fn inode(path: &std::path::Path) -> Result<Option<u64>> {
+        use std::os::unix::fs::MetadataExt as _;
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(metadata.is_dir().then(|| metadata.ino())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        }
+    }
+    let home_inode = inode(home)?.with_context(|| {
+        format!(
+            "no Fabric home at {}; set FABRIC_HOME if Fabric keeps it elsewhere",
+            home.display()
+        )
+    })?;
+    let mut directories = vec![(home.to_path_buf(), home_inode)];
     let inbox = home.join("inbox");
-    let mut found = Vec::new();
+    let Some(inbox_inode) = inode(&inbox)? else {
+        return Ok(directories);
+    };
+    directories.push((inbox.clone(), inbox_inode));
     for sender in fs::read_dir(&inbox)
         .with_context(|| format!("read the Fabric inbox {}", inbox.display()))?
     {
+        let sender = sender?.path();
+        if let Some(sender_inode) = inode(&sender)? {
+            directories.push((sender, sender_inode));
+        }
+    }
+    Ok(directories)
+}
+
+/// The one `st-fleet-join-*.code` file in `home`'s Fabric inbox, if one has arrived.
+fn fabric_inbox_code(home: &std::path::Path) -> Result<Option<PathBuf>> {
+    let inbox = home.join("inbox");
+    let senders = match fs::read_dir(&inbox) {
+        Ok(senders) => senders,
+        // Fabric makes the inbox when the first file arrives.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("read the Fabric inbox {}", inbox.display()))
+        }
+    };
+    let mut found = Vec::new();
+    for sender in senders {
         let sender = sender?.path();
         if !sender.is_dir() {
             continue;
@@ -153,8 +434,8 @@ fn fabric_inbox_code() -> Result<PathBuf> {
         }
     }
     match found.len() {
-        1 => Ok(found.remove(0)),
-        0 => anyhow::bail!("no join code in the Fabric inbox {}", inbox.display()),
+        0 => Ok(None),
+        1 => Ok(Some(found.remove(0))),
         _ => anyhow::bail!(
             "{} join codes in the Fabric inbox {}; remove the old ones",
             found.len(),
@@ -184,6 +465,7 @@ async fn lock_fleet_admission(
 /// Pairing credentials travel over the helper's private stdin/stdout, never argv.
 async fn bootstrap_fabric_invite(
     endpoint: &Endpoint,
+    adapter: Option<&std::path::Path>,
     created: &mut fractal_daemon::api::FleetInviteCreated,
 ) -> Result<()> {
     let code = fractal_daemon::fleet::code::JoinCode::decode(&created.code)?;
@@ -197,19 +479,7 @@ async fn bootstrap_fabric_invite(
     let Endpoint::Unix(socket) = endpoint else {
         anyhow::bail!("Fabric bootstrap invitations must be issued on the sponsor machine");
     };
-    let helper = std::env::var_os("ST_FABRIC_ADAPTER")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::current_exe()
-                .ok()
-                .and_then(|path| path.parent().map(|parent| parent.join("st-fabric-adapter")))
-                .filter(|path| path.is_file())
-        })
-        .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "st-fabric-adapter"))
-        .context(
-            "Fabric invitations need st-fabric-adapter installed and Fabric running with \
-             --runtime-peers; use --via tailscale for a Tailscale-only invitation",
-        )?;
+    let helper = adapter.context(FABRIC_PAIRING_UNAVAILABLE)?;
     let mut child = tokio::process::Command::new(helper)
         .arg("--st-socket")
         .arg(socket)
@@ -232,7 +502,8 @@ async fn bootstrap_fabric_invite(
     let output = child.wait_with_output().await?;
     anyhow::ensure!(
         output.status.success(),
-        "Fabric invitation bootstrap failed; the st invite remains open until revoked or expired"
+        "Fabric pairing failed; it needs st-fabric-adapter running on this machine and Fabric \
+         running with --runtime-peers"
     );
     #[derive(serde::Deserialize)]
     struct PairedInvite {
@@ -311,51 +582,78 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         }
         FleetCommand::Invite(args) => {
             let person = fleet_person(args.actor.clone(), &config)?;
-            if args.send_fabric {
-                anyhow::ensure!(
-                    args.name.is_some(),
-                    "--send-fabric needs the NAME of the machine to send it to"
-                );
-            }
-            let mut created: fractal_daemon::api::FleetInviteCreated = client
-                .post(
-                    "/v1/internal/fleet/invites",
-                    &fractal_daemon::api::FleetInviteRequest {
-                        name: args.name.clone(),
-                        expires_seconds: parse_fleet_duration(&args.expires)?,
-                        via: Some(args.via.clone()),
-                        migrate: args.migrate,
-                        person,
-                    },
-                )
-                .await?;
-            bootstrap_fabric_invite(endpoint, &mut created).await?;
-            let command = if args.migrate { "migrate" } else { "join" };
-            if let Some(path) = &args.code_file {
-                fractal_daemon::fleet::join::write_private(path, created.code.as_bytes())?;
-                println!("{}\t{}", created.invite, path.display());
-            } else if args.send_fabric {
-                let name = args.name.as_deref().unwrap_or_default();
+            let expires_seconds = parse_fleet_duration(&args.expires)?;
+            // Everything that can refuse runs before the invite exists, so a refusal leaves
+            // no open invite behind.
+            let fabric = if args.send_fabric {
+                let name = args
+                    .name
+                    .as_deref()
+                    .context("--send-fabric needs the NAME of the machine to send it to")?;
                 let fabric = fractal_daemon::config::FleetFile::load(&config.state_dir)?
                     .and_then(|file| file.fabric)
                     .or_else(|| fractal_daemon::fleet::transport::resolve_tool(None, "fabric"))
                     .context("--send-fabric needs the fabric command")?;
-                let temporary = config
-                    .state_dir
-                    .join("fleet")
-                    .join(format!(".send-{}.code", std::process::id()));
-                fractal_daemon::fleet::join::write_private(&temporary, created.code.as_bytes())?;
-                let invite_id = created.invite.trim_start_matches("fleet-invite/");
-                let sent = std::process::Command::new(&fabric)
-                    .args(["send-file", name])
-                    .arg(&temporary)
-                    .args(["--as", &format!("st-fleet-join-{invite_id}.code")])
-                    .status();
-                let _ = fs::remove_file(&temporary);
-                anyhow::ensure!(
-                    sent?.success(),
-                    "fabric send-file to {name} failed; the invite stays open until it expires"
-                );
+                trusted_fabric_peer(&fabric, name)?;
+                Some((fabric, name))
+            } else {
+                None
+            };
+            let adapter = fabric_adapter();
+            let mut via = args.via.clone();
+            if adapter.is_none() && !args.migrate {
+                via = invite_via(&via, &member_endpoints(&client, &config.node).await?, false)?;
+            }
+            let create = |via: String| {
+                let request = fractal_daemon::api::FleetInviteRequest {
+                    name: args.name.clone(),
+                    expires_seconds,
+                    via: Some(via),
+                    migrate: args.migrate,
+                    person: person.clone(),
+                };
+                let client = &client;
+                async move {
+                    client
+                        .post::<_, fractal_daemon::api::FleetInviteCreated>(
+                            "/v1/internal/fleet/invites",
+                            &request,
+                        )
+                        .await
+                }
+            };
+            let mut created = create(via).await?;
+            if let Err(error) = bootstrap_fabric_invite(endpoint, adapter.as_deref(), &mut created).await {
+                // Revoke first, so nothing that fails below leaves the undelivered invite open.
+                let (error, revoked) = revoke_undelivered(&client, &created.invite, &person, error).await;
+                if !revoked || args.via != "auto" || args.migrate {
+                    return Err(error);
+                }
+                // `auto` still has the member's other endpoints when Fabric cannot pair.
+                let endpoints = match member_endpoints(&client, &config.node).await {
+                    Ok(endpoints) => endpoints,
+                    Err(lookup) => return Err(error.context(format!("{lookup:#}"))),
+                };
+                let Ok(fallback) = invite_via("auto", &endpoints, false) else {
+                    return Err(error);
+                };
+                eprintln!("{error:#}; inviting over {fallback} instead.");
+                created = create(fallback).await?;
+            }
+            let command = if args.migrate { "migrate" } else { "join" };
+            let delivered = if let Some(path) = &args.code_file {
+                write_code_file(path, created.code.as_bytes())
+            } else if let Some((fabric, name)) = &fabric {
+                send_code_over_fabric(&config, fabric, name, &created)
+            } else {
+                Ok(())
+            };
+            if let Err(error) = delivered {
+                return Err(revoke_undelivered(&client, &created.invite, &person, error).await.0);
+            }
+            if let Some(path) = &args.code_file {
+                println!("{}\t{}", created.invite, path.display());
+            } else if let Some((_, name)) = &fabric {
                 render_fabric_invite_sent(
                     &mut cli_output::stdout(),
                     &created.invite,
@@ -435,7 +733,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         },
         FleetCommand::Join(args) => {
             let (code, code_path) = if args.fabric_inbox {
-                let path = fabric_inbox_code()?;
+                let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
                 (fs::read_to_string(&path)?, Some(path))
             } else if let Some(path) = &args.code_file {
                 (fs::read_to_string(path)?, Some(path.clone()))
@@ -635,7 +933,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             }
             if use_services {
                 fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
-                println!("st3 now runs local-only on this machine.");
+                println!("Fractal now runs local-only on this machine.");
             } else {
                 println!("{}", leave_restart_hint(json_output));
             }
@@ -1111,7 +1409,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         );
     } else {
         let (code, code_path) = if args.fabric_inbox {
-            let path = fabric_inbox_code()?;
+            let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
             (fs::read_to_string(&path)?, Some(path))
         } else if let Some(path) = &args.code_file {
             (fs::read_to_string(path)?, Some(path.clone()))
@@ -1361,5 +1659,104 @@ mod output_tests {
     fn migrate_anchor_and_join_without_services_preserve_json_stdout() {
         assert_eq!(migration_restart_hint(false, true), "Start st3 up and st3 replication-worker; legacy exchanges stay accepted until st fleet migrate --finish.");
         assert_eq!(migration_restart_hint(false, false), "Start fractal up and fractal replication-worker; legacy exchanges stay accepted until fractal fleet migrate --finish.");
+    }
+}
+
+#[cfg(test)]
+mod invite_route_tests {
+    use super::*;
+
+    fn endpoints(transports: &[&str]) -> Vec<Value> {
+        transports.iter().map(|transport| json!({ "transport": transport })).collect()
+    }
+
+    #[test]
+    fn auto_routes_around_fabric_without_pairing() {
+        let both = endpoints(&["fabric", "tailscale", "loopback"]);
+        assert_eq!(invite_via("auto", &both, true).unwrap(), "auto");
+        assert_eq!(invite_via("auto", &both, false).unwrap(), "tailscale");
+        assert_eq!(
+            invite_via("auto", &endpoints(&["fabric", "loopback"]), false).unwrap(),
+            "loopback"
+        );
+        assert_eq!(invite_via("auto", &endpoints(&["tailscale"]), false).unwrap(), "auto");
+        assert_eq!(invite_via("tailscale", &both, false).unwrap(), "tailscale");
+    }
+
+    #[test]
+    fn an_invitation_only_fabric_could_carry_needs_pairing() {
+        for (via, advertised) in [("auto", &["fabric"][..]), ("fabric", &["fabric", "tailscale"])] {
+            let error = invite_via(via, &endpoints(advertised), false).unwrap_err();
+            assert_eq!(error.to_string(), FABRIC_PAIRING_UNAVAILABLE);
+        }
+        assert_eq!(invite_via("fabric", &endpoints(&["fabric"]), true).unwrap(), "fabric");
+    }
+
+    #[test]
+    fn code_file_is_private_and_leaves_its_directory_alone() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let path = root.path().join("invite.code");
+        fs::write(&path, "stale").unwrap();
+        write_code_file(&path, b"code").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"code");
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(root.path()).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1, "no temporary file remains");
+        let missing = root.path().join("missing").join("invite.code");
+        assert!(write_code_file(&missing, b"code").is_err());
+    }
+
+    #[test]
+    fn fabric_inbox_wakes_for_a_code_delivered_after_it_began_waiting() {
+        let home = tempfile::tempdir().unwrap();
+        let sender = home.path().join("inbox").join("sponsor-id");
+        let code = sender.join("st-fleet-join-1.code");
+        let delivery = std::thread::spawn({
+            let code = code.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(200));
+                // As Fabric receives: the sender's directory, a partial file, then the rename.
+                fs::create_dir_all(&sender).unwrap();
+                let partial = code.with_extension("fabric-partial");
+                fs::write(&partial, "code").unwrap();
+                fs::rename(&partial, &code).unwrap();
+            }
+        });
+        let began = std::time::Instant::now();
+        let found = wait_for_fabric_inbox_code(home.path(), Duration::from_secs(60), true).unwrap();
+        delivery.join().unwrap();
+        assert_eq!(found, code);
+        assert!(began.elapsed() < Duration::from_secs(30), "woken by the deadline, not the watch");
+    }
+
+    #[test]
+    fn fabric_inbox_wait_ends_at_its_deadline() {
+        let home = tempfile::tempdir().unwrap();
+        let error = wait_for_fabric_inbox_code(home.path(), Duration::from_millis(100), true)
+            .unwrap_err();
+        assert!(error.to_string().contains("no join code arrived"), "{error:#}");
+
+        let missing = home.path().join("missing");
+        let error = wait_for_fabric_inbox_code(&missing, Duration::from_secs(60), true).unwrap_err();
+        assert!(error.to_string().contains("no Fabric home"), "{error:#}");
+    }
+
+    #[test]
+    fn a_watch_error_ends_the_fabric_inbox_wait() {
+        let (events, woken) = std::sync::mpsc::channel();
+        events.send(Ok(notify::Event::default())).unwrap();
+        events.send(Err(notify::Error::generic("inotify watch limit reached"))).unwrap();
+        let began = std::time::Instant::now();
+        let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
+        assert!(began.elapsed() < Duration::from_secs(30));
+        assert!(format!("{error:#}").contains("inotify watch limit reached"), "{error:#}");
+
+        events.send(Ok(notify::Event::default())).unwrap();
+        await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap();
+        drop(events);
+        let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
+        assert!(error.to_string().contains("stopped"), "{error:#}");
     }
 }
