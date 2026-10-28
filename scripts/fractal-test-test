@@ -680,15 +680,27 @@ class StTest(unittest.TestCase):
 
     def test_a_ci_local_check_s_time_limit_counts_from_when_ci_local_starts(self):
         self.commit('b.txt', 'two')
-        # 12 s of waiting (its dev shell's admission, say) before ci-local starts, then almost nothing: within a 10 s limit. The limit
-        # also covers what the wrapper does after the command (sign, verify), so it is set well above that even on a loaded host
-        # (2026-10-28: 2 s, under three parallel suites and a signing run, timed the passing case out).
-        late = 'sleep 12; echo "ci-local: stage logs in /x"'
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '10', command=['sh', '-c', late, 'scripts/ci-local'])
+        # 100 s of waiting (its dev shell's admission, say) before ci-local starts, then almost nothing: within a 50 s limit. The wait is
+        # simulated (the Limit hears the start line as if it came 100 s after the check began), so no wall clock decides the outcome. And
+        # this process takes 2 s to handle that line, as a loaded host may: the wrapper, which reads pre_start_s once the check ended, must
+        # still find the wait (2026-10-28: with a plain file it read before this process had written it, and the note said 'none').
+        hear = st_test.Limit.output
+
+        def late(limit, chunk):
+            if limit.begins_at and limit.begins_at in limit.tail + chunk:
+                time.sleep(2)
+                limit.started -= 100
+            hear(limit, chunk)
+
+        with mock.patch.object(st_test.Limit, 'output', late):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '50',
+                                              command=['sh', '-c', 'echo "ci-local: stage logs in /x"', 'scripts/ci-local'])
         self.assertEqual(code, 0, out + err)
-        self.assertRegex(out, r'waited 1[1-9]s before ci-local started \(admission, dev shell\) \(not counted against --time-limit\)')
+        waited = re.search(r'waited (\d+)s before ci-local started \(admission, dev shell\) \(not counted against --time-limit\)', out)
+        self.assertIsNotNone(waited, out)
+        self.assertGreaterEqual(int(waited.group(1)), 100)
         statement, = self.statements()
-        self.assertRegex(json.dumps(statement), r'"pre_start_s": "1[1-9]"')  # the note records the wait
+        self.assertEqual(statement['predicate']['observed']['inputs']['pre_start_s'], waited.group(1))  # the note records the same wait
         # Once ci-local has started the limit holds as before: 3 s of running is over it.
         code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun',
                                           command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 3', 'scripts/ci-local'])
