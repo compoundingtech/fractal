@@ -2334,8 +2334,8 @@ sekret.refused slot=subject keep=newest min-age-before-cut=5d
 sekret.changed slot=subject keep=newest min-age-before-cut=5d
 sealed=every-admitted-claim-of-an-envelope-before-the-cut-but-repaired-originals
 proof=the-sealed-claims-and-the-blobs-they-reference
-graph=shared-projection-tables-including-arrangements-and-arrangement_registers-even-when-empty
-replay=clear-arrangements-and-arrangement_registers,rebuild-from-sealed-arrangement-claims
+graph=shared-projection-tables-including-arrangements,arrangement_registers,ordered-membership-raw/live/counts/lifecycle-and-shared-reverse-edges-even-when-empty
+replay=clear-arrangements,arrangement_registers-and-ordered-membership-projections,rebuild-from-retained-claims
 guards=person-actor,once-cardinality,record-not-valid,repair-replacement,projection-reference,claim-in-two-envelopes,cited-as-evidence,mission-run-input,shared-operation,writer-newest-envelope,whole-envelope
 witness=every-field-set-again-by-a-later-kept-claim-of-the-slot
 carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";

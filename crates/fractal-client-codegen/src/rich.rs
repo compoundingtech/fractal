@@ -447,7 +447,7 @@ fn subject_ref(object: &Map<String, Value>, families: &Value) -> Result<String> 
 }
 
 fn emit_string(object: &Map<String, Value>) -> Result<String> {
-    let mut excluded = None;
+    let mut excluded = vec![];
     let mut excluded_pattern = None;
     if let Some(not) = object.get("not") {
         let only = not.as_object().filter(|n| n.len() == 1);
@@ -458,10 +458,23 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
         if let Some(pattern) = only.and_then(|n| n.get("pattern")) {
             excluded_pattern = Some(pattern.as_str().context("`not.pattern` must be a string")?);
         } else {
-            // `not: { const }` excludes one value from an otherwise plain string.
-            excluded = Some(only.and_then(|n| n.get("const")).context(
-                "only `not: { enum }`, `not: { const }` and `not: { pattern }` are translated",
-            )?);
+            // `not: { const }` excludes one value, and `not: { anyOf: [{ const }, ..] }` several,
+            // from an otherwise plain string.
+            excluded = match only.and_then(|n| n.get("anyOf")).and_then(Value::as_array) {
+                Some(branches) => branches
+                    .iter()
+                    .map(|branch| {
+                        branch
+                            .as_object()
+                            .filter(|b| b.len() == 1)
+                            .and_then(|b| b.get("const"))
+                            .context("`not: { anyOf }` must list only `{ const }` branches")
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                None => vec![only.and_then(|n| n.get("const")).context(
+                    "only `not: { enum }`, `not: { const }`, `not: { anyOf: [{ const }] }` and `not: { pattern }` are translated",
+                )?],
+            };
         }
     }
     let mut schema = match object.get("x-st-ref") {
@@ -490,11 +503,12 @@ fn emit_string(object: &Map<String, Value>) -> Result<String> {
             with_checks("Schema.String".into(), checks)
         }
     };
-    if let Some(value) = excluded {
+    if !excluded.is_empty() {
+        let values = js(&Value::Array(excluded.iter().map(|value| (*value).clone()).collect()));
+        let expected = excluded.iter().map(|value| value.to_string()).collect::<Vec<_>>().join(", ");
         schema = format!(
-            "{schema}.check(Schema.makeFilter((value: string) => value !== {}, {{ expected: {} }}))",
-            js(value),
-            js(&json!(format!("a string other than {value}")))
+            "{schema}.check(Schema.makeFilter((value: string) => !{values}.includes(value), {{ expected: {} }}))",
+            js(&json!(format!("a string other than {expected}")))
         );
     }
     if let Some(pattern) = excluded_pattern {

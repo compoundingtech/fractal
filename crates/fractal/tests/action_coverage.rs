@@ -849,6 +849,7 @@ async fn dispatch(
         "agent.retire" => agent_retire, "agent.stop" => agent_stop, "agent.suspend" => agent_suspend,
         "custom.reply" => custom_reply, "prompt.respond" => prompt_respond,
         "arrangement.edit" => arrangement_edit,
+        "arrangement.membership.edit" => arrangement_membership_edit,
         "attention.resolve" => attention_resolve,
         "lane.approve" => lane_approve, "lane.join" => lane_join, "lane.leave" => lane_leave,
         "lane.mark" => lane_mark, "lane.move" => lane_move,
@@ -871,6 +872,49 @@ async fn dispatch(
         "work.publish-mission" => work_publish_mission, "work.release" => work_release,
         "work.renew" => work_renew, "work.retry" => work_retry,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn arrangement_membership_edits_survive_stale_fences_and_restarts() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    let subject = "arrangement/person/avery/019a0000-0000-7000-8000-000000000001";
+    let fence = daemon.fence(PERSON).await;
+    dispatch(
+        &daemon.client(PERSON),
+        "arrangement.edit",
+        "coverage:membership-container",
+        fence,
+        json!({"subject": subject, "owner": PERSON, "version": 2,
+            "operations": [{"op": "create", "name": "Restart memberships"}]}),
+    )
+    .await
+    .unwrap();
+    let operations = json!([{"op": "place", "member": WORKER, "bucket": null, "key": "a0"}]);
+    let fence = daemon.fence(PERSON).await;
+    daemon
+        .exercise(
+            PERSON,
+            "arrangement.membership.edit",
+            json!({"subject": subject, "owner": PERSON, "operations": operations}),
+            fence,
+        )
+        .await;
+    // `exercise` reopened the disk-backed daemon after acceptance and replayed the edit.
+    let claims = daemon.store().claims_for(subject, Some("ordered-membership.edited")).unwrap();
+    assert_eq!(claims.len(), 1);
+    assert_eq!(claims[0].actor.as_deref(), Some(PERSON));
+    assert_eq!(claims[0].body["fields"]["owner"], PERSON);
+    assert_eq!(claims[0].body["fields"]["operations"], operations);
+    let memberships = daemon.store().ordered_memberships(subject, u64::MAX, None, 10).unwrap();
+    assert_eq!(memberships.len(), 1);
+    assert_eq!(memberships[0]["container"], subject);
+    assert_eq!(memberships[0]["member"], WORKER);
+    assert_eq!(memberships[0]["position"], json!({"bucket": null, "key": "a0"}));
+    assert_eq!(memberships[0]["revision"], claims[0].id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

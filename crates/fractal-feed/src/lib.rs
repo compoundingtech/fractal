@@ -756,6 +756,8 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
+                    // The feed holds no ordered-membership window.
+                    CollectionEvent::MembershipSnapshot { .. } | CollectionEvent::MembershipChanges { .. } => {}
                 }
             }
             command = commands.recv() => match command {

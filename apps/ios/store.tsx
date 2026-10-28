@@ -31,7 +31,7 @@ import { normalizeGatewayUrl } from './gatewayUrl';
 import { tabOrder, type Tab } from './tabs';
 import type { SidebarResource } from './sidebarView';
 import { readSidebarResources } from './sidebarResources';
-import { SIDEBAR_RETIRED, sidebarArrangement, sidebarRetired, sidebarSubject } from './sidebarEdits';
+import { SIDEBAR_RETIRED, sidebarArrangement, sidebarRetired, sidebarSubject, type SidebarArrangement } from './sidebarEdits';
 import { fetch as expoFetch } from 'expo/fetch';
 import { decodeBase64, encodeBase64, type Picked } from './images';
 import { DiagnosticsConnection } from './DiagnosticsConnection';
@@ -156,7 +156,7 @@ function useAppStore(proof?: FabricProfile) {
   // The Agents list shows a list or a tree, as the Fractal terminal UI's `t` toggles.
   const [treeView, setTreeView] = useState(false);
   const [simpleOn, setSimpleOn] = useState(true);
-  const [arrangements, setArrangements] = useState<Arrangement[]>([]), [arrangementsIssue, setArrangementsIssue] = useState('');
+  const [arrangements, setArrangements] = useState<SidebarArrangement[]>([]), [arrangementsIssue, setArrangementsIssue] = useState('');
   const [sidebarTerminals, setSidebarTerminals] = useState<Runtime[]>([]), [sidebarTerminalsIssue, setSidebarTerminalsIssue] = useState('');
   const [glasses, setGlasses] = useState<Glass[]>([]), [glassesIssue, setGlassesIssue] = useState('');
   const [scrollRequest, setScrollRequest] = useState<{ y: number; at: number } | null>(null);

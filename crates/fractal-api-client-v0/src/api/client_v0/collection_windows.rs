@@ -43,8 +43,8 @@ mod tests {
         state.store.read_snapshot(|index| {
             windows.read(state, session, request, ReadFence { index, now, commits, prepared }, || {
                 let n = count.fetch_add(1, Ordering::SeqCst);
-                Ok((vec![json!({"id":format!("row/{n}"), "authority":session.authority_actor})], false, None))
-            }).map(|(rows, _)| rows)
+                Ok((vec![json!({"id":format!("row/{n}"), "authority":session.authority_actor})], false, None, None))
+            }).map(|(rows, _, _)| rows)
         }).unwrap()
     }
 
@@ -80,8 +80,8 @@ mod tests {
             state.store.read_snapshot(|index| {
                 windows.read(&state, &session, &request, ReadFence {index, now, commits, prepared}, || {
                     let n = count.fetch_add(1, Ordering::SeqCst);
-                    Ok((vec![json!({"evaluated_at":now.to_string(),"valid_until":"200","missions":[],"build":n})], false, None))
-                }).map(|(rows, _)| rows)
+                    Ok((vec![json!({"evaluated_at":now.to_string(),"valid_until":"200","missions":[],"build":n})], false, None, None))
+                }).map(|(rows, _, _)| rows)
             }).unwrap()
         };
         let first = read(100);
@@ -143,6 +143,7 @@ mod tests {
             revision: held.revision, period: held.period,
             valid_from: held.valid_from, valid_until: Some(200),
             items: held.items.clone(), has_more: held.has_more,
+            membership: held.membership,
         }));
         drop(cached);
         assert_eq!(read(&windows, &state, &session, &agents, 199, &count), first);
@@ -189,7 +190,7 @@ mod tests {
                             builds.fetch_add(1, Ordering::SeqCst);
                             entered.send(()).unwrap();
                             held.recv().unwrap();
-                            Ok((vec![json!({"id":"shared"})], false, None))
+                            Ok((vec![json!({"id":"shared"})], false, None, None))
                         },
                     )
                 })
@@ -321,10 +322,19 @@ mod tests {
         for (collection, scope) in [
             ("glasses", "read.glasses"),
             ("arrangements", "read.arrangements"),
+            ("ordered-memberships", "read.arrangements"),
             ("agents", "read.projections"),
         ] {
             let root = tempfile::tempdir().unwrap();
             let state = state(root.path());
+            let arrangement = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
+            if collection == "ordered-memberships" {
+                state.store.append_claim(&ClaimInput {
+                    subject:arrangement.into(),kind:"arrangement.edited".into(),actor:Some("person/ada".into()),
+                    fields:serde_json::from_value(json!({"owner":"person/ada","version":2,"operations":[{"op":"create","name":"Membership scope"}]})).unwrap(),
+                    evidence:vec![],expected_subject:None,idempotency_key:None,
+                }).unwrap();
+            }
             let grant = "custom/client/scoped-window-reader";
             let pair = |scopes: Value| {
                 state.store.append_claim(&ClaimInput {
@@ -339,9 +349,10 @@ mod tests {
             let windows = Windows::attach(&state.store).unwrap();
             let slots = Arc::new(tokio::sync::Semaphore::new(1));
             let mut query = request(collection);
-            if collection == "arrangements" {
+            if matches!(collection, "arrangements" | "ordered-memberships") {
                 query.person = Some("person/ada".into());
             }
+            if collection == "ordered-memberships" { query.subject = Some(arrangement.into()); }
             if collection == "agents" {
                 query.agent = Some("agent/selected".into());
             }
@@ -354,7 +365,12 @@ mod tests {
             )
             .await
             .unwrap();
+            let before = windows.changes(&state.store).unwrap();
             pair(if collection == "agents" { json!([]) } else { json!(["read.projections"]) });
+            if collection == "ordered-memberships" {
+                assert!(Windows::changed(collection, &before, &windows.changes(&state.store).unwrap()),
+                    "scope changes invalidate a held membership window without a membership edit");
+            }
             for cache in [Some(windows.clone()), None] {
                 let error = collection_items_with_windows(
                     &state,
@@ -456,7 +472,7 @@ mod tests {
                         },
                         || {
                             count.fetch_add(1, Ordering::SeqCst);
-                            Ok((vec![json!({"id":"old-snapshot"})], false, None))
+                            Ok((vec![json!({"id":"old-snapshot"})], false, None, None))
                         },
                     )?
                     .0;
@@ -1077,8 +1093,8 @@ mod tests {
                             client_attention_resources_fenced_at(&state.store, Some("person/ada"), now)?
                         };
                         client_attention_compatibility(&mut items, session.custom_forms);
-                        Ok((items, false, until))
-                    })).unwrap()
+                        Ok((items, false, until, None))
+                    })).map(|(items, more, _)| (items, more)).unwrap()
             };
             measure("shared cold", &|| { assert_eq!(cached(), oracle); });
             measure("shared warm x22", &|| {
@@ -1155,7 +1171,7 @@ mod tests {
                         } else {
                             client_attention_resources_fenced_at(&state.store, Some("person/ada"), now)?
                         };
-                        Ok((items, false, until))
+                        Ok((items, false, until, None))
                     })).unwrap().0
             };
             let before = cached(29_999);
@@ -1246,7 +1262,8 @@ mod tests {
                     ReadFence { index, now, commits, prepared },
                     // Two cards plus lookahead exercise the production projection's
                     // membership/has_more logic with a small injected-clock fixture.
-                    || mission_collection_projection_at(&state.store, 2, now),
+                    || mission_collection_projection_at(&state.store, 2, now)
+                        .map(|(items, more, until)| (items, more, until, None)),
                 )).unwrap()
             };
             let before = read(oldest_last_included - 1);
@@ -1276,7 +1293,7 @@ mod tests {
             let (oracle, more, _) = state.store.read_snapshot(|_| {
                 mission_collection_projection_at(&state.store, 2, latest_last_included + 1)
             }).unwrap();
-            assert_eq!(after, (oracle, more), "{status} cached/uncached membership parity");
+            assert_eq!(after, (oracle, more, None), "{status} cached/uncached membership parity");
         }
     }
 }
