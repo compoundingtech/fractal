@@ -1,12 +1,12 @@
-//! The API as the daemon serves it: st3-api's routes and the route families of the crates above it
-//! (st3-api-mailbox, st3-api-client-v0). Every module keeps its `fractal_daemon::api::..` path.
+//! The API as the daemon serves it: fractal-api-core's routes and the route families of the crates above it
+//! (fractal-api-mailbox, fractal-api-client-v0). Every module keeps its `fractal_daemon::api::..` path.
 
 pub use fractal_api_core::api::*;
 pub use fractal_api_client_v0::api::client_v0;
 pub use fractal_api_mailbox::api::mailbox;
 use axum::Router;
 
-/// Every route family the daemon serves beside st3-api's own routes.
+/// Every route family the daemon serves beside fractal-api-core's own routes.
 pub const ROUTE_FAMILIES: &[RouteFamily] = &[mailbox::routes, client_v0::routes];
 
 /// Build routes only. The owner starts background publications with

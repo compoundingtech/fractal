@@ -1,6 +1,6 @@
-//! The shared client contract in `fixtures/clients`: what every Small Talk client shows.
+//! The shared client contract in `fixtures/clients`: what every Fractal client shows.
 //!
-//! stui writes these files and the iOS app tests against them, so both apps clean the same
+//! Fractal TUI writes these files and the iOS app tests against them, so both apps clean the same
 //! transcripts the same way, use the same words and colours, draw a conversation's entries
 //! by the same rules, and share one demo world.
 //! Run `STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract` after an intended change.
@@ -12,6 +12,10 @@ use super::view::*;
 use ratatui::style::Color;
 use serde_json::{Value, json};
 use std::path::PathBuf;
+
+/// The lists every client offers, by name. Worktrees stays hidden until the graph models
+/// worktrees: its screens only have invented data to show (Nathan, 2026-09-28).
+const LISTS: [&str; 5] = ["Now", "Agents", "Missions", "Fleet", "Usage"];
 
 fn root() -> PathBuf {
     PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../fixtures/clients")
@@ -83,6 +87,7 @@ pub fn words() -> Value {
         Word::Failed,
         Word::Cancelled,
         Word::NotStarted,
+        Word::Unknown,
     ]
     .iter()
     .map(|word| {
@@ -120,7 +125,7 @@ pub fn words() -> Value {
         .iter()
         .map(|tier| json!({ "id": serde_json::to_value(tier).unwrap(), "title": tier.title() }))
         .collect::<Vec<_>>();
-    json!({ "mission": mission, "agent": agent, "tier": tier, "tabs": super::screens::TABS })
+    json!({ "mission": mission, "agent": agent, "tier": tier, "tabs": LISTS })
 }
 
 /// The cleaned conversation. `at` is a local display time, so it is left out: it depends on
@@ -139,8 +144,9 @@ fn files() -> Vec<(&'static str, Value)> {
     vec![
         (
             "demo-world.json",
-            serde_json::to_value(demo::world()).unwrap(),
+            serde_json::to_value(demo::contract_world()).unwrap(),
         ),
+        ("demo-scenario-inputs.json", demo::contract_inputs()),
         ("theme.json", theme_tokens()),
         ("words.json", words()),
         (
@@ -194,7 +200,7 @@ fn sorted_keys(value: Value) -> Value {
 }
 
 #[test]
-fn the_shared_client_contract_matches_stui() {
+fn the_shared_client_contract_matches_tui() {
     let update = std::env::var_os("STUI_UPDATE_CONTRACT").is_some();
     for (name, value) in files() {
         let path = root().join(name);
@@ -207,8 +213,53 @@ fn the_shared_client_contract_matches_stui() {
             .unwrap_or_else(|_| panic!("{name} is missing; run with STUI_UPDATE_CONTRACT=1"));
         assert!(
             current == text,
-            "{name} no longer matches stui; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
+            "{name} no longer matches Fractal TUI; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
         );
+    }
+}
+
+/// Plain-text product review capture, rendered by the same TestBackend as UI tests.
+#[test]
+fn scenario_demo_first_frames_match_golden() {
+    use super::{Ui, Pane, glass};
+    use ratatui::{Terminal, backend::TestBackend};
+    let world = demo::contract_world();
+    let mut actual = String::new();
+    for (title, pane) in [
+        ("Now", Pane::List(0)),
+        ("Roster", Pane::List(1)),
+        ("Mission", Pane::Mission(Some(world.missions.items()[0].id.clone()))),
+        ("Fleet", Pane::List(3)),
+        ("Worktrees unavailable", Pane::List(5)),
+        ("Machine and devices", Pane::Machine(Some("machine/meadow".into()))),
+        ("Conversation", Pane::Agent(Some("agent/example/atlas/builder".into()))),
+        ("Agent details", Pane::Agent(Some("agent/example/atlas/builder".into()))),
+        ("Terminal", Pane::Terminal("agent/example/atlas/builder".into())),
+    ] {
+        let mut ui = Ui::new(world.clone());
+        ui.glasses = glass::Glasses::open(None, None);
+        ui.glasses.sidebar.shown = true;
+        if title == "Agent details" { ui.details_here.insert("agent/example/atlas/builder".into()); }
+        if matches!(pane, Pane::Terminal(_)) { ui.attach_terminal("agent/example/atlas/builder"); }
+        ui.open_in_glass(pane, glass::Open::Tab);
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        terminal.draw(|frame| ui.render(frame)).unwrap();
+        actual.push_str(&format!("=== {title} ===\n"));
+        let buffer = terminal.backend().buffer();
+        for y in 0..32 {
+            let line: String = (0..120).map(|x| buffer[(x, y)].symbol()).collect();
+            actual.push_str(line.trim_end());
+            actual.push('\n');
+        }
+        actual.push('\n');
+    }
+    let path = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scenario-demo.golden");
+    if std::env::var_os("STUI_UPDATE_CONTRACT").is_some() {
+        std::fs::write(&path, &actual).unwrap();
+    } else {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), actual,
+            "scenario demo frames drifted; regenerate with STUI_UPDATE_CONTRACT=1");
     }
 }
 

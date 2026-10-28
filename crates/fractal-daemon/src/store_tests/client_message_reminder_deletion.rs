@@ -13,7 +13,12 @@ use serde_json::{Value, json};
 const GROUP: &str = "bounded-desired-delete";
 const OWNER: &str = "mission-run/bounded-desired-delete";
 const RECIPIENTS: [&str; 2] = ["agent/bounded-a", "agent/bounded-b"];
-const NATIVE_MEMBERS: usize = 4096;
+/// The native reminder group. Pull requests seed a quarter of it; the daily run
+/// (ST_TEST_SCALE=full, docs/ci.md) seeds all 4,096. The selector-write bounds below are per
+/// subject, so a deletion that rewrites the group's members fails them at either size.
+fn native_members() -> usize {
+    if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") { 4096 } else { 1024 }
+}
 const DECLARED_MEMBERS: usize = BACKFILL_SUBJECTS * 6 + 1;
 const MAX_DELETE_SELECTOR_WRITES: usize = 9;
 
@@ -49,7 +54,7 @@ fn seed_group(store: &Store, declarations: usize) {
     {
         let mut writer = store.connection.write();
         let transaction = writer.transaction().unwrap();
-        for index in 0..NATIVE_MEMBERS {
+        for index in 0..native_members() {
             append(&transaction, &native_subject(index), "message.sent", &json!({"fields": {
                 "from": "person/sender", "to": RECIPIENTS[index % 2],
                 "content": format!("native {index}"), "status": "sent",
@@ -81,9 +86,9 @@ fn seed_group(store: &Store, declarations: usize) {
         "SELECT COUNT(*),SUM(global_current) FROM local_client_message_selectors_v1 WHERE born_index>=0 AND retired_index IS NULL AND closed=0 AND reminder=?1",
         [GROUP], |row| Ok((row.get(0)?,row.get(1)?)),
     ).unwrap();
-    assert_eq!(open, NATIVE_MEMBERS + declarations);
+    assert_eq!(open, native_members() + declarations);
     assert_eq!(winners, 1);
-    assert!(open - winners >= 4000, "fixture must contain thousands of superseded open members");
+    assert!(open - winners >= native_members(), "fixture must contain the whole native group as superseded open members");
 }
 
 fn audit_deletions(connection: &Connection) {
@@ -115,7 +120,7 @@ fn writes(connection: &Connection) -> Vec<(String, String, i64)> {
 fn assert_single_delete_writes(connection: &Connection, affected: &str, allowed_live: &[String]) {
     let changes = writes(connection);
     assert!(changes.len() <= MAX_DELETE_SELECTOR_WRITES,
-        "desired deletion changed {} selector rows for a {NATIVE_MEMBERS}-member group: {changes:?}", changes.len());
+        "desired deletion changed {} selector rows for a {}-member group: {changes:?}", changes.len(), native_members());
     assert!(changes.iter().any(|(_,subject,born)|subject==affected && *born==-1),
         "unfinished reconciliation must stay in the subject-keyed pending queue");
     for (cause,subject,born) in changes {
@@ -263,14 +268,14 @@ fn desired_delete_preserves_native_reminder_and_promotes_only_old_recipient_winn
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h3fbbefe2fa94 owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET revision=revision WHERE subject=?1", [&affected]).unwrap();
         transaction.execute(/* sqlite-large-value: allow-for-now lv-hecbf5a76ec40 owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM reminder_selector_writes", []).unwrap();
         assert_eq!(transaction.execute(/* sqlite-large-value: allow-for-now lv-h3316a5f5149b owner=fractal_daemon::store_tests::client_message_reminder_deletion TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired WHERE subject=?1", [&affected]).unwrap(),1);
-        assert_single_delete_writes(&transaction,&affected,&[affected.clone(),native_subject(NATIVE_MEMBERS-1)]);
+        assert_single_delete_writes(&transaction,&affected,&[affected.clone(),native_subject(native_members()-1)]);
         transaction.commit().unwrap();
     }
     let rows = pages(&store,None,false,1);
     assert_eq!(rows.len(),1);
     assert_eq!(rows[0].0.subject,affected);
     assert_eq!(rows[0].0.tags,vec![format!("reminder:{GROUP}"),format!("version:{}",u64::MAX)]);
-    assert_eq!(pages(&store,Some(RECIPIENTS[1]),false,1)[0].0.subject,native_subject(NATIVE_MEMBERS-1));
+    assert_eq!(pages(&store,Some(RECIPIENTS[1]),false,1)[0].0.subject,native_subject(native_members()-1));
     assert_fresh_and_continued_parity(&store);
     while store.maintain_client_message_selectors().unwrap() {}
     assert_fresh_and_continued_parity(&store);
@@ -318,11 +323,11 @@ fn bulk_owned_desired_delete_does_not_rewrite_superseded_reminder_members() {
             let writer = store.connection.write();
             let changes = writes(&writer);
             // The managed API can additionally perform one bounded fold/cleanup
-            // allowance, never a second inventory of the 4,096-member group.
+            // allowance, never a second inventory of the native group.
             let fold_allowance = if managed { BACKFILL_SUBJECTS*32+PRUNE_ROWS } else { 0 };
             assert!(changes.len()<=DECLARED_MEMBERS*MAX_DELETE_SELECTOR_WRITES+fold_allowance,
                 "bulk source/fold selector mutations exceeded the bounded allowance: {}",changes.len());
-            let native_winners = [native_subject(NATIVE_MEMBERS-2),native_subject(NATIVE_MEMBERS-1)];
+            let native_winners = [native_subject(native_members()-2),native_subject(native_members()-1)];
             for (_,subject,born) in changes {
                 assert!(subject.starts_with("message/declared-bounded-") ||
                     (born>=0 && native_winners.contains(&subject)),
@@ -333,7 +338,7 @@ fn bulk_owned_desired_delete_does_not_rewrite_superseded_reminder_members() {
         assert_fresh_and_continued_parity(&store);
         assert_eq!(pages(&store,None,false,5).len(),DECLARED_MEMBERS+1);
         for (index,recipient) in RECIPIENTS.into_iter().enumerate() {
-            let expected = native_subject(NATIVE_MEMBERS-2+index);
+            let expected = native_subject(native_members()-2+index);
             assert_eq!(pages(&store,Some(recipient),false,1)[0].0.subject,expected);
         }
         while store.maintain_client_message_selectors().unwrap() {}

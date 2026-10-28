@@ -1,4 +1,4 @@
-//! The part of `store::assistant_write_gate` that moved up from st3-store.
+//! The part of `store::assistant_write_gate` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::{path::{Path, PathBuf}, sync::OnceLock, time::{Duration, Instant}};
 use crate::model::St3Error;

@@ -2,7 +2,7 @@
 name = "fractal-kernel"
 version = "0.1.0"
 edition = "2024"
-description = "Claims-graph agent reconciler: the leaf modules of the st3 library, which name no store, api or reconcile code"
+description = "Claims-graph agent reconciler: the leaf modules of the Fractal library, which name no store, api or reconcile code"
 license = "MIT"
 
 [dependencies]

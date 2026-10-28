@@ -52,7 +52,7 @@ const ci1MinIdle = 1
 
 export const pickRunnerJob = {
   name: pickRunnerJobId,
-  if: "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on'",
+  if: "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on' || (github.event_name == 'pull_request' && vars.CI_PR_NAMESPACE_PROFILE != '')",
   // GitHub-hosted, so the choice never waits for either pool it chooses between.
   'runs-on': 'ubuntu-latest',
   'timeout-minutes': 3,
@@ -63,9 +63,26 @@ export const pickRunnerJob = {
     ci1_secondary: '${{ steps.pick.outputs.ci1_secondary }}',
     ci1_mail: '${{ steps.pick.outputs.ci1_mail }}',
     ci1_build: '${{ steps.pick.outputs.ci1_build }}',
+    namespace_pr: '${{ steps.namespace.outputs.namespace_pr }}',
+    namespace_pr_optional: '${{ steps.namespace.outputs.namespace_pr_optional }}',
   },
   steps: [
     {
+      name: 'Select the provisioned PR profile unless this exact head is already queued',
+      id: 'namespace',
+      env: {
+        EVENT: '${{ github.event_name }}',
+        GH_REPO_TOKEN: '${{ github.token }}',
+        PR_NAMESPACE_PROFILE: '${{ vars.CI_PR_NAMESPACE_PROFILE }}',
+        PR_NUMBER: '${{ github.event.pull_request.number }}',
+        PR_HEAD_SHA: '${{ github.event.pull_request.head.sha }}',
+        REPOSITORY: '${{ github.repository }}',
+        RUN_ID: '${{ github.run_id }}',
+      },
+      run: `python3 - <<'CI_PR_PROFILE'\n${readFileSync(new URL('../../scripts/ci-namespace-pr-profile', import.meta.url), 'utf8')}CI_PR_PROFILE\n`,
+    },
+    {
+      if: "github.event_name == 'merge_group' || vars.CI1_RUNNERS == 'on'",
       name: 'Keep reserved primary lanes and use idle general runners for tests and canaries',
       id: 'pick',
       env: {
@@ -93,7 +110,14 @@ export const pickRunnerJob = {
 export const priorityRunnerJob = {
   ...pickRunnerJob,
   if: "github.event_name != 'pull_request'",
-  steps: pickRunnerJob.steps.map(step => ({ ...step, env: { ...step.env, MODE: 'priority' } })),
+  outputs: {
+    ci1: '${{ steps.pick.outputs.ci1 }}',
+    ci1_profile: '${{ steps.pick.outputs.ci1_profile }}',
+    ci1_secondary: '${{ steps.pick.outputs.ci1_secondary }}',
+    ci1_mail: '${{ steps.pick.outputs.ci1_mail }}',
+    ci1_build: '${{ steps.pick.outputs.ci1_build }}',
+  },
+  steps: pickRunnerJob.steps.filter(step => step.id === 'pick').map(({ if: _if, ...step }) => ({ ...step, env: { ...step.env, MODE: 'priority' } })),
 } as const
 
 // Every required merge job follows one pool decision, including explicit overflow.
@@ -106,11 +130,11 @@ const pickedOr = (namespaceLabels: string, output = 'ci1', mergeLabels = mergeCi
 // Deployment and merge progress take precedence during saturation. Required PR
 // checks precede optional/manual work; local reservations remain unchanged.
 const workspaceJobPriority = "github.event_name == 'merge_group' && 1 || github.event_name == 'pull_request' && 2 || 3"
-// Set this repository variable only after a runner administrator has provisioned
-// the profile with the existing image/cache and left it capacity outside the PR pool.
-// An unset variable retains the existing shapes and Workspace priority policy.
+// CI_MERGE_NAMESPACE_PROFILE remains the independent merge overflow profile.
+// CI_PR_NAMESPACE_PROFILE is selected by the hosted step only after a successful
+// exact-head, not-queued lookup. Keep it unset until the PR profile is provisioned.
 const namespaceLabels = (labels: readonly string[]) =>
-  `github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('${JSON.stringify(labels).replaceAll('${{ github.run_id }}', '{0}').replaceAll(linuxJobPriority, '{1}')}', github.run_id, ${workspaceJobPriority})`
+  `github.event_name == 'pull_request' && needs.${pickRunnerJobId}.outputs.namespace_pr || github.event_name == 'merge_group' && vars.CI_MERGE_NAMESPACE_PROFILE && format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE, github.run_id) || format('${JSON.stringify(labels).replaceAll('${{ github.run_id }}', '{0}').replaceAll(linuxJobPriority, '{1}')}', github.run_id, ${workspaceJobPriority})`
 /** `runs-on` for a stage job: picked ci1, else the shared Namespace queue class. */
 export const linuxStageRunsOn = pickedOr(
   namespaceLabels(linuxStageRunner),
@@ -147,6 +171,10 @@ export const linuxRunsOn = pickedOr(
 /** Supporting merge jobs use the priority lane; supporting PR jobs use Namespace. */
 export const supportingLinuxRunsOn = `\${{ fromJSON(${mergeProfileLabels} || ${namespaceLabels(linuxRunner)}) }}`
 export const supportingStageRunsOn = `\${{ fromJSON(${mergeCi1Labels} || ${namespaceLabels(linuxStageRunner)}) }}`
+
+// Optional Workspace cost work shares the PR profile cap, at its existing lower priority.
+// Non-PR events retain their original shape and controls; merge-group exclusion is in fleet.
+export const performanceCostRunsOn = `\${{ fromJSON(github.event_name == 'pull_request' && needs.${pickRunnerJobId}.outputs.namespace_pr_optional || format('${JSON.stringify(linuxStageRunner).replaceAll('${{ github.run_id }}', '{0}').replaceAll(linuxJobPriority, '{1}')}', github.run_id, github.event_name == 'merge_group' && 1 || 3)) }}`
 
 /** A job that needs `pick-runner` still runs when it was skipped (ci1 off). */
 export const afterPickRunner = { needs: [pickRunnerJobId], if: '${{ !cancelled() }}' } as const
@@ -405,7 +433,7 @@ export const testArchiveProducer = {
 }
 
 /**
- * isolation-vm's work: st2's transport-isolation cascade tests need a real systemd user manager, which the
+ * isolation-vm's work: the retained st2 controls and current-runtime scope proofs need a real systemd user manager, which the
  * runner image lacks, so a NixOS VM runs the shared producer's prebuilt test binary and compiles nothing; a
  * second VM runs the sekrets gateway. Workspace CI and the daily long-lane run share these steps.
  */
@@ -421,7 +449,7 @@ nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackage
 printf '| VM driver build | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"`,
   },
   {
-    name: 'Run all three systemd-scope tests in the VM',
+    name: 'Run all seven selected systemd-scope tests in the VM',
     id: 'vmtest',
     env: {
       // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -470,7 +498,7 @@ printf '| sekrets VM test | %ss |\\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SU
  */
 export const evidenceStageNames = [
   'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3', 'linux-tests-shard-4',
-  'linux-clippy', 'linux-fleet-compat', 'mail-redelivery-canaries',
+  'linux-clippy', 'linux-fleet-compat',
 ] as const
 const evidenceHelper = '"$RUNNER_TEMP/evidence-base/scripts/ci-evidence-signing"'
 /**
@@ -486,11 +514,11 @@ export const evidenceStageJob = (name: string) =>
   (evidenceStageNames as readonly string[]).includes(name) ? { environment: evidenceEnvironment } : {}
 
 /**
- * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness,
- * typescript-client, isolation-vm). They sign from the outcomes of their own steps; a step that did
+ * Jobs that are not `scripts/ci-linux` stages but are required checks too (genie-freshness, ci-script-tests,
+ * typescript-client). They sign from the outcomes of their own steps; a step that did
  * not run (for example because the job was covered by a trusted note) makes no note.
  */
-export const evidenceStepNames = ['genie-freshness', 'typescript-client', 'isolation-vm'] as const
+export const evidenceStepNames = ['genie-freshness', 'ci-script-tests', 'typescript-client'] as const
 /**
  * A lane that is skipped whenever its paths are untouched (fractal-web), so a run that did not execute it makes no note
  * for it. Each shard signs its own note (scripts/ci-evidence-signing STEP_INPUTS), and the evidence note job signs one
@@ -504,9 +532,7 @@ export const evidenceStepJob = () => ({ environment: evidenceEnvironment })
 // which it did not run its work: the signing helper refuses when this is 'true' (and so makes no note), whatever the
 // job's log or step outcomes say. Every gate named here must be in that job's `needs`.
 export const gateSkipExpression = (name: string): string => {
-  const gates = name === 'mail-redelivery-canaries'
-    ? ['linux-gate', 'mail-redelivery-canaries']
-    : [...evidenceStepNames, ...evidenceLaneNames].includes(name as never) ? [name] : ['linux-gate']
+  const gates = [...evidenceStepNames, ...evidenceLaneNames].includes(name as never) ? [name] : ['linux-gate']
   return '${{ ' + gates.map((gate) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`).join(' || ') + ' }}'
 }
 
@@ -796,7 +822,7 @@ printf 'MEGAREPO_STORE=%s\\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"`,
 /** The web lane's pnpm store, keyed by its lock and toolchain; only main upkeep fills it. */
 export const fractalWebStoreCache = {
   path: pnpmStoreEnv.pnpm_config_store_dir,
-  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.7.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
+  key: "fractal-web-pnpm-${{ runner.os }}-pnpm12.15.0-node24.20.0-${{ hashFiles('pnpm-lock.yaml') }}",
 } as const
 
 /**
@@ -837,7 +863,8 @@ const embeddedPython = (script: string) =>
 // SHA-256(story ID) modulo this count; increasing it does not depend on index order. Only the
 // full set (KIT_PLAY_SET=all: merge groups and manual runs) is sharded; pull requests run the
 // per-commit set unsharded on shard 0.
-const kitShardCount = 2
+// Four shards leave room for shard 0's non-play lanes within the unchanged 25-minute job budget.
+const kitShardCount = 4
 const kitSharded = "needs.fractal-web-changes.outputs.kit-inputs == 'true' && github.event_name != 'pull_request'"
 // What one run of the lane covers, written once: the matrix, the run step, each shard's note and the whole-check note
 // all read these, so a note can never claim more shards or a fuller test set than the run had.
@@ -880,6 +907,7 @@ export const fractalWebJobs = {
           EVENT: '${{ github.event_name }}',
           REMOTE: '${{ github.server_url }}/${{ github.repository }}.git',
           BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
+          BASE_REF: "${{ github.event.merge_group.base_ref || 'refs/heads/main' }}",
           HEAD_SHA: '${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}',
         },
         run: embeddedPython('ci-fractal-web-changes'),
@@ -893,7 +921,7 @@ export const fractalWebJobs = {
       matrix: `\${{ fromJSON(${kitSharded} && '${JSON.stringify({ shard: Array.from({ length: kitShardCount }, (_, index) => index) })}' || '{"shard":[0]}') }}`,
     },
     needs: ['fractal-web-changes', 'genie-freshness', 'evidence-gate-fractal-web'],
-    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' }}",
+    if: "${{ !cancelled() && needs.fractal-web-changes.result == 'success' && needs.fractal-web-changes.outputs.relevant == 'true' && needs.genie-freshness.result == 'success' && !(github.event_name == 'pull_request' && needs.evidence-gate-fractal-web.outputs.skip == 'true') }}",
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 25,
     permissions: { contents: 'read' },
@@ -930,11 +958,11 @@ export const fractalWebJobs = {
           KIT_SHARD_COUNT: kitShardCountExpression,
           KIT_RECEIPT_DIRECTORY: '${{ runner.temp }}/kit-play-receipts',
           // Pull requests run the per-commit set of the critical stories (one scheme-and-width case each, no
-          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out) within a 100-second budget;
+          // axe; scripts/kit-play-commit-set.mjs lists what it leaves out), with a raw CPU ceiling;
           // merge groups (observed and signed) and manual runs keep every story, in four cases, with axe.
           KIT_PLAY_SET: kitPlaySetExpression,
           KIT_PLAY_A11Y: "${{ github.event_name == 'pull_request' && 'off' || 'on' }}",
-          KIT_PLAY_MAX_SECONDS: "${{ github.event_name == 'pull_request' && '100' || '' }}",
+          KIT_PLAY_WALL_GUARD_SECONDS: "${{ github.event_name == 'pull_request' && '268' || '' }}",
           // Pull requests run the app unit tests that import a changed file (all of them when a change cannot be
           // placed in the import graph); merge groups and manual runs run every test file.
           APP_TEST_SET: appTestSetExpression,
@@ -969,9 +997,8 @@ export const fractalWebJobs = {
   'fractal-web': {
     name: 'fractal-web',
     needs: ['fractal-web-changes', 'fractal-web-execution', 'evidence-gate-fractal-web'],
-    // A failed, cancelled or unexpectedly skipped execution must fail this check. Under an evidence skip the execution
-    // shards end in success with their steps skipped (fleet.yml.genie.ts), so the verdict passes and the cost steps,
-    // which have no receipts to read, do not run.
+    // Only a PR's explicit evidence decision permits job-level skipping. Queue and manual runs
+    // still require execution and, when sharded, complete exact-index receipts.
     if: 'always()',
     'runs-on': 'ubuntu-latest',
     'timeout-minutes': 1,
@@ -984,6 +1011,8 @@ export const fractalWebJobs = {
           CHANGES_RESULT: '${{ needs.fractal-web-changes.result }}',
           RELEVANT: '${{ needs.fractal-web-changes.outputs.relevant }}',
           EXECUTION_RESULT: '${{ needs.fractal-web-execution.result }}',
+          EVIDENCE_SKIP: '${{ needs.evidence-gate-fractal-web.outputs.skip }}',
+          EVENT_NAME: '${{ github.event_name }}',
         },
         run: embeddedPython('ci-fractal-web-gate'),
       },

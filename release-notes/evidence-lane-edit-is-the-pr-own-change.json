@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A pull request that is only behind main no longer counts as editing a check's lane: local notes for the heavy checks are judged against the lane definition at the branch point, so they can skip CI on pull requests",
+  "replay": {
+    "status": "none",
+    "detail": "No graph, claim or storage change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule change. The evidence verifier takes --lane-base and the gate passes the branch point for a pull request head tree; a pull request that changes a lane's files still runs CI. Merge-group runs are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Required check names and results are unchanged. Notes signed before this change carry the base's digest and still verify when the branch held the base's tip."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert this change: the gate and verifier are read from the base, so runs after the revert merges judge lanes against the base's tip again."
+  }
+}

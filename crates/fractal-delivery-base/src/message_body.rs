@@ -402,7 +402,7 @@ pub fn parse_reference(reference: &str) -> Option<&str> {
     crate::blobs::is_sha256(hash).then_some(hash)
 }
 
-/// A long body as the attachment record it is kept as. st3-kernel defines `MessageView`; the
+/// A long body as the attachment record it is kept as. fractal-kernel defines `MessageView`; the
 /// body reference format lives here, so the method is an extension trait.
 pub trait BodyAttachment {
     /// A long body as the attachment record it is kept as: a file on the member that took the

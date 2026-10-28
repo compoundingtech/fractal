@@ -37,6 +37,7 @@ impl Store {
                     (name, TableDigest { digest, count })
                 })
                 .collect(),
+            ledgers: super::backup_ledgers::digests(&connection)?,
         })
     }
 
@@ -145,7 +146,9 @@ impl Store {
                 // projection frontier covers its log can promise the same graph on restore.
                 self.check_backup_projection()?;
                 let mut header = self.backup_header()?;
-                if !owned.is_empty() {
+                if !header.ledgers.is_empty() {
+                    header.version = super::backup_format::VERSION_WITH_LEDGERS;
+                } else if !owned.is_empty() {
                     header.version = super::backup_format::VERSION_WITH_BODIES;
                 }
                 let mut hash = Sha256::new();
@@ -221,6 +224,11 @@ impl Store {
                         }
                     }
                 }
+                // Every ledger row, after the manifest whose tombstones restore turns into some
+                // of the same rows again. The header already holds their digests.
+                super::backup_ledgers::write_pages(&self.readers.get(), |page| {
+                    write_record(output, &mut hash, &Record::Ledger(page))
+                })?;
                 if let Some(bodies) = bodies {
                     use base64::Engine as _;
                     for (subject, actor, sha256) in &owned {
@@ -376,6 +384,16 @@ impl Store {
         Ok(())
     }
 
+    /// Add one archived ledger page by union. Admission reads none of these ledgers, and sequence
+    /// allocation reads them only for its own writer, which a restore names afresh.
+    pub fn receive_backup_ledger(&self, page: &super::backup_ledgers::LedgerPage) -> Result<()> {
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
+        super::backup_ledgers::union_page(&transaction, page)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn finish_backup_restore(
         &self,
         header: &Header,
@@ -417,6 +435,16 @@ impl Store {
                 "restored claim source digest/count differs from backup: expected {:?}, got {:?}",
                 header.tables.get("claim_sources"),
                 actual.tables.get("claim_sources")
+            );
+        }
+        // The archive's ledgers, unioned with what the restored log and manifest imply, must be
+        // exactly the source's: a missing row is lost deletion knowledge, an extra one invented.
+        if header.version >= super::backup_format::VERSION_WITH_LEDGERS {
+            anyhow::ensure!(
+                actual.ledgers == header.ledgers,
+                "restored ledgers differ from backup: expected {:?}, got {:?}",
+                header.ledgers,
+                actual.ledgers
             );
         }
         let projections_match =
@@ -1183,6 +1211,129 @@ mod tests {
         let report = backup::restore(&path, &root.path().join("restored.db")).unwrap();
         assert_eq!(report.log_digest, header.log_digest);
         assert!(report.projections_match);
+    }
+
+    fn trimmed_source(root: &Path) -> Store {
+        let source = Store::open(&root.join("source.db"), "alder").unwrap();
+        source.bind_fleet("test-fleet").unwrap();
+        for index in 0..12 {
+            diagnostic(&source, &format!("note-{index}"));
+        }
+        let context = CheckpointContext {
+            now_unix_ms: now_ms() + 3 * 86_400_000,
+            configured_peers: vec![],
+            scratch: root.join("scratch"),
+            reviewer: "person/operator".into(),
+        };
+        for _ in 0..3 {
+            source.checkpoint_step(&context).unwrap();
+        }
+        assert!(source.trimmed_checkpoint().unwrap().is_some());
+        source
+    }
+
+    fn ledgers(store: &Store) -> BTreeMap<String, TableDigest> {
+        super::super::backup_ledgers::digests(&store.readers.get()).unwrap()
+    }
+
+    #[test]
+    fn a_trimmed_backup_carries_its_ledgers_and_restores_them_by_union() {
+        let root = tempfile::tempdir().unwrap();
+        let source = trimmed_source(root.path());
+        // A tombstone an earlier adoption withdrew: only the ledger still knows it.
+        let withdrawn = "cd".repeat(32);
+        source
+            .connection
+            .write()
+            .execute_batch(&format!(
+                "INSERT INTO retired_claim_ids(id) VALUES (unhex('{withdrawn}'));
+                 INSERT INTO retired_claim_withdrawals(id, checkpoint)
+                 VALUES (unhex('{withdrawn}'), 'checkpoint/earlier');"
+            ))
+            .unwrap();
+        let path = root.path().join("trimmed.jsonl");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION_WITH_LEDGERS);
+        assert_eq!(header.ledgers, ledgers(&source));
+        for table in ["retired_claim_ids", "retired_envelopes", "retired_claim_withdrawals"] {
+            assert!(header.ledgers.contains_key(table), "{table}: {:?}", header.ledgers);
+        }
+        let target = root.path().join("restored.db");
+        let report = backup::restore(&path, &target).unwrap();
+        assert!(report.projections_match);
+        let restored = Store::open(&target, &report.writer).unwrap();
+        assert_eq!(ledgers(&restored), ledgers(&source));
+        let kept: bool = restored
+            .readers
+            .get()
+            .query_row(
+                &format!(
+                    "SELECT EXISTS(SELECT 1 FROM retired_claim_withdrawals
+                     WHERE id=unhex('{withdrawn}') AND checkpoint='checkpoint/earlier')"
+                ),
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(kept);
+        drop(restored);
+
+        // An archive that lost a ledger page cannot restore: that would forget a deletion.
+        let original = fs::read(&path).unwrap();
+        rewrite(&path, |records| {
+            records.retain(|record| {
+                !matches!(record, Record::Ledger(page) if page.table == "retired_claim_withdrawals")
+            })
+        });
+        let target = root.path().join("lost-page.db");
+        let error = backup::restore(&path, &target).unwrap_err();
+        assert!(error.to_string().contains("restored ledgers differ"), "{error:#}");
+        assert!(!target.exists());
+
+        // A ledger page in an archive that does not declare version 3 is refused before restore.
+        fs::write(&path, &original).unwrap();
+        rewrite(&path, |records| {
+            if let Record::Header(header) = &mut records[0] {
+                header.version = super::super::backup_format::VERSION;
+            }
+        });
+        assert!(backup::verify_file(&path).unwrap_err().to_string().contains("does not declare"));
+
+        // What a version 1 archive of the same store keeps: the restored manifest's tombstones,
+        // without the withdrawn one. Version 3 exists to stop exactly this loss.
+        fs::write(&path, &original).unwrap();
+        rewrite(&path, |records| {
+            records.retain(|record| !matches!(record, Record::Ledger(_)));
+            if let Record::Header(header) = &mut records[0] {
+                header.version = super::super::backup_format::VERSION;
+                header.ledgers.clear();
+            }
+        });
+        let target = root.path().join("version-one.db");
+        let report = backup::restore(&path, &target).unwrap();
+        let restored = Store::open(&target, &report.writer).unwrap();
+        let restored_ledgers = ledgers(&restored);
+        assert!(restored_ledgers.contains_key("retired_claim_ids"));
+        assert_ne!(restored_ledgers, ledgers(&source));
+        assert!(!restored_ledgers.contains_key("retired_claim_withdrawals"));
+    }
+
+    #[test]
+    fn an_untrimmed_backup_keeps_the_version_older_builds_restore() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        for index in 0..3 {
+            diagnostic(&source, &format!("note-{index}"));
+        }
+        // Every retained batch implies its writer's head, so none needs the archive.
+        assert!(source.writer_head("alder").unwrap().is_some());
+        let path = root.path().join("untrimmed.jsonl");
+        let header = archive(&source, &path);
+        assert_eq!(header.version, super::super::backup_format::VERSION);
+        assert!(header.ledgers.is_empty());
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\"ledgers\"") && !text.contains("\"record\":\"ledger\""));
+        backup::restore(&path, &root.path().join("restored.db")).unwrap();
     }
 
     #[test]

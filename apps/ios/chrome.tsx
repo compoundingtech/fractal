@@ -10,7 +10,7 @@ import { Banner, Button, T, useTextAppearance } from './ui';
 // What every screen's content shares: the connection, problems worth reading, and pull to refresh.
 // The navigation bar and tab bar above and below are native and styled only through their options.
 
-/** `● live example-linux · person/alex`, as stui's top-right corner says it. The first line of a list. */
+/** `● live example-linux · person/alex`, as the Fractal terminal UI's top-right corner says it. The first line of a list. */
 /** How long ago, as a person says it: 40s, 12m, 5h. */
 function ageOf(ms: number): string | null {
   if (!Number.isFinite(ms)) return null;
@@ -21,7 +21,7 @@ function ageOf(ms: number): string | null {
 export function StatusLine() {
   const { status, hasSynced, gatewayHost, caps, snapshot, data, cachedAt } = useStore();
   const appearance = useTextAppearance();
-  // Not live, what is shown is st's last snapshot: say how old it is.
+  // Not live, what is shown is Fractal's last snapshot: say how old it is.
   const age = snapshot ? ageOf(Date.now() - Date.parse(snapshot.created_at)) : cachedAt ? ageOf(Date.now() - cachedAt) : null;
   const shown = age ? `showing data from ${age} ago` : 'showing last data';
   const [glyph, color, word] = status === 'online' ? ['●', theme.idle, 'live']
@@ -48,13 +48,13 @@ export function Banners() {
   return <View>
     {error ? <Banner text={error} onPress={() => setError('')} /> : null}
     {pairingIssue ? <Banner text={pairingIssue} onPress={() => setPairingIssue('')} /> : null}
-    {status === 'offline' ? <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : theme.mantle, paddingHorizontal: 12, paddingBottom: 8 }}>
+    {status === 'offline' ? <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.mantle, paddingHorizontal: 12, paddingBottom: 8 }}>
       <Banner tone="warning" text={`${offlinePresentation(hasSynced).title}${connectionIssue ? ` · reconnecting on its own: ${connectionIssue}` : ''}`} />
       <Button label="reconnect now" onPress={() => actions.reconnect()} />
     </View> : null}
     {behind ? <Banner tone="warning" text={behind} /> : null}
     {failed.length && status === 'online' ? <Banner tone="warning" text={`not loaded: ${failed.map(([key, message]) => `${key} (${message})`).join(' · ')}`} /> : null}
-    {busy ? <ActivityIndicator color={theme.accent} style={{ paddingVertical: 4 }} /> : null}
+    {busy ? <ActivityIndicator color={appearance.color(theme.accent)} style={{ paddingVertical: 4 }} /> : null}
   </View>;
 }
 

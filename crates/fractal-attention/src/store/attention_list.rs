@@ -1,4 +1,4 @@
-//! The part of `store::attention_list` that moved up from st3-seats.
+//! The part of `store::attention_list` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::PublishedViewsAttentionStore;
 use super::*;
@@ -242,7 +242,7 @@ impl AttentionListStore for Store {
 
     fn start_attention_list_refresher(&self) -> Option<Arc<tokio::sync::Notify>> {
         let wake = Arc::new(tokio::sync::Notify::new());
-        self.smalltalk
+        self.fractal
             .attention_list
             .refresher
             .set(Arc::clone(&wake))
@@ -251,7 +251,7 @@ impl AttentionListStore for Store {
     }
 
     fn attention_list_refresher_running(&self) -> bool {
-        let list = &self.smalltalk.attention_list;
+        let list = &self.fractal.attention_list;
         list.refresher.get().is_some() && !list.stopped.load(AtomicOrdering::Acquire)
     }
 
@@ -260,7 +260,7 @@ impl AttentionListStore for Store {
             return false;
         };
         self.attention_list_refresher_running()
-            && !self.smalltalk.attention_list.health[position]
+            && !self.fractal.attention_list.health[position]
                 .withdrawn
                 .load(AtomicOrdering::Acquire)
     }
@@ -269,7 +269,7 @@ impl AttentionListStore for Store {
         let Some(position) = PUBLISHED_VIEWS.iter().position(|name| *name == view) else {
             return;
         };
-        let health = &self.smalltalk.attention_list.health[position];
+        let health = &self.fractal.attention_list.health[position];
         let now = now_ms() as u64;
         if succeeded {
             health.failing_since.store(0, AtomicOrdering::Release);
@@ -294,7 +294,7 @@ impl AttentionListStore for Store {
     }
 
     fn recheck_pairings(&self) -> Result<()> {
-        let list = &self.smalltalk.attention_list;
+        let list = &self.fractal.attention_list;
         let checked = list.pairings_checked.load(AtomicOrdering::Acquire);
         let index = self.index()?;
         if checked == 0 || index <= checked {
@@ -316,7 +316,7 @@ impl AttentionListStore for Store {
     }
 
     fn stop_attention_list_refresher(&self) {
-        let list = &self.smalltalk.attention_list;
+        let list = &self.fractal.attention_list;
         if list.refresher.get().is_none() || list.stopped.swap(true, AtomicOrdering::AcqRel) {
             return;
         }
@@ -327,13 +327,13 @@ impl AttentionListStore for Store {
     }
 
     fn request_attention_list_refresh(&self) {
-        if let Some(wake) = self.smalltalk.attention_list.refresher.get() {
+        if let Some(wake) = self.fractal.attention_list.refresher.get() {
             wake.notify_one();
         }
     }
 
     fn published_attention_list(&self) -> Option<Arc<AttentionPublication>> {
-        let list = &self.smalltalk.attention_list;
+        let list = &self.fractal.attention_list;
         list.refresher.get()?;
         self.note_published_view_read();
         list.published
@@ -343,7 +343,7 @@ impl AttentionListStore for Store {
     }
 
     fn newest_attention_list(&self) -> (u64, Option<Arc<AttentionPublication>>) {
-        let list = &self.smalltalk.attention_list;
+        let list = &self.fractal.attention_list;
         let published = list.published.lock().unwrap_or_else(PoisonError::into_inner);
         (list.forgotten.load(AtomicOrdering::Acquire), published.clone())
     }
@@ -353,14 +353,14 @@ impl AttentionListStore for Store {
     }
 
     fn note_published_view_read(&self) {
-        self.smalltalk
+        self.fractal
             .attention_list
             .read_at
             .store(now_ms() as u64, AtomicOrdering::Release);
     }
 
     fn attention_list_read_within(&self, within_ms: u64) -> bool {
-        let read_at = self.smalltalk.attention_list.read_at.load(AtomicOrdering::Acquire);
+        let read_at = self.fractal.attention_list.read_at.load(AtomicOrdering::Acquire);
         read_at != 0 && (now_ms() as u64).saturating_sub(read_at) <= within_ms
     }
 
@@ -370,7 +370,7 @@ impl AttentionListStore for Store {
             publication: AttentionPublication,
             changed: bool,
         ) {
-        let list = &self.smalltalk.attention_list;
+        let list = &self.fractal.attention_list;
         {
             let mut published = list.published.lock().unwrap_or_else(PoisonError::into_inner);
             if list.forgotten.load(AtomicOrdering::Acquire) != generation {
@@ -391,8 +391,7 @@ impl AttentionListStore for Store {
     }
 
     fn note_attention_list_fold(&self, cause: &str) {
-        *self
-            .smalltalk
+        *self.fractal
             .attention_list
             .folds
             .lock()
@@ -402,7 +401,7 @@ impl AttentionListStore for Store {
     }
 
     fn attention_list_folds(&self) -> BTreeMap<String, u64> {
-        self.smalltalk
+        self.fractal
             .attention_list
             .folds
             .lock()

@@ -1,4 +1,4 @@
-//! The part of `store::work_summaries_ivm` that moved up from st3-store.
+//! The part of `store::work_summaries_ivm` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use smallclaims::ivm::{Contribution, Definition, LocalChange, Readiness, View, Views, source_cut};

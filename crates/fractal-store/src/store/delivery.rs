@@ -102,8 +102,7 @@ impl Store {
             latest_claim_index,
             desired_claim_id,
         } = version;
-        if let Some(view) = self
-            .smalltalk
+        if let Some(view) = self.fractal
             .message_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -118,8 +117,7 @@ impl Store {
             return Ok(view);
         }
         let view = message_view_tx(connection, subject, created_index)?;
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .message_cache
             .lock()
             .unwrap_or_else(PoisonError::into_inner);

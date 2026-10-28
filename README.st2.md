@@ -1,6 +1,6 @@
 # st2 legacy guide
 
-This guide describes the st2 runtime during the Small Talk migration.
+This guide describes the st2 runtime during the Fractal migration.
 
 st2 runs a declarative network of Codex, Claude, and pi agents from one catalog. It owns process
 reconciliation, native messages, normalized terminal DING delivery, presence, durable context,

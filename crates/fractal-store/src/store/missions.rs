@@ -1,6 +1,18 @@
 use super::*;
 use super::identities;
 
+fn agent_metadata_only(previous: &Value, next: &Value) -> bool {
+    fn operational_children(desired: &Value) -> impl Iterator<Item = &Value> {
+        desired["children"].as_array().into_iter().flatten().filter(|child| {
+            !matches!(child["name"].as_str(), Some("description" | "under"))
+        })
+    }
+    previous["name"] == next["name"]
+        && previous["arguments"] == next["arguments"]
+        && previous["properties"] == next["properties"]
+        && operational_children(previous).eq(operational_children(next))
+}
+
 /// Mission tables and revision hashes always address the original, bare identity.
 /// Unknown names remain usable by declaration/planning readers before publication.
 pub fn mission_storage_id(connection: &Connection, id: &str) -> Result<String, St3Error> {
@@ -90,6 +102,27 @@ pub fn normalize_intent_missions(
 }
 
 impl Store {
+    /// Incoming named edges, using the target index rather than scanning declaration bodies.
+    /// While a preexisting store's edge index is still being folded in bounded background
+    /// steps, the same answer comes straight from the selected declarations.
+    pub fn declared_resource_referrers(&self, subject: &str) -> Result<Vec<Value>> {
+        let connection = self.readers.get();
+        if resource_references::backfilling(&connection)? {
+            return resource_references::referrers_from_declarations(&connection, subject);
+        }
+        let mut statement = connection.prepare_cached(
+            "SELECT owner, name, reason FROM declared_resource_edges WHERE target=?1 ORDER BY owner, name",
+        )?;
+        let rows = statement.query_map([subject], |row| {
+            Ok(json!({
+                "owner": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "reason": row.get::<_, Option<String>>(2)?,
+            }))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn mission_spec(
         &self,
         mission_id: &str,
@@ -689,6 +722,9 @@ impl Store {
         if let Err(error) = message_subscriptions::validate(&connection, intent, store_index) {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
+        if let Err(error) = schedule_standby::validate_publication(&connection, &self.origin, intent) {
+            blockers.push(format!("{}: {}", error.code, error.message));
+        }
         if let Err(error) = crate::provenance::validate_publication(&connection, intent) {
             blockers.push(format!("{}: {}", error.code, error.message));
         }
@@ -940,11 +976,11 @@ impl Store {
         for (subject, desired) in &intent.subjects {
             let current = desired_row_at(&connection, subject, at_index).map_err(internal)?;
             let revision = desired_revision(desired);
+            let changed = !desired_matches(current.as_ref(), desired, &revision)?;
             tokens.insert(
                 subject.clone(),
                 intent_leaves_at(&connection, subject, at_index).map_err(internal)?,
             );
-            let changed = current.as_ref().is_none_or(|row| row.revision != revision);
             if changed {
                 changes.push(SubjectChange {
                     subject: subject.clone(),
@@ -958,6 +994,21 @@ impl Store {
                     new_revision: revision,
                 });
             }
+            let metadata_only = if changed && desired.kind == "agent" {
+                if let Some(row) = current.as_ref() {
+                    let previous: Value = serde_json::from_str(&row.body).map_err(internal)?;
+                    let member = row.member.as_deref()
+                        .map(serde_json::from_str::<crate::model::MemberSpec>)
+                        .transpose().map_err(internal)?;
+                    row.kind == "agent"
+                        && member == desired.member
+                        && agent_metadata_only(&previous, &desired.desired)
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
             if !changed && desired.member.is_none() {
                 continue;
             }
@@ -968,6 +1019,15 @@ impl Store {
             })
                 .map_err(internal)?
             {
+                let action = if metadata_only && action.action == "observe-or-start" {
+                    PlannedAction {
+                        subject: subject.clone(),
+                        action: "publish-only".into(),
+                        reason: "only the agent description or grouping changed".into(),
+                    }
+                } else {
+                    action
+                };
                 if changed || action.action == "restart" {
                     actions.push(action);
                 }
@@ -976,6 +1036,12 @@ impl Store {
                     subject: subject.clone(),
                     action: "stop".into(),
                     reason: "the desired state explicitly stops this member".into(),
+                });
+            } else if metadata_only || (changed && desired.member.is_none()) {
+                actions.push(PlannedAction {
+                    subject: subject.clone(),
+                    action: "publish-only".into(),
+                    reason: "the declaration changes without a member launch change".into(),
                 });
             } else if desired.member.is_some() && changed {
                 actions.push(PlannedAction {

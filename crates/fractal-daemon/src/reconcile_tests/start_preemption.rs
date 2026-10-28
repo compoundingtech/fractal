@@ -1,4 +1,4 @@
-//! Start-preemption test that serves the API; it lives in st3-daemon because the API does.
+//! Start-preemption test that serves the API; it lives in fractal-daemon because the API does.
 
 #![allow(unused_imports, dead_code)]
 
@@ -65,9 +65,10 @@ impl NativeLatePty {
 fn new() -> Self {
     use std::os::unix::{ffi::OsStrExt as _, fs::PermissionsExt as _};
     fractal_runtime::initialize_isolation(&BTreeMap::new());
+    // The tree's pty from this test's PATH (the dev shell's), not the login shell's: on NixOS a
+    // login shell rebuilds PATH, so under an isolated HOME (scripts/ci-local) it has no pty.
     let real_pty =
-        fractal_runtime::resolve_executable("pty", &crate::environment::snapshot().unwrap())
-            .unwrap();
+        fractal_runtime::resolve_executable("pty", &std::env::vars().collect()).unwrap();
     let root = tempfile::tempdir().unwrap();
     let bin = root.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -194,21 +195,19 @@ assert!(fixture.dispatch().unwrap());
 let operation = fixture.assert_open();
 assert!(fixture.runtime.snapshot_ptys().unwrap().is_empty());
 let state = fixture.root.path().join("state");
-let app = crate::api::router(crate::api::AppState {
-    owning_person: None,
-    store: fixture.store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: tokio::sync::watch::channel(0).0,
-    node: "node".into(),
-    pty_root: state.join("pty"),
-    state_dir: state,
-    pty_binary: fixture.real_pty.clone(),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: crate::model::PlannerSpec::default(),
-});
+let app = crate::api::router(crate::api::AppState { owning_person: None,
+store: fixture.store.clone(),
+notify: Arc::new(Notify::new()),
+event_notify: tokio::sync::watch::channel(0).0,
+node: "node".into(),
+pty_root: state.join("pty"),
+state_dir: state,
+pty_binary: fixture.real_pty.clone(),
+fleet_id: None,
+configured_peers: Vec::new(),
+client_relay: None,
+native_session_home: None,
+planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  });
 let response = app
     .oneshot(
         axum::http::Request::builder()

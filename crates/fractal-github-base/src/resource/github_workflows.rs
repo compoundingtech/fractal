@@ -417,7 +417,8 @@ pub async fn workspace_ci_runs(
         i64::try_from(now_unix_ms.saturating_sub(DAY_MS)).unwrap_or_default(),
     )
     .unwrap_or_default()
-    .format("%Y-%m-%d");
+    .format("%Y-%m-%d")
+    .to_string();
     let mut listed = Vec::new();
     for filter in ["event=pull_request&status=success", "event=merge_group&status=completed"] {
         // Ten pages is GitHub's 1,000-result search bound. An overflow fails rather than truncates.
@@ -426,6 +427,26 @@ pub async fn workspace_ci_runs(
             format!("{base}/actions/workflows/fleet.yml/runs?{filter}&created=%3E%3D{since}&per_page=100"),
             auth, cache_for, 10, false, Some("workflow_runs"),
         ).await?;
+        // A page short of what the listing's total says (the same filter's other failure) fails the read too.
+        let expected = listing.total_count.unwrap_or_default().min(1_000);
+        anyhow::ensure!(
+            listing.values.len() as u64 >= expected,
+            "fleet.yml listed {} {filter} runs created since {since} of the {expected} its total names",
+            listing.values.len()
+        );
+        if listing.values.is_empty() {
+            // The created= filter now and then answers an empty listing while the runs exist (2026-10-22: two
+            // requests in ten during a burst). Read as an idle day, that would replace the last runs; so the same
+            // filter without created= names its newest run, and one inside the window fails the read instead.
+            let newest = super::github_json(
+                client, format!("{base}/actions/workflows/fleet.yml/runs?{filter}&per_page=1"), auth, cache_for,
+            ).await?;
+            let created = newest.value.pointer("/workflow_runs/0/created_at").and_then(Value::as_str).unwrap_or_default();
+            anyhow::ensure!(
+                created < since.as_str(),
+                "fleet.yml listed no {filter} runs created since {since}, but its newest was created at {created}"
+            );
+        }
         listed.extend(listing.values);
     }
     let mut runs = workspace_runs(repository, &listed)?;

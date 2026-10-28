@@ -157,7 +157,7 @@ const CANDIDATE_PAGE: usize = 32;
 /// The longest chain admission follows: a device, its person's root, and the node that vouched.
 const MAX_CHAIN_DEPTH: usize = 8;
 const VERDICT_ROOTS: &str = "claim_candidate_verdict_roots";
-const OWN_NODE_KEY: &str = "principal_node_key";
+pub(super) const OWN_NODE_KEY: &str = "principal_node_key";
 
 /// A claim's position in the canonical order, as comparable values.
 #[derive(Clone, Debug)]

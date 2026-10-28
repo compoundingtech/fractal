@@ -45,7 +45,7 @@ pub fn rows(report: &Value, limits: &[AccountLimit], now_unix_ms: u64, stale_aft
                     rows.push(max_latency(&format!("{name}/{kind}"), about, label, max, &target[kind]));
                 }
             }
-            "cpu" => rows.push(cpu(about, target)),
+            "cpu" => rows.extend(cpu(about, target)),
             "database" => rows.push(database(about, target)),
             _ if target["min_percent"].is_number() => rows.push(share(name, about, target)),
             _ => {
@@ -170,27 +170,87 @@ fn max_latency(id: &str, about: &str, what: &str, target_ms: Option<f64>, window
     })
 }
 
-fn cpu(about: &str, target: &Value) -> Value {
+/// The member's CPU, its daemon and replication workers, as two rows: `cpu` over the hour, and
+/// `cpu/idle` over the hour's idle minutes. Either is no-data while it is unknown: the hour not
+/// whole, a minute's CPU not known, or too few idle minutes to judge.
+fn cpu(about: &str, target: &Value) -> [Value; 2] {
+    use crate::slo::cores;
+    let verdict = crate::slo::cpu_verdict(target);
     let max = target["max_cores"].as_f64().unwrap_or_default();
-    let cores = |w: &str| target["windows"][w]["cores"].as_f64();
-    let Some(hour) = cores("1h") else {
-        return json!({
-            "id": "cpu", "kind": "objective", "about": about, "target": format!("≤ {max} cores"),
-            "current": "not measured", "window": "1h", "remaining_percent": null, "status": "no-data",
-            "explain": format!("{about}. The daemon has not measured its CPU yet."),
-        });
+    let idle_max = target["idle_max_cores"].as_f64().unwrap_or_default();
+    let needed = target["idle_min_minutes"].as_u64().unwrap_or_default();
+    let window = |w: &str| target["windows"][w]["cores"].as_f64();
+    let status = |met: Option<bool>| match met {
+        Some(true) => "met",
+        Some(false) => "missed",
+        None => "no-data",
     };
-    let met = WINDOWS.iter().all(|w| cores(w).unwrap_or_default() <= max);
-    let remaining = clamp_percent(100.0 * (1.0 - hour / max));
-    json!({
-        "id": "cpu", "kind": "objective", "about": about,
-        "target": format!("≤ {max} cores"), "current": format!("{hour:.2} cores"), "window": "1h",
-        "remaining_percent": remaining, "status": if met { "met" } else { "missed" },
-        "explain": format!(
-            "{about}. Goal: the daemon uses at most {max} cores. Over the last hour it used {hour:.2} on average, so {remaining:.0}% of that allowance is left. Last minute {:.2}, last five minutes {:.2}.",
-            cores("1m").unwrap_or_default(), cores("5m").unwrap_or_default(),
-        ),
-    })
+    let remaining = |value: Option<f64>, of: f64| value.map(|value| clamp_percent(100.0 * (1.0 - value / of)));
+    let not_idle = target["idle"]["not_idle"]
+        .as_object()
+        .map(|reasons| {
+            reasons
+                .iter()
+                .filter(|(_, n)| n.as_u64().unwrap_or_default() > 0)
+                .map(|(reason, n)| format!("{reason} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .filter(|reasons| !reasons.is_empty())
+        .map_or(String::new(), |reasons| format!(" Minutes not idle, by why (one may have several reasons): {reasons}."));
+    let hour = match verdict.hour {
+        Some(hour) => json!({
+            "current": format!("{hour:.2} cores"),
+            "explain": format!(
+                "{about}. Goal: the member uses at most {} over the hour. Over the last hour it used {hour:.2} on average, so {:.0}% of that allowance is left. Last minute {}, last five minutes {}.",
+                cores(max),
+                remaining(Some(hour), max).unwrap_or_default(),
+                window("1m").map_or("unknown".to_owned(), |c| format!("{c:.2}")),
+                window("5m").map_or("unknown".to_owned(), |c| format!("{c:.2}")),
+            ),
+        }),
+        None => json!({
+            "current": format!("unknown: {} of 60 minutes known", target["windows"]["1h"]["minutes"].as_u64().unwrap_or_default()),
+            "explain": format!(
+                "{about}. Goal: the member uses at most {} over the hour. The hour is not known: a minute is known only once the daemon has been up for all of it and the CPU of every replication worker it runs is known for it.",
+                cores(max),
+            ),
+        }),
+    };
+    let idle = match verdict.idle {
+        Some(idle) => json!({
+            "current": format!("{idle:.2} cores over {}", plural(verdict.idle_minutes, "idle minute")),
+            "explain": format!(
+                "{about}. Goal: at most {} on average over the hour's idle minutes. {} of the last 60 were idle and used {idle:.2} cores, so {:.0}% of that allowance is left.{not_idle}",
+                cores(idle_max), verdict.idle_minutes, remaining(Some(idle), idle_max).unwrap_or_default(),
+            ),
+        }),
+        None => json!({
+            "current": if verdict.minutes < 60 {
+                format!("unknown: {} of 60 minutes held", verdict.minutes)
+            } else {
+                format!("unknown: {}, needs {needed}", plural(verdict.idle_minutes, "idle minute"))
+            },
+            "explain": format!(
+                "{about}. Goal: at most {} on average over the hour's idle minutes. It is judged once the daemon has been up for the whole hour and at least {needed} of its minutes are known to be idle; the hour holds {} minutes, {} of them idle.{not_idle}",
+                cores(idle_max), verdict.minutes, verdict.idle_minutes,
+            ),
+        }),
+    };
+    [
+        json!({
+            "id": "cpu", "kind": "objective", "about": about,
+            "target": format!("≤ {} over the hour", cores(max)), "current": hour["current"], "window": "1h",
+            "remaining_percent": remaining(verdict.hour, max), "status": status(verdict.hour_met),
+            "explain": hour["explain"],
+        }),
+        json!({
+            "id": "cpu/idle", "kind": "objective", "about": about,
+            "target": format!("≤ {} over idle minutes", cores(idle_max)), "current": idle["current"], "window": "1h",
+            "remaining_percent": remaining(verdict.idle, idle_max), "status": status(verdict.idle_met),
+            "explain": idle["explain"],
+        }),
+    ]
 }
 
 fn database(about: &str, target: &Value) -> Value {
@@ -490,6 +550,7 @@ mod tests {
             measured_by: "agent/a".into(),
             host: "host".into(),
             seats: vec![],
+            identity: None,
         }
     }
 
@@ -542,8 +603,9 @@ mod tests {
     #[test]
     fn cpu_database_and_a_phone_share_read_against_their_own_allowances() {
         let report = json!({"targets": [
-            {"name": "cpu", "about": "Daemon CPU", "max_cores": 2.0, "windows": {
-                "1m": {"cores": 0.5}, "5m": {"cores": 0.5}, "1h": {"cores": 0.5}}},
+            {"name": "cpu", "about": "Member CPU", "max_cores": 1.0, "idle_max_cores": 0.5, "idle_min_minutes": 10,
+             "windows": {"1m": {"cores": 0.5, "minutes": 1}, "5m": {"cores": 0.5, "minutes": 5}, "1h": {"cores": 0.25, "minutes": 60}},
+             "minutes": 60, "idle": {"minutes": 20, "cores": 0.1, "not_idle": {"seat": 40}}},
             {"name": "database", "about": "The store", "max_live_gb": 8.0, "max_growth_mb_per_day": 300,
              "size": {"live_bytes": 2_000_000_000u64, "growth_bytes_per_day": 60_000_000i64}},
             {"name": "ios-live-share", "about": "Phone live share", "min_percent": 99,
@@ -554,10 +616,47 @@ mod tests {
         ]});
         let rows = rows(&report, &[], 0, 0);
         assert_eq!(by_id(&rows, "cpu")["remaining_percent"], 75.0);
+        assert_eq!(by_id(&rows, "cpu/idle")["remaining_percent"], 80.0);
         assert_eq!(by_id(&rows, "database")["remaining_percent"], 75.0);
         assert_eq!(by_id(&rows, "database")["status"], "met");
         // 0.6% disconnected of the 1% allowed leaves 40%.
         assert_eq!(by_id(&rows, "ios-live-share")["remaining_percent"], 40.0);
+    }
+
+    #[test]
+    fn the_cpu_rows_are_met_missed_or_no_data_never_met_without_the_facts() {
+        let target = |hour: Option<f64>, minutes: u64, idle_minutes: u64, idle: Option<f64>| {
+            json!({"targets": [{"name": "cpu", "about": "Member CPU", "max_cores": 1.0, "idle_max_cores": 0.5,
+                "idle_min_minutes": 10, "windows": {"1m": {"cores": 0.2, "minutes": 1},
+                    "5m": {"cores": 0.2, "minutes": 5}, "1h": {"cores": hour, "minutes": minutes}},
+                "minutes": minutes, "idle": {"minutes": idle_minutes, "cores": idle,
+                    "not_idle": {"seat": 30, "start": 0, "deploy": 0, "catch-up": 2, "unknown": 1}}}]})
+        };
+        let both = |report: Value| {
+            let rows = rows(&report, &[], 0, 0);
+            (by_id(&rows, "cpu").clone(), by_id(&rows, "cpu/idle").clone())
+        };
+        let (hour, idle) = both(target(Some(0.4), 60, 27, Some(0.1)));
+        assert_eq!((hour["status"].as_str(), hour["target"].as_str()), (Some("met"), Some("≤ 1 core over the hour")));
+        assert_eq!((idle["status"].as_str(), idle["target"].as_str()), (Some("met"), Some("≤ 0.5 core over idle minutes")));
+        assert_eq!(idle["current"], "0.10 cores over 27 idle minutes");
+        let explain = idle["explain"].as_str().unwrap();
+        for reason in ["seat 30", "catch-up 2", "unknown 1"] {
+            assert!(explain.contains(reason), "{reason}: {explain}");
+        }
+        assert!(!explain.contains("deploy"), "{explain}");
+        let (hour, idle) = both(target(Some(1.2), 60, 27, Some(0.6)));
+        assert_eq!((hour["status"].as_str(), idle["status"].as_str()), (Some("missed"), Some("missed")));
+        assert_eq!((hour["remaining_percent"].as_f64(), idle["remaining_percent"].as_f64()), (Some(0.0), Some(0.0)));
+        // Too few idle minutes: unknown, however low.
+        let (_, idle) = both(target(Some(0.4), 60, 9, Some(0.01)));
+        assert_eq!((idle["status"].as_str(), idle["current"].as_str()), (Some("no-data"), Some("unknown: 9 idle minutes, needs 10")));
+        assert_eq!(idle["remaining_percent"], Value::Null);
+        // A daemon up less than the hour: both unknown.
+        let (hour, idle) = both(target(None, 42, 30, Some(0.01)));
+        assert_eq!((hour["status"].as_str(), idle["status"].as_str()), (Some("no-data"), Some("no-data")));
+        assert_eq!(hour["current"], "unknown: 42 of 60 minutes known");
+        assert_eq!(idle["current"], "unknown: 42 of 60 minutes held");
     }
 
     #[test]
@@ -605,7 +704,7 @@ mod tests {
         for latency in &crate::slo::targets().latency {
             assert!(rows.iter().any(|row| row["id"] == latency.name.as_str()), "{} is missing", latency.name);
         }
-        for id in ["sql-statement", "transaction/read", "cpu", "database", "merge-latency/p50", "flakes"] {
+        for id in ["sql-statement", "transaction/read", "cpu", "cpu/idle", "database", "merge-latency/p50", "flakes"] {
             assert!(rows.iter().any(|row| row["id"] == id), "{id}");
         }
         let mut ids = rows.iter().map(|row| row["id"].as_str().unwrap()).collect::<Vec<_>>();

@@ -24,4 +24,4 @@ Do not use Claude teams, subagents, `SendMessage`, or another message channel.
 5. Read the durable repository state before you resume work.
 6. Set your status to available when the inbox and batch are empty.
 
-Use Small Talk for each result or blocker. Nobody reads your terminal output.
+Use Fractal for each result or blocker. Nobody reads your terminal output.

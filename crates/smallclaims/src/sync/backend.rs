@@ -49,6 +49,17 @@ pub trait Backend: Clone + Send + Sync + 'static {
         }
     }
 
+    /// Read the recent-inbound guard's scalar without requiring a process boundary to carry
+    /// every bucket. Backends without that local optimization keep the full summary path and
+    /// its errors, exactly once. The result is fresh at its read cut, not a promise about later
+    /// writes; callers must retain their existing change notifications and anti-entropy.
+    fn authority_digest(
+        &self,
+        fleet_id: &str,
+    ) -> impl Future<Output = Result<String>> + Send {
+        async move { Ok(self.guard_summary(fleet_id).await?.exchange.authority_digest) }
+    }
+
     /// Store a peer's exchange, then admit and project what it carried. `round_trip` is how
     /// long this worker's request that returned it took, when the exchange is a response.
     fn receive(
@@ -128,6 +139,14 @@ impl<S: Borrow<Store>> Local<S> {
 
 /// A redemption as the join route reads it.
 pub fn redemption_answer(store: &Store, redemption: FleetRedemption) -> Result<Value> {
+    let membership = store.fleet_membership()?;
+    let sponsor_endpoints = match membership.state(store.origin()) {
+        crate::fleet::MemberState::Current(member) => member.endpoints.clone(),
+        _ => Vec::new(),
+    };
+    let sponsor_node_id = sponsor_endpoints.iter().find_map(|endpoint| {
+        (endpoint["transport"] == "fabric").then(|| endpoint["node"].as_str()).flatten()
+    });
     Ok(match redemption {
         FleetRedemption::Closed => serde_json::json!({"status": "closed"}),
         FleetRedemption::Refused(reason) => {
@@ -146,6 +165,8 @@ pub fn redemption_answer(store: &Store, redemption: FleetRedemption) -> Result<V
             "anchor_key": store.fleet_anchor()?,
             "fleet_id": store.bound_fleet()?,
             "fabric_protocol": serde_json::Value::Null,
+            "sponsor_node_id": sponsor_node_id,
+            "sponsor_endpoints": sponsor_endpoints,
         }),
     })
 }
@@ -250,7 +271,13 @@ where
     }
 
     async fn redeem(&self, request: &JoinRequest) -> Result<Value> {
-        redemption_answer(self.store(), self.store().redeem_fleet_invite(request)?)
+        let redeemed = self.store().redeem_fleet_invite(request)?;
+        if matches!(redeemed, FleetRedemption::Admitted { .. })
+            && let Some(node_id) = &request.node_id
+        {
+            self.store().verify_fleet_pairing_admission(&request.name, &request.member_key, node_id)?;
+        }
+        redemption_answer(self.store(), redeemed)
     }
 
     async fn fleet_view(&self) -> Result<FleetView> {

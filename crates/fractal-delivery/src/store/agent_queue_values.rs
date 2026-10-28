@@ -1,4 +1,4 @@
-//! The part of `store::agent_queue_values` that moved up from st3-store.
+//! The part of `store::agent_queue_values` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};

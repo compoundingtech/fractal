@@ -1,4 +1,4 @@
-//! Tests of `smallclaims::store::document_index` through smalltalk's store.
+//! Tests of `smallclaims::store::document_index` through Fractal's store.
 use super::*;
 use proptest::prelude::*;
 
@@ -20,6 +20,15 @@ proptest! {
 
 #[test]
 fn fleet_sized_document_reads_use_indexed_canonical_bindings_within_budget() {
+    // Pull requests generate about a quarter of the fleet; the daily run (ST_TEST_SCALE=full,
+    // docs/ci.md) generates all of it. The plan assertions below fail at either size if a read
+    // stops using the canonical binding index. Versions stay a multiple of the 200 names, so each
+    // name's latest version is `versions - 200 + number`.
+    let (noise_rows, versions) = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+        (250_000, 10_000)
+    } else {
+        (62_500, 2_400)
+    };
     let store = Store::open_memory("alder").unwrap();
     let mut first = None;
     {
@@ -37,14 +46,14 @@ fn fleet_sized_document_reads_use_indexed_canonical_bindings_within_budget() {
         )
         .unwrap();
         // Generate unrelated history directly: the measured path is reading, not batching
-        // writes. The claim source digests still cover all 250,000 generated rows.
+        // writes. The claim source digests still cover every generated row.
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h192e6d1cb594 owner=fractal_store::store::document_index_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE fixture(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM fixture WHERE n<250000)
+            /* sqlite-large-value: allow-for-now lv-h6e6e0efb62c3 owner=fractal_store::store::document_index_tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE fixture(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM fixture WHERE n<?4)
              INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
              SELECT 'fixture-'||n,?1,'daemon/alder','daemon.diagnostic','alder',?2,'[]',?3 FROM fixture",
-            params![noise.batch_id,canonical_json_text(&noise.body).unwrap(),noise.accepted_at_unix_ms.to_string()],
+            params![noise.batch_id,canonical_json_text(&noise.body).unwrap(),noise.accepted_at_unix_ms.to_string(),noise_rows],
         ).unwrap();
-        for index in 0..10_000 {
+        for index in 0..versions {
             let name = format!("doc/generated/{:03}", index % 200);
             let bytes = format!("version {index}");
             let hash = hex::encode(Sha256::digest(bytes.as_bytes()));
@@ -82,7 +91,7 @@ fn fleet_sized_document_reads_use_indexed_canonical_bindings_within_budget() {
         let number: usize = version.name.rsplit('/').next().unwrap().parse().unwrap();
         assert_eq!(
             store.get_blob(&version.hash).unwrap().unwrap(),
-            format!("version {}", 9800 + number).as_bytes()
+            format!("version {}", versions - 200 + number).as_bytes()
         );
         assert_eq!(
             store
@@ -120,13 +129,15 @@ fn fleet_sized_document_reads_use_indexed_canonical_bindings_within_budget() {
             .latest
     );
     eprintln!(
-        "fleet document reads: {:?} over 260,000 claims / 10,000 versions",
-        started.elapsed()
+        "fleet document reads: {:?} over {} claims / {versions} versions",
+        started.elapsed(),
+        noise_rows + versions
     );
     assert!(
         started.elapsed() < std::time::Duration::from_secs(2),
-        "document reads took {:?} over 260,000 claims",
-        started.elapsed()
+        "document reads took {:?} over {} claims",
+        started.elapsed(),
+        noise_rows + versions
     );
     let connection = store.readers.get();
     let plans=connection.prepare("EXPLAIN QUERY PLAN SELECT hash FROM documents WHERE name=?1 ORDER BY binding_key DESC LIMIT 1").unwrap()

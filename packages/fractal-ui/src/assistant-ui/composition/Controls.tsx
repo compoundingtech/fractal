@@ -47,13 +47,40 @@ function CheckMark({ indeterminate = false }: { indeterminate?: boolean }) {
 /** Quiet time after scrolling before the keyboard-focused tooltip reopens. */
 const scrollSettleMs = 100
 const tooltipOpenEvent = 'fractal-kit-tooltip-open'
-export type TooltipProps = { label: string; shortcut?: string; placement?: 'top' | 'bottom'; delay?: number; isOpen?: boolean; onOpenChange?: (isOpen: boolean) => void; children: React.ReactNode; style?: stylex.StyleXStyles }
+type FocusNavigation = { pending: boolean; target: EventTarget | null; userMoved: boolean }
+const focusNavigationByDocument = new WeakMap<Document, FocusNavigation>()
+/** One shared listener set per document, installed only for navigation-only tooltips. */
+const trackFocusNavigation = (document: Document): FocusNavigation => {
+  const existing = focusNavigationByDocument.get(document)
+  if (existing !== undefined) return existing
+  const navigation: FocusNavigation = { pending: false, target: null, userMoved: false }
+  focusNavigationByDocument.set(document, navigation)
+  document.addEventListener('keydown', event => {
+    navigation.pending = !event.altKey && !event.ctrlKey && !event.metaKey && (event.key === 'Tab' || event.key === 'ArrowUp' || event.key === 'ArrowDown' || event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+  }, true)
+  document.addEventListener('keyup', () => { navigation.pending = false }, true)
+  document.addEventListener('pointerdown', () => { navigation.pending = false }, true)
+  // Tab can leave an iframe: its keyup then belongs to another document.
+  document.defaultView?.addEventListener('blur', () => { navigation.pending = false; navigation.target = null; navigation.userMoved = false })
+  document.addEventListener('focusin', event => {
+    navigation.target = event.target
+    navigation.userMoved = navigation.pending
+    navigation.pending = false
+  }, true)
+  return navigation
+}
+export type TooltipProps = { label: string; shortcut?: string; placement?: 'top' | 'bottom'; delay?: number; isOpen?: boolean; onOpenChange?: (isOpen: boolean) => void; navigationFocusOnly?: boolean; children: React.ReactNode; style?: stylex.StyleXStyles }
 /** `isOpen` lets a trigger hold its tooltip open to acknowledge an action, e.g. "Copied". */
-export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, isOpen: controlledOpen, onOpenChange, children, style }: TooltipProps) {
+export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, isOpen: controlledOpen, onOpenChange, navigationFocusOnly = false, children, style }: TooltipProps) {
   const id = React.useId()
   const scope = React.useRef<HTMLSpanElement>(null)
   const lastScroll = React.useRef(Number.NEGATIVE_INFINITY)
   const reopenRequest = React.useRef(0)
+  const focusFromNavigation = React.useRef(false)
+  const setScope = React.useCallback((element: HTMLSpanElement | null) => {
+    scope.current = element
+    if (element !== null && navigationFocusOnly) trackFocusNavigation(element.ownerDocument)
+  }, [navigationFocusOnly])
   const [localOpen, setLocalOpen] = React.useState(false)
   const isOpen = controlledOpen ?? localOpen
   const [settling, setSettling] = React.useState(false)
@@ -62,6 +89,19 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
     const active = scope.current?.ownerDocument.activeElement
     return active != null && scope.current!.contains(active) && active.matches(':focus-visible')
   }
+  React.useEffect(() => {
+    if (!navigationFocusOnly) return
+    const view = scope.current?.ownerDocument.defaultView
+    const onBlur = () => {
+      focusFromNavigation.current = false
+      reopenRequest.current++
+      lastScroll.current = Number.NEGATIVE_INFINITY
+      setSettling(false)
+      setOpen(false)
+    }
+    view?.addEventListener('blur', onBlur)
+    return () => view?.removeEventListener('blur', onBlur)
+  }, [navigationFocusOnly])
   React.useEffect(() => {
     if (!isOpen && !settling) return
     let timer: number | undefined
@@ -85,13 +125,17 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
     return () => window.removeEventListener(tooltipOpenEvent, onOtherOpen)
   }, [isOpen, settling, id])
   const changeOpen = (open: boolean) => {
+    if (open && navigationFocusOnly && !focusFromNavigation.current) return
     setOpen(open)
     if (open) return
     const closedAt = performance.now()
     const request = ++reopenRequest.current
     window.setTimeout(() => { if (request === reopenRequest.current && Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
   }
-  return <ThemePortal><span ref={scope} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
+  return <ThemePortal><span ref={setScope} onPointerEnter={() => { focusFromNavigation.current = true }} onFocusCapture={event => {
+    const navigation = focusNavigationByDocument.get(event.currentTarget.ownerDocument)
+    focusFromNavigation.current = navigation?.target === event.target && navigation.userMoved
+  }} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
 }
 export type TooltipSurfaceProps = Omit<AriaTooltipProps, 'className' | 'style'> & { style?: stylex.StyleXStyles }
 /** Use inside an existing TooltipTrigger and ThemePortal when its trigger is not a kit Button. */

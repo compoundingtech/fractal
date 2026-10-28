@@ -75,6 +75,22 @@ pub enum StartCompletion {
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
+        let failed_start = self.store.runtime_start_for(&prepared.subject.subject)?;
+        let recovery_lock = if let Some(pending) = &failed_start {
+            if prepared.request.is_none() {
+                return Ok(false);
+            }
+            let Some(lock) = self.store.try_runtime_start_lock(&prepared.subject.subject)? else {
+                return Ok(false);
+            };
+            let observation = self.runtime.observe_start(&prepared.member)?;
+            if !self.stale_failed_start_ready(pending, observation.as_ref())? {
+                return Ok(false);
+            }
+            Some(lock)
+        } else {
+            None
+        };
         let id = uuid::Uuid::now_v7().to_string();
         prepared
             .launch_member
@@ -97,6 +113,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             dispatched: false,
             receipted: false,
         };
+        if let Some(pending) = &failed_start {
+            // Operation metadata, retained across queueing and daemon restart. The admission
+            // writer uses this exact ID, never whichever start happens to be pending later.
+            operation.body["stale_failed_start"] = Value::from(pending.id.clone());
+        }
         match self
             .store
             .admit_runtime_start(&mut operation, MAX_START_JOBS)?
@@ -105,6 +126,18 @@ impl<R: RuntimeControl> Reconciler<R> {
                 return Ok(false);
             }
             RuntimeStartAdmission::Admitted | RuntimeStartAdmission::CapacityBusy => {}
+        }
+        drop(recovery_lock);
+        if let Some(pending) = &failed_start {
+            self.record_once(
+                &operation.subject,
+                "runtime.reconcile-decision",
+                BTreeMap::from([
+                    ("key".into(), Value::from(format!("restart-superseded-failed-start:{}", pending.id))),
+                    ("decision".into(), Value::from("restart-superseded-failed-start")),
+                    ("reason".into(), Value::from("current restart intent atomically replaced a stale failed start after absent-runtime and producer-lock checks")),
+                ]),
+            )?;
         }
         self.start_changed(&operation.subject);
         self.start_queued_job(&operation)?;
@@ -164,7 +197,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             let _lock = lock;
             let guard = || -> Result<()> {
                 anyhow::ensure!(!store.runtime_start_revoked(&id)?, "start operation was revoked");
+                anyhow::ensure!(store.runtime_start_intent_current(&id)?,
+                    "restart lifecycle intent changed before launch");
                 store.owned_desired_guard(&prepared.subject)?;
+                anyhow::ensure!(store.helper_launcher_alive(&subject)?,
+                    "the helper's launcher run has ended");
                 anyhow::ensure!(store.selected_desired_token(&subject)? == prepared.selected_token,
                     "declaration changed before launch");
                 anyhow::ensure!(prepared.requests_retained(&store)?,
@@ -317,7 +354,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn reconcile_start_operation(
+    pub(super) fn reconcile_start_operation(
         &self,
         mut operation: RuntimeStartOperation,
         snapshot: &PassPtySnapshot,
@@ -342,12 +379,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             // The kernel lock, not a PID guess, establishes that no old launch worker holds
             // admission. Late producer ownership still needs exact operation provenance.
             if let Some(_lock) = self.store.try_runtime_start_lock(&operation.subject)? {
-                self.revoke_start(&operation.subject)?;
-                self.store.finish_runtime_start(
-                    &operation.id,
-                    &serde_json::json!({"error": "launch owner ended before its result"}),
-                )?;
-                self.start_changed(&operation.subject);
+                // A worker records its result before it releases the lock and leaves `live`, so
+                // this pass's earlier read can predate a launch that has since finished. Only a
+                // start that is still unfinished under the lock has lost its owner.
+                let unfinished = self
+                    .store
+                    .pending_runtime_starts()?
+                    .into_iter()
+                    .any(|fresh| fresh.id == operation.id && !fresh.finished);
+                if unfinished {
+                    self.revoke_start(&operation.subject)?;
+                    self.store.finish_runtime_start(
+                        &operation.id,
+                        &serde_json::json!({"error": "launch owner ended before its result"}),
+                    )?;
+                    self.start_changed(&operation.subject);
+                }
             }
             return Ok(());
         }
@@ -544,6 +591,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         prepared: &PreparedStart,
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
+        if self
+            .store
+            .close_runtime_start_from_stored_witness(&operation.id)?
+        {
+            self.start_changed(&operation.subject);
+            return Ok(());
+        }
         let member = &prepared.member;
         let exec_observation;
         let observation = if member.terminal {
@@ -553,16 +607,19 @@ impl<R: RuntimeControl> Reconciler<R> {
             exec_observation = self.runtime.observe_exec(&member.runtime_id)?;
             exec_observation.as_ref()
         };
-        let Some(observation) = observation else {
+        // A retained terminal registry row without an incarnation is not evidence
+        // about this operation: it may belong to an older launch. As with an
+        // absent row, only operation-fenced producer/work-scope closure can retire it.
+        let terminal_without_incarnation = observation.is_some_and(|observation| {
+            observation.incarnation_id.is_none()
+                && matches!(observation.status.as_str(), "exited" | "stopped" | "vanished")
+        });
+        if observation.is_none() || terminal_without_incarnation {
             // An error from an entered backend does not prove its detached producer closed.
             if operation.finished
-                && (operation
-                    .result
-                    .as_ref()
-                    .is_some_and(|r| r["producer_closed"] == true)
-                    || self
-                        .runtime
-                        .start_operation_closed(&prepared.launch_member)?)
+                && self
+                    .runtime
+                    .start_operation_closed(&prepared.launch_member)?
             {
                 self.store
                     .retain_runtime_start_producer_closed(&operation.id)?;
@@ -575,8 +632,14 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]))?;
             }
             return Ok(());
-        };
+        }
+        let observation = observation.expect("observed runtime required after absence cleanup");
         let Some(incarnation) = observation.incarnation_id.as_deref() else {
+            self.record_once(&operation.subject, "harness.diagnostic", BTreeMap::from([
+                ("severity".into(), Value::String("error".into())),
+                ("code".into(), Value::String("start-revocation-unverified".into())),
+                ("reason".into(), Value::String("the revoked runtime has no incarnation and is not terminal; producer closure cannot retire a potentially live runtime".into())),
+            ]))?;
             return Ok(());
         };
         let exec_provenance;

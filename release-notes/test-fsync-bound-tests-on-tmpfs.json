@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Six fsync-bound fractal tests that check what their stores hold, not what reaches a disk, keep their stores on /dev/shm where it exists (new test-support helper memory_tempdir): reconcile_pass_perf 35.7 -> 3.1 s, backup 25.8 -> 5.4 s, the 29 setup tests 69.3 -> 16.5 s, operation_audit's mutation helper (projection_drift 47.3 -> 27.2 s), and the delivery probe's fake-API cases 11.5 -> 2.1 s. operation_audit_perf and checkpoint_memory stay on disk.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to put these tests' stores back on the temporary directory's disk."}
+}

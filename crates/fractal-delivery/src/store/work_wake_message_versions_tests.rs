@@ -60,6 +60,38 @@ fn point_work_wakes(store: &Store, agent: &str) -> Result<Vec<MessageView>> {
 }
 
 #[test]
+fn a_pass_reads_only_the_work_wakes_sent_since_the_last() {
+    let store = Store::open_memory("fixture").unwrap();
+    for index in 0..3 {
+        send(&store, &format!("wake-{index}"), "agent/worker", vec![format!("st3-work:step-run/{index}@1@1@worker")]);
+    }
+    send(&store, "ordinary", "agent/worker", vec![]);
+    let read = || super::delivery::WORK_WAKE_SUBJECTS_READ.with(std::cell::Cell::get);
+    let before = read();
+    assert_eq!(store.work_wake_messages_for_reconcile("agent/worker").unwrap().len(), 3);
+    assert_eq!(read() - before, 3);
+
+    let before = read();
+    let again = store.work_wake_messages_for_reconcile("agent/worker").unwrap();
+    assert_eq!(read() - before, 0, "nothing was sent since the last pass");
+    assert_eq!(
+        serde_json::to_value(&again).unwrap(),
+        serde_json::to_value(point_work_wakes(&store, "agent/worker").unwrap()).unwrap()
+    );
+
+    send(&store, "wake-3", "agent/worker", vec!["st3-work:step-run/3@1@1@worker".into()]);
+    send(&store, "other", "agent/other", vec!["st3-work:step-run/other@1@1@other".into()]);
+    let before = read();
+    let after = store.work_wake_messages_for_reconcile("agent/worker").unwrap();
+    assert_eq!(read() - before, 1);
+    assert_eq!(after.len(), 4);
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(point_work_wakes(&store, "agent/worker").unwrap()).unwrap()
+    );
+}
+
+#[test]
 fn work_wake_batch_preserves_closed_attempts_order_and_fresh_lifecycle_without_point_queries() {
     let store = Store::open_memory("fixture").unwrap();
     for index in 0..129 {
@@ -92,8 +124,9 @@ fn work_wake_batch_preserves_closed_attempts_order_and_fresh_lifecycle_without_p
         serde_json::to_value(&batch_result).unwrap(),
         serde_json::to_value(&point_result).unwrap()
     );
+    // The batch adds two constant reads (the recipient's names and the newest index).
     assert!(
-        point_count >= batch_count + 127,
+        point_count >= batch_count + 125,
         "point={point_count}, batch={batch_count}"
     );
     store

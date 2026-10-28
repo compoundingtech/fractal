@@ -23,8 +23,10 @@ import type {
   BlobChunk,
   BlobUpload,
   ConversationSearch,
+  SubagentSummary,
 } from '@fractal/client/schema'
-import type { ErrorEnvelope } from '@fractal/client'
+import type { ErrorEnvelope, SubagentDriver } from '@fractal/client'
+import type { Timestamp } from '@fractal/client/schema'
 import type { ConnectionState, DecodedAgent, DecodedUsageSummary, MessageSendInput, Undecodable } from '@fractal/sdk/effect'
 import type { FeedSync, FeedSyncObservation } from './feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
@@ -35,6 +37,7 @@ import type { MonitorSource } from '../monitor/source.ts'
 import type { AgentResourceSource } from '../resources/agent/source.ts'
 import type { SubjectEnvelope } from '../resources/envelope.ts'
 import type { TerminalHistoryFactory } from '../terminal/historySource.ts'
+import type { RawTerminalPort } from '../terminal/rawTerminalState.ts'
 import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
 import type { AgentControlPort } from '../agents/agent-control-port.ts'
@@ -43,6 +46,7 @@ import type { AlertActionPort } from '../conversation/alerts/alert-action-port.t
 import type { DocumentPort } from '../documents/document-port.ts'
 import type { SubjectReads } from './subjectReadPort.ts'
 
+import type { NativeDetailsSource } from './nativeDetailsSource.ts'
 import type { TraceQuery, TraceSeries } from './sessionTrace.ts'
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
@@ -54,6 +58,10 @@ export type Feed<A> =
       readonly _tag: 'Observed'
       readonly value: A
       readonly freshness: 'live' | 'stale'
+      /** Client epoch milliseconds of the last successful getter read; retained across failed refreshes. */
+      readonly readAt?: number
+      /** Producer snapshot time, not the client's receipt or display clock. */
+      readonly snapshotCreatedAt?: Timestamp
       /** Explicitly bounded published evidence; absence makes no completeness claim. */
       readonly coverage?: { readonly _tag: 'Partial' }
       /** A newer transcript read failed; these are still the last trusted rows, not a repair. */
@@ -74,7 +82,7 @@ export type Feed<A> =
       readonly retryable?: boolean
     }
 
-/** Which adapter feeds the tree: the deterministic fixture world or the st gateway. */
+/** Which adapter feeds the tree: the deterministic fixture world or the Fractal gateway. */
 export type DataMode = 'fixtures' | 'live'
 
 /**
@@ -129,12 +137,17 @@ export interface Agent {
   readonly host: string
   readonly connected: boolean
   readonly harness?: 'omp' | 'claude' | 'codex'
+  /** Actual wire driver and reporting capability; unlike harness, unknown and non-observing values are retained. */
+  readonly driver?: SubagentDriver
   readonly activity: 'working' | 'waiting' | 'idle' | 'errored'
   readonly status: string
   readonly state?: string
   readonly description?: string
   /** Known only with a recognized aggregation; dependent figures are never derived otherwise. */
   readonly usage: Known<DecodedUsageSummary>
+  readonly incarnationId?: string
+  /** Only occupancy newer than a retained incarnation transition may claim current context. */
+  readonly contextObservedAfter?: number
   /** Requested checkout, not confirmation of a successful checkout. */
   readonly checkout: Known<AgentCheckout>
   readonly workspace: Known<string>
@@ -174,6 +187,10 @@ export const decodedRoster: RosterDecode = { undecodable: [], decodeStale: false
 /** The loaded conversation window; older history is a boundary, not an available fetch operation. */
 export interface ConversationPage {
   readonly items: readonly ConversationItem[]
+  /** OMP task-block summaries with addressable child transcripts, never roster session IDs. */
+  readonly subagents?: readonly SubagentSummary[]
+  /** Header values include their native source and as_of; absence is not inferred. */
+  readonly header?: Readonly<Record<string, unknown>>
   readonly hasOlder: boolean
   /** Native page provenance; filtered items cannot establish emptiness. */
   readonly observation?: { readonly empty: boolean }
@@ -187,7 +204,12 @@ export interface ConversationPage {
 export interface Grants {
   readonly actions: 'granted' | 'ungranted'
   readonly messageSend: 'granted' | 'ungranted'
+  /** Image upload for message attachments (`control.messages`); sending them still needs `messageSend`. */
+  readonly attachmentUpload: 'granted' | 'ungranted'
+  /** `terminal.input`: typing through the gateway's fenced `terminal.input` actions. */
   readonly terminalInput: 'granted' | 'ungranted'
+  /** `terminal.control`: a raw PTY ATTACH that types on the socket and votes the shared size. */
+  readonly terminalControl: 'granted' | 'ungranted'
 }
 
 /** One gateway activity line (`at` is ISO-8601) for the events feed. */
@@ -202,7 +224,7 @@ export type ConversationPortResult<T> =
   | { readonly _tag: 'Success'; readonly value: T }
   | {
       readonly _tag: 'Refused'
-      /** `unconfirmed`: st said `applied: "unknown"`; the identical request may still complete. */
+      /** `unconfirmed`: Fractal said `applied: "unknown"`; the identical request may still complete. */
       readonly reason: 'ungranted' | 'invalid' | 'failed' | 'stale-fence' | 'snapshot-unavailable' | 'unconfirmed'
       readonly detail: string
       /** Preserve the daemon's complete refusal, including its retry policy. */
@@ -234,7 +256,7 @@ type MessageSendFields = Omit<MessageSendInput, 'parameters' | 'idempotency_key'
  * A first send (`Send`) never carries a caller-owned key: the data layer generates one
  * and paints the optimistic row synchronously. `Resend` is an explicit retry of an
  * uncertain send with its original key; its authoritative identity is reconciled
- * before any optimistic row can duplicate mail the stream already shows. st deduplicates
+ * before any optimistic row can duplicate mail the stream already shows. Fractal deduplicates
  * a key by its whole request except the fence, so a Resend repeats the original action
  * id and parameters; a source that recorded the key's first send substitutes them.
  */
@@ -261,6 +283,7 @@ export interface AttachmentPort {
   readonly upload: (request: {
     readonly bytes: Blob | ArrayBuffer | Uint8Array
     readonly mediaType: BlobUpload['media_type']
+    readonly signal?: AbortSignal
   }) => Promise<ConversationPortResult<BlobUpload>>
   readonly chunk: (request: {
     readonly sha256: string
@@ -289,6 +312,8 @@ export interface DataSource {
   readonly attachments?: AttachmentPort
   /** Schema-coupled native family reads; unsupported native producers carry an explicit reason. */
   readonly subjectReads: SubjectReads
+  /** Visible Details uses shared native getter facts; no private harness decoding. */
+  readonly nativeDetails?: NativeDetailsSource
   readonly connection: Atom.Atom<ConnectionState>
   /** Browser reachability is a local signal, not a claim about the gateway's host. */
   readonly network?: Atom.Atom<NetworkReachability>
@@ -309,18 +334,20 @@ export interface DataSource {
   readonly conversationInterest?: (agentRef: string) => Atom.Atom<void>
   /** Explicit pointer/focus intent; live admits it only after a visible thread's first-page frame. */
   readonly prefetchConversation?: (agentRef: string) => void
+  /** Explicit terminal-toggle pointer/focus intent; live retains a read-only viewer. */
+  readonly prefetchTerminal?: (terminalRef: string) => void
   /** Explicit recovery: re-acquire a failed or ended conversation follow; a healthy follow is untouched. */
   readonly retryConversation?: (agentRef: string) => void
-  /** Keyed by terminal ref; live attaches a read-only viewer. */
+  /** Keyed by terminal ref; the projected read-only screen, also the raw stream's fallback. */
   readonly terminal: (terminalRef: string) => Atom.Atom<Feed<TerminalScreen>>
   readonly terminalInterest?: (terminalRef: string) => Atom.Atom<void>
   /** Explicit recovery for a retryable terminal failure; never retries a healthy or permanent feed. */
   readonly retryTerminal?: (terminalRef: string) => void
   /** Restart, suspend, retire, start, resume or interrupt a seat (`agent.*`, Esc to its terminal). */
   readonly agentControls?: AgentControlPort
-  /** st documents by name or exact reference (`GET /v1/client/documents/content`). */
+  /** Fractal documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
-  /** Explicit geometry action; never tied to the browser pane dimensions. */
+  /** Explicit geometry action; never tied to the browser pane dimensions. The raw ATTACH path resizes on the socket instead. */
   readonly terminalResize?: TerminalResizePort
   /** Answers to native harness prompts (`prompt.respond`), one submission each. */
   readonly prompts?: PromptAnswerPort
@@ -328,7 +355,9 @@ export interface DataSource {
   readonly alertActions?: AlertActionPort
   /** Retained owner scrollback, with its own independently granted availability. */
   readonly terminalHistory?: TerminalHistoryFactory
-  /** Ordered input sessions bound to one terminal incarnation; absent when the source cannot type. */
+  /** Raw PTY stream (`st3.client.pty.v0`): ATTACH with `terminal.control`, else view-only PEEK; absent when the source has none. */
+  readonly terminalRaw?: RawTerminalPort
+  /** Ordered `terminal.input` sessions bound to one terminal incarnation: typing when raw ATTACH is not allowed. */
   readonly terminalInput?: TerminalInputPortFactory
   /** Keyed by subject ref (PR, CI run, mission, pty …). */
   readonly envelope: (ref: string) => Atom.Atom<Feed<SubjectEnvelope>>
@@ -354,13 +383,16 @@ export interface DataSource {
 export const observed = <A>({
   value,
   freshness = 'live',
+  snapshotCreatedAt,
 }: {
   readonly value: A
   readonly freshness?: 'live' | 'stale'
+  readonly snapshotCreatedAt?: Timestamp
 }): Feed<A> => ({
   _tag: 'Observed',
   value,
   freshness,
+  ...(snapshotCreatedAt === undefined ? {} : { snapshotCreatedAt }),
 })
 /** The feed before the first observation arrives. */
 export const waiting: Feed<never> = { _tag: 'Waiting' }

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry current main into native transcript design repairs after retaining the prior reviewed main merge.",
+  "replay": { "status": "none", "detail": "No additional replay change from the clean merge." },
+  "schema": { "status": "none", "detail": "No additional schema change from the clean merge." },
+  "rules": { "status": "none", "detail": "No additional checkpoint change from the clean merge." },
+  "compatibility": { "status": "none", "detail": "Current main merges cleanly; native transcript semantics are unchanged by this carry." },
+  "downtime": { "status": "none", "detail": "No additional interruption." },
+  "manual": { "status": "none", "detail": "No additional manual step." },
+  "recovery": { "status": "none", "detail": "No additional recovery change." }
+}

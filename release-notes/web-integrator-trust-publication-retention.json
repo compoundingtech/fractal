@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Authorize exact same-repository integration heads, recover cached build publication, and retain only the current and rollback production builds.",
+  "replay": { "status": "none", "detail": "No replay or rebuild of application data." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "Checkpoint rules and digests are unchanged." },
+  "compatibility": { "status": "none", "detail": "Developer-only deployment scripts. An explicit trust mode is required: an author allowlist or repository collaborator write, maintain or admin permission. Fork and moved PR heads cannot run as integration candidates." },
+  "downtime": { "status": "none", "detail": "No running service is activated by this change. Cached successful builds can retry publication after an activation failure." },
+  "manual": { "status": "none", "detail": "No released-product manual step. Deployment owners configure the trust mode and its required inputs before adopting these scripts." },
+  "recovery": { "status": "none", "detail": "Application data is unchanged. After successful activation, deployment build retention preserves the current build and one previous rollback build and removes older build directories." }
+}

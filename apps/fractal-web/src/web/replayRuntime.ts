@@ -2,7 +2,7 @@ import { FractalClient } from '@fractal/client'
 import { arrangementActions } from '@fractal/sdk/effect'
 import { catalog, loadWorld } from '@fractal/scenarios'
 import { createReplay, realClock } from '@fractal/scenarios/replay'
-import { st3InventoryGateway } from '../data/arrangements.ts'
+import { fractalInventoryGateway } from '../data/arrangements.ts'
 import { installPageFolders, sidebarFolders } from '../folders/client.ts'
 
 /** Only imported behind the page entry's compile-time DEV guard. */
@@ -23,7 +23,7 @@ export const createDevReplay = (search: string) => {
   installPageFolders(sidebarFolders({
     gateway: () => {
       const options = { baseUrl: globalThis.location.origin, fetchImpl: replay.fetch }
-      return { ...st3InventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
+      return { ...fractalInventoryGateway(options), actions: arrangementActions(new FractalClient(options)) }
     },
     socket: replay.socket,
   }))

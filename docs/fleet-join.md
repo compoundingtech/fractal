@@ -1,7 +1,7 @@
 # Fleet join
 
 A fleet is a set of trusted members that replicate one claim history. For the two-machine
-walkthrough, see [Two machines](two-machines.md); [Fleet replication](st3/replication.md) explains
+walkthrough, see [Two machines](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md); [Fleet replication](st3/replication.md) explains
 sync, digests and checkpoints. This page is the membership, invitation and transport reference.
 
 ## Terms
@@ -38,7 +38,7 @@ Previously admitted envelopes are not retrospectively removed; doctor exposes ad
 high water. A member that has not learned a writer's key can admit unsigned history, and legacy
 writers cannot be authenticated individually. Disable legacy exchanges after every retained
 writer is admitted and signed. Removing membership does not erase history, rotate the secret or
-stop declared seats. See [Checkpoints](st3/checkpoints.md) before treating removal as an excusal.
+stop declared agents. See [Checkpoints](st3/checkpoints.md) before treating removal as an excusal.
 
 ## Files on each machine
 
@@ -51,6 +51,7 @@ stop declared seats. See [Checkpoints](st3/checkpoints.md) before treating remov
 | `STATE/fleet/secret` | `0600` | Fleet secret |
 | `STATE/fleet/node.key` | `0600` | Private member key |
 | `STATE/fleet/join.json` | `0600` | Interrupted join progress, without secrets |
+| `STATE/fleet/pairing-recovery.json` | `0600` | Authenticated pending pairing answer, including fleet secret; bound to code digest, member key and name; erased after the durable join checkpoint |
 | `STATE/fleet/removal.json` | `0600` | Signed removal reporter, reason and time |
 
 Fleet commands maintain `fleet.toml`; change it through those commands. Config loading uses the
@@ -73,10 +74,12 @@ st fleet invites [--all]
 st fleet invites revoke fleet-invite/ID --reason TEXT
 ```
 
-The optional name pins the joiner's name. Expiry defaults to 15 minutes and accepts 10 seconds to
-24 hours. `auto` includes advertised endpoints; `--via` selects a transport. A sponsor must already
-be a fleet member with a listener. Invites are person operations; an agent seat must provide an
-explicit `--as person/NAME` where the command permits it.
+The optional name pins the joiner's name. Expiry defaults to 10 minutes and accepts
+10 seconds to 24 hours; an invitation carrying Fabric pairing is capped at 10
+minutes. `auto` includes advertised endpoints; `--via` selects a transport. A
+sponsor must already be a fleet member with a listener. Invites are person
+operations; an agent seat must provide an explicit `--as person/NAME` where the
+command permits it.
 
 Prefer the no-echo prompt, a pipe, `--code-file` or `--send-fabric` to a code in argv or a transcript.
 The Fabric form creates a private temporary code file, sends it and deletes the local copy;
@@ -108,7 +111,7 @@ it does not query `scutil` during join. The reserved name `local` is refused.
 
 Join persists its member key before redeeming, stops the local daemon before reading its writer
 head, writes the sealed response into private fleet files, records the writer floor, and starts
-or refreshes the daemon/worker. Native seats retain their provider processes across the daemon
+or refreshes the daemon/worker. Native agents retain their provider processes across the daemon
 restart. A joiner with unreachable inbound ports can still sync both directions by dialing out.
 
 ### Interrupted join
@@ -124,7 +127,7 @@ A current member or a writer with unended history must be removed first. A new k
 writer history can reuse an ended name: its writer floor is the highest sequence or ended high
 water the sponsor knows, and its window begins above that floor. A store that already wrote under
 that name cannot use this rejoin path; choose a new name or a separately reviewed reset.
-Seats remain declared on the node name and can resume when a member rejoins under that name.
+Agents remain declared on the node name and can resume when a member rejoins under that name.
 
 ## Who may exchange
 
@@ -165,7 +168,8 @@ successful contact; authentication, admission, membership and projection failure
 
 ## Transports
 
-The worker dials listening members using local overrides, Tailscale, Fabric, then loopback routes.
+The worker dials listening members using local overrides, then enabled Tailscale/Fabric
+routes in local `fleet.toml` preference order, then loopback routes.
 Successful inbound exchanges suppress redundant reverse dials. Graph/network wakes request prompt
 sync; unreachable peers use adaptive network backoff. This is connection recovery, not a retry of
 broken local work. A connection pushes and pulls history while its backlog drains.
@@ -173,21 +177,25 @@ broken local work. A connection pushes and pulls history while its backlog drain
 ### Changing an existing member's transports
 
 ```text
-st fleet transports add fabric [--fabric-protocol PROTOCOL] [--no-service]
+st fleet transports add fabric [--prefer] [--fabric-protocol PROTOCOL] [--no-service]
 st fleet transports remove fabric [--no-service]
+st fleet transports prefer <tailscale|fabric> [--no-service]
 ```
 
 Run these commands on the member whose transports should change. They update the existing
 `fleet.toml`, publish `fleet.member-endpoints` immediately, and refresh the service using the
 same path as `st fleet mode`. Run them with the local daemon running. The member's name,
 identity, secret, signing key and graph history stay intact.
-The command currently supports Fabric; changing Tailscale is outside this command's scope.
+Add and remove support Fabric. Prefer reorders either enabled Tailscale or Fabric
+without changing enablement or exposure; it rejects disabled carriers and is a
+no-op when already first. It preserves the remaining carriers' relative order.
 
 Adding Fabric requires a listening member with a configured replication port and a working
 local `fabric` command. Use `st fleet mode listening` first for a dial-out member. Add exposes
 `127.0.0.1:PORT` before saving or announcing the Fabric endpoint; if exposure fails, settings
 and endpoints are unchanged. The protocol defaults to the saved `fabric_protocol`, or
-`st3/fleet/FLEET_ID`. Re-adding an enabled transport changes nothing; to change its protocol,
+`st3/fleet/FLEET_ID`. Re-adding an enabled transport changes nothing unless `--prefer`
+moves it first; the saved protocol and exposure remain unchanged. To change its protocol,
 remove it and add it with `--fabric-protocol PROTOCOL`. Configure Fabric trust and grants on
 the peers as described below.
 
@@ -204,7 +212,7 @@ result and keeps the exposure reachable: a lost response can follow a committed 
 Restart the worker to publish the saved settings; after a failed remove publication, then
 run `fabric unexpose PROTOCOL` to finish cleanup.
 
-With `--no-service`, or when no service is installed, restart `st3 replication-worker` yourself
+With `--no-service`, or when no service is installed, restart `st replication-worker` yourself
 to apply its new transport selection. Until that restart, the old worker cannot re-expose
 Fabric or republish its previous endpoint list after a settings change. The worker restores
 the configured exposure from `fleet.toml` when it starts. `st fleet status` shows the local
@@ -228,11 +236,84 @@ allow the peer port. See [Tailscale](st3/tailscale.md) for setup.
 
 ### Fabric
 
-The default protocol is `st3/fleet/FLEET_ID`; `fabric_protocol` can retain an existing grant name.
-The worker exposes its loopback listener with `fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and
-obtains an outbound tunnel with `fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`. `st fleet transports remove fabric`, leave, dial-out
-mode and uninstall remove the exposure. st does not edit Fabric trust: the exposing member must
-allow the dialer's NodeID and protocol. Missing grants are reported with the entry to add.
+Run Fabric with `--runtime-peers` and install the external `st-fabric-adapter` on
+both machines. Keep the adapter running on the sponsor. No prior peer trust is
+needed:
+
+```sh
+# On a member:
+st fleet invite beacon
+# On beacon:
+st fleet join CODE
+```
+
+The code includes a pinned sponsor Fabric NodeID and a one-use pairing permit.
+The joining adapter uses its existing Fabric daemon identity, not a temporary
+peer or a second identity. The restricted `fabric/pair/1` exchange carries the
+existing signed, sealed Fractal admission. It grants no ordinary service access.
+The sponsor verifies the request's signed Fabric NodeID against the authenticated
+pending identity and its admitted member key against signed Fractal membership before
+atomic confirmation. The immutable permit and reciprocal policy grant exactly
+`st3/fleet/FLEET_ID` and `st3-client-v0`, under owner `st/fleet/FLEET_ID`.
+Terminal access (`st3/pty/FLEET_ID`) requires an explicit operator grant in
+static Fabric policy, which the adapter never edits.
+The joiner verifies the sponsor's signed response and pinned endpoint before its
+adapter installs reciprocal access. The Fractal daemon carries admission data only;
+all Fabric permit, confirmation, and policy calls belong to the adapter.
+
+Pending attempts expire or fail closed after a Fabric restart; issue a fresh
+invite rather than manually granting trust. Preserve adapter state across
+restarts. Existing static or other-owner grants are not revoked by pairing or
+membership reconciliation.
+
+The default replication protocol is `st3/fleet/FLEET_ID`.
+`fabric_protocol` can retain an existing grant name for non-pairing migrations.
+The worker exposes its loopback listener with
+`fabric expose PROTOCOL --tcp 127.0.0.1:PORT` and obtains an outbound tunnel with
+`fabric dial NODE_ID PROTOCOL --tcp 127.0.0.1:0`.
+`st fleet transports remove fabric`, leave, dial-out mode, and uninstall remove
+the exposure. The adapter maintains trust and grants; Fractal does not edit
+`peers.toml`.
+
+#### Adapter helper boundary
+
+The CLI discovers `st-fabric-adapter` beside its executable or on `PATH`;
+`ST_FABRIC_ADAPTER` selects an explicit helper for isolated tests.
+`pairing-invite` accepts one JSON line `{"code":"..."}` on standard input and
+returns a JSON line containing the augmented `code`. `pairing-join` is a
+private interactive JSON-line protocol: the code produces `node_id`, the signed
+join `request` produces a sealed `response`, and the authenticated sealed
+admission plus `sponsor_key` produces `confirmed: true` only after confirmation.
+Credentials travel through pipes, not helper arguments. The Fractal side verifies
+the sealed response before sending the authenticated admission back to the
+helper; it does not write fleet settings before confirmation.
+
+For isolated development/live proofs, `nix build .#fabric-pairing` builds the
+published Fabric revision pinned with this adapter's control contract. Use
+`--st-socket`, `--fabric-socket`, and `--state-dir` to keep proof daemons and
+adapter journals separate from user services.
+
+After an interruption following authentication, rerun the same code with the
+same name and local member key. The private recovery journal retains the
+authenticated answer before irreversible confirmation; the helper queries the
+retained receipt without presenting the spent bearer token. Confirmed recovery
+does not reinstall Fabric policy. A restart-lost or expired unconfirmed exchange
+still requires a fresh invite.
+When given a fresh code, Fractal replaces a saved recovery only after `pairing-status`
+observes an authenticated expired or rejected receipt for the old attempt and
+the same Fabric NodeID. Pending, confirmed, unknown, and unreachable outcomes
+preserve the recovery journal; use the original code rather than discarding a
+possibly confirmed admission.
+The replacement invitation can retain the same machine name and local member
+key: the sponsor reuses the existing verified invite admission only when its
+member key, machine name, Fabric NodeID and mode match, without migration. It
+does not remove that member or append another incarnation; unrelated identities
+still receive the normal name-collision refusal.
+
+If Fabric has pruned an old permit record after receipt retention, the sponsor
+adapter terminates that expired journal while retaining its unconfirmed identity
+fence. Historical journal expiry does not stop other invitations or membership
+policy reconciliation.
 
 ### Loopback and plain HTTP
 
@@ -244,10 +325,10 @@ bind loopback or Tailscale addresses; `peer_listen_allow_plain_http = true` (or
 ## Remove, leave and uninstall
 
 `st fleet remove NAME --reason TEXT [--as PERSON]` ends membership. It does not inspect or stop
-seats: stop them first with `st agents stop` if needed. Their declarations remain on host NAME.
+agents: stop them first with `st agents stop` if needed. Their declarations remain on host NAME.
 
 `st fleet leave [--offline] [--force] [--cancel] [--wait DURATION] [--no-service] [--as PERSON]`
-refuses running local seats unless forced. It records leaving mode in the store, stops local
+refuses running local agents unless forced. It records leaving mode in the store, stops local
 mutations, drains history to a listener, writes the leave claim, and confirms the same authority
 digest before and after that claim or a signed `member-left` naming its key. Interrupted leaving
 resumes; `--cancel` restores normal mode before the claim is written. Offline leave skips the peer
@@ -255,7 +336,7 @@ proof and prints the removal command for another member. The local history remai
 joining a different fleet needs a separately authorized reset.
 
 `st uninstall [--dry-run] [--yes] [--offline] [--keep-binaries] [--erase-local-graph] [--no-service] [--as PERSON]`
-leaves the fleet, stops owned runtimes, removes services/exposure and st's Claude plugin/marketplace,
+leaves the fleet, stops owned runtimes, removes services/exposure and fractal's Claude plugin/marketplace,
 and deletes configured local state and manifest-owned binaries. It does not remove workspace Git
 exclude lines. Nix/source installations without a manifest print their removal instructions.
 A sole local graph copy also requires `--erase-local-graph`. Inspect `--dry-run` before deleting it.

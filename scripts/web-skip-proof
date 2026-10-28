@@ -139,7 +139,7 @@ def main(argv):
     parser.add_argument('arguments', nargs='*')
     parser.add_argument('--base', default='origin/main')
     parser.add_argument('--head', default='HEAD')
-    parser.add_argument('--repository', default='compoundingtech/smalltalk')
+    parser.add_argument('--repository', default='compoundingtech/fractal')
     parser.add_argument('--explain', action='store_true', help='also list the changed paths each check owns')
     parser.add_argument('--fetch', action='store_true', help='fetch the evidence notes from origin first')
     args = parser.parse_args(argv[1:])

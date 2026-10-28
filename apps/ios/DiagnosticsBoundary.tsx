@@ -26,7 +26,7 @@ export class DiagnosticsBoundary extends React.Component<React.PropsWithChildren
   render(): React.ReactNode {
     if (this.state.failed) return <View style={{ flex: 1, justifyContent: 'center', padding: 24, backgroundColor: theme.base }}>
       <Text accessibilityRole="header" style={{ color: theme.text, fontSize: 20 }}>The app could not continue</Text>
-      <Text style={{ color: theme.text, marginTop: 12 }}>Close and reopen Smalltalk. If device storage is available, a redacted diagnostic will be retained for the next paired connection.</Text>
+      <Text style={{ color: theme.text, marginTop: 12 }}>Close and reopen Fractal. If device storage is available, a redacted diagnostic will be retained for the next paired connection.</Text>
     </View>;
     return <>{__DEV__ ? <DiagnosticInjection /> : null}{this.props.children}</>;
   }

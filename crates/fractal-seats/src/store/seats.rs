@@ -1,4 +1,4 @@
-//! The part of `store::seats` that moved up from st3-store.
+//! The part of `store::seats` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AgentMessagesStore;
 use crate::MissionsStore;
@@ -11,6 +11,10 @@ pub use fractal_missions::store::seats::{EndedDeclaration};
 #[cfg(test)]
 #[path = "identity_boundary_tests.rs"]
 mod identity_boundary_tests;
+
+#[cfg(test)]
+#[path = "harness_ready_tests.rs"]
+mod harness_ready_tests;
 
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
@@ -440,7 +444,7 @@ impl SeatsStore for Store {
             {
                 continue;
             }
-            if self.smalltalk.claim_registry().claim(&kind).is_none() {
+            if self.fractal.claim_registry().claim(&kind).is_none() {
                 return Ok(AgentResourcesChange::Invalidated {
                     reason: "unknown_kind", detail: format!("unregistered {kind}"),
                 });
@@ -577,19 +581,19 @@ impl SeatsStore for Store {
     }
 
     fn begin_agent_roster_fault_retries(&self, history: bool) {
-        let mut retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let mut retries = self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         let mut pending = std::mem::take(&mut retries.pending[mode]);
         retries.due[mode].append(&mut pending);
     }
 
     fn agent_roster_fault_retries(&self, history: bool) -> BTreeSet<String> {
-        self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned")
+        self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned")
             .due[usize::from(history)].clone()
     }
 
     fn agent_roster_faults_pending(&self, history: bool) -> bool {
-        let retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let retries = self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         !retries.due[mode].is_empty() || !retries.pending[mode].is_empty()
     }
@@ -598,7 +602,7 @@ impl SeatsStore for Store {
             &self, history: bool, subjects: &[String], deadline: bool,
             selected: Option<&BTreeSet<String>>,
         ) {
-        let mut retries = self.smalltalk.agent_roster_fault_retries.lock().expect("fault retries poisoned");
+        let mut retries = self.fractal.agent_roster_fault_retries.lock().expect("fault retries poisoned");
         let mode = usize::from(history);
         let answered = |subject: &String| selected.is_none_or(|selected| selected.contains(subject));
         // Even a deadline answers this attempt: retry only on the next refresh, otherwise
@@ -612,14 +616,14 @@ impl SeatsStore for Store {
     }
 
     fn agent_roster_refresh_failed(&self) -> bool {
-        self.smalltalk.agent_roster_attempt.load(std::sync::atomic::Ordering::Acquire) == 2
+        self.fractal.agent_roster_attempt.load(std::sync::atomic::Ordering::Acquire) == 2
     }
 
     fn previous_agent_faults(
             &self, index: u64, history: bool, subjects: &[String],
         ) -> BTreeMap<String, Value> {
         let subjects = subjects.iter().map(String::as_str).collect::<HashSet<_>>();
-        let cache = self.smalltalk.agent_resources_cache.lock().expect("agent resources cache poisoned");
+        let cache = self.fractal.agent_resources_cache.lock().expect("agent resources cache poisoned");
         let mut faults = BTreeMap::new();
         for entry in cache.iter().rev().filter(|entry| entry.index <= index && entry.history == history) {
             for card in entry.items.iter() {
@@ -636,12 +640,12 @@ impl SeatsStore for Store {
 
     fn agent_roster_valid_until(&self, index: u64, agent: Option<&str>) -> Option<u128> {
         let Some(agent) = agent else {
-            return self.smalltalk.agent_resources_cache.lock()
+            return self.fractal.agent_resources_cache.lock()
                 .expect("agent resources cache poisoned").iter().rev()
                 .find(|entry| entry.index == index && !entry.history)
                 .and_then(|entry| entry.valid_until_unix_ms);
         };
-        self.smalltalk.exact_agent_resources_cache.lock()
+        self.fractal.exact_agent_resources_cache.lock()
             .expect("exact agent resources cache poisoned").iter().rev()
             .find(|entry| entry.index == index && !entry.history && exact_agent_entry(entry, agent))
             .and_then(|entry| entry.valid_until_unix_ms)
@@ -649,7 +653,7 @@ impl SeatsStore for Store {
 
     fn start_agent_roster_refresher(&self) -> Option<Arc<tokio::sync::Notify>> {
         let wake = Arc::new(tokio::sync::Notify::new());
-        self.smalltalk.agent_roster_refresh.set(Arc::clone(&wake)).ok()?;
+        self.fractal.agent_roster_refresh.set(Arc::clone(&wake)).ok()?;
         Some(wake)
     }
 
@@ -659,7 +663,7 @@ impl SeatsStore for Store {
             history: bool,
             bound: usize,
         ) -> Result<Option<String>> {
-        let previous = self.smalltalk.agent_resources_cache.lock()
+        let previous = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter()
             .filter(|entry| entry.history == history && entry.index <= index)
             .max_by_key(|entry| (entry.index, entry.local)).cloned();
@@ -698,19 +702,19 @@ impl SeatsStore for Store {
 
     fn note_agent_roster_chunked(&self, reason: &str) {
         crate::performance::record_request("roster/chunked-assembly", None, std::time::Duration::ZERO);
-        *self.smalltalk.agent_roster_chunked.lock().expect("roster counts poisoned")
+        *self.fractal.agent_roster_chunked.lock().expect("roster counts poisoned")
             .entry(reason.to_owned()).or_default() += 1;
     }
 
     fn agent_roster_chunked_assemblies(&self) -> BTreeMap<String, u64> {
-        self.smalltalk.agent_roster_chunked.lock().expect("roster counts poisoned").clone()
+        self.fractal.agent_roster_chunked.lock().expect("roster counts poisoned").clone()
     }
 
     fn agent_roster_current(&self, index: u64, history: bool) -> Result<bool> {
         if self.agent_roster_faults_pending(history) { return Ok(false); }
         let local = roster_local_frontier(&self.readers.get(), index)?;
         let now = now_ms();
-        Ok(self.smalltalk.agent_resources_cache.lock()
+        Ok(self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned").iter()
             .any(|entry| entry.history == history && entry.covered.is_none()
                 && entry.index == index && entry.local == local
@@ -725,7 +729,7 @@ impl SeatsStore for Store {
             published_at: u128,
             cards: &Arc<Vec<Value>>,
         ) -> Result<bool> {
-        if self.smalltalk.agent_roster_refresh.get().is_none()
+        if self.fractal.agent_roster_refresh.get().is_none()
             || self.agent_roster_faults_pending(history)
         {
             return Ok(false);
@@ -734,8 +738,7 @@ impl SeatsStore for Store {
             if cut > through || through > physical {
                 return Ok(false);
             }
-            let Some((local, valid_until)) = self
-                .smalltalk
+            let Some((local, valid_until)) = self.fractal
                 .agent_resources_cache
                 .lock()
                 .expect("agent resources cache poisoned")
@@ -769,29 +772,26 @@ impl SeatsStore for Store {
     }
 
     fn note_agent_roster_read(&self) {
-        self.smalltalk.agent_roster_read_at.store(now_ms() as u64, std::sync::atomic::Ordering::Release);
+        self.fractal.agent_roster_read_at.store(now_ms() as u64, std::sync::atomic::Ordering::Release);
     }
 
     fn request_agent_roster_refresh(&self) {
-        if let Some(wake) = self.smalltalk.agent_roster_refresh.get() {
-            let _ = self.smalltalk.agent_roster_requested_at.compare_exchange(
-                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            wake.notify_one();
-        }
+        // A summary or assistant read requests freshness without necessarily reading the
+        // ordinary agents list. Register demand here so no requesting caller can omit it.
+        self.note_agent_roster_read();
+        self.fractal.wake_read_roster();
     }
 
     fn request_agent_roster_history(&self) {
-        self.smalltalk.agent_roster_history_wanted.store(true, std::sync::atomic::Ordering::Release);
+        self.fractal.agent_roster_history_wanted.store(true, std::sync::atomic::Ordering::Release);
         self.request_agent_roster_refresh();
     }
 
     fn request_fresh_agent_roster(&self, history: bool) {
-        if self.smalltalk.agent_roster_refresh.get().is_none() {
+        if self.fractal.agent_roster_refresh.get().is_none() {
             return;
         }
-        self.smalltalk.agent_roster_fresh_wanted.notify_one();
+        self.fractal.agent_roster_fresh_wanted.notify_one();
         if history {
             self.request_agent_roster_history();
         } else {
@@ -800,18 +800,18 @@ impl SeatsStore for Store {
     }
 
     async fn fresh_agent_roster_wanted(&self) {
-        self.smalltalk.agent_roster_fresh_wanted.notified().await;
+        self.fractal.agent_roster_fresh_wanted.notified().await;
     }
 
     fn take_agent_roster_history_request(&self) -> bool {
-        self.smalltalk.agent_roster_history_wanted.swap(false, std::sync::atomic::Ordering::AcqRel)
+        self.fractal.agent_roster_history_wanted.swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
     fn warn_if_agent_roster_overdue(&self) {
-        let requested = self.smalltalk.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire);
+        let requested = self.fractal.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire);
         let waited = (now_ms() as u64).saturating_sub(requested);
         if requested != 0 && waited > AGENT_ROSTER_OVERDUE_MS
-            && !self.smalltalk.agent_roster_overdue_warned.swap(true, std::sync::atomic::Ordering::AcqRel)
+            && !self.fractal.agent_roster_overdue_warned.swap(true, std::sync::atomic::Ordering::AcqRel)
         {
             eprintln!("st3: WARN an agents roster refresh asked for {} s ago is still unanswered; \
                 serving the newest published roster", waited / 1000);
@@ -819,11 +819,11 @@ impl SeatsStore for Store {
     }
 
     fn subscribe_agent_roster(&self) -> tokio::sync::watch::Receiver<u64> {
-        self.smalltalk.agent_roster_published.subscribe()
+        self.fractal.agent_roster_published.subscribe()
     }
 
     fn agent_roster_revision(&self) -> u64 {
-        *self.smalltalk.agent_roster_published.borrow()
+        *self.fractal.agent_roster_published.borrow()
     }
 
     fn agent_queue_valid_until(&self, now: u128, agent: Option<&str>) -> Result<Option<u128>> {
@@ -855,7 +855,7 @@ impl SeatsStore for Store {
         let valid = |entry: &&runtime::AgentResourcesEntry| {
             entry.valid_until_unix_ms.is_none_or(|expiry| now < expiry)
         };
-        let cache = self.smalltalk.agent_page_refs_cache.lock()
+        let cache = self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned");
         if let Some(entry) = cache.iter().filter(valid).find(|entry| entry.index == index && entry.history == history) {
             let items = Arc::clone(&entry.items);
@@ -871,7 +871,7 @@ impl SeatsStore for Store {
             }
             _ => (Arc::new(build()?), self.agent_queue_valid_until(now, None)?),
         };
-        let mut cache = self.smalltalk.agent_page_refs_cache.lock()
+        let mut cache = self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned");
         cache.push_back(runtime::AgentResourcesEntry {
             index, local: 0, history, covered: None, valid_until_unix_ms, items: Arc::clone(&items),
@@ -965,8 +965,8 @@ impl SeatsStore for Store {
         }).cloned().collect::<Vec<_>>();
         let fault_retries = self.agent_roster_fault_retries(history);
         let resources = match exact {
-            Some(_) => &self.smalltalk.exact_agent_resources_cache,
-            None => &self.smalltalk.agent_resources_cache,
+            Some(_) => &self.fractal.exact_agent_resources_cache,
+            None => &self.fractal.agent_resources_cache,
         };
         // The exact cache holds one entry per agent: only this agent's entries are its rows.
         let own = |entry: &&runtime::AgentResourcesEntry| exact.is_none_or(|agent| exact_agent_entry(entry, agent));
@@ -1112,7 +1112,7 @@ impl SeatsStore for Store {
                     });
                 }
                 #[cfg(any(test, feature = "test-support"))]
-                self.smalltalk.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = previous.items.iter()
                     .filter(|item| {
                         let id = item["id"].as_str().unwrap_or_default();
@@ -1138,7 +1138,7 @@ impl SeatsStore for Store {
             None => {
                 let _rebuild = self.start_roster_rebuild(invalidation, index);
                 #[cfg(any(test, feature = "test-support"))]
-                self.smalltalk.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.fractal.agent_resources_builds.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut items = crate::performance::task("roster/card-projection",
                     || build(selected.map(|names| (names, &[][..]))))?;
                 #[cfg(any(test, feature = "test-support"))]
@@ -1198,7 +1198,7 @@ impl SeatsStore for Store {
         };
         drop(cache);
         if complete {
-            self.smalltalk.agent_roster_published.send_modify(|revision| *revision += 1);
+            self.fractal.agent_roster_published.send_modify(|revision| *revision += 1);
         }
         Ok(select(&items))
     }
@@ -1227,7 +1227,7 @@ impl SeatsStore for Store {
             roster_local_frontier(&self.readers.get(), index)
         })?;
         let selected = BTreeSet::from([agent.to_owned()]);
-        Ok(self.smalltalk.exact_agent_resources_cache.lock()
+        Ok(self.fractal.exact_agent_resources_cache.lock()
             .expect("exact agent resources cache poisoned").iter().rev()
             .find(|entry| exact_agent_entry(entry, agent)
                 && entry.index == index && entry.local == local && entry.history == history)
@@ -1241,7 +1241,7 @@ impl SeatsStore for Store {
             history: bool,
         ) -> Option<Arc<Vec<Value>>> {
         let now = now_ms();
-        self.smalltalk.agent_page_refs_cache.lock()
+        self.fractal.agent_page_refs_cache.lock()
             .expect("agent page refs cache poisoned")
             .iter()
             .find(|entry| entry.index == index && entry.history == history
@@ -1722,8 +1722,8 @@ impl SeatsStore for Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h67815d20ea1f owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
-             WHERE owner_run IN (
+            /* sqlite-large-value: allow-for-now lv-h738ce7626839 owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
+             WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
             [run_id],
@@ -1734,7 +1734,7 @@ impl SeatsStore for Store {
                  FROM desired
                  JOIN mission_runs
                    ON desired.owner_run='mission-run/' || mission_runs.id
-                 WHERE mission_runs.root_run_id=?1
+                 WHERE mission_runs.root_run_id=?1 AND desired.subject NOT LIKE 'resource/uri/%'
                  ORDER BY desired.subject",
             )?;
             statement
@@ -1870,8 +1870,8 @@ impl SeatsStore for Store {
         ) -> Result<(ResourceObservationOutcome, bool), St3Error> {
         let fence = resource_preparation::Fence::new(self);
         for pass in 0..2 {
-            let prepared = fence.prepare_with_actuals(self, |connection, serial| {
-                resource_preparation::inputs_with_actuals(
+            let prepared = fence.prepare_with_actuals(self, |connection, _| {
+                resource_preparation::read_inputs(
                     connection,
                     resource_preparation::Observation {
                         observer,
@@ -1880,10 +1880,6 @@ impl SeatsStore for Store {
                         resource,
                         facts: &canonical_json_value(facts),
                         subscriptions,
-                    },
-                    &mut |subject| match serial {
-                        Some(serial) => self.smalltalk.observer_actuals.read(connection, subject, serial),
-                        None => latest_actual(connection, subject),
                     },
                 )
             });
@@ -2130,12 +2126,12 @@ impl SeatsStore for Store {
             token: &str,
             build: impl FnOnce() -> Result<Option<crate::model::PlacementFence>>,
         ) -> Result<Option<Arc<crate::model::PlacementFence>>> {
-        if let Some(fence) = self.smalltalk.placement_cache.lock()
+        if let Some(fence) = self.fractal.placement_cache.lock()
             .unwrap_or_else(PoisonError::into_inner).get(token) {
             return Ok(fence.clone());
         }
         let fence = build()?.map(Arc::new);
-        let mut cache = self.smalltalk.placement_cache.lock()
+        let mut cache = self.fractal.placement_cache.lock()
             .unwrap_or_else(PoisonError::into_inner);
         if cache.len() >= ACTUAL_CACHE_LIMIT { cache.clear(); }
         cache.insert(token.to_owned(), fence.clone());
@@ -2188,12 +2184,17 @@ impl SeatsStore for Store {
         let connection = self.readers.get();
         let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
         let subject = subject.as_str();
+        // Seek to this incarnation's observations rather than read every earlier incarnation's.
+        // A body without fields has no state, so the wider incarnation expression adds no match.
         let found: i64 = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims
-             WHERE subject=?1 AND kind='harness.observed'
-               AND json_extract(body, '$.fields.incarnation_id')=?2
-               AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
-               AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')",
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_harness_incarnation_accepted_index
+                 WHERE subject=?1 AND kind='harness.observed'
+                   AND {INCARNATION_OF_CLAIM}=?2
+                   AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
+                   AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')"
+            )
+            .as_str(),
             params![subject, incarnation],
             |row| row.get(0),
         )?;

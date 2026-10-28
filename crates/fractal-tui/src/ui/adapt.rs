@@ -8,7 +8,7 @@ use crate::model::{Model, clean_message_text};
 use serde_json::Value;
 #[cfg(test)]
 use fractal_client::TimelineEntry;
-use fractal_client::{MissionStep, WorkLabel};
+use fractal_client::WorkLabel;
 use std::collections::BTreeMap;
 #[cfg(test)]
 use std::collections::BTreeSet;
@@ -49,12 +49,8 @@ pub struct Extras {
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
 }
 
-fn now() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
-fn age(then: &str) -> String {
-    let label = crate::age_label(then, &now());
+fn age(then: &str, now: &str) -> String {
+    let label = crate::age_label(then, now);
     label.trim_end_matches(" ago").to_owned()
 }
 
@@ -74,24 +70,12 @@ fn loaded_or_why<T>(snapshot: bool, items: Vec<T>, why: Option<&String>) -> Load
     }
 }
 
-/// The host this stui talks to, from whichever window has loaded.
+/// The host this Fractal TUI talks to, from whichever window has loaded.
 fn gateway(model: &Model) -> Option<String> {
     [&model.missions, &model.agents, &model.now, &model.sessions]
         .into_iter()
         .find_map(|collection| collection.snapshot.as_ref())
         .map(|snapshot| snapshot.host_id.clone())
-}
-
-/// A step st sent with some mission, and that mission.
-fn find_step<'a>(model: &'a Model, id: &str) -> Option<(&'a fractal_client::Mission, &'a MissionStep)> {
-    model.missions().find_map(|mission| {
-        mission
-            .run_details
-            .iter()
-            .flat_map(|run| run.steps.iter().flatten())
-            .find(|step| step.id == id)
-            .map(|step| (mission, step))
-    })
 }
 
 /// "Mission › step" for a step an agent holds or has queued, as st named it.
@@ -104,33 +88,21 @@ fn label_text(model: &Model, label: &WorkLabel) -> String {
     format!("{mission} › {}", label.path)
 }
 
-/// Who asked: the agent's name, or the tail of its id; "An agent" when st does not say.
-fn requester_name(model: &Model, id: Option<&str>) -> String {
-    id.map(|id| {
-        model
-            .agents()
-            .find(|agent| agent.header.id == id)
-            .map(crate::agent_label)
-            .unwrap_or_else(|| short(id))
-    })
-    .unwrap_or_else(|| "An agent".into())
-}
-
 fn short(id: &str) -> String {
     id.trim_start_matches("mission/")
         .trim_start_matches("agent/")
         .to_owned()
 }
 
-fn missions(model: &Model) -> Vec<Mission> {
+fn missions(model: &Model, person: &str, now: &str) -> Vec<Mission> {
     fractal_ui_model::missions::adapt(
         model.missions(),
         model.agents(),
         model.attention(),
-        &now(),
+        person,
+        now,
         &fractal_ui_model::missions::Display {
             mission_label: &crate::mission_display_label,
-            agent_label: &crate::agent_label,
             age_label: &crate::age_label,
             clean_text: &clean_message_text,
         },
@@ -153,7 +125,43 @@ pub fn offline_grace() -> std::time::Duration {
     })
 }
 
+/// Render shared presentation prose without changing its serialized spelling.
+pub(super) fn human_presentation(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match text {
+        "a step is ready; st has not said which agent takes it" => {
+            Cow::Borrowed("a step is ready; Fractal has not said which agent takes it")
+        }
+        "st keeps this open and starts other missions when something happens" => {
+            Cow::Borrowed("Fractal keeps this open and starts other missions when something happens")
+        }
+        "st does not say: an older st, or one that has not read its agents yet" => {
+            Cow::Borrowed("Fractal does not say: an older version, or one that has not read its agents yet")
+        }
+        "st names a card this client does not know: answer it with st alerts." => {
+            Cow::Borrowed("Fractal names a card this client does not know: answer it with fractal alerts.")
+        }
+        "st does not say what this is: this host's st is older, or has not presented it yet. Answer it with st alerts." => {
+            Cow::Borrowed("Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts.")
+        }
+        _ => {
+            if let Some(reason) = text.strip_prefix("Its st channel is not attached, so its mail is held") {
+                Cow::Owned(format!("Its Fractal channel is not attached, so its mail is held{reason}"))
+            } else if let Some(state) = text.strip_suffix(" · st does not say") {
+                Cow::Owned(format!("{state} · Fractal does not say"))
+            } else {
+                Cow::Borrowed(text)
+            }
+        }
+    }
+}
+
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
+    world_at(model, person, extras, &chrono::Utc::now().to_rfc3339())
+}
+
+/// Adapt a snapshot using one explicit clock for all timestamp presentation.
+pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) -> World {
     let restarting = extras
         .offline_since
         .is_some_and(|since| since.elapsed() < offline_grace());
@@ -170,14 +178,20 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let host = gateway(model)
         .map(|host| host.trim_start_matches("host/").to_owned())
         .unwrap_or_else(|| "this machine".into());
-    let attention = attention(model, extras);
-    let missions = missions(model);
+    let attention = attention_at(model, extras, now);
+    let missions = missions(model, person, now);
     let quiet = missions
         .iter()
         .filter(|mission| {
             !matches!(
                 mission.word,
-                Word::Decision | Word::Done | Word::Failed | Word::Cancelled | Word::NotStarted
+                // A mission st serves no word for is not known to be quiet.
+                Word::Decision
+                    | Word::Done
+                    | Word::Failed
+                    | Word::Cancelled
+                    | Word::NotStarted
+                    | Word::Unknown
             ) && !mission.system
         })
         .count();
@@ -210,7 +224,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             extras
                 .degraded
                 .iter()
-                .map(|why| format!("live stream: {why} · st answers, reconnecting")),
+                .map(|why| format!("live stream: {why} · Fractal answers, reconnecting")),
         )
         .collect();
     World {
@@ -224,10 +238,10 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         settled: extras.attention_live && extras.agents_live,
         active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
-        agents: loaded_or_why(model.agents.snapshot.is_some(), agents(model, &missions), extras.window_errors.get("Agents")),
+        agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
-        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model), extras.window_errors.get("machines")),
-        worktrees: Load::Ready(super::demo::world().worktrees.items().to_vec()),
+        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model, now), extras.window_errors.get("machines")),
+        worktrees: Load::Failed("Worktrees are not modeled by the graph".into()),
         devices: loaded_or_why(
             model.devices.snapshot.is_some(),
             model
@@ -256,6 +270,10 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Ok(period)) => period.limits.clone(),
             _ => Vec::new(),
         },
+        usage_accounts: match &model.usage {
+            Some(Ok(period)) => period.accounts.clone(),
+            _ => Vec::new(),
+        },
         agent_messages: match &model.usage {
             Some(Ok(period)) => period.agent_messages.clone(),
             _ => None,
@@ -266,7 +284,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Ok(list)) => Load::Ready(
                 list.items
                     .iter()
-                    .map(|item| connected(item, model.member_build.as_deref()))
+                    .map(|item| connected(item, model.member_build.as_deref(), now))
                     .collect(),
             ),
             Some(Err(why)) => Load::Failed(why.clone()),
@@ -277,7 +295,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     }
 }
 
-fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>) -> Connected {
+fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>, now: &str) -> Connected {
     let client = item.client.clone().unwrap_or_default();
     Connected {
         older: member_build.is_some_and(|member| older_than_member(&client, member)),
@@ -288,9 +306,9 @@ fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>
         via: item.via.clone(),
         connected: item.connected,
         when: if item.connected {
-            format!("since {}", age(&item.since))
+            format!("since {}", age(&item.since, now))
         } else {
-            format!("seen {} ago", age(&item.last_seen))
+            format!("seen {} ago", age(&item.last_seen, now))
         },
         follows: item.follows.clone(),
     }
@@ -318,203 +336,231 @@ fn older_than_member(client: &str, member: &str) -> bool {
 
 // ------------------------------------------------------------------ attention
 
+/// The Now group st names (`presentation.tier`, a words.json id).
+fn tier(id: &str) -> Option<Tier> {
+    match id {
+        "stopped" => Some(Tier::Stopped),
+        "alert" => Some(Tier::Alert),
+        "today" => Some(Tier::Today),
+        "later" => Some(Tier::Later),
+        _ => None,
+    }
+}
+
+/// Who Fractal names, as a person reads it: an agent by its label and id, Fractal's own
+/// machinery as "Fractal", a mission or a person as Fractal labels it.
+fn who(actor: &fractal_client::AttentionActor) -> String {
+    if actor.label == "st" {
+        "Fractal".into()
+    } else if actor.id.starts_with("agent/") && actor.label != actor.id {
+        format!("{} · {}", actor.label, actor.id)
+    } else {
+        actor.label.clone()
+    }
+}
+
+/// The attention rows st puts on Now, as st presents them (`Attention.presentation`): its
+/// group, its card, who Chat about this reaches, who raised it and the step it holds. The
+/// client keeps no derivation of its own. A row st puts on no Now is not shown; one st places
+/// in a way this client does not know shows what st says, as an unplaced card.
+#[cfg(test)]
 fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
+    attention_at(model, extras, &chrono::Utc::now().to_rfc3339())
+}
+
+fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
+    let question_agents: std::collections::BTreeSet<_> = model.agents()
+        .filter(|agent| extras.agents_live && agent.ask.as_deref() == Some("question"))
+        .map(|agent| agent.header.id.as_str())
+        .collect();
     model
         .attention()
         .filter_map(|item| {
-            let step = item
-                .step_run_id
-                .as_ref()
-                .and_then(|id| find_step(model, id))
-                .map(|(_, step)| step.path.clone());
             let mission = item.mission_id.clone();
-            let (tier, kind) = match item.attention_kind.as_str() {
-                "human-gate" => (
-                    Tier::Stopped,
-                    AttentionKind::Review {
-                        question: item.detail.clone(),
-                        because: "the step cannot finish until you answer".into(),
-                        look_at: item
-                            .target_states
-                            .iter()
-                            .map(|target| (target.id.clone(), target.state.clone()))
-                            .chain(
-                                item.targets
-                                    .iter()
-                                    .filter(|target| {
-                                        !item.target_states.iter().any(|state| &state.id == *target)
-                                    })
-                                    .map(|target| ("review".to_owned(), target.clone())),
-                            )
-                            .collect(),
-                        step: step.clone().unwrap_or_default(),
-                        feedback: item.review_mode.as_deref() == Some("feedback"),
-                    },
+            let presented = item.presentation.as_ref();
+            let path = presented
+                .and_then(|presentation| presentation.waiting.as_ref())
+                .map(|waiting| waiting.path.clone());
+            // Who asked, as st labels them; "An agent" when st names nobody.
+            let from = || {
+                item.requester_id
+                    .as_ref()
+                    .and(presented.and_then(|presentation| presentation.raised_by.as_ref()))
+                    .map(|raised_by| raised_by.label.clone())
+                    .unwrap_or_else(|| "An agent".into())
+            };
+            let request = || AttentionKind::Request {
+                from: from(),
+                from_id: item.requester_id.clone().unwrap_or_default(),
+                question: clean_message_text(
+                    item.request
+                        .as_ref()
+                        .map_or(&item.detail, |request| &request.question),
                 ),
-                "launch-approval" => (
-                    Tier::Today,
-                    AttentionKind::Launch {
-                        planner: "The planner".into(),
-                        name: mission
-                            .as_deref()
-                            .map(short)
-                            .unwrap_or_else(|| item.title.clone()),
-                        preview: extras
-                            .previews
-                            .get(&item.header.id)
-                            .cloned()
-                            .unwrap_or(Load::Loading),
-                    },
-                ),
-                "revision-approval" => (
-                    Tier::Today,
-                    AttentionKind::Revision {
-                        reason: item.detail.clone(),
-                        changes: vec![],
-                    },
-                ),
-                // Information the person asked for: nothing waits on it.
-                "person-step" if let Some(update) = &item.update => (
-                    Tier::Later,
-                    AttentionKind::Update {
-                        from: requester_name(model, item.requester_id.as_deref()),
-                        body: clean_message_text(
-                            update
-                                .summary
-                                .as_deref()
-                                .filter(|_| item.detail.trim().is_empty())
-                                .unwrap_or(&item.detail),
-                        ),
-                        about: update.about.clone(),
-                        subjects: update
-                            .subjects
-                            .iter()
-                            .map(|subject| {
-                                (
-                                    subject.label.clone(),
-                                    subject
-                                        .url
-                                        .clone()
-                                        .or_else(|| subject.reference.clone())
-                                        .unwrap_or_default(),
+                structured: item.request.clone().map(Box::new),
+                images: request_images(item.request.as_ref().map(|request| &request.attachments), &item.source_id),
+            };
+            // st's alert flag, read as st's own CLI reads it: from a daemon that predates the
+            // flag, every row but an update is one.
+            let alert = item.alert.unwrap_or(item.update.is_none());
+            let fallback = if alert { Tier::Stopped } else { Tier::Later };
+            let unplaced = |why: &str| AttentionKind::Unplaced {
+                text: clean_message_text(&item.detail),
+                why: why.into(),
+                alert,
+            };
+            let (tier, kind) = match presented {
+                Some(presentation) => {
+                    // A null group or card is a row st puts on no Now.
+                    let (Some(group), Some(card)) =
+                        (presentation.tier.as_deref(), presentation.kind.as_deref())
+                    else {
+                        return None;
+                    };
+                    let kind = match card {
+                        kind @ ("review" | "feedback") => AttentionKind::Review {
+                            question: item.detail.clone(),
+                            because: "the step cannot finish until you answer".into(),
+                            look_at: item
+                                .target_states
+                                .iter()
+                                .map(|target| (target.id.clone(), target.state.clone()))
+                                .chain(
+                                    item.targets
+                                        .iter()
+                                        .filter(|target| {
+                                            !item.target_states.iter().any(|state| &state.id == *target)
+                                        })
+                                        .map(|target| ("review".to_owned(), target.clone())),
                                 )
-                            })
-                            .collect(),
-                    },
-                ),
-                // An agent stopped on the person: a request to answer, not a fault to clear.
-                "person-step" | "agent-request" => (
-                    Tier::Stopped,
-                    AttentionKind::Request {
-                        from: requester_name(model, item.requester_id.as_deref()),
-                        from_id: item.requester_id.clone().unwrap_or_default(),
-                        question: clean_message_text(
-                            item.request
+                                .collect(),
+                            step: path.clone().unwrap_or_default(),
+                            feedback: kind == "feedback",
+                        },
+                        "launch" => AttentionKind::Launch {
+                            planner: "The planner".into(),
+                            name: mission
+                                .as_deref()
+                                .map(short)
+                                .unwrap_or_else(|| item.title.clone()),
+                            preview: extras
+                                .previews
+                                .get(&item.header.id)
+                                .cloned()
+                                .unwrap_or(Load::Loading),
+                        },
+                        "revision" => AttentionKind::Revision {
+                            reason: item.detail.clone(),
+                            changes: vec![],
+                        },
+                        "update" => AttentionKind::Update {
+                            from: from(),
+                            body: clean_message_text(
+                                item.update
+                                    .as_ref()
+                                    .and_then(|update| update.summary.as_deref())
+                                    .filter(|_| item.detail.trim().is_empty())
+                                    .unwrap_or(&item.detail),
+                            ),
+                            about: item
+                                .update
                                 .as_ref()
-                                .map_or(&item.detail, |request| &request.question),
+                                .map(|update| update.about.clone())
+                                .unwrap_or_default(),
+                            subjects: item
+                                .update
+                                .iter()
+                                .flat_map(|update| &update.subjects)
+                                .map(|subject| {
+                                    (
+                                        subject.label.clone(),
+                                        subject
+                                            .url
+                                            .clone()
+                                            .or_else(|| subject.reference.clone())
+                                            .unwrap_or_default(),
+                                    )
+                                })
+                                .collect(),
+                        },
+                        // A registered kind's request: its reply form names the fields.
+                        "request" if item.attention_kind.starts_with("custom.") => AttentionKind::Request {
+                            from: from(),
+                            from_id: item.requester_id.clone().unwrap_or_default(),
+                            question: format!(
+                                "{}\n\n{}\nSource: {}",
+                                item.detail,
+                                crate::custom_form_hint(item.custom_form.as_ref()),
+                                item.source_id
+                            ),
+                            structured: None,
+                            images: Vec::new(),
+                        },
+                        "request" => request(),
+                        // A prompt the seat's harness shows and waits on. Claude's permission
+                        // prompts can be answered here; the others are answered in the seat's
+                        // terminal.
+                        "prompt" => AttentionKind::Prompt {
+                            seat: presentation
+                                .agent
+                                .as_ref()
+                                .map(|agent| agent.label.clone())
+                                .unwrap_or_else(|| short(&item.source_id)),
+                            seat_id: item.source_id.clone(),
+                            text: clean_message_text(&item.detail),
+                            question: question_agents.contains(item.source_id.as_str()),
+                            answers: item
+                                .action_parameters
+                                .get("prompt.respond")
+                                .and_then(|parameters| parameters["answers"].as_array())
+                                .map(|answers| {
+                                    answers.iter().filter_map(Value::as_str).map(str::to_owned).collect()
+                                })
+                                .unwrap_or_default(),
+                            episode: item.episode.clone(),
+                            call: item
+                                .action_parameters
+                                .get("prompt.respond")
+                                .and_then(|parameters| parameters.get("call_id"))
+                                .map(|call| call.as_str().map(str::to_owned)),
+                        },
+                        "login" => AttentionKind::Login {
+                            text: clean_message_text(&item.detail),
+                            seats: item.targets.clone(),
+                        },
+                        // st sends each fault to the agent that owns it.
+                        "fault" => return None,
+                        // A newer st's card: show what st says, never drop it.
+                        _ => unplaced(
+                            "Fractal names a card this client does not know: answer it with fractal alerts.",
                         ),
-                        structured: item.request.clone().map(Box::new),
-                        images: request_images(item.request.as_ref().map(|request| &request.attachments), &item.source_id),
-                    },
+                    };
+                    // A group this client does not know shows where st's alert flag puts it.
+                    (tier(group).unwrap_or(fallback), kind)
+                }
+                // st puts neither a message nor a fault on Now, whatever it presents.
+                None if matches!(item.attention_kind.as_str(), "unread-message" | "fault") => {
+                    return None;
+                }
+                // An st that presents nothing (an older st, or a row it has not presented yet)
+                // gets no card guessed from the row: it shows what st says, where st's alert
+                // flag puts it, and offers no answer of its own.
+                None => (
+                    fallback,
+                    unplaced(
+                        "Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts.",
+                    ),
                 ),
-                custom if custom.starts_with("custom.") => (
-                    Tier::Today,
-                    AttentionKind::Request {
-                        from: requester_name(model, item.requester_id.as_deref()),
-                        from_id: item.requester_id.clone().unwrap_or_default(),
-                        question: format!(
-                            "{}\n\n{}\nSource: {}",
-                            item.detail,
-                            crate::custom_form_hint(item.custom_form.as_ref()),
-                            item.source_id
-                        ),
-                        structured: None,
-                        images: Vec::new(),
-                    },
-                ),
-                // A prompt the seat's harness shows and waits on. Claude's permission prompts
-                // can be answered here; the others are answered in the seat's terminal.
-                "harness-prompt" => (
-                    Tier::Stopped,
-                    AttentionKind::Prompt {
-                        seat: requester_name(model, Some(&item.source_id)),
-                        seat_id: item.source_id.clone(),
-                        text: clean_message_text(&item.detail),
-                        answers: item
-                            .action_parameters
-                            .get("prompt.respond")
-                            .and_then(|parameters| parameters["answers"].as_array())
-                            .map(|answers| {
-                                answers.iter().filter_map(Value::as_str).map(str::to_owned).collect()
-                            })
-                            .unwrap_or_default(),
-                        episode: item.episode.clone(),
-                        call: item
-                            .action_parameters
-                            .get("prompt.respond")
-                            .and_then(|parameters| parameters.get("call_id"))
-                            .map(|call| call.as_str().map(str::to_owned)),
-                    },
-                ),
-                "harness-login" => (
-                    Tier::Stopped,
-                    AttentionKind::Login {
-                        text: clean_message_text(&item.detail),
-                        seats: item.targets.clone(),
-                    },
-                ),
-                // Messages stay in conversations, and st sends each fault to the agent that
-                // owns it.
-                _ => return None,
             };
             let conversations = if item.conversation_ids.is_empty() {
                 item.conversation_id.iter().cloned().collect()
             } else {
                 item.conversation_ids.clone()
             };
-            // st names the agent whose conversation an alert belongs to; an older st does not,
-            // and then it is the step's claimant or the agent working in the mission.
-            let agent = item
-                .conversation_id
-                .clone()
-                .or_else(|| {
-                    item.step_run_id
-                        .as_ref()
-                        .and_then(|id| find_step(model, id))
-                        .and_then(|(_, step)| step.claimant.clone())
-                })
-                .or_else(|| {
-                    // An agent working in the mission, for a gate that has no claimant.
-                    item.mission_id.as_ref().and_then(|mission| {
-                        model
-                            .agents()
-                            .find(|agent| {
-                                agent
-                                    .current_work
-                                    .iter()
-                                    .any(|work| &work.mission_id == mission)
-                            })
-                            .map(|agent| agent.header.id.clone())
-                    })
-                })
-                .or_else(|| {
-                    item.source_id
-                        .starts_with("agent/")
-                        .then(|| item.source_id.clone())
-                })
-                .or_else(|| match &kind {
-                    AttentionKind::Message { from, .. } if from.starts_with("agent/") => {
-                        Some(from.clone())
-                    }
-                    AttentionKind::Request { from_id, .. } if from_id.starts_with("agent/") => {
-                        Some(from_id.clone())
-                    }
-                    AttentionKind::Update { .. } => item
-                        .requester_id
-                        .clone()
-                        .filter(|id| id.starts_with("agent/")),
-                    _ => None,
-                });
+            let agent = match presented {
+                Some(presentation) => presentation.agent.as_ref().map(|agent| agent.id.clone()),
+                None => item.conversation_id.clone(),
+            };
             let related = item
                 .targets
                 .iter()
@@ -528,37 +574,13 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                     (target.clone(), state)
                 })
                 .collect();
-            // Who raised it: the requester st names, else the agent the item is about. st's own
-            // machinery reads as st.
-            let raised_by = item
-                .requester_id
-                .clone()
-                .or_else(|| {
-                    item.extra
-                        .get("actor")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
-                .or_else(|| agent.clone())
-                .map(|who| match who.as_str() {
-                    "daemon/runtime" | "agent/st3/reconciler" => "st".to_owned(),
-                    _ => model
-                        .agents()
-                        .find(|candidate| candidate.header.id == who)
-                        .map(|candidate| format!("{} · {who}", crate::agent_label(candidate)))
-                        .unwrap_or(who),
-                })
-                // A gate or fault nobody filed by hand comes from its mission.
-                .or_else(|| {
-                    item.mission_id.as_ref().map(|mission| {
-                        format!("the {} mission", mission.trim_start_matches("mission/"))
-                    })
-                });
             Some(Attention {
                 id: item.header.id.clone(),
                 agent,
                 related,
-                raised_by,
+                raised_by: presented
+                    .and_then(|presentation| presentation.raised_by.as_ref())
+                    .map(who),
                 blocked: item.blocked.as_ref().map(|blocked| Blocked {
                     step: blocked.step.clone(),
                     goal: clean_message_text(&blocked.goal),
@@ -578,8 +600,8 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                     })
                     .map(|title| clean_message_text(&title))
                     .unwrap_or_else(|| clean_message_text(&item.title)),
-                waiting: step.map(|step| format!("step {step}")),
-                age: age(&item.requested_at),
+                waiting: path.map(|path| format!("step {path}")),
+                age: age(&item.requested_at, now),
                 mission,
                 kind,
                 actions: item.actions.clone(),
@@ -631,7 +653,7 @@ pub fn preview(name: &str, normalized: &Value) -> MissionPreview {
             let assignee = match selector["kind"].as_str() {
                 Some("assigned") => selector["agent"].as_str().map(short).unwrap_or_default(),
                 Some("available") => "any of several".into(),
-                Some("agentless") => "st".into(),
+                Some("agentless") => "Fractal".into(),
                 _ => "—".into(),
             };
             if let Some(agent) = selector["agent"].as_str()
@@ -718,7 +740,12 @@ fn agent_state(agent: &fractal_client::Agent) -> AgentState {
     }
 }
 
+#[cfg(test)]
 fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
+    agents_at(model, missions, &chrono::Utc::now().to_rfc3339())
+}
+
+fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
     let mut agents = model
         .agents()
         .map(|agent| {
@@ -733,13 +760,14 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
             Agent {
                 id: agent.header.id.clone(),
                 name: crate::agent_label(agent),
+                lifecycle: agent.lifecycle,
                 harness: harness(agent.driver.as_deref()),
                 state,
                 host,
                 worktree: agent.checkout.as_ref().map(fractal_client::checkout_label),
                 mission: work.map(|work| work.mission_id.clone()),
                 step: work.map(|work| work.path.clone()),
-                activity: age(&agent.header.updated_at),
+                activity: age(&agent.header.updated_at, now),
                 unmanaged: false,
                 // A running agent with a runtime is worth trying; opening it finds the terminal.
                 terminal: !agent.runtime_ids.is_empty()
@@ -749,6 +777,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                     .first()
                     .map(|relation| relation.agent_id.clone()),
                 details: AgentDetails {
+                    mail_custody: agent.mail_custody.as_ref().map(|custody| format!("retired; mail held for {}", custody.successor)),
                     progress: work
                         .and_then(|work| {
                             let reported = step_progress(missions, &work.id);
@@ -761,7 +790,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                             }
                         }),
                     goal: work.and_then(|work| work.goal.as_deref().map(clean_message_text)),
-                    claimed: work.map(|work| format!("{} ago", age(&work.since))),
+                    claimed: work.map(|work| format!("{} ago", age(&work.since, now))),
                     next: agent
                         .next_work
                         .as_ref()
@@ -812,7 +841,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         id: subagent.id.clone(),
                         kind: subagent.subagent_type.clone(),
                         description: subagent.description.clone(),
-                        age: subagent.started_at.as_deref().map(age).unwrap_or_default(),
+                        age: subagent.started_at.as_deref().map(|at| age(at, now)).unwrap_or_default(),
                     })
                     .collect(),
                 // An st too old to serve a presentation: show the state it reports.
@@ -843,13 +872,14 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                     .map(|path| path.rsplit('/').next().unwrap_or(path))
                     .unwrap_or("?")
             ),
+            lifecycle: None,
             harness: harness(driver),
             state: AgentState::Unknown,
             host: gateway.clone(),
             worktree: workspace,
             mission: None,
             step: None,
-            activity: age(&session.header.updated_at),
+            activity: age(&session.header.updated_at, now),
             unmanaged: true,
             parent: None,
             details: AgentDetails::default(),
@@ -866,8 +896,9 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
 /// A member heard from within this long is online, even without a direct link.
 const HEARD_RECENTLY: chrono::Duration = chrono::Duration::minutes(5);
 
-fn machines(model: &Model) -> Vec<Machine> {
+fn machines(model: &Model, now: &str) -> Vec<Machine> {
     let gateway = gateway(model).unwrap_or_default();
+    let clock = chrono::DateTime::parse_from_rfc3339(now).ok();
     model
         .machines()
         .map(|machine| {
@@ -885,7 +916,7 @@ fn machines(model: &Model) -> Vec<Machine> {
                 )
                 .filter_map(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
                 .max();
-            let recent = heard.is_some_and(|at| chrono::Utc::now() - at.to_utc() < HEARD_RECENTLY);
+            let recent = heard.zip(clock).is_some_and(|(at, now)| now - at < HEARD_RECENTLY);
             let reach = match machine.state.as_str() {
                 _ if machine.host_id == gateway => Reach::Here,
                 "local" => Reach::Here,
@@ -899,7 +930,7 @@ fn machines(model: &Model) -> Vec<Machine> {
                 reach,
                 platform: String::new(),
                 seen: heard
-                    .map(|at| crate::age_label(&at.to_rfc3339(), &now()))
+                    .map(|at| crate::age_label(&at.to_rfc3339(), now))
                     .unwrap_or_else(|| "never".into()),
                 load: Some(match machine.occupancy.running_runtimes {
                     1 => "1 running runtime".to_owned(),
@@ -917,7 +948,7 @@ fn machines(model: &Model) -> Vec<Machine> {
                         );
                         let detail = match (up, transport.last_success_at.as_deref()) {
                             (true, _) => "up".to_owned(),
-                            (false, Some(at)) => format!("down · last worked {}", age(at)),
+                            (false, Some(at)) => format!("down · last worked {}", age(at, now)),
                             (false, None) => "no direct link".to_owned(),
                         };
                         (transport.protocol.clone(), up, detail)
@@ -1030,6 +1061,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identity_labels_show_fallback_ids_only_once() {
+        for id in ["agent/example/unnamed", "person/ada"] {
+            let actor = fractal_client::AttentionActor {
+                id: id.into(),
+                label: id.into(),
+            };
+            assert_eq!(who(&actor), id);
+        }
+        let named = fractal_client::AttentionActor {
+            id: "agent/example/maintainer".into(),
+            label: "Maintainer".into(),
+        };
+        assert_eq!(who(&named), "Maintainer · agent/example/maintainer");
+    }
+
+    #[test]
+    fn human_presentation_accepts_current_and_older_shared_model_wording() {
+        let word = fractal_ui_model::missions::Word::Watching;
+        let current = "Fractal keeps this open and starts other missions when something happens";
+        // Shared explanations are human copy, not serialized state identifiers.
+        assert_eq!(word.explain(), current);
+        assert_eq!(serde_json::to_value(word).unwrap(), "watching");
+        assert_eq!(human_presentation(word.explain()), current);
+        // An older daemon or shared model can still supply the previous wording.
+        assert_eq!(
+            human_presentation("st keeps this open and starts other missions when something happens"),
+            current
+        );
+        assert_eq!(human_presentation("st"), "st");
+        assert_eq!(human_presentation("blocked · st does not say"), "blocked · Fractal does not say");
+        assert_eq!(
+            human_presentation("Its st channel is not attached, so its mail is held (reason)"),
+            "Its Fractal channel is not attached, so its mail is held (reason)"
+        );
+        // User-authored text and stable IDs are not product presentation.
+        assert_eq!(human_presentation("please run st"), "please run st");
+        assert_eq!(human_presentation("agent/st/assistant"), "agent/st/assistant");
+    }
+
+    #[test]
+    fn retired_agent_card_shows_pending_mail_custodian_in_plain_words() {
+        let mut model = Model::default();
+        model.agents = window(vec![serde_json::json!({
+            "id":"agent/example/old", "kind":"agent", "revision":"retirement",
+            "updated_at":"2026-10-15T10:00:00Z", "name":"example/old",
+            "state":"retired", "reachability":"unknown", "runtime_ids":[], "under":[],
+            "mail_custody":{"successor":"agent/example/new","state":"pending"}
+        })]);
+        let cards = agents(&model, &[]);
+        assert_eq!(cards[0].details.mail_custody.as_deref(),
+            Some("retired; mail held for agent/example/new"));
+    }
+
+    #[test]
     fn standalone_native_image_blocks_get_a_focusable_inline_row() {
         let timeline = serde_json::from_value::<Vec<TimelineEntry>>(json!([{
             "id":"picture","sequence":1,"revision":1,"timestamp":"2026-10-08T10:00:00Z",
@@ -1089,15 +1174,14 @@ mod tests {
         let mut model = Model::default();
         model.actor = "person/example".into();
         model.now.items.push(
-            serde_json::from_value(serde_json::json!({
+            served(serde_json::json!({
                 "kind":"attention","id":"attention/update","revision":"one","updated_at":"2026-10-03T10:00:00Z",
                 "attention_kind":"person-step","source_id":"step-run/update-aa/update","person_id":"person/example",
                 "requester_id":"agent/example/cos","title":"The audit you asked for","detail":"All three machines run main.",
                 "priority":"normal","state":"open","requested_at":"2026-10-03T10:00:00Z","actions":["work.done"],
                 "update":{"version":1,"type":"update","about":"message/0123456789abcdef",
                           "subjects":[{"kind":"link","label":"the audit","url":"https://example.com/audit"}]}
-            }))
-            .unwrap(),
+            })),
         );
         let items = attention(&model, &Extras::default());
         let [item] = &items[..] else {
@@ -1152,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn small_talk_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
+    fn fractal_in_the_timeline_draws_as_mail_and_step_pings_as_events() {
         let timeline: Vec<TimelineEntry> = serde_json::from_value(serde_json::json!([
             {"id":"e1","sequence":4,"revision":1,"timestamp":"2026-09-29T10:00:00Z","role":"user","type":"message","final":true,
              "body":{"message_id":"message/one","from":"agent/example/harbor","to":"agent/example/cos","title":"A question"}},
@@ -1190,7 +1274,7 @@ mod tests {
         assert!(
             matches!(&entries[1].body, Body::Event(title) if title == "Mission step ready: review")
         );
-        // A harness turn's own message header is not Small Talk.
+        // A harness turn's own message header is not Fractal.
         assert!(matches!(&entries[2].body, Body::Assistant(text) if text == "On it."));
     }
 
@@ -1270,7 +1354,7 @@ mod tests {
                 "line one",
                 "line two",
                 "line",
-                "… st kept only the start of this output"
+                "… Fractal kept only the start of this output"
             ]
         );
     }
@@ -1561,7 +1645,7 @@ mod tests {
             [
                 "delivery paused, then resumed ×3",
                 "assistant: Still here.",
-                "delivery paused · st unreachable",
+                "delivery paused · Fractal unreachable",
                 "error: the harness exited",
             ]
         );
@@ -1613,7 +1697,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_skill_model_folds_the_expansion_and_stui_draws_real_lines() {
+    fn claude_skill_model_folds_the_expansion_and_tui_draws_real_lines() {
         let fixture = include_str!("../../../../fixtures/clients/transcripts/claude-skill.json");
         let timeline: Vec<TimelineEntry> = serde_json::from_str(fixture).unwrap();
         let entries = conversation(&timeline, &BTreeMap::new());
@@ -1780,9 +1864,23 @@ mod tests {
         let preview = preview("harbor/audit", &normalized);
         assert_eq!(preview.goals, vec!["Audit dependencies"]);
         assert_eq!(preview.steps[0].assignee, "example/auditor");
+        assert_eq!(preview.steps[1].assignee, "Fractal");
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
         assert_eq!(preview.agents.len(), 1);
+    }
+
+    #[test]
+    fn an_agent_named_st_keeps_its_launch_assignment_label() {
+        let normalized = json!({
+            "goals": [],
+            "display_order": ["scan"],
+            "steps": {
+                "scan": {"path": "scan", "work_selector": {"kind": "assigned", "agent": "agent/st"}, "dependencies": [], "gates": []}
+            }
+        });
+        let preview = preview("audit", &normalized);
+        assert_eq!(preview.steps[0].assignee, "st");
     }
 
     #[test]
@@ -1808,6 +1906,54 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// What st knows beside a test row: agents' labels, the steps they hold, the missions they
+    /// work in and steps' paths.
+    #[derive(Default)]
+    struct Known {
+        labels: Vec<(&'static str, &'static str)>,
+        claimants: Vec<(&'static str, &'static str)>,
+        working: Vec<(&'static str, &'static str)>,
+        paths: Vec<(&'static str, &'static str)>,
+    }
+
+    impl fractal_ui_model::attention::Fleet for Known {
+        fn agent_label(&self, agent: &str) -> Option<String> {
+            find(&self.labels, agent)
+        }
+        fn claimant(&self, step: &str) -> Option<String> {
+            find(&self.claimants, step)
+        }
+        fn working_in(&self, mission: &str) -> Option<String> {
+            find(&self.working, mission)
+        }
+        fn step_path(&self, step: &str) -> Option<String> {
+            find(&self.paths, step)
+        }
+    }
+
+    fn find(pairs: &[(&'static str, &'static str)], key: &str) -> Option<String> {
+        pairs
+            .iter()
+            .find(|(candidate, _)| *candidate == key)
+            .map(|(_, value)| (*value).to_owned())
+    }
+
+    /// An attention row as st serves it, presented with what `known` holds.
+    fn served_with<T: serde::de::DeserializeOwned>(mut row: Value, known: &Known) -> T {
+        if row.get("presentation").is_none() {
+            let facts =
+                <fractal_ui_model::attention::Facts as serde::Deserialize>::deserialize(&row).unwrap();
+            row["presentation"] =
+                serde_json::to_value(fractal_ui_model::attention::present(&facts, known)).unwrap();
+        }
+        serde_json::from_value(row).unwrap()
+    }
+
+    /// An attention row as st serves it, with no agents or steps known beyond the row.
+    fn served<T: serde::de::DeserializeOwned>(row: Value) -> T {
+        served_with(row, &Known::default())
     }
 
     /// A collection window as st serves it: an agent row carries the presentation st adds.
@@ -1921,7 +2067,7 @@ mod tests {
         assert!(matches!(live.link, Link::Live));
         assert_eq!(
             live.stale,
-            ["live stream: st closed the connection · st answers, reconnecting"]
+            ["live stream: st closed the connection · Fractal answers, reconnecting"]
         );
     }
 
@@ -1994,7 +2140,7 @@ mod tests {
 
     #[test]
     fn a_seats_status_is_what_its_step_last_reported_on_one_line() {
-        let mut mission = crate::ui::demo::world().missions.items()[0].clone();
+        let mut mission = crate::ui::demo::test_world().missions.items()[0].clone();
         mission.step_metadata.insert(
             "step-run/example/build".into(),
             fractal_ui_model::missions::StepMetadata {
@@ -2014,6 +2160,26 @@ mod tests {
         );
         assert_eq!(step_progress(&missions, "step-run/example/quiet"), None);
         assert_eq!(step_progress(&missions, "step-run/example/unknown"), None);
+    }
+
+    #[test]
+    fn agent_rows_keep_declared_lifecycle_without_inference() {
+        use fractal_client::AgentLifecycle::{Bounded, Owner, Standing, Unknown};
+
+        for lifecycle in [Some(Standing), Some(Owner), Some(Bounded), Some(Unknown), None] {
+            let mut resource = json!({
+                "id": "agent/example/keeper", "kind": "agent", "revision": "r1",
+                "updated_at": "2026-10-08T12:00:00Z", "name": "Keeper",
+                "state": "running", "reachability": "local", "harness_state": "idle",
+                "runtime_ids": [], "under": []
+            });
+            if let Some(lifecycle) = lifecycle {
+                resource["lifecycle"] = serde_json::to_value(lifecycle).unwrap();
+            }
+            let mut model = Model::default();
+            model.agents = window(vec![resource]);
+            assert_eq!(agents(&model, &[])[0].lifecycle, lifecycle);
+        }
     }
 
     #[test]
@@ -2052,7 +2218,7 @@ mod tests {
     fn a_harness_prompt_is_an_alert_in_its_seats_conversation() {
         let mut model = Model::default();
         model.actor = "person/example".into();
-        model.now.items.push(serde_json::from_value(prompt_card(true)).unwrap());
+        model.now.items.push(served(prompt_card(true)));
         let items = attention(&model, &Extras::default());
         let [item] = &items[..] else { panic!("{items:#?}") };
         assert!(item.is_alert());
@@ -2071,10 +2237,29 @@ mod tests {
     fn another_harnesss_prompt_has_no_answers_to_send() {
         let mut model = Model::default();
         model.actor = "person/example".into();
-        model.now.items.push(serde_json::from_value(prompt_card(false)).unwrap());
+        model.now.items.push(served(prompt_card(false)));
         let items = attention(&model, &Extras::default());
         let AttentionKind::Prompt { answers, .. } = &items[0].kind else { panic!() };
         assert!(answers.is_empty());
+    }
+
+    #[test]
+    fn tab_badge_question_identity_survives_missing_client_answer_actions() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.agents = window(vec![serde_json::json!({
+            "id": "agent/example/atlas", "kind": "agent", "revision": "r1",
+            "updated_at": "2026-10-10T12:00:00Z", "name": "example/atlas",
+            "state": "running", "reachability": "local", "harness_state": "blocked",
+            "ask": "question", "runtime_ids": [], "under": [],
+        })]);
+        model.now.items.push(served(prompt_card(false)));
+        let extras = Extras { agents_live: true, ..Extras::default() };
+        let items = attention(&model, &extras);
+        let AttentionKind::Prompt { question, answers, .. } = &items[0].kind else { panic!() };
+        assert!(*question);
+        assert!(answers.is_empty());
+        assert!(items[0].actions.is_empty());
     }
 
     #[test]
@@ -2082,7 +2267,7 @@ mod tests {
         let mut model = Model::default();
         model.actor = "person/example".into();
         model.now.items.push(
-            serde_json::from_value(serde_json::json!({
+            served(serde_json::json!({
                 "kind":"attention","id":"attention/login","revision":"one","updated_at":"2026-10-10T10:00:00Z",
                 "attention_kind":"harness-login","source_id":"agent/example/atlas","person_id":"person/example",
                 "alert":true,"conversation_id":"agent/example/atlas",
@@ -2090,8 +2275,7 @@ mod tests {
                 "targets":["agent/example/atlas","agent/example/harbor"],
                 "title":"2 seats on wren need you to log in","detail":"Attach and run /login.",
                 "priority":"high","state":"open","requested_at":"2026-10-10T10:00:00Z","actions":[]
-            }))
-            .unwrap(),
+            })),
         );
         let items = attention(&model, &Extras::default());
         let [item] = &items[..] else { panic!("{items:#?}") };
@@ -2099,19 +2283,263 @@ mod tests {
         assert!(matches!(&item.kind, AttentionKind::Login { seats, .. } if seats.len() == 2));
     }
 
+    /// A gate row's group, card, chat agent, raiser and held step all come from st's
+    /// presentation, never from the row's kind or the client's own lookups.
+    #[test]
+    fn st_presents_each_card_and_the_client_derives_none() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now.items.push(served(serde_json::json!({
+            "kind":"attention","id":"attention/gate","revision":"one","updated_at":"2026-10-15T10:00:00Z",
+            "attention_kind":"human-gate","source_id":"step-run/example/audit/1/review","person_id":"person/example",
+            "review_mode":"feedback","step_run_id":"step-run/example/audit/1/review","alert":true,
+            "title":"Review the audit","detail":"Ready to ship?","priority":"normal","state":"open",
+            "requested_at":"2026-10-15T10:00:00Z","actions":["review.approve","review.request-changes"],
+            "presentation":{"tier":"today","kind":"feedback",
+                "agent":{"id":"agent/example/auditor","label":"Auditor"},
+                "raised_by":{"id":"daemon/runtime","label":"st"},
+                "waiting":{"step":"step-run/example/audit/1/review","path":"review"}}
+        })));
+        let items = attention(&model, &Extras::default());
+        let [item] = &items[..] else {
+            panic!("{items:#?}")
+        };
+        // st put this gate in Today: the client follows it.
+        assert_eq!(item.tier, Tier::Today);
+        assert!(
+            matches!(&item.kind, AttentionKind::Review { feedback: true, step, .. } if step == "review")
+        );
+        assert_eq!(item.agent.as_deref(), Some("agent/example/auditor"));
+        assert_eq!(item.raised_by.as_deref(), Some("Fractal"));
+        assert_eq!(item.waiting.as_deref(), Some("step review"));
+    }
+
+    /// A row st puts on no Now (a fault goes to its agent) is not shown, whatever its kind.
+    #[test]
+    fn a_row_st_puts_on_no_now_is_not_shown() {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now.items.push(served(serde_json::json!({
+            "kind":"attention","id":"attention/fault","revision":"one","updated_at":"2026-10-15T10:00:00Z",
+            "attention_kind":"fault","source_id":"agent/example/atlas","person_id":"person/example",
+            "alert":true,"title":"Atlas keeps restarting","detail":"exited 4 times",
+            "priority":"high","state":"open","requested_at":"2026-10-15T10:00:00Z","actions":[]
+        })));
+        assert!(attention(&model, &Extras::default()).is_empty());
+    }
+
+    /// A test attention row of `attention_kind` with `fields` beside the row's own.
+    fn row(id: &str, attention_kind: &str, fields: Value) -> Value {
+        let mut row = serde_json::json!({
+            "kind":"attention","id":id,"revision":"one","updated_at":"2026-10-15T10:00:00Z",
+            "attention_kind":attention_kind,"source_id":"step-run/example/ask","person_id":"person/example",
+            "title":id,"detail":"What st says.","priority":"normal","state":"open",
+            "requested_at":"2026-10-15T10:00:00Z","actions":[]
+        });
+        row.as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        row
+    }
+
+    fn shown(rows: Vec<Value>) -> Vec<Attention> {
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        for row in rows {
+            model.now.items.push(serde_json::from_value(row).unwrap());
+        }
+        attention(&model, &Extras::default())
+    }
+
+    /// An st that presents nothing (an older st, or a row it has not presented yet) gets no
+    /// card guessed from the row: each row shows what st says, where st's alert flag puts it, as
+    /// an unplaced card with no answer of its own; a gate is never offered a request's answer. st
+    /// puts neither a message nor a fault on Now.
+    #[test]
+    fn a_row_without_a_presentation_shows_what_st_says_and_offers_no_guessed_answer() {
+        let items = shown(vec![
+            row(
+                "attention/gate",
+                "human-gate",
+                serde_json::json!({"alert": true, "actions": ["review.approve", "review.reject"]}),
+            ),
+            row(
+                "attention/note",
+                "person-step",
+                serde_json::json!({"alert": false}),
+            ),
+            // No alert flag, as from a daemon that predates it: every row but an update is one.
+            row("attention/old", "person-step", serde_json::json!({})),
+            row(
+                "attention/message",
+                "unread-message",
+                serde_json::json!({"alert": false}),
+            ),
+            row(
+                "attention/fault",
+                "fault",
+                serde_json::json!({"alert": true}),
+            ),
+        ]);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.id.as_str(), item.tier, item.is_alert()))
+                .collect::<Vec<_>>(),
+            [
+                ("attention/gate", Tier::Stopped, true),
+                ("attention/note", Tier::Later, false),
+                ("attention/old", Tier::Stopped, true),
+            ]
+        );
+        let AttentionKind::Unplaced { text, why, .. } = &items[0].kind else {
+            panic!("{:#?}", items[0].kind);
+        };
+        assert_eq!(text, "What st says.");
+        assert!(why.contains("Fractal is older"), "{why}");
+        // The gate keeps the actions st offers; the client offers none of its own.
+        assert_eq!(items[0].actions, ["review.approve", "review.reject"]);
+        assert!(
+            items
+                .iter()
+                .all(|item| item.raised_by.is_none() && item.waiting.is_none())
+        );
+    }
+
+    /// A newer st may name a group or card this client does not know: the row still shows, as
+    /// what st says, never dropped. Only a null group or card keeps a row off Now.
+    #[test]
+    fn a_group_or_card_this_client_does_not_know_still_shows() {
+        let presented = |tier: Value, kind: Value| {
+            serde_json::json!({"alert": true, "presentation": {"tier": tier, "kind": kind,
+                "agent": null, "raised_by": null, "waiting": null}})
+        };
+        let items = shown(vec![
+            row(
+                "attention/new-card",
+                "something-new",
+                presented("today".into(), "poll".into()),
+            ),
+            row(
+                "attention/new-group",
+                "person-step",
+                presented("urgent".into(), "request".into()),
+            ),
+            row(
+                "attention/off",
+                "person-step",
+                presented(Value::Null, "request".into()),
+            ),
+        ]);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.id.as_str(), item.tier))
+                .collect::<Vec<_>>(),
+            [
+                ("attention/new-card", Tier::Today),
+                ("attention/new-group", Tier::Stopped)
+            ]
+        );
+        assert!(
+            matches!(&items[0].kind, AttentionKind::Unplaced { why, .. } if why.contains("does not know"))
+        );
+        assert!(matches!(&items[1].kind, AttentionKind::Request { .. }));
+    }
+
+    /// A registered kind, a launch and a revision each show as the card st names.
+    #[test]
+    fn custom_launch_and_revision_rows_show_as_st_presents_them() {
+        let items = {
+            let mut model = Model::default();
+            model.actor = "person/example".into();
+            for value in [
+                row(
+                    "attention/custom",
+                    "custom.deploy-window",
+                    serde_json::json!({"alert": true}),
+                ),
+                row(
+                    "attention/launch",
+                    "launch-approval",
+                    serde_json::json!({"alert": true, "mission_id": "mission/example/ship"}),
+                ),
+                row(
+                    "attention/revision",
+                    "revision-approval",
+                    serde_json::json!({"alert": true}),
+                ),
+            ] {
+                model.now.items.push(served(value));
+            }
+            attention(&model, &Extras::default())
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| (item.tier, item.kind.word()))
+                .collect::<Vec<_>>(),
+            [
+                (Tier::Today, "request"),
+                (Tier::Today, "launch"),
+                (Tier::Today, "revision")
+            ]
+        );
+        assert!(
+            matches!(&items[0].kind, AttentionKind::Request { question, .. } if question.contains("Source: step-run/example/ask"))
+        );
+        assert!(
+            matches!(&items[1].kind, AttentionKind::Launch { name, .. } if name == "example/ship")
+        );
+    }
+
+    /// Chat about this reaches the agent st names: the step's claimant, else an agent working in
+    /// the mission, each with the label st gives it.
+    #[test]
+    fn chat_reaches_the_claimant_or_an_agent_working_in_the_mission() {
+        let known = Known {
+            labels: vec![("agent/example/auditor", "Auditor")],
+            claimants: vec![("step-run/example/audit/1/review", "agent/example/auditor")],
+            working: vec![("mission/example/ship", "agent/example/builder")],
+            paths: vec![("step-run/example/audit/1/review", "review")],
+        };
+        let mut model = Model::default();
+        model.actor = "person/example".into();
+        model.now.items.push(served_with(
+            row("attention/claimed", "human-gate", serde_json::json!({"alert": true,
+                "step_run_id": "step-run/example/audit/1/review", "mission_id": "mission/example/audit"})),
+            &known,
+        ));
+        model.now.items.push(served_with(
+            row(
+                "attention/working",
+                "human-gate",
+                serde_json::json!({"alert": true, "mission_id": "mission/example/ship"}),
+            ),
+            &known,
+        ));
+        let items = attention(&model, &Extras::default());
+        assert_eq!(items[0].agent.as_deref(), Some("agent/example/auditor"));
+        assert_eq!(
+            items[0].raised_by.as_deref(),
+            Some("Auditor · agent/example/auditor")
+        );
+        assert_eq!(items[0].waiting.as_deref(), Some("step review"));
+        assert_eq!(items[1].agent.as_deref(), Some("agent/example/builder"));
+    }
+
     #[test]
     fn an_update_is_not_an_alert() {
         let mut model = Model::default();
         model.actor = "person/example".into();
         model.now.items.push(
-            serde_json::from_value(serde_json::json!({
+            served(serde_json::json!({
                 "kind":"attention","id":"attention/update","revision":"one","updated_at":"2026-10-03T10:00:00Z",
                 "attention_kind":"person-step","source_id":"step-run/update-aa/update","person_id":"person/example",
                 "requester_id":"agent/example/cos","title":"The audit","detail":"Done.","alert":false,
                 "priority":"normal","state":"open","requested_at":"2026-10-03T10:00:00Z","actions":["work.done"],
                 "update":{"version":1,"type":"update","about":"message/0123456789abcdef","subjects":[]}
-            }))
-            .unwrap(),
+            })),
         );
         assert!(!attention(&model, &Extras::default())[0].is_alert());
     }
@@ -2268,7 +2696,7 @@ mod tests {
         let guidance = super::super::screens::login_guidance(agent);
         assert!(guidance.contains("Claude login required on harbor"), "{guidance}");
         assert!(guidance.contains("/login") && guidance.contains("without a restart"), "{guidance}");
-        let header = super::super::screens::agent_header(&super::super::demo::world(), agent, 100, "⠋")
+        let header = super::super::screens::agent_header(&super::super::demo::test_world(), agent, 100, "⠋")
             .lines
             .iter()
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
@@ -2295,7 +2723,7 @@ mod tests {
         })]);
         let seat = &agents(&model, &[])[0];
         assert_eq!((seat.state, seat.reported.as_deref()), (AgentState::Unknown, Some("running")));
-        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older st");
+        assert_eq!(super::super::screens::agent_shown_word(seat), "running · older Fractal");
         let world = world(&model, "person/avery", &Extras::default());
         let legend = super::super::screens::agents_list(&world, "⠋", 80)
             .legend
@@ -2303,7 +2731,7 @@ mod tests {
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(legend.contains("This host's st is older"), "{legend}");
+        assert!(legend.contains("This host's Fractal is older"), "{legend}");
     }
 
     #[test]
@@ -2334,7 +2762,7 @@ mod tests {
         assert!(!subagents[0].age.is_empty());
         assert!(
             subagents[1].age.is_empty(),
-            "st did not say when it started"
+            "Fractal did not say when it started"
         );
     }
 
@@ -2418,7 +2846,7 @@ mod tests {
 
     #[test]
     fn the_agent_header_names_the_model_beside_the_harness() {
-        let world = crate::ui::demo::world();
+        let world = crate::ui::demo::test_world();
         let mut agent = world.agents.items()[0].clone();
         assert_eq!(agent.details.model.as_deref(), Some("claude-sonnet-5-5"));
         let line = |agent: &Agent| -> String {
@@ -2460,7 +2888,7 @@ mod tests {
 
     #[test]
     fn the_clients_card_says_who_is_connected_and_notes_an_older_build_quietly() {
-        let world = crate::ui::demo::world();
+        let world = crate::ui::demo::test_world();
         let doc = crate::ui::screens::clients_card(&world, 100);
         let text: Vec<String> = doc
             .lines
@@ -2488,7 +2916,7 @@ mod tests {
 
     #[test]
     fn the_clients_card_wraps_a_long_client_instead_of_clipping_it() {
-        let world = crate::ui::demo::world();
+        let world = crate::ui::demo::test_world();
         let doc = crate::ui::screens::clients_card(&world, 44);
         let lines: Vec<String> = doc
             .lines

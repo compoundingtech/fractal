@@ -1,4 +1,4 @@
-//! The part of `store::missions` that moved up from st3-store.
+//! The part of `store::missions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_delivery::store::missions::*;
@@ -1247,6 +1247,10 @@ pub trait MissionsStore {
     fn mission_specs_for_runs(&self, runs: &[String]) -> Result<BTreeMap<String, MissionSpec>>;
     /// The mission behind each of these runs, in one read.
     fn run_missions(&self, runs: &[String]) -> Result<BTreeMap<String, String>>;
+    /// A run's header and the state of every step of its current generation, for what the run
+    /// waits on: one primary-key read of the run and a range of `step_runs_run_index`. It reads
+    /// no claims, so its cost is the run's own steps, never the store's history.
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>>;
     /// Return every current published mission definition, including definitions with no runs.
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>>;
     /// The definitions of the missions that have no run, as `mission_definitions` reads them,
@@ -1751,6 +1755,17 @@ pub trait MissionsStore {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error>;
+    /// [`Self::work_action_with_handoff`]. A renewal answers with the step's row view alone unless
+    /// `enrich_renewal`: its queue, timing, summaries and wake are folded from a reader after COMMIT.
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
     fn set_step_state(
@@ -1759,6 +1774,14 @@ pub trait MissionsStore {
             status: &str,
             reason: Option<&str>,
         ) -> Result<bool>;
+    /// Apply an evaluator transition only while the stored step is nonterminal.
+    /// Rechecks in the writer transaction; a terminal step produces no claim or update.
+    fn set_step_state_unless_terminal(
+        &self,
+        subject: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> Result<bool>;
     fn retry_step(&self, subject: &str, reason: &str, backoff_ms: u64) -> Result<bool>;
     fn retry_step_as(
             &self,
@@ -1899,10 +1922,103 @@ pub trait MissionsStore {
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>>;
 }
 
+// Both entry points share the same transaction and existing transition guards. Only
+// stale evaluator decisions refuse a terminal step; administrative transitions retain
+// their existing behavior.
+fn set_step_state_guarded(
+    store: &Store,
+    subject: &str,
+    status: &str,
+    reason: Option<&str>,
+    reject_terminal: bool,
+) -> Result<bool> {
+    let subject = normalize_step_run(subject);
+    store.connection
+        .batched(|transaction| -> Result<bool> {
+            let current: Option<StepStateRow> = transaction
+                .query_row(
+                    "SELECT step_runs.status,
+                                step_runs.generation_id=mission_runs.current_generation_id,
+                                step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
+                                run_generations.status, root_runs.status, root_runs.phase
+                         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
+                         JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
+                         JOIN run_generations ON run_generations.id=step_runs.generation_id
+                         WHERE step_runs.subject=?1",
+                    [&subject],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                            row.get(6)?,
+                            row.get(7)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((
+                current,
+                is_current,
+                current_epoch,
+                run_status,
+                run_phase,
+                generation_status,
+                root_status,
+                root_phase,
+            )) = current
+            else {
+                return Ok(false);
+            };
+            if (reject_terminal && matches!(current.as_str(), "completed" | "failed" | "cancelled"))
+                || !is_current
+                || current == status
+                || ((is_terminal_run_state(&run_status)
+                    || run_phase == "terminal"
+                    || is_terminal_generation_state(&generation_status)
+                    || is_terminal_run_state(&root_status)
+                    || root_phase == "terminal")
+                    && !matches!(status, "completed" | "failed" | "cancelled"))
+            {
+                return Ok(false);
+            }
+            let now = now_ms();
+            let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
+            transaction.execute(
+                /* sqlite-large-value: allow-for-now lv-hed370910e4dc owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, blocked_reason=?3,
+                            lease_owner=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_owner END,
+                            lease_incarnation=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_incarnation END,
+                            lease_expires_at_unix_ms=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_expires_at_unix_ms END,
+                            not_before_unix_ms=CASE WHEN ?2='ready' THEN NULL ELSE not_before_unix_ms END,
+                            activated_at_unix_ms=CASE WHEN ?2='ready' THEN ?4 ELSE activated_at_unix_ms END,
+                            readiness_epoch=?5, updated_at_unix_ms=?4 WHERE subject=?1",
+                params![subject, status, reason, now.to_string(), readiness_epoch])?;
+            let body = json!({"fields": {"status": status, "reason": reason, "readiness_epoch": readiness_epoch}});
+            let claim = append_claim_tx(
+                transaction,
+                &store.origin,
+                &subject,
+                "step-run.state",
+                None,
+                &body,
+                &[],
+                None,
+            )?;
+            if status == "completed" {
+                arm_waiting_mission_deadline_tx(transaction, &subject, claim.accepted_at_unix_ms, false)?;
+            }
+            Ok(true)
+        })
+        .map_err(anyhow::Error::msg)?
+}
+
 impl MissionsStore for Store {
 
     fn agent_roster_refresher_running(&self) -> bool {
-        self.smalltalk.agent_roster_refresh.get().is_some()
+        self.fractal.agent_roster_refresh.get().is_some()
     }
 
     fn rebuild_planning_projection(&self) -> Result<()> {
@@ -1972,6 +2088,43 @@ impl MissionsStore for Store {
             })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
+    }
+
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {
+        let run = run.strip_prefix("mission-run/").unwrap_or(run);
+        let connection = self.readers.get();
+        let header = connection
+            .query_row(
+                "SELECT mission_id, status, current_generation_id FROM mission_runs WHERE id=?1",
+                [run],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .optional()?;
+        let Some((mission, status, generation)) = header else {
+            return Ok(None);
+        };
+        let steps = connection
+            .prepare_cached(
+                "SELECT subject, step_path, title, status, updated_at_unix_ms FROM step_runs
+                 WHERE run_id=?1 AND generation_id=?2 ORDER BY step_path",
+            )?
+            .query_map([run, generation.as_str()], |row| {
+                Ok(crate::waiting_on::RunStep {
+                    subject: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                    updated_at_unix_ms: row.get::<_, String>(4)?.parse().unwrap_or_default(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(crate::waiting_on::RunSteps {
+            run: format!("mission-run/{run}"),
+            mission: format!("mission/{mission}"),
+            status,
+            generation: format!("run-generation/{generation}"),
+            steps,
+        }))
     }
 
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>> {
@@ -5508,6 +5661,18 @@ impl MissionsStore for Store {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error> {
+        self.work_action_answering(subject, action, request, extend_ms, handoff, true)
+    }
+
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error> {
         if action == "extend" {
             if !extend_ms.is_some_and(|by| (1..=MAX_STEP_EXTENSION_MS).contains(&by)) {
                 return Err(St3Error::new(
@@ -5611,7 +5776,7 @@ impl MissionsStore for Store {
                 }
                 // A revision carries a claim into the successor generation. Its worker may still name the
                 // step by the predecessor subject.
-                let (subject, current) = match (action != "claim")
+                let (subject, mut current) = match (action != "claim")
                     .then(|| carried_claim_successor_tx(transaction, &current, &actor))
                     .transpose()
                     .map_err(internal)?
@@ -5620,6 +5785,9 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject, current),
                 };
+                if handoff.is_some() {
+                    enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
+                }
                 let (run_status, run_phase, current_generation, generation_status, root_status, root_phase): (
                     String,
                     String,
@@ -6009,6 +6177,9 @@ impl MissionsStore for Store {
                         )
                         .map_err(internal)?;
                 }
+                if let Some(input) = handoff {
+                    adhoc_work::clear_eta_tx(transaction, &self.origin, &current, input)?;
+                }
                 let mut view = transaction.query_row(
                     "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                             lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
@@ -6035,7 +6206,7 @@ impl MissionsStore for Store {
             })
             .map_err(|error| St3Error::new("internal", error))?;
         let mut view = committed?;
-        if action == "renew" {
+        if action == "renew" && enrich_renewal {
             // An exact retry of a renewal also replays a view cached without these fields.
             self.enrich_work_response(&mut view)
                 .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
@@ -6047,92 +6218,17 @@ impl MissionsStore for Store {
         enrich_step_queue(&self.readers.get(), view).map_err(Into::into)
     }
 
-    fn set_step_state(
-            &self,
-            subject: &str,
-            status: &str,
-            reason: Option<&str>,
-        ) -> Result<bool> {
-        let subject = normalize_step_run(subject);
-        self.connection
-            .batched(|transaction| -> Result<bool> {
-                let current: Option<StepStateRow> = transaction
-                    .query_row(
-                        "SELECT step_runs.status,
-                                step_runs.generation_id=mission_runs.current_generation_id,
-                                step_runs.readiness_epoch, mission_runs.status, mission_runs.phase,
-                                run_generations.status, root_runs.status, root_runs.phase
-                         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-                         JOIN mission_runs root_runs ON root_runs.id=mission_runs.root_run_id
-                         JOIN run_generations ON run_generations.id=step_runs.generation_id
-                         WHERE step_runs.subject=?1",
-                        [&subject],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                                row.get(4)?,
-                                row.get(5)?,
-                                row.get(6)?,
-                                row.get(7)?,
-                            ))
-                        },
-                    )
-                    .optional()?;
-                let Some((
-                    current,
-                    is_current,
-                    current_epoch,
-                    run_status,
-                    run_phase,
-                    generation_status,
-                    root_status,
-                    root_phase,
-                )) = current
-                else {
-                    return Ok(false);
-                };
-                if !is_current
-                    || current == status
-                    || ((is_terminal_run_state(&run_status)
-                        || run_phase == "terminal"
-                        || is_terminal_generation_state(&generation_status)
-                        || is_terminal_run_state(&root_status)
-                        || root_phase == "terminal")
-                        && !matches!(status, "completed" | "failed" | "cancelled"))
-                {
-                    return Ok(false);
-                }
-                let now = now_ms();
-                let readiness_epoch = current_epoch.saturating_add(u32::from(status == "ready"));
-                transaction.execute(
-                    /* sqlite-large-value: allow-for-now lv-hed370910e4dc owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2, blocked_reason=?3,
-                            lease_owner=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_owner END,
-                            lease_incarnation=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_incarnation END,
-                            lease_expires_at_unix_ms=CASE WHEN ?2 IN ('ready','completed','failed','cancelled') THEN NULL ELSE lease_expires_at_unix_ms END,
-                            not_before_unix_ms=CASE WHEN ?2='ready' THEN NULL ELSE not_before_unix_ms END,
-                            activated_at_unix_ms=CASE WHEN ?2='ready' THEN ?4 ELSE activated_at_unix_ms END,
-                            readiness_epoch=?5, updated_at_unix_ms=?4 WHERE subject=?1",
-                    params![subject, status, reason, now.to_string(), readiness_epoch])?;
-                let body = json!({"fields": {"status": status, "reason": reason, "readiness_epoch": readiness_epoch}});
-                let claim = append_claim_tx(
-                    transaction,
-                    &self.origin,
-                    &subject,
-                    "step-run.state",
-                    None,
-                    &body,
-                    &[],
-                    None,
-                )?;
-                if status == "completed" {
-                    arm_waiting_mission_deadline_tx(transaction, &subject, claim.accepted_at_unix_ms, false)?;
-                }
-                Ok(true)
-            })
-            .map_err(anyhow::Error::msg)?
+    fn set_step_state(&self, subject: &str, status: &str, reason: Option<&str>) -> Result<bool> {
+        set_step_state_guarded(self, subject, status, reason, false)
+    }
+
+    fn set_step_state_unless_terminal(
+        &self,
+        subject: &str,
+        status: &str,
+        reason: Option<&str>,
+    ) -> Result<bool> {
+        set_step_state_guarded(self, subject, status, reason, true)
     }
 
     fn retry_step(&self, subject: &str, reason: &str, backoff_ms: u64) -> Result<bool> {

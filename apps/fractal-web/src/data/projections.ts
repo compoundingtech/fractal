@@ -1,13 +1,14 @@
 /**
  * Everything wf derives from the gateway's rows, computed once for every source.
  *
- * Sources supply SDK-decoded `DecodedAgent` rows (generated `St3.Agent` with open leaves) and
- * generated `St3.Mission` / `St3.Attention` rows only; the fleet,
+ * Sources supply SDK-decoded `DecodedAgent` rows (generated `Fractal.Agent` with open leaves) and
+ * generated `Fractal.Mission` / `Fractal.Attention` rows only; the fleet,
  * mission views and workbench subjects are projected here, so fixtures and live cannot derive
  * them differently. Native actionable asks are the needs-you authority: a subject needs an
  * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
-import * as St3 from '@fractal/client/schema'
+import * as Fractal from '@fractal/client/schema'
+import { classifySubagentDriver } from '@fractal/client'
 import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/effect'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
@@ -18,10 +19,10 @@ import type { SubjectSummary } from '../shell/context.tsx'
 import { isWaitingForAnswer } from './attention.ts'
 import type { Agent, Fleet, Host, Known } from './source.ts'
 
-const isAgentId = Schema.is(St3.AgentId)
+const isAgentId = Schema.is(Fractal.AgentId)
 
 /** Match the native agent identity boundary before deriving any terminal subject. */
-export function terminalSubjectForAgent(id: St3.AgentId): string
+export function terminalSubjectForAgent(id: Fractal.AgentId): string
 export function terminalSubjectForAgent(id: string): string | undefined
 export function terminalSubjectForAgent(id: string): string | undefined {
   return isAgentId(id) ? `terminal/${id.slice('agent/'.length)}` : undefined
@@ -118,11 +119,13 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     lifecycle: lifecycleOf(row),
     host: hostName(row),
     ...(harness === undefined ? {} : { harness }),
+    driver: classifySubagentDriver(driver === undefined ? undefined : leafText(driver)),
     activity: activityOf(row),
     status: statusOf(row),
     state: leafText(row.state),
     ...(description === undefined ? {} : { description }),
     usage: usageOf(row),
+    incarnationId: Option.getOrUndefined(row.incarnation_id),
     checkout: fromOption(row.checkout),
     workspace: fromOption(row.workspace),
     startedAt: unknown,
@@ -166,8 +169,8 @@ export const missionViews = ({
   attention,
   proposed,
 }: {
-  readonly missions: readonly St3.Mission[]
-  readonly attention: readonly St3.Attention[]
+  readonly missions: readonly Fractal.Mission[]
+  readonly attention: readonly Fractal.Attention[]
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>
 }): MissionView[] =>
   missions.map((mission) => ({
@@ -177,7 +180,7 @@ export const missionViews = ({
   }))
 
 /** Open-card linkage for unread ownership, including informational/non-answerable cards. */
-export const attentionRefs = (attention: readonly St3.Attention[]): ReadonlySet<string> =>
+export const attentionRefs = (attention: readonly Fractal.Attention[]): ReadonlySet<string> =>
   new Set(
     attention
       .filter((item) => item.state === 'open')
@@ -226,8 +229,8 @@ export const subjectList = ({
   attention,
 }: {
   readonly fleet?: Fleet
-  readonly missions?: readonly St3.Mission[]
-  readonly attention?: readonly St3.Attention[]
+  readonly missions?: readonly Fractal.Mission[]
+  readonly attention?: readonly Fractal.Attention[]
 }): SubjectSummary[] => {
   const needsYou = attention === undefined ? undefined : attentionRefs(attention.filter(isWaitingForAnswer))
   return [
@@ -261,7 +264,7 @@ const sameItems = <T>(left: readonly T[], right: readonly T[]): boolean =>
 
 const sameKnown = <T>(left: Known<T>, right: Known<T>, equivalent: (left: T, right: T) => boolean = Object.is): boolean =>
   left._tag === 'Unknown' ? right._tag === 'Unknown' : right._tag === 'Known' && equivalent(left.value, right.value)
-const sameCheckout = Schema.toEquivalence(St3.AgentCheckout)
+const sameCheckout = Schema.toEquivalence(Fractal.AgentCheckout)
 // oxlint-disable-next-line overeng/named-args -- Retained child projection comparator.
 const sameSubagents = (a: Agent['subagents'], b: Agent['subagents']): boolean =>
   a === b || (a !== undefined && b !== undefined && a.length === b.length && a.every((child, index) => {
@@ -289,6 +292,8 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   a.lifecycle._tag === b.lifecycle._tag &&
   a.host === b.host &&
   a.harness === b.harness &&
+  a.driver?._tag === b.driver?._tag &&
+  a.driver?.name === b.driver?.name &&
   a.activity === b.activity &&
   a.status === b.status &&
   a.state === b.state &&
@@ -297,6 +302,8 @@ const sameAgent = (a: Agent, b: Agent): boolean =>
   sameKnown(a.startedAt, b.startedAt) &&
   sameKnown(a.endedAt, b.endedAt) &&
   sameKnown(a.usage, b.usage, decodedUsageEquivalence) &&
+  a.incarnationId === b.incarnationId &&
+  a.contextObservedAfter === b.contextObservedAfter &&
   sameKnown(a.checkout, b.checkout, sameCheckout) &&
   sameKnown(a.workspace, b.workspace) &&
   sameKnown(a.blockedOn, b.blockedOn) &&
@@ -319,26 +326,39 @@ export const createProjections = (): {
   readonly subjectList: typeof subjectList
 } => {
   const agents = new WeakMap<DecodedAgent, Agent>()
-  const views = new WeakMap<St3.Mission, MissionView>()
+  const views = new WeakMap<Fractal.Mission, MissionView>()
   const agentSubjects = new WeakMap<Agent, readonly SubjectSummary[]>()
-  const missionSubjects = new WeakMap<St3.Mission, SubjectSummary>()
-  const attentionSubjects = new WeakMap<St3.Attention, SubjectSummary>()
+  const missionSubjects = new WeakMap<Fractal.Mission, SubjectSummary>()
+  const attentionSubjects = new WeakMap<Fractal.Attention, SubjectSummary>()
   let previousRows: readonly DecodedAgent[] | undefined
   let previousFleet: Fleet | undefined
   let previousViews: MissionView[] = []
   let previousSubjects: SubjectSummary[] = []
+  const lifecycles = new Map<string, { readonly incarnationId: string | undefined; readonly contextObservedAfter: number | undefined; readonly contextAt: number | undefined }>()
   return {
     fleetFromAgents: (rows) => {
       if (rows === previousRows && previousFleet !== undefined) return previousFleet
       const previousAgents = new Map(previousFleet?.agents.map((agent) => [agent.ref, agent]))
       const projected = rows.map((row) => {
-        let agent = agents.get(row)
-        if (agent === undefined) {
-          const candidate = agentFromRow(row)
-          const previous = previousAgents.get(row.id)
-          agent = previous !== undefined && sameAgent(previous, candidate) ? previous : candidate
-          agents.set(row, agent)
+        let candidate = agents.get(row)
+        if (candidate === undefined) {
+          candidate = agentFromRow(row)
+          agents.set(row, candidate)
         }
+        const previous = previousAgents.get(row.id)
+        // UsageSummary spans incarnations; an unchanged occupancy timestamp cannot prove a
+        // new incarnation's context. A strictly newer reading restores the reported claim.
+        // The lifecycle is per ref, not per fleet: a ref that leaves a bounded roster window and
+        // returns (even as the same or a cloned DTO) keeps its incarnation and fence.
+        const context = candidate.usage._tag === 'Known' ? candidate.usage.value.context : undefined
+        const contextAt = context === undefined ? undefined : DateTime.toEpochMillis(context.observed_at_unix_ms)
+        const prior = lifecycles.get(row.id)
+        const contextObservedAfter = prior !== undefined && prior.incarnationId !== candidate.incarnationId
+          ? Math.max(prior.contextObservedAfter ?? 0, DateTime.toEpochMillis(row.updated_at), prior.contextAt ?? 0, contextAt ?? 0)
+          : prior?.contextObservedAfter
+        lifecycles.set(row.id, { incarnationId: candidate.incarnationId, contextObservedAfter, contextAt: contextAt ?? prior?.contextAt })
+        if (contextObservedAfter !== undefined) candidate = { ...candidate, contextObservedAfter }
+        const agent = previous !== undefined && sameAgent(previous, candidate) ? previous : candidate
         return agent
       })
       const connected = new Map<string, boolean>()
@@ -369,7 +389,7 @@ export const createProjections = (): {
       return previousFleet
     },
     missionViews: ({ missions, attention, proposed }) => {
-      const open = new Map<string, St3.Attention[]>()
+      const open = new Map<string, Fractal.Attention[]>()
       for (const item of attention) {
         if (item.state !== 'open' || item.mission_id === undefined) continue
         const rows = open.get(item.mission_id)

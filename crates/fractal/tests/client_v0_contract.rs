@@ -122,6 +122,36 @@ fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Val
 }
 
 #[test]
+fn agents_publication_contract_is_complete_and_unbounded() {
+    let validator = contract_validator("AgentsPublication");
+    let resources = fixture("resources.json");
+    let agent = resources.as_array().unwrap().iter()
+        .find(|row| row["kind"] == "agent").unwrap();
+    let rows = (0..401).map(|index| {
+        let mut row = agent.clone();
+        row["id"] = serde_json::json!(format!("agent/publication-{index}"));
+        row
+    }).collect::<Vec<_>>();
+    let order = rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+    let mut publication = serde_json::json!({
+        "publication": {
+            "node_epoch": "18a992c2-f834-4946-b412-211f358ff531",
+            "revision": 9_007_199_254_740_991_u64,
+            "status_watermark": {"store_index": 8, "local_frontier": 3},
+            "materialized_at_ms": 1_700_000_000_000_u64
+        },
+        "items": rows, "order": order, "has_more": false
+    });
+    assert_conforms(&validator, "401 complete current agents", &publication);
+    publication["has_more"] = serde_json::json!(true);
+    assert!(!validator.is_valid(&publication), "a partial head cannot be complete");
+    publication["has_more"] = serde_json::json!(false);
+    publication["publication"]["revision"] = serde_json::json!(9_007_199_254_740_992_u64);
+    assert!(!validator.is_valid(&publication), "revision exhaustion requires another epoch");
+}
+
+
+#[test]
 fn consumers_accept_future_enum_cases_but_producers_reject_them() {
     for (definition, known) in [
         ("MissionState", "running"),
@@ -423,7 +453,7 @@ async fn outbound_rust_collection_commands_conform_with_none_and_exact_agent() {
         axum::routing::get(move |upgrade: WebSocketUpgrade| {
             let sender = sender.clone();
             async move {
-                upgrade.protocols(["st3.client.collections.v0"]).on_upgrade(
+                upgrade.protocols(["fractal.client.collections.v0"]).on_upgrade(
                     move |mut socket| async move {
                         while let Some(Ok(message)) = socket.next().await {
                             if let Ok(text) = message.to_text() {
@@ -1152,24 +1182,80 @@ async fn publish_fixture_lists(state: &AppState) -> u64 {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
-        store: Arc::new(
-            Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
-        ),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "client-v0-baseline".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
+    AppState { owning_person: None,
+    // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
+    store: Arc::new(
+        Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
+    ),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "client-v0-baseline".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+}
+
+#[test]
+fn old_shape_subscribe_and_proposed_trace_preserve_collection_contract() {
+    let validator = contract_validator("CollectionCommand");
+    let old = fixture("collection-subscribe.json");
+    assert_conforms(&validator, "old-shape subscribe without trace", &old);
+    assert!(old.get("trace").is_none());
+    let mut proposed = fixture("collection-subscribe-trace-proposed.json");
+    assert_conforms(&validator, "proposed subscribe trace", &proposed);
+    proposed.as_object_mut().unwrap().remove("trace");
+    assert_eq!(proposed, old, "trace does not change subscription fields");
+    for malformed in [
+        Value::Null, serde_json::json!(42), serde_json::json!([]),
+        serde_json::json!({"traceparent":"not-a-traceparent"}),
+    ] {
+        proposed["trace"] = malformed;
+        assert_conforms(&validator, "malformed telemetry preserves frame contract", &proposed);
     }
+}
+
+#[tokio::test]
+async fn collection_socket_accepts_out_of_range_ignored_trace() {
+    use futures_util::{SinkExt as _, StreamExt as _};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest as _};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("client.sock");
+    let state = test_state(root.path());
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let mut request = "ws://localhost/v1/client/collections/stream".into_client_request().unwrap();
+    request.headers_mut().insert("sec-websocket-protocol", "st3.client.collections.v0".parse().unwrap());
+    request.headers_mut().insert("x-st3-person", "person/ada".parse().unwrap());
+    let (mut stream, _) = tokio_tungstenite::client_async(
+        request, tokio::net::UnixStream::connect(&socket).await.unwrap(),
+    ).await.unwrap();
+    stream.send(Message::Text(
+        r#"{"kind":"subscribe","id":"ignored-trace","collection":"missions","trace":1e999}"#.into()
+    )).await.unwrap();
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let message = stream.next().await.unwrap().unwrap();
+            if let Message::Text(text) = message {
+                break serde_json::from_str::<Value>(&text).unwrap();
+            }
+        }
+    }).await.unwrap();
+    assert_eq!(frame["kind"], "snapshot", "{frame}");
+    assert_eq!(frame["id"], "ignored-trace");
+    assert_conforms(&contract_validator("CollectionFrame"), "ignored out-of-range trace", &frame);
+    stream.close(None).await.unwrap();
+    server.abort();
 }
 
 #[tokio::test]
@@ -3073,14 +3159,16 @@ mission "example/other/one" state="ready" { concurrent-runs; goal "Wait outside 
         "agent/example/operator"
     );
     let receipts = store
-        .claims_for_kind_at("custom.client.action-result", None, true, 100)
+        .local_observations_tail(100)
         .unwrap()
-        .claims;
+        .into_iter()
+        .filter(|receipt| receipt.kind == "client.action-result")
+        .collect::<Vec<_>>();
     assert!(!receipts.is_empty());
     for receipt in receipts {
-        let actor = receipt.actor.as_deref().unwrap();
+        assert!(receipt.actor.is_none(), "action receipts are server-written");
+        let actor = receipt.body["fields"]["authority_actor"].as_str().unwrap();
         assert!(actor.starts_with("agent/example/"), "{actor}");
-        assert_eq!(receipt.body["fields"]["authority_actor"], actor);
     }
 }
 
@@ -4299,7 +4387,7 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
     let mut manifest: fractal_schema::custom::Manifest = serde_json::from_str(include_str!(
-        "../../../examples/st3/custom-review.json"
+        "../../../examples/fractal/custom-review.json"
     )).unwrap();
     manifest.attention.as_mut().unwrap().episode = fractal_schema::custom::Expr::Constant {
         value: serde_json::json!("garden question; keep"),

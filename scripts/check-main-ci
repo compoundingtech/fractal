@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-REQUIRED = {"linux-gate", "isolation-vm", "genie-freshness", "typescript-client", "mail-redelivery-canaries", "fractal-web"}
+REQUIRED = {"linux-gate", "genie-freshness", "typescript-client", "fractal-web"}
 
 
 def api(path):

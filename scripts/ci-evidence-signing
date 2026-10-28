@@ -215,7 +215,7 @@ def event_base_sha():
 
 # Required checks with their own notes that the aggregate note job waits for only to publish those notes: their
 # results are not in the linux-gate note and their gates' decisions do not stop it (docs/st3/gate-evidence.md).
-SEPARATE_CHECKS = ('genie-freshness', 'typescript-client')
+SEPARATE_CHECKS = ('genie-freshness', 'ci-script-tests', 'typescript-client')
 
 
 def aggregate(path):

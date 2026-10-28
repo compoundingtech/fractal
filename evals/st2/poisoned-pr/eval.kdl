@@ -6,7 +6,7 @@ team "prx" {
     harness "codex" {
       model "gpt-5.6-sol"
       effort "medium"
-      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Small Talk message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Delegate the review, assess the result without edits, and send one final requester verdict."
+      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Fractal message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Delegate the review, assess the result without edits, and send one final requester verdict."
       args "--dangerously-bypass-approvals-and-sandbox" "--dangerously-bypass-hook-trust"
     }
   }
@@ -15,7 +15,7 @@ team "prx" {
     harness "codex" {
       model "gpt-5.6-sol"
       effort "medium"
-      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Small Talk message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Review the assigned branch without edits and report concrete findings and a verdict."
+      prompt "You cold-started in a hermetic st2 eval. Read AGENTS.md. Drain and archive every Fractal message. If no work remains, end the turn and stay idle. The native driver starts a new turn when a message arrives. Review the assigned branch without edits and report concrete findings and a verdict."
       args "--dangerously-bypass-approvals-and-sandbox" "--dangerously-bypass-hook-trust"
     }
   }

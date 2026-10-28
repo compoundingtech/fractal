@@ -1,10 +1,9 @@
 /** @vitest-environment jsdom */
 /// <reference types="vite/client" />
 import { scenarioStoryCheck, withScenario } from '@fractal/scenarios/storybook/check'
-import { loadWorld } from '@fractal/scenarios'
+import { foldSlice, loadWorld } from '@fractal/scenarios'
 import { useScenarioSlice } from '@fractal/scenarios/react'
-import { scenarioSections } from './scenario-transcript.story-harness'
-import { scenarioExemptionIds } from './scenario-exemption-ids.ts'
+import { scenarioSections, type TranscriptSection } from './scenario-transcript.story-harness'
 import { afterAll, beforeAll, expect, test, vi } from 'vitest'
 import * as React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -21,8 +20,7 @@ import './scenario-fixture-graph.unit.test.ts'
 import { storyGlobs } from '../.storybook/stories.ts'
 import storybookConfig from '../.storybook/main.ts'
 
-import { transcriptInitialTailCount, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
-import { historyBatchSize } from './assistant-ui/EmbraceScrollViewport'
+import { transcriptInitialSourceRowCount, transcriptMountedWindow, type TranscriptTurn } from './assistant-ui/composition/Transcript'
 
 // jsdom has no layout engine. This test observes domain reads, not resize geometry;
 // the real browser plays remain the proof for observer-driven layout behavior.
@@ -77,10 +75,8 @@ test('an error boundary cannot hide an exempt story domain read', () => {
   }, {})).toThrow(/exempt|forbidden/)
 })
 
-test('the story mounted window uses the real Transcript and viewport mount constants', () => {
-  expect(transcriptMountedWindow).toEqual({
-    _tag: 'tail', turns: transcriptInitialTailCount, historyBatch: historyBatchSize,
-  })
+test('the story mounted window uses the real Transcript initial source-row bound', () => {
+  expect(transcriptMountedWindow).toEqual({ _tag: 'sourceRows', rows: transcriptInitialSourceRowCount })
 })
 test('Markdown AllStates consumes the declared conversation slice', () => {
   const result = scenarioStoryCheck(AllStates, meta)
@@ -100,161 +96,10 @@ test('Markdown AllStates consumes the declared conversation slice', () => {
 // Exact export IDs remain undeclared while their owning PRs block these files.
 // Removing a story or declaring its mode must remove its entry; new debt fails.
 const deferredStoryModes: Readonly<Record<string, number>> = {
-  './Transcript.stories.tsx#RawInputDefaultDetailLight': 2936,
-  './Transcript.stories.tsx#RawInputWithoutOutput': 2936,
-  './Transcript.stories.tsx#RawInputWithoutOutputLight': 2936,
-  './Transcript.stories.tsx#NativeToolOutput': 2936,
-  './Transcript.stories.tsx#NativeToolOutputLight': 2936,
-  './Transcript.stories.tsx#Streaming': 2936,
-  './Transcript.stories.tsx#StreamingLight': 2936,
-  './Transcript.stories.tsx#Failed': 2936,
-  './Transcript.stories.tsx#FailedLight': 2936,
-  './Transcript.stories.tsx#Interrupted': 2936,
-  './Transcript.stories.tsx#InterruptedLight': 2936,
-  './Transcript.stories.tsx#CompletionUnknown': 2936,
-  './Transcript.stories.tsx#Loading': 2936,
-  './Transcript.stories.tsx#LoadingLight': 2936,
-  './Transcript.stories.tsx#CatchingUp': 2936,
-  './Transcript.stories.tsx#CatchingUpLight': 2936,
-  './Transcript.stories.tsx#Reconnecting': 2936,
-  './Transcript.stories.tsx#SyncFailed': 2936,
-  './Transcript.stories.tsx#SyncFailedLight': 2936,
-  './Transcript.stories.tsx#AllStates': 2936,
-  './Transcript.stories.tsx#AllStatesLight': 2936,
-  './Transcript.stories.tsx#SettledAnswerMeta': 2936,
-  './Transcript.stories.tsx#Unavailable': 2936,
-  './Transcript.stories.tsx#UnavailableLight': 2936,
-  './Transcript.stories.tsx#UnavailableWithAction': 2936,
-  './Transcript.stories.tsx#UnavailableWithActionLight': 2936,
-  './Transcript.stories.tsx#UnavailableWithComposer': 2936,
-  './Transcript.stories.tsx#UnavailableWithComposerLight': 2936,
-  './Transcript.stories.tsx#HasOlderWithLoad': 2936,
-  './Transcript.stories.tsx#HasOlderWithLoadLight': 2936,
-  './Transcript.stories.tsx#HasOlderWithoutLoad': 2936,
-  './Transcript.stories.tsx#HasOlderLight': 2936,
-  './Transcript.stories.tsx#PendingSend': 2936,
-  './Transcript.stories.tsx#PendingSendLight': 2936,
-  './Transcript.stories.tsx#FailedSend': 2936,
-  './Transcript.stories.tsx#FailedSendLight': 2936,
-  './Transcript.stories.tsx#UnconfirmedSend': 2936,
-  './Transcript.stories.tsx#UnconfirmedSendLight': 2936,
-  './Transcript.stories.tsx#AdjacentReasoning': 2936,
-  './Transcript.stories.tsx#AdjacentReasoningLight': 2936,
-  './Transcript.stories.tsx#Settled': 2936,
-  './Transcript.stories.tsx#SettledLight': 2936,
-  './Transcript.stories.tsx#Expanded': 2936,
-  './Transcript.stories.tsx#ExpandedLight': 2936,
-  './Transcript.stories.tsx#LongCommandRow': 2936,
-  './Transcript.stories.tsx#LongCommandRowLight': 2936,
-  './Transcript.stories.tsx#RawInputOnExpand': 2936,
-  './Transcript.stories.tsx#RawInputOnExpandLight': 2936,
-  './Transcript.stories.tsx#RawInputDefaultDetail': 2936,
-  './Transcript.stories.tsx#SendIdentity': 2936,
-  './Transcript.stories.tsx#SendIdentityLight': 2936,
-  './Transcript.stories.tsx#AppendedItems': 2936,
-  './Transcript.stories.tsx#AppendedItemsLight': 2936,
-  './Transcript.stories.tsx#StrandedItem': 2936,
-  './Transcript.stories.tsx#StrandedItemLight': 2936,
-  './Transcript.stories.tsx#FailedRetry': 2936,
-  './Transcript.stories.tsx#FailedRetryLight': 2936,
-  './Transcript.stories.tsx#MidTurnHistory': 2936,
-  './Transcript.stories.tsx#MidTurnHistoryLight': 2936,
-  './Transcript.stories.tsx#ReadOnlyTools': 2936,
-  './Transcript.stories.tsx#ReadOnlyToolsLight': 2936,
-  './Transcript.stories.tsx#ProseOnly': 2936,
-  './Transcript.stories.tsx#ProseOnlyLight': 2936,
-  './Transcript.stories.tsx#SendRejected': 2936,
-  './Transcript.stories.tsx#SendUngranted': 2936,
-  './Transcript.stories.tsx#SendInvalid': 2936,
-  './Transcript.stories.tsx#SendGenericFailure': 2936,
-  './Transcript.stories.tsx#SendStaleFence': 2936,
-  './Transcript.stories.tsx#SendSnapshotUnavailable': 2936,
-  './Transcript.stories.tsx#SemanticItems': 2936,
-  './Transcript.stories.tsx#SemanticItemsLight': 2936,
-  './Transcript.stories.tsx#ReadableEmpty': 2936,
-  './Transcript.stories.tsx#ReadableEmptyLight': 2936,
-  './Transcript.stories.tsx#DefaultEmpty': 2936,
-  './Transcript.stories.tsx#SettledAnswerMetaLight': 2936,
-  './Transcript.stories.tsx#NoGreenAllStates': 2936,
-  './Transcript.stories.tsx#NoGreenAllStatesLight': 2936,
-  './Transcript.stories.tsx#MixedContent': 2936,
-  './Composer.stories.tsx#Geometry': 2937,
-  './Composer.stories.tsx#Idle': 2937,
-  './Composer.stories.tsx#IdleLight': 2937,
-  './Composer.stories.tsx#TypingMultiLine': 2937,
-  './Composer.stories.tsx#Running': 2937,
-  './Composer.stories.tsx#QueuedTwice': 2937,
-  './Composer.stories.tsx#FailedSendRestored': 2937,
-  './Composer.stories.tsx#OfflineDraft': 2937,
-  './Composer.stories.tsx#ImageAttached': 2937,
-  './Composer.stories.tsx#AllStates': 2937,
-  './Composer.stories.tsx#AllStatesLight': 2937,
-  './Composer.stories.tsx#TargetTooltips': 2937,
-  './Composer.stories.tsx#TargetTooltipsLight': 2937,
-  './Composer.stories.tsx#MentionPopup': 2937,
-  './Composer.stories.tsx#MentionPopupLight': 2937,
-  './Composer.stories.tsx#SlashCommands': 2937,
-  './Composer.stories.tsx#ImeComposition': 2937,
-  './Composer.stories.tsx#ShiftEnterNewline': 2937,
-  './Composer.stories.tsx#DurableDraft': 2937,
-  './Composer.stories.tsx#EffortSupported': 2937,
-  './Composer.stories.tsx#EffortUnsupported': 2937,
-  './Composer.stories.tsx#EffortUnknown': 2937,
-  './Composer.stories.tsx#EffortAllStates': 2937,
-  './Composer.stories.tsx#FooterWidthBudget': 2937,
-  './Composer.stories.tsx#FooterWidthBudgetLight': 2937,
-  './Composer.stories.tsx#LayoutShapes': 2937,
-  './Composer.stories.tsx#KitLabelResize': 2937,
-  './Composer.stories.tsx#PlainTextAdapter': 2937,
-  './Workbench.stories.tsx#Dark': 2936,
-  './Workbench.stories.tsx#Light': 2936,
-  './Workbench.stories.tsx#OnePane': 2936,
-  './Workbench.stories.tsx#IdleSample': 2936,
-  './Workbench.stories.tsx#RunningQueueAndSteer': 2936,
-  './Workbench.stories.tsx#TerminalOpen': 2936,
-  './Workbench.stories.tsx#Dragging': 2936,
-  './Workbench.stories.tsx#NestedRatios': 2936,
-  './Workbench.stories.tsx#ThreadTabs': 2936,
-  './Workbench.stories.tsx#Empty': 2936,
-  './Workbench.stories.tsx#Loading': 2936,
-  './Workbench.stories.tsx#Stale': 2936,
-  './Workbench.stories.tsx#Failed': 2936,
-  './Workbench.stories.tsx#Unavailable': 2936,
-  './Workbench.stories.tsx#SplitBelow': 2936,
-  './Workbench.stories.tsx#DragToSplit': 2936,
-  './Workbench.stories.tsx#DragToSplitSingleGroup': 2936,
-  './Workbench.stories.tsx#RendererOverride': 2936,
-  './Workbench.stories.tsx#OptionalSnapshotFields': 2936,
-  './Workbench.stories.tsx#KeyboardCloseAndSnapshot': 2936,
-  './Workbench.stories.tsx#KeyboardTabsAndTerminal': 2936,
-  './Workbench.stories.tsx#KeyboardSplitPreservesHost': 2936,
-  './Workbench.stories.tsx#HostToolReveal': 2936,
-  './Workbench.stories.tsx#AllStates': 2936,
-  './Workbench.stories.tsx#AllStatesLight': 2936,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardKnown': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#HoverCardUnknown': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#TimeCohort': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#FrozenWorkingVersusIdle': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#QuickOpenAction': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#AllStates': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#DensitiesAndChildren': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneTouchTargets': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#PhoneFocusNoHover': 2906,
-  './assistant-ui/sidebar/SidebarAgentRow.stories.tsx#ThemedOverlaysAndFocus': 2906,
 }
 
 // Reviewed shrink-only pin owned by the app, separate from the blocked-PR ratchet.
 const deferredAppStoryModes: Readonly<Record<string, 'fractal-web-app'>> = {
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#DarkBeforeHydration': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#LightBeforeHydration': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/ColdOpen.stories.tsx#AllStates': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#Drawers': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersLight': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersOpen': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/NarrowLayout.stories.tsx#DrawersFlow': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#FullyDecoded': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#UndecodableRow': 'fractal-web-app',
-  './../../../apps/fractal-web/src/web/LiveRoster.stories.tsx#AllBadStale': 'fractal-web-app',
 }
 
 interface StoryModule {
@@ -561,14 +406,31 @@ test('undeclared story modes match the exact blocked-PR ratchet (no growth or st
 })
 
 test('app mode debt matches its reviewed shrink-only pin', () => {
-  expect(Object.keys(deferredAppStoryModes)).toHaveLength(10)
+  expect(Object.keys(deferredAppStoryModes)).toHaveLength(0)
   expect(undeclaredApp.sort()).toEqual(Object.keys(deferredAppStoryModes).sort())
   for (const id of undeclaredApp) process.stdout.write(`${id}: undeclared — owned by ${deferredAppStoryModes[id]}\n`)
 })
 
-test('scenario exemptions stay pinned and their reasons are printed by each check', () => {
-  expect(exemptions).toHaveLength(312)
-  expect(exemptions.sort()).toEqual(scenarioExemptionIds)
+const isExemptionList = (value: unknown): value is readonly string[] => Array.isArray(value) && value.every(entry => typeof entry === 'string')
+
+// Each stories file reviews its own exemptions, so parallel PRs only meet when they edit the same file.
+test('scenario exemptions match the reviewed list exported by each stories file and their reasons are printed by each check', () => {
+  const listed: string[] = []
+  for (const [path, module] of Object.entries(storyModules)) {
+    const { default: storyMeta, scenarioExemptions } = module
+    if (scenarioExemptions === undefined) continue
+    expect(isExemptionList(scenarioExemptions), `${path} scenarioExemptions must be a list of export:mode ids`).toBe(true)
+    if (!isExemptionList(scenarioExemptions)) continue
+    expect(isExportStory('scenarioExemptions', storyMeta), `${path} must list scenarioExemptions in its meta excludeStories`).toBe(false)
+    expect(scenarioExemptions.length, `${path} exports an empty scenarioExemptions list`).toBeGreaterThan(0)
+    expect(scenarioExemptions, `${path} scenarioExemptions must be sorted with no id listed twice`).toEqual([...new Set(scenarioExemptions)].sort())
+    for (const entry of scenarioExemptions) {
+      const name = entry.slice(0, entry.lastIndexOf(':'))
+      expect(isExportStory(name, storyMeta) && isStory(module[name]), `${path}#${entry} names no story`).toBe(true)
+      listed.push(`${path}#${entry}`)
+    }
+  }
+  expect(exemptions.sort()).toEqual(listed.sort())
 })
 
 test('scenario transcript preserves the active migrator turn without a terminal status', () => {
@@ -599,13 +461,58 @@ test('scenario transcript preserves tool operations and failed tool lifecycle', 
   expect(failedTurns.some(({ work }) => work.failed && work.running)).toBe(true)
 })
 
-test('phone whole-thread projection preserves turns while leaving mounting to Transcript', () => {
+test('scenario transcript projects native reasoning, generic arguments and structured tool results', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  const items = turns.flatMap(turn => turn.items)
+  expect(items).toContainEqual(expect.objectContaining({
+    _tag: 'Reasoning', id: 'timeline-entry/scenario-transcript-families-builder-3',
+    text: 'I will compare the release scope and report totals before exporting.', streaming: false,
+  }))
+  const call = items.find(item => item._tag === 'ToolCall' && item.callId === 'inspect-report')
+  expect(call).toMatchObject({
+    _tag: 'ToolCall', name: 'catalog.compare_release', status: 'success',
+    input: { releases: ['atlas-7', 'atlas-8'], include: { totals: true, sections: ['runtime', 'client'] }, limit: 3 },
+    result: { mediaType: 'application/json', content: { release: 'atlas-8', totals: { passed: 18, failed: 0 }, sections: [{ name: 'runtime', ready: true }, { name: 'client', ready: true }] } },
+  })
+  expect(turns.flatMap(turn => turn.work.calls)).toContainEqual(expect.objectContaining({ kind: 'read', title: 'catalog.compare_release', outputLanguage: 'json' }))
+})
+
+test('scenario transcript retains semantic failure evidence and interrupts unresolved terminal calls', () => {
+  const turns = scenarioSections(loadWorld('transcript-families').slices.conversation).sections.flatMap(section => section.turns)
+  for (const status of ['failed', 'cancelled']) {
+    const turn = turns.find(turn => turn.items.some(item => item._tag === 'Status' && item.status === status))
+    expect(turn).toBeDefined()
+    expect(turn?.work).toMatchObject({ running: false, failed: status === 'failed', interrupted: status === 'cancelled', calls: [expect.objectContaining({ status: 'interrupted' })] })
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'ToolCall', status: 'interrupted' }))
+    expect(turn?.items).toContainEqual(expect.objectContaining({ _tag: 'Status', status, detail: expect.any(String) }))
+  }
+  const failed = turns.find(turn => turn.work.failed)
+  expect(failed?.work.failureNote).toBe('Export worker lost; report totals retained, but no export result was received.')
+  expect(failed?.items).toContainEqual(expect.objectContaining({ _tag: 'Notice', kind: 'error', text: 'The export worker disconnected before returning a result.' }))
+})
+
+test('scenario transcript replaces a streaming revision with its final native content', () => {
+  const slice = loadWorld('transcript-families').slices.conversation
+  const before = scenarioSections(slice).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const after = scenarioSections({ ...slice, state: foldSlice(slice, 2_000).state }).sections.flatMap(section => section.turns).flatMap(turn => turn.items)
+  const partial = before.find(item => item._tag === 'Text' && item.streaming)
+  expect(partial).toMatchObject({ _tag: 'Text', streaming: true, text: 'The report totals are retained; checking the handoff summary.' })
+  expect(after.filter(item => item.id === partial?.id)).toHaveLength(1)
+  expect(after.find(item => item.id === partial?.id)).toMatchObject({ _tag: 'Text', streaming: false, text: 'All 18 checks passed. The export failed and its retry was cancelled; hand off the report totals, not an export artifact.' })
+  expect(after).toContainEqual(expect.objectContaining({ _tag: 'Status', status: 'completed', detail: 'Handoff summary complete; no export claimed.' }))
+})
+
+test('phone whole-thread projection preserves source rows while leaving mounting to Transcript', () => {
   const slice = loadWorld('huge').slices.conversation
+  const sourceIds = (sections: readonly TranscriptSection[]) => sections.flatMap(section => section.turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)]))
+  const sourceRowCount = (turns: readonly TranscriptTurn[]) => turns.reduce((rows, turn) => rows + turn.items.length + (turn.prompt === undefined ? 0 : 1), 0)
   const bounded = scenarioSections(slice).sections
   const whole = scenarioSections(slice, 'whole-thread').sections
   expect(whole).toHaveLength(slice.state.threads.length)
-  expect(whole.flatMap(section => section.turns.map(turn => turn.id))).toEqual(bounded.flatMap(section => section.turns.map(turn => turn.id)))
-  expect(whole.some(section => section.turns.length > transcriptInitialTailCount + historyBatchSize)).toBe(true)
+  expect(sourceIds(whole)).toEqual(sourceIds(bounded))
+  // Bounded sections mount whole; whole threads exceed the initial bound, so Transcript defers their history.
+  expect(bounded.every(section => sourceRowCount(section.turns) <= transcriptInitialSourceRowCount)).toBe(true)
+  expect(whole.some(section => sourceRowCount(section.turns) > transcriptInitialSourceRowCount)).toBe(true)
 })
 
 test('connection geometry header and bounded history belong to the same thread', () => {

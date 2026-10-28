@@ -32,6 +32,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case missionRevise = "mission.revise"
     case missionStart = "mission.start"
     case pairingRevoke = "pairing.revoke"
+    case privateNotesWrite = "private-notes.write"
     case promptRespond = "prompt.respond"
     case reviewApprove = "review.approve"
     case reviewReject = "review.reject"
@@ -65,6 +66,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case notesList = "notes.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
+    case privateNotesGet = "private-notes.get"
     case hostRepositories = "host.repositories"
     case setsList = "sets.list"
     case setsGet = "sets.get"
@@ -92,6 +94,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case launchVariantsList = "launch-variants.list"
     case launchDecisionsList = "launch-decisions.list"
     case launchApprovalsList = "launch-approvals.list"
+    case schedulesList = "schedules.list"
     case missionsList = "missions.list"
     case missionsGet = "missions.get"
     case workList = "work.list"
@@ -113,6 +116,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case lanesList = "lanes.list"
     case lanesGet = "lanes.get"
     case terminalsList = "terminals.list"
+    case runtimeStartsList = "runtime-starts.list"
     case operationsList = "operations.list"
     case operationsGet = "operations.get"
     case historyList = "history.list"
@@ -146,6 +150,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",
+    .privateNotesGet: "/v1/client/private-notes/{uri}",
     .hostRepositories: "/v1/client/hosts/{id}/repositories",
     .setsList: "/v1/client/sets",
     .setsGet: "/v1/client/sets/{id}",
@@ -173,6 +178,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .launchVariantsList: "/v1/client/launches/{id}/variants",
     .launchDecisionsList: "/v1/client/launches/{id}/decisions",
     .launchApprovalsList: "/v1/client/launches/{id}/approvals",
+    .schedulesList: "/v1/client/schedules",
     .missionsList: "/v1/client/missions",
     .missionsGet: "/v1/client/missions/{id}",
     .workList: "/v1/client/work",
@@ -194,6 +200,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .lanesList: "/v1/client/lanes",
     .lanesGet: "/v1/client/lanes/{id}",
     .terminalsList: "/v1/client/terminals",
+    .runtimeStartsList: "/v1/client/runtime-starts",
     .operationsList: "/v1/client/operations",
     .operationsGet: "/v1/client/operations/{id}",
     .historyList: "/v1/client/history",

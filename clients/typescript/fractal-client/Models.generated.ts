@@ -18,6 +18,7 @@ export type ActionCommon = {
   type: 
   "arrangement.edit"
   | "custom.reply"
+  | "private-notes.write"
   | "prompt.respond"
   | "attention.resolve"
   | "review.approve"
@@ -81,6 +82,7 @@ export type ActionResult = {
   arrangement_revision?: Revision;
   kind: "action-result";
   operation_id: Id;
+  private_notes?: PrivateNotesFence;
   snapshot_id: Id;
   status: "accepted" | "completed" | "rejected";
   terminal_attachment?: (TerminalAttachment | null);
@@ -92,6 +94,7 @@ export type Agent = ResourceHeader & {
   active_work_count?: number;
   activity?: string | null;
   ask?: string | null;
+  background_jobs?: number | null;
   blocked_on?: string | null;
   checkout?: (AgentCheckout | null);
   current_session_id?: string | null;
@@ -111,6 +114,7 @@ export type Agent = ResourceHeader & {
   kind: "agent";
   last_activity_at?: (Timestamp | null);
   lifecycle?: AgentLifecycle;
+  mail_custody?: AgentMailCustody;
   name: string;
   next_work?: (WorkLabel | null);
   next_work_id?: (Id | null);
@@ -120,6 +124,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  resources?: Array<DeclaredResource>;
   rollout?: {
 
 } | null;
@@ -198,6 +203,11 @@ export type AgentHandoff = {
 export type AgentId = string;
 
 export type AgentLifecycle = ("standing" | "owner" | "bounded" | string);
+
+export type AgentMailCustody = {
+  state: "pending";
+  successor: AgentId;
+};
 
 export type AgentMessageDay = {
   calibrated_messages: number;
@@ -310,6 +320,7 @@ export type AgentResumeParameters = {
 export type AgentRetireParameters = {
   agent: Id;
   reason: string;
+  successor?: Id;
 };
 
 export type AgentStartParameters = {
@@ -389,6 +400,25 @@ export type AgentWorkspace = {
   host_id: HostId;
   kind: "agent-workspace";
   workspace: string;
+};
+
+export type AgentsPublication = {
+  has_more: false;
+  items: Array<Agent>;
+  order: Array<Id>;
+  publication: AgentsPublicationMetadata;
+};
+
+export type AgentsPublicationMetadata = {
+  materialized_at_ms: number;
+  node_epoch: string;
+  revision: number;
+  status_watermark: AgentsStatusWatermark;
+};
+
+export type AgentsStatusWatermark = {
+  local_frontier: number;
+  store_index: number;
 };
 
 export type Arrangement = ResourceHeader & {
@@ -883,6 +913,7 @@ export type Attention = ResourceHeader & {
   mission_id?: Id;
   mission_run_id?: Id;
   person_id: Id;
+  presentation?: AttentionPresentation;
   preview?: (LaunchPreview | null);
   preview_token?: string | null;
   priority: "critical" | "high" | "normal" | "low";
@@ -902,6 +933,11 @@ export type Attention = ResourceHeader & {
   what?: string;
 };
 
+export type AttentionActor = {
+  id: Id;
+  label: string;
+};
+
 export type AttentionBlocked = {
   attempt: number;
   goal: string;
@@ -909,10 +945,48 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionPresentation = {
+  agent: (AttentionActor | null);
+  kind: 
+  "review"
+  | "feedback"
+  | "request"
+  | "update"
+  | "launch"
+  | "revision"
+  | "prompt"
+  | "login"
+  | "fault"
+  | null
+;
+  raised_by: (AttentionActor | null);
+  revision?: AttentionRevision;
+  tier: "stopped" | "alert" | "today" | "later" | null;
+  waiting: (AttentionWaiting | null);
+};
+
+export type AttentionRevision = {
+  from_revision: string;
+  lines: Array<AttentionRevisionLine>;
+  reason: string;
+  to_revision: string;
+  truncated: boolean;
+};
+
+export type AttentionRevisionLine = {
+  op: "+" | "-" | "~";
+  text: string;
+};
+
 export type AttentionTargetState = {
   id: Id;
   since?: Timestamp;
   state: string;
+};
+
+export type AttentionWaiting = {
+  path: string;
+  step: StepRunId;
 };
 
 export type BlobChunk = {
@@ -1094,6 +1168,7 @@ export type CollectionCommand = ({
   person?: string | null;
   since_ms?: number;
   status?: null;
+  trace?: SubscribeTraceContext;
   until_ms?: number;
 } | {
   actor?: string | null;
@@ -1103,6 +1178,7 @@ export type CollectionCommand = ({
   limit?: number;
   person?: string | null;
   status?: string | null;
+  trace?: SubscribeTraceContext;
 } | {
   actor?: string | null;
   agent?: (AgentId | null);
@@ -1112,6 +1188,7 @@ export type CollectionCommand = ({
   limit?: number;
   person?: string | null;
   status?: string | null;
+  trace?: SubscribeTraceContext;
 } | {
   collection: "arrangements";
   id: string;
@@ -1119,6 +1196,7 @@ export type CollectionCommand = ({
   limit?: number;
   person: ArrangementPerson;
   subject?: ArrangementId;
+  trace?: SubscribeTraceContext;
 } | {
   capability: string;
   collection: "terminal";
@@ -1126,11 +1204,13 @@ export type CollectionCommand = ({
   incarnation?: string | null;
   kind: "subscribe";
   terminal: Id;
+  trace?: SubscribeTraceContext;
 } | {
   collection: "conversation";
   conversation: Id;
   id: string;
   kind: "subscribe";
+  trace?: SubscribeTraceContext;
 } | {
   id: string;
   kind: "unsubscribe";
@@ -1144,6 +1224,7 @@ export type CollectionFrame = ({
   kind: "snapshot";
   order: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
 } | {
   collection: CollectionName;
   has_more: boolean;
@@ -1152,6 +1233,7 @@ export type CollectionFrame = ({
   order: Array<Id>;
   removes: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
   upserts: Array<Resource>;
 } | {
   collection: "terminal";
@@ -1310,6 +1392,23 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DeclaredResource = {
+  kind: "uri" | "subject";
+  name: string;
+  reason?: string | null;
+  resolution: "resolved" | "unresolved" | "not-applicable";
+  subject: Id;
+  uri?: string;
+};
+
+export type DelegationProof = {
+  episode: string;
+  message: string;
+  person: string;
+  policy: string;
+  quote: string;
+};
+
 export type Device = ResourceHeader & {
   expires_at: Timestamp;
   grant_expires_at?: Timestamp;
@@ -1417,7 +1516,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | DocumentsPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | TerminalRoute | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | TerminalRoute | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -1429,6 +1528,8 @@ export type ErrorCode = (
   | "identity-unknown"
   | "lifecycle-unavailable"
   | "retirement-upgrade-required"
+  | "invalid-custody-successor"
+  | "custody-pending"
   | "attention-migrated"
   | "arrangement-exists"
   | "arrangement-folder-exists"
@@ -1448,6 +1549,7 @@ export type ErrorCode = (
   | "not-found"
   | "forbidden"
   | "unsupported-capability"
+  | "peer-too-old"
   | "validation-failed"
   | "idempotency-conflict"
   | "issuer-required"
@@ -1484,6 +1586,9 @@ export type ErrorCode = (
   | "content-not-text"
   | "invalid-document-reference"
   | "document-not-synced"
+  | "private-notes-unreachable"
+  | "private-notes-carrier-conflict"
+  | "private-notes-indeterminate"
   | "internal"
  | string);
 
@@ -1517,10 +1622,18 @@ export type ExchangeTransport = {
   fabric_route?: string;
 };
 
+export type FabricGrant = {
+  detail?: string;
+  peer?: string;
+  service?: string;
+  state: "granted" | "already-trusted" | "not-enabled" | "not-requested" | "failed";
+};
+
 export type Fence = {
   attempt?: number;
   mission_generation?: RunGenerationId;
   preview_token?: string;
+  private_notes?: PrivateNotesFence;
   readiness_epoch?: number;
   runtime_desired_revision?: string;
   runtime_incarnation?: string;
@@ -1871,6 +1984,7 @@ export type Mission = ResourceHeader & {
   mission_revision: Revision;
   must_act?: MustAct;
   presentation?: MissionPresentation;
+  resources?: Array<DeclaredResource>;
   run_counts?: {
   [key: string]: number;
 };
@@ -2182,6 +2296,7 @@ export type PageInfo = {
   has_more: boolean;
   limit: number;
   next_cursor?: string | null;
+  omitted_items?: number | null;
 };
 
 export type PairedSession = (PersonPairedSession | AssistantPairedSession);
@@ -2189,7 +2304,7 @@ export type PairedSession = (PersonPairedSession | AssistantPairedSession);
 export type PairingAdvertisement = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   capabilities: Array<{
-  id: "device-key-proofs";
+  id: "device-key-proofs" | "fabric-gateway-grant";
   state: "granted";
   version: 1;
 }>;
@@ -2230,6 +2345,7 @@ export type PairingComplete = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   code: string;
   device_public_key: string;
+  fabric_node_id?: string;
   key_storage?: "secure-enclave" | "software";
 };
 
@@ -2291,6 +2407,7 @@ export type PersonPairedSession = {
 
 }>;
   expires_at: Timestamp;
+  fabric_grant?: FabricGrant;
   kind: "paired-session";
   person_id: string;
   person_root_key_proof?: {
@@ -2303,6 +2420,7 @@ export type PersonPairedSession = {
 export type PersonPairingBegin = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   device_name: string;
+  fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
   scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
@@ -2337,6 +2455,38 @@ export type PresentationActor = {
   person?: Id;
 };
 
+export type PrivateNotesAction = {
+  fence: Fence & Required<Pick<Fence, 'private_notes'>>;
+  id: "private-notes.write";
+};
+
+export type PrivateNotesData = {
+  fence: PrivateNotesFence;
+  markdown: string;
+  uri: PrivateNotesUri;
+};
+
+export type PrivateNotesFence = {
+  carrier_generation: Revision;
+  revision: Revision;
+};
+
+export type PrivateNotesSubject = {
+  actions: Array<PrivateNotesAction>;
+  data: PrivateNotesData;
+  family: "private-notes";
+  live: null;
+  ref: PrivateNotesUri;
+  schema: "fractal.private-notes@1";
+};
+
+export type PrivateNotesUri = string;
+
+export type PrivateNotesWriteParameters = {
+  markdown: string;
+  uri: PrivateNotesUri;
+};
+
 export type ProjectionEvent = Omit<{
   body: {
 
@@ -2354,6 +2504,7 @@ export type ProjectionEvent = Omit<{
 
 export type PromptRespondParameters = {
   answer: string;
+  delegation?: DelegationProof;
   episode: string;
   target_id: Id;
 };
@@ -2547,6 +2698,74 @@ export type ScgReadAuthorizationPayload = {
   request_digest: string;
 };
 
+export type ScheduleCoverage = {
+  covered_host_count: number;
+  membership: ("unknown" | string);
+  omitted_configured_peer_count: number;
+  omitted_covered_host_count: number;
+  scope: "configured-peers-and-page-hosts";
+  truncated: boolean;
+  unheard_after_ms: number;
+  unheard_hosts: Array<ScheduleUnheardHost>;
+  [key: string]: unknown;
+};
+
+export type ScheduleDeclaration = {
+  declaration: unknown;
+  declaration_bytes: number;
+  declaration_claim_id: string;
+  declaration_origin_host_id: string | null;
+  id: string;
+  knowledge: ScheduleKnowledge;
+  next_declared_fire_at: string | null;
+  next_fire_basis: "declaration-only";
+  next_fire_state: ("future" | "stopped" | "past-one-shot" | "unknown" | string);
+  owner: ScheduleOwner;
+  primary_host_id: string | null;
+  read_problem: string | null;
+  revision: string;
+  standby_node: unknown;
+  standby_state: ("declared" | "not-declared" | "unknown" | string);
+  state: ("declared" | "stopped" | "unknown" | string);
+  [key: string]: unknown;
+};
+
+export type ScheduleKnowledge = {
+  age_ms: (number | null);
+  basis: ("local-read" | "last-direct-exchange" | "unknown" | string);
+  completeness: ("unknown" | string);
+  last_exchange_at: string | null;
+  origin_host_id: string | null;
+  [key: string]: unknown;
+};
+
+export type ScheduleOwner = {
+  generation_id: string | null;
+  run_id: string | null;
+  state: ("recorded" | "not-recorded" | "unknown" | string);
+  step_id: string | null;
+  [key: string]: unknown;
+};
+
+export type ScheduleUnheardHost = {
+  age_ms: (number | null);
+  host_id: string;
+  last_exchange_at: string | null;
+  reason: ("older-than-threshold" | "never-recorded" | "clock-unknown" | string);
+  [key: string]: unknown;
+};
+
+export type SchedulesPage = {
+  as_of: Timestamp;
+  basis: "local-replicated-declarations";
+  collection: "schedules";
+  coverage: ScheduleCoverage;
+  items: Array<ScheduleDeclaration>;
+  kind: "page";
+  page: PageInfo;
+  [key: string]: unknown;
+};
+
 export type SenderRef = string;
 
 export type Session = ResourceHeader & {
@@ -2617,6 +2836,11 @@ export type StatusTransition = {
 
 export type StepRunId = string;
 
+export type StreamSync = {
+  peers?: Array<SyncPeer>;
+  state: ("level" | "catching-up" | "diverged" | string);
+};
+
 export type StructuredDiff = {
   changes: Array<{
 
@@ -2668,6 +2892,8 @@ export type SubjectDefinition = {
   kind: "subject-definition";
   subject: string;
 };
+
+export type SubscribeTraceContext = unknown;
 
 export type Subscription = ResourceHeader & {
   kind: "subscription";
@@ -2912,6 +3138,7 @@ export type TimelineEntry = Omit<{
   body: {
 
 };
+  delivers?: string;
   final: boolean;
   id: TimelineEntryId;
   revision: number;
@@ -2946,11 +3173,13 @@ export type TimelineErrorBody = {
 export type TimelineMessageBody = {
   assistant_grant_id?: string;
   attachments?: Array<Attachment>;
+  author?: ActorRef;
   blocks?: Array<TimelineBlock>;
   body_bytes?: number;
   from?: SenderRef;
   message_id: string;
   provenance?: MessageProvenance;
+  recipients?: Array<ParticipantRef>;
   reply_to?: string | null;
   sender_class?: "external-assistant";
   tags?: Array<string>;
@@ -3314,6 +3543,16 @@ export type Usage = ResourceHeader & {
   value: UsagePeriod;
 };
 
+export type UsageAccount = {
+  account?: string;
+  credits?: UsageCredits;
+  driver?: string;
+  kind: "subscription" | "api-key";
+  name: string;
+  plan?: string;
+  provider: string;
+};
+
 export type UsageContext = {
   compactions?: number;
   last_compaction_ms?: number;
@@ -3323,6 +3562,13 @@ export type UsageContext = {
   used_percent?: number;
   used_tokens?: number;
   window_tokens?: number;
+};
+
+export type UsageCredits = {
+  budget_microusd: number;
+  period_start_ms: number;
+  unpriced_tokens: number;
+  used_microusd: number;
 };
 
 export type UsageLimit = {
@@ -3342,6 +3588,7 @@ export type UsageLimit = {
 };
 
 export type UsagePeriod = {
+  accounts?: Array<UsageAccount>;
   agent_messages?: AgentMessageEstimate;
   limits?: Array<UsageLimit>;
   rows: Array<UsageRow>;
@@ -3375,6 +3622,7 @@ export type UsagePricingRates = {
 
 export type UsageRow = {
   account?: string;
+  account_ref?: string;
   agent: Id;
   cache_write_1h_tokens: number;
   cache_write_tokens: number;
@@ -3680,6 +3928,7 @@ export type ActionRequest =
   workspace: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |

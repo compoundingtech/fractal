@@ -1,4 +1,4 @@
-//! The part of `store::published_views` that moved up from st3-seats.
+//! The part of `store::published_views` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_seats::store::published_views::*;
@@ -19,12 +19,12 @@ impl PublishedViewsAttentionStore for Store {
 
     #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
     fn publish_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.publish(collection);
+        self.fractal.published_views.publish(collection);
     }
 
     #[cfg_attr(not(test), allow(dead_code, reason = "the missions, work and attention refreshers call it"))]
     fn withdraw_collection_view(&self, collection: &str) {
-        self.smalltalk.published_views.withdraw(collection);
+        self.fractal.published_views.withdraw(collection);
     }
 }
 

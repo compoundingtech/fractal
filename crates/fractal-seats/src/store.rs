@@ -1,4 +1,4 @@
-//! The part of `store` that moved up from st3-store.
+//! The part of `store` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 pub use fractal_missions::store::identities;
 #[cfg(any(test, feature = "test-support"))]
@@ -99,7 +99,7 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
-pub use fractal_missions::store::runtime::SmalltalkRuntime;
+pub use fractal_missions::store::runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
@@ -143,6 +143,7 @@ pub mod retirements;
 pub mod revision_seats;
 pub mod rollouts;
 pub mod roster_admission;
+pub mod runtime_start_diagnostics;
 pub mod runtime_starts;
 pub mod seat_status;
 pub mod seats;
@@ -150,6 +151,8 @@ pub mod step_labels;
 pub mod stop_deferral;
 pub mod subagents;
 pub mod trace_principal;
+pub mod usage_accounts;
+pub use usage_accounts::AttributedUsage;
 pub mod usage_period;
 pub mod work_summaries_ivm;
 #[cfg(test)]
@@ -286,6 +289,12 @@ pub trait SeatsStoreCore {
         ) -> Result<BTreeSet<String>>;
     /// The desired subjects named in `subjects`, by their primary keys.
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>>;
+    /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
+    /// only typed edges; this resolves them through the ordinary desired resource subjects.
+    fn declared_resource_uris<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a crate::model::DeclaredResourceReference>,
+    ) -> Result<BTreeMap<String, String>>;
 }
 
 impl SeatsStoreCore for Store {
@@ -313,8 +322,7 @@ impl SeatsStoreCore for Store {
             // a snapshot can see a commit a moment before the writer publishes its index.
             let current = current_index(&self.readers.get())?;
             let index = selected_index(current, at_index).map_err(anyhow::Error::new)?;
-            let mut cache = self
-                .smalltalk
+            let mut cache = self.fractal
                 .agent_status_cache
                 .lock()
                 .expect("agent status cache poisoned");
@@ -394,6 +402,29 @@ impl SeatsStoreCore for Store {
             }
         }
         Ok(stopped)
+    }
+
+    /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
+    /// only typed edges; this resolves them through the ordinary desired resource subjects.
+    fn declared_resource_uris<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a crate::model::DeclaredResourceReference>,
+    ) -> Result<BTreeMap<String, String>> {
+        let subjects = references
+            .into_iter()
+            .map(|reference| reference.subject.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(self
+            .desired_subjects_named(&subjects)?
+            .into_iter()
+            .filter(|desired| desired.kind == "resource")
+            .filter_map(|desired| {
+                let uri = fractal_store::graph::declared_uri(&desired.desired)?.to_owned();
+                Some((desired.subject, uri))
+            })
+            .collect())
     }
 
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {

@@ -71,21 +71,19 @@ impl Daemon {
     }
 
     fn state(&self) -> AppState {
-        AppState {
-            owning_person: None,
-            store: self.store.clone(),
-            notify: Arc::new(Notify::new()),
-            event_notify: self.event_notify.clone(),
-            node: "restart-node".into(),
-            state_dir: self.root.join("daemon"),
-            pty_root: self.root.join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: fractal_daemon::model::PlannerSpec::default(),
-        }
+        AppState { owning_person: None,
+        store: self.store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: self.event_notify.clone(),
+        node: "restart-node".into(),
+        state_dir: self.root.join("daemon"),
+        pty_root: self.root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     // Dropping this runtime also closes upgraded WebSocket connections, just as exiting
@@ -445,6 +443,50 @@ while not (home / 'provider-finish').exists():
     driver
 }
 
+/// Linux analogue of Claude's policy refusal: the provider prints a warning but stays
+/// alive. An isolated API and HOME prove this does not become a failed process exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_channel_policy_banner_keeps_driver_alive_and_channel_unattached() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut daemon = Daemon::new(root);
+    let seat = "agent/grove/policy-orchid";
+    let incarnation = "policy-orchid:one";
+    declare_claude(&daemon, seat);
+    daemon.observe_running(seat, incarnation);
+    daemon.start_admitted_protocol().await;
+    let provider = "printf '%s\\n' '--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)' 'Inbound messages will be silently dropped' 'Have an administrator set channelsEnabled: true in managed settings to enable'; exec sleep 300";
+    let mut driver = TestSeat(Some(
+        seat_command(root, &daemon.socket)
+            .env("ST_AGENT", seat)
+            .env("ST3_MAILBOX_TRANSPORT", "push")
+            .env("ST3_CLAUDE_ATTACH_WINDOW_MS", "50")
+            .args(["driver", "claude", "--subject", seat, "--", "sh", "-c", provider])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn().unwrap(),
+    ));
+    wait_until("the policy-blocked driver reports no attachment", Duration::from_secs(10), || {
+        assert_alive(&mut driver, "policy-blocked driver");
+        daemon.has_diagnostic(seat, incarnation, "claude-channel-unattached")
+    }).await;
+    // Read only the three flushed banner lines; the still-running provider owns the pipe.
+    let mut output = BufReader::new(driver.stdout.take().unwrap());
+    let mut banner = String::new();
+    output.read_line(&mut banner).unwrap();
+    output.read_line(&mut banner).unwrap();
+    output.read_line(&mut banner).unwrap();
+    assert!(banner.contains("blocked by org policy") && banner.contains("channelsEnabled"));
+    assert_alive(&mut driver, "policy-blocked driver after banner");
+    request_driver_stop(&driver);
+    native_exit_finishes(root, &mut driver, Duration::from_secs(8)).await;
+    daemon.stop().await;
+}
+
 fn request_driver_stop(driver: &Child) {
     // Signal only the driver: its normal provider supervision must stop the child itself.
     assert_eq!(unsafe { libc::kill(driver.id() as i32, libc::SIGTERM) }, 0);
@@ -715,6 +757,14 @@ time.sleep(300)
     let owned = fractal_drivers::harness_state::read(&record, None).unwrap();
     wait_until("the quiet seat's channel attaches", Duration::from_secs(10), || {
         daemon.has_diagnostic(seat, incarnation, "claude-channel-attached")
+            && daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap()
+                .iter().any(|claim| {
+                    claim.body["fields"]["code"] == "claude-channel-initialized"
+                        && claim.body["fields"]["incarnation_id"] == incarnation
+                        && claim.body["fields"]["reason"].as_str().is_some_and(|reason| {
+                            reason.contains("legacy ownership: unprotected until next natural restart")
+                        })
+                })
     })
     .await;
     // Stand in for this wrapper's Stop hook. Retain the same provider ownership for a
@@ -752,6 +802,20 @@ time.sleep(300)
         .unwrap();
     assert_eq!(before["harness_state"], "idle", "{before}");
     assert_eq!(before["observation"], "current", "{before}");
+    // Accepted legacy startup stays silent in the terminal, but operators retain both
+    // its delivery-report warning and its durable initialization diagnostic.
+    let warning = "legacy ownership: unprotected until next natural restart";
+    assert!(before["delivery"]["reason"].as_str().is_some_and(|reason| {
+        reason.contains(warning)
+    }), "{before}");
+    let initialized = daemon.store.claims_for(seat, Some("harness.diagnostic")).unwrap();
+    assert!(initialized.iter().any(|claim| {
+        claim.body["fields"]["code"] == "claude-channel-initialized"
+            && claim.body["fields"]["incarnation_id"] == incarnation
+            && claim.body["fields"]["reason"].as_str().is_some_and(|reason| {
+                reason.contains(warning)
+            })
+    }));
     daemon.stop().await;
     // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
     // test-only shortened timeout and not by sleeping through it. Open a fresh Store too: the
@@ -1023,7 +1087,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         log.contains("native conversation delivery resumed"),
         "{log}"
     );
-    assert!(!log.contains("st3 up"), "{log}");
+    assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1117,7 +1181,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
     let log = driver_log(root);
     assert!(log.contains("may be restarting"), "{log}");
-    assert!(!log.contains("st3 up"), "{log}");
+    assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1411,7 +1475,7 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
     );
     assert!(stderr.contains("was not reachable for 1s"), "{stderr}");
     assert!(stderr.contains("Nothing was sent"), "{stderr}");
-    assert!(!stderr.contains("st3 up"), "{stderr}");
+    assert!(!stderr.contains("st3 up") && !stderr.contains("fractal up"), "{stderr}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

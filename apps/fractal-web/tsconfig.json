@@ -21,8 +21,6 @@
     "server/**/*.mts",
     "src/**/*.ts",
     "src/**/*.tsx",
-    "packages/fractal-sdk/src/**/*.ts",
-    "packages/fractal-sdk/vitest.config.ts",
     "vitest.config.ts"
   ],
   "exclude": [

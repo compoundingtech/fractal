@@ -340,7 +340,8 @@ fn clean_path_supports_help_validate_env_and_doctor() {
     let doctor_agent = doctor_catalog.join("agents/h/missing/agent.kdl");
     fs::create_dir_all(doctor_agent.parent().unwrap()).unwrap();
     fs::write(&doctor_agent, "agent \"missing\" { host \"h\" }\n").unwrap();
-    let mut owner = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+    // Only st2's children get the clean PATH; this fixture uses the inherited tools.
+    let mut owner = Command::new("sleep").arg("30").spawn().unwrap();
     fs::write(
         doctor_catalog.join(".st2.h.lock"),
         format!("{}\n", owner.id()),

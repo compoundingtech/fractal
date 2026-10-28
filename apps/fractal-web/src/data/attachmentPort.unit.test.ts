@@ -34,13 +34,15 @@ const ack = {
 
 const attachmentClient = ({
   states = {},
+  preflight,
   reply = (url: URL) => Response.json({
     api_version: 'st3.client.v0', snapshot: { id: 'snapshot/native' },
     value: url.pathname.endsWith('/chunk') ? chunk : url.pathname.endsWith('/actions') ? ack : upload,
   }),
 }: {
   readonly states?: Readonly<Record<string, string>>
-  readonly reply?: (url: URL) => Response | Promise<Response>
+  readonly reply?: (url: URL, init?: RequestInit) => Response | Promise<Response>
+  readonly preflight?: () => Promise<void>
 } = {}) => {
   const calls: { readonly url: URL; readonly init?: RequestInit }[] = []
   const client = new FractalClient({
@@ -48,14 +50,16 @@ const attachmentClient = ({
     fetchImpl: async (input, init) => {
       const url = new URL(String(input))
       calls.push({ url, ...(init === undefined ? {} : { init }) })
-      return url.pathname.endsWith('/capabilities')
-        ? Response.json({ ...recording.capabilities, value: {
+      if (url.pathname.endsWith('/capabilities')) {
+        await preflight?.()
+        return Response.json({ ...recording.capabilities, value: {
           ...recording.capabilities.value,
           capabilities: ['control.messages', 'message.send', 'read.projections'].map((id) => ({
             id, version: 0, state: states[id] ?? 'granted',
           })),
         } })
-        : reply(url)
+      }
+      return reply(url, init)
     },
   })
   return { port: gatewayAttachments(client, async () => ({ _tag: 'Success', value: 'snapshot/data-layer' })), calls }
@@ -75,6 +79,66 @@ describe('native attachment port', () => {
     expect(calls[1]?.init?.method).toBe('POST')
     expect(calls[1]?.init?.body).toBe(bytes)
     expect(new Headers(calls[1]?.init?.headers).get('Content-Type')).toBe('image/webp')
+  })
+
+  it('keeps the composer signal on preflight and aborts an actual pending upload transport without a refusal', async () => {
+    const controller = new AbortController()
+    const reason = new DOMException('Upload canceled', 'AbortError')
+    const started = Promise.withResolvers<void>()
+    const transport = Promise.withResolvers<Response>()
+    const { port, calls } = attachmentClient({
+      reply: (_url, init) => {
+        const signal = init?.signal
+        signal?.addEventListener('abort', () => transport.reject(signal.reason), { once: true })
+        started.resolve()
+        return transport.promise
+      },
+    })
+    const pending = port.upload({ bytes: new Uint8Array([1]), mediaType: 'image/png', signal: controller.signal })
+    const rejected = expect(pending).rejects.toBe(reason)
+    await started.promise
+    expect(calls.map(({ init }) => init?.signal)).toEqual([controller.signal, controller.signal])
+    controller.abort(reason)
+    await rejected
+  })
+
+  it('does no preflight or upload for a pre-aborted signal', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const { port, calls } = attachmentClient()
+    await expect(port.upload({ bytes: new Uint8Array([1]), mediaType: 'image/png', signal: controller.signal })).rejects.toBe(controller.signal.reason)
+    expect(calls).toEqual([])
+  })
+
+  it('does not upload after cancellation during a delayed capability preflight that ignores abort', async () => {
+    const controller = new AbortController()
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const { port, calls } = attachmentClient({ preflight: () => {
+      started.resolve()
+      return release.promise
+    } })
+    const pending = port.upload({ bytes: new Uint8Array([1]), mediaType: 'image/png', signal: controller.signal })
+    await started.promise
+    controller.abort()
+    release.resolve()
+    await expect(pending).rejects.toBe(controller.signal.reason)
+    expect(calls.map(({ url }) => url.pathname)).toEqual(['/v1/client/capabilities'])
+  })
+
+  it('does not return an uploaded reference if the upload transport completes after cancellation', async () => {
+    const controller = new AbortController()
+    const started = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<Response>()
+    const { port } = attachmentClient({ reply: () => {
+      started.resolve()
+      return release.promise
+    } })
+    const pending = port.upload({ bytes: new Uint8Array([1]), mediaType: 'image/png', signal: controller.signal })
+    await started.promise
+    controller.abort()
+    release.resolve(Response.json({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/native' }, value: upload }))
+    await expect(pending).rejects.toBe(controller.signal.reason)
   })
 
   it('reads the requested native chunk with the carrier message and offset unchanged', async () => {

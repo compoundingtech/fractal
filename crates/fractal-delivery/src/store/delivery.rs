@@ -1,4 +1,4 @@
-//! The part of `store::delivery` that moved up from st3-store.
+//! The part of `store::delivery` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::message_desired_recipient_match;
 use crate::message_sent_recipient_match;
@@ -55,6 +55,24 @@ fn subscription_request_view(
     }
 }
 
+/// Each recipient's work-wake subjects through a store index, so a reconcile pass reads only the
+/// sent claims committed since, not the body of every message the agent was ever sent.
+#[derive(Default)]
+struct WorkWakeSubjects(Mutex<HashMap<String, KeptWorkWakes>>);
+
+struct KeptWorkWakes {
+    /// The recipient's names when these were read; a new name reads its history again.
+    names: Vec<String>,
+    through: u64,
+    subjects: Vec<(String, u64)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Work-wake subjects this thread read from sent claims, kept ones not counted.
+    pub(crate) static WORK_WAKE_SUBJECTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The seat channel's current owner, and whether `fence`'s binding still exists.
 fn mailbox_owner_key(
     connection: &Connection,
@@ -103,6 +121,14 @@ pub trait DeliveryStore {
             &self,
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
+        ) -> Result<(ClaimRecord, bool), St3Error>;
+    /// Called only inside the native lease/authority guard. Metadata commits with
+    /// the first new read receipt; replay/settlement never adds or changes a binding.
+    fn append_native_mailbox_receipt_outcome(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
         ) -> Result<(ClaimRecord, bool), St3Error>;
     /// Search refreshes only a person's private message texts, using the same endpoint
     /// indexes as the mailbox. Other fleet writes do not invalidate this source.
@@ -330,6 +356,32 @@ impl DeliveryStore for Store {
         self.append_claim_fenced_outcome(input, Some(fence))
     }
 
+    fn append_native_mailbox_receipt_outcome(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
+        ) -> Result<(ClaimRecord, bool), St3Error> {
+        if native.is_some_and(|native| !native.valid() || input.kind != "message.read") {
+            return Err(St3Error::new(
+                "invalid-native-receipt",
+                "native proof needs a read receipt",
+            ));
+        }
+        append_claim_with_commit_context(
+            &self.graph,
+            input,
+            Some(fence),
+            None,
+            None,
+            None,
+            ClaimCommitContext {
+                native_receipt: native,
+                ..Default::default()
+            },
+        )
+    }
+
     fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String> {
         let connection = self.readers.get();
         let (count, newest): (u64, u64) = connection.query_row(
@@ -405,6 +457,26 @@ impl DeliveryStore for Store {
             .strip_prefix("agent/")
             .filter(|suffix| !suffix.contains('/'))
             .unwrap_or(&recipient);
+        let names = connection
+            .prepare_cached("SELECT name FROM identity_names WHERE identity=?1 ORDER BY name")?
+            .query_map([&recipient], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let through: u64 = connection.query_row(
+            "SELECT COALESCE(MAX(store_index), 0) FROM claims",
+            [],
+            |row| row.get(0),
+        )?;
+        let wakes = self.extension::<WorkWakeSubjects>();
+        let kept = wakes
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&recipient)
+            .filter(|kept| kept.names == names && kept.through <= through)
+            .map(|kept| (kept.through, kept.subjects.clone()));
+        let (after, mut subjects) = kept.unwrap_or_default();
+        // Sent claims are only appended, so only those after the kept cut can add a wake. The
+        // rowid bounds are checked on the index entry, before the body is read.
         let mut statement = connection.prepare_cached(
             "SELECT DISTINCT sent.subject,
                     (SELECT MIN(created.store_index) FROM claims created
@@ -412,15 +484,22 @@ impl DeliveryStore for Store {
              FROM claims sent INDEXED BY claims_message_to_index
              WHERE sent.kind='message.sent'
                AND json_extract(sent.body, '$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
+               AND sent.store_index>?3 AND sent.store_index<=?4
                AND instr(sent.body, 'st3-work:')>0
              ORDER BY created_index, sent.subject",
         )?;
-        let subjects = statement
-            .query_map(params![recipient, bare_recipient], |row| {
+        let added = statement
+            .query_map(params![recipient, bare_recipient, after, through], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
+        #[cfg(test)]
+        WORK_WAKE_SUBJECTS_READ.with(|read| read.set(read.get() + added.len()));
+        let known = subjects.iter().map(|(subject, _)| subject.clone()).collect::<HashSet<_>>();
+        subjects.extend(added.into_iter().filter(|(subject, _)| !known.contains(subject)));
+        subjects.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+        let mut gone = BTreeSet::new();
         let mut messages = Vec::with_capacity(subjects.len());
         for chunk in subjects.chunks(fractal_store::store::message_versions::CHUNK) {
             let requested = chunk
@@ -429,6 +508,10 @@ impl DeliveryStore for Store {
                 .collect::<Vec<_>>();
             let versions = fractal_store::store::message_versions::read(&connection, &requested)?;
             for ((subject, created_index), version) in chunk.iter().zip(versions) {
+                if version.latest_claim_index == 0 {
+                    gone.insert(subject.clone());
+                    continue;
+                }
                 let message = self.message_view_cached_at_version(
                     &connection,
                     subject,
@@ -440,6 +523,13 @@ impl DeliveryStore for Store {
                 {
                     messages.push(message);
                 }
+            }
+        }
+        subjects.retain(|(subject, _)| !gone.contains(subject));
+        {
+            let mut kept = wakes.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if kept.get(&recipient).is_none_or(|kept| kept.through <= through) {
+                kept.insert(recipient.clone(), KeptWorkWakes { names, through, subjects });
             }
         }
         sort_messages_canonically(&connection, &mut messages)?;
@@ -966,7 +1056,7 @@ impl DeliveryStore for Store {
             mailbox_lease::record_argv_binding(&tx, &bound, member)?;
         }
         tx.commit().map_err(internal)?;
-        if let Some(wakes) = self.smalltalk.mailbox_wakes.get() {
+        if let Some(wakes) = self.fractal.mailbox_wakes.get() {
             wakes.owner_changed(&bound.subject, &bound.component);
         }
         Ok(bound)

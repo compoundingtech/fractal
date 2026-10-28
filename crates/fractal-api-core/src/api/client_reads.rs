@@ -276,6 +276,7 @@ fn client_work_published_continuation(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(cursor.expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -389,6 +390,7 @@ async fn client_work_history(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(state),
         replicated: None,
@@ -741,7 +743,7 @@ pub async fn client_sessions_detail(
         })?;
         let id = session_id.as_str();
         let managed = crate::relay_trace::result(crate::relay_trace::Phase::Owner, || {
-            managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+            client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
         })
         .map_err(ApiError::internal)?;
         if let Some((_, _, origin)) = managed {
@@ -789,12 +791,35 @@ pub async fn client_sessions_detail(
     // Child transcripts are deliberately absent from the top-level session inventory.
     // Resolve their resource by the same parent/task identity used by timeline reads.
     let session_id = client_detail_id("session", &id);
-    if let Some(child) = crate::subagent_sessions::resolve_child(
-        state.native_session_home.as_deref(),
-        &session_id,
-    )
-    .map_err(ApiError::internal)?
-    {
+    if crate::subagent_sessions::child_parts(&session_id).is_some() {
+        let owner = client_v0::routing_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).map_err(ApiError::internal)?;
+        if let Some((_, _, Some(origin))) = owner
+            && origin != state.store.origin()
+        {
+            let remote_host = client_host_id(&origin);
+            let relay = state.client_relay.as_ref()
+                .ok_or_else(|| remote_unavailable_for_owner(&state, &remote_host))?;
+            if !client_v0::acting_party(&session) {
+                return Err(ApiError::bad(St3Error::new(
+                    "forbidden",
+                    "remote session detail requires a concrete person or agent",
+                )));
+            }
+            let value = relay.read(
+                &remote_host,
+                &crate::peer::ClientReadRequest {
+                    authority_actor: session.authority_actor.clone(),
+                    relay: None,
+                    request: crate::peer::ClientReadOperation::SessionDetail { session_id },
+                },
+            ).await.map_err(|error| {
+                client_v0::conversation_blocks::availability(remote_read_error(&remote_host, error))
+            })?;
+            return Ok(Json(value));
+        }
+        let child = client_v0::conversation_blocks::source(&state, &session_id, None)?;
         return Ok(Json(external_session_resource(child)));
     }
     client_detail(
@@ -829,6 +854,9 @@ pub async fn client_attention(
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
     let mut effective_query = query.clone();
     effective_query.person.clone_from(&person);
+    if query.history {
+        return attention_history::page(state, snapshot, effective_query, "attention").await;
+    }
     let history = query.history;
     client_snapshot_page(
         &state,
@@ -849,12 +877,18 @@ pub async fn client_attention_detail(
     Extension(session): Extension<client_v0::ClientSession>,
     AxumPath(id): AxumPath<String>,
     Query(query): Query<ClientListQuery>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let person = client_v0::person_filter(&session, query.person.as_deref())?;
-    let mut items = client_attention_resources_with_previews(&state, person.as_deref(), query.history)
-        .map_err(ApiError::internal)?;
+    if let Some(claim) = attention_history::closed_claim_id(&id) {
+        return attention_history::detail(state, claim.to_owned(), person)
+            .await
+            .map(IntoResponse::into_response);
+    }
+    let mut items =
+        client_attention_resources_with_previews(&state, person.as_deref(), query.history)
+            .map_err(ApiError::internal)?;
     client_attention_compatibility(&mut items, session.custom_forms);
-    client_detail(items, "attention", &id)
+    client_detail(items, "attention", &id).map(IntoResponse::into_response)
 }
 
 pub async fn client_messages(
@@ -1059,6 +1093,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
         filters: client_page_filters("messages", query), items,
         page: ClientPageInfo {
             limit, has_more: selected_more, next_cursor: None, cursor_expires_at: None,
+            omitted_items: None,
         },
         sync: client_sync_notice(state), replicated,
     };
@@ -1466,6 +1501,7 @@ pub async fn client_history(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(&state),
         replicated: None,

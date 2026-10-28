@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The pre-push hook refuses an agent's push (ST_AGENT set, signer listed on main) unless st-test --status --all says HEAD's tree is covered, and prints the command to run (scripts/st-test --all --push origin); it no longer signs for such a push. ST_EVIDENCE_OVERRIDE='reason' lets a push go and is recorded. st-test --status counts a lane edit, and with --all a policy check without a local command, as covered (CI runs them). Machines without a listed signer and people's pushes are unchanged.",
+  "replay": {
+    "status": "none",
+    "detail": "The pre-push hook and st-test's status output only; no protocol, schema, policy or workflow change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "The pre-push hook and st-test's status output only; no protocol, schema, policy or workflow change."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "An agent with a listed signer can no longer push a tree that is not covered by signed evidence for every check it can sign; it runs scripts/st-test --all --push origin first, or uses the logged ST_EVIDENCE_OVERRIDE. Nobody is refused for lacking a key."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "A hook stub installed before this change discards exit codes and keeps letting pushes go until it is replaced (next nix develop from a tree with the new scripts/install-git-hooks, or running that script from main)."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "The pre-push hook and st-test's status output only; no protocol, schema, policy or workflow change."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "After this merges, run scripts/install-git-hooks from main in each agent clone, so its stub passes the hook's refusal to git."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert this change, or push with ST_EVIDENCE_OVERRIDE='reason' (recorded); git push --no-verify skips the hook."
+  }
+}

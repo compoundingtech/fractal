@@ -19,7 +19,7 @@ each other holds.
 
 This document explains how a checkpoint works and what trimming drops, with examples. It describes
 the code in `crates/smallclaims/src/store/checkpoint*.rs` (agreement, proof, trim),
-`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for st's own claim
+`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for Fractal's own claim
 kinds; see [Retention](retention.md)) and `crates/fractal-store/src/store/checkpoint_rules.rs` (the planner
 functions those rules name). Operating commands
 are in [Fleet replication](replication.md#checkpoints). Read this before changing a rule, the
@@ -119,6 +119,9 @@ checkpoint instead; see [Trimming](#trimming).
 The daemon does this work in the background, sleeping ten minutes after each pass, on a thread
 that never holds the store's writer for long. `[checkpoint] enabled = false` in a node's config stops that node
 sealing, and since every participant must seal, that stops trimming for the whole fleet.
+`[trim] local = true` takes a member out of checkpoints for local trim: it seals, verifies and
+adopts nothing and only finishes a trim it had already committed. That also stops checkpoints
+for the other members until a person excuses it; see [replication](replication.md).
 
 ## What a rule may drop
 

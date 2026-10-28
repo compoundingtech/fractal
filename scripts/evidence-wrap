@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run one check once on this machine and ask the signer to record it as an evidence note.
 
-  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--push origin] -- COMMAND...
+  scripts/evidence-wrap --check linux-gate [--change-id github:OWNER/REPO#N] [--input NAME=VALUE]... [--input-file NAME=PATH]... [--push origin] -- COMMAND...
 
 Run it from a clean checkout of the exact commit you are about to push. It runs COMMAND once
 (output streams to your terminal), then sends the signer the facts it measured: the commit,
@@ -16,6 +16,7 @@ GLIBC_TUNABLES, GCONV_PATH, NLSPATH) and with a fixed PATH.
 The note is imported as refs/tags/evidence/<tree>/<record> in this checkout and, while gates on older bases
 read only notes, as refs/notes/evidence/<tree>/<record> naming the same record. With --push REMOTE both are
 also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it only helps when the commit you push has the tree CI will test (a branch current with main).
+A ref the remote answers with a bare `(failed)` is pushed again, up to 3 times; a refusal that gives a reason fails at once.
 
 With --aggregate FILE nothing is run: FILE is JSON {"command": [...], "exit_code": N, "output": ANY,
 "inputs": {name: string}} written by a job that summarizes other jobs (an aggregate gate). The
@@ -29,12 +30,17 @@ publish. A job on a shallow checkout uses this, because the server refuses a pus
 In --aggregate mode a dirty workspace does not stop the signature (the job has already run its
 tests); it is recorded as the input workspace_clean instead.
 
+--input-file NAME=PATH records an input the command itself reports, read after it ends: the sorted, distinct non-empty lines of
+PATH joined by commas (a count and digest past 500 characters), or 'none' when PATH is missing or empty. fractal-test uses it for env_skips, the tests that skipped because this
+host cannot run them (CI_TEST_ENV_SKIPS), so the note says which tests did not run here.
+
 With EVIDENCE_PUSH_TOKEN set, --push uses it as an HTTP authorization header (never printed).
 
 With --lanes-from BASE the check is held to its lane in .st/required-lanes.json at BASE (the accepted base): the command must be the
-lane's argv, every file at or below the lane's definition paths must be identical in this tree and at BASE (otherwise nothing is signed:
-the change edits the scripts that decide what the check runs, so CI runs the check), and the note records lane_definition_sha256, the
-digest the verifier recomputes from BASE. It is the producer half of `evidence-verify --lanes-from`.
+lane's argv, and the note records lane_definition_sha256, the digest of the lane as THIS tree defines it (the base's argv and paths, this
+tree's bytes at those paths). For a tree that leaves the lane alone that is the digest the verifier recomputes from BASE; for a tree that
+edits its lane it is the edited definition's, which only a level whose policy says by_level lane "tree" accepts (our hosts, since
+2026-10-26: a lane edit is signed like any other change). It is the producer half of `evidence-verify --lanes-from`.
 
 Take this script from the accepted base (main), not from the change under test.
 """
@@ -46,9 +52,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+import time
 
 sys.dont_write_bytecode = True
 
@@ -67,6 +75,36 @@ class Failure(Exception):
     pass
 
 
+PUSH_TRIES, PUSH_BACKOFF = 3, 2.0
+
+
+def push_refs(remote, refs, env_extra):
+    """Push refs to remote. GitHub now and then answers a ref with a bare `(failed)` and takes the same ref on the next push
+    (scripts/st-test's push_records retries it too): only those refs go again, up to PUSH_TRIES times, after 2 s and then 4 s.
+    A refusal that gives a reason (a rule, a non-fast-forward, an update the ruleset forbids) or a transport error fails at once.
+    The failure names every ref still refused, with its reason."""
+    pending = list(refs)
+    for attempt in range(1, PUSH_TRIES + 1):
+        done = git('push', '--porcelain', remote, *(f'{name}:{name}' for name in pending), check=False, env_extra=env_extra, transport=True)
+        if done.returncode == 0:
+            return
+        refused = {}
+        for line in done.stdout.decode(errors='replace').splitlines():
+            fields = line.split('\t')
+            if line.startswith('!') and len(fields) >= 3:
+                refused[fields[1].split(':')[0]] = fields[2].strip()
+        if not refused:
+            raise Failure(f'push failed: {done.stderr.decode(errors="replace").strip()[-500:]}')
+        transient = [name for name, why in refused.items() if why == '[remote rejected] (failed)']
+        if len(transient) < len(refused) or attempt == PUSH_TRIES:
+            shown = '; '.join(f'{name} {why}' for name, why in refused.items())
+            raise Failure(f'push failed (try {attempt} of {PUSH_TRIES}): {shown}')
+        print(f'evidence-wrap: {remote} answered {len(transient)} ref(s) with a bare (failed); pushing them again ({attempt + 1} of {PUSH_TRIES})',
+              file=sys.stderr, flush=True)
+        time.sleep(PUSH_BACKOFF * attempt)
+        pending = transient
+
+
 def signer_launch(argv, environ=None):
     """(argv, env) that start the signer: the program as an absolute path, the caller's environment without any
     loader or interpreter variable, and SIGNER_PATH as PATH."""
@@ -81,10 +119,15 @@ def signer_launch(argv, environ=None):
     return [os.path.abspath(program), *argv[1:]], env
 
 
-def git(*args, stdin=None, check=True, env_extra=None):
-    # Runs with the signing HOME in a job whose checkout holds code under test: no GIT_* variable of
-    # the job reaches git, and the checkout's fsmonitor, hooks and pager cannot name a program.
+def git(*args, stdin=None, check=True, env_extra=None, transport=False):
+    # Measurement git calls ignore the job's GIT_* environment. Publication alone keeps
+    # transport settings; neither path lets the checkout's fsmonitor, hooks or pager name a program.
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    if transport:
+        # Only publication uses the caller's transport configuration. In particular, dropping
+        # GIT_CONFIG_* here loses HTTPS remote/pushurl overrides and credential helpers.
+        clean.update({k: v for k, v in os.environ.items()
+                      if k.startswith('GIT_CONFIG_') or k in ('GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_SSH_VARIANT', 'GIT_ASKPASS')})
     done = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat', *args],
                           input=stdin, capture_output=True, timeout=600,
                           env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env_extra or {})))
@@ -109,6 +152,11 @@ def tracked_dirty():
     return changed or ('index flags hide changes: ' + ', '.join(hidden[:3]) if hidden else '')
 
 
+# The inputs this script sets itself; --input may not name them.
+WRAP_INPUTS = frozenset({'flake_lock_sha256', 'toolchain_sha256', 'wrapper_sha256', 'system', 'attempt', 'lane_definition_sha256',
+                         'workspace_clean', 'untracked_files'})
+
+
 def toolchain_digest(override):
     if override:
         return override
@@ -125,15 +173,21 @@ def toolchain_digest(override):
 def run_command(command):
     digest = hashlib.sha256()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    for chunk in iter(lambda: process.stdout.read(65536), b''):
+    # read1, not read: read(65536) waits for a full 64 KiB, so a caller reading this output as it comes (fractal-test's limit, which starts
+    # when ci-local says it has, and stops a check silent too long) would see it only in late bursts. The digest is of the same bytes.
+    for chunk in iter(lambda: process.stdout.read1(65536), b''):
         digest.update(chunk)
         sys.stdout.buffer.write(chunk)
         sys.stdout.buffer.flush()
     return process.wait(), digest.hexdigest()
 
 
+# fractal-test reads this from the base's copy: a base whose wrapper signs a tree that edits its lane (it no longer reports such a check as "not signed").
+SIGNS_LANE_EDITS = True
+
+
 def lane_inputs(verifier_path, base, check, tree, command):
-    """The lane definition digest for `check`, after refusing a command that is not the lane's argv and a tree that edits its own lane."""
+    """The digest of `check`'s lane as `tree` defines it, after refusing a command that is not the lane's argv."""
     loader = importlib.machinery.SourceFileLoader('evidence_verify_for_wrap', verifier_path)
     verifier = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
     loader.exec_module(verifier)
@@ -149,9 +203,9 @@ def lane_inputs(verifier_path, base, check, tree, command):
     if command != rules['argv']:
         raise Failure(f'the command is not the argv of lane {check} at {base}; nothing was signed')
     if definition['changed']:
-        raise Failure(f'this tree changes the definition of lane {check} relative to {base} ({", ".join(definition["changed"][:5])}); '
-                      'nothing was signed and CI will run the check')
-    return definition['sha256']
+        print(f'evidence-wrap: this tree edits lane {check} ({", ".join(definition["changed"][:5])}); the note carries the edited definition\'s digest',
+              file=sys.stderr)
+    return definition['tree_sha256']
 
 
 def main(argv):
@@ -169,6 +223,10 @@ def main(argv):
     parser.add_argument('--lanes-from', metavar='COMMIT',
                         help='hold the check to its lane in .st/required-lanes.json at this accepted base and record the lane definition digest')
     parser.add_argument('--aggregate', metavar='FILE', help='record the facts in FILE instead of running a command')
+    parser.add_argument('--input', action='append', default=[], metavar='NAME=VALUE',
+                        help='record one more input the command depends on (a name this script does not set itself; repeatable)')
+    parser.add_argument('--input-file', action='append', default=[], metavar='NAME=PATH',
+                        help='record one more input read from PATH after the command ends (its distinct lines, comma-joined; repeatable)')
     parser.add_argument('--out', metavar='DIR', help='write the pack and a summary here instead of importing and pushing')
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
@@ -195,6 +253,21 @@ def main(argv):
             'system': f'{system[1]}-{system[0]}'.lower() if len(system) == 2 else 'unknown',
             'attempt': args.attempt,
         }
+        for item in args.input:
+            name, sep, value = item.partition('=')
+            if not sep or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not value or name in inputs or name in WRAP_INPUTS:
+                raise Failure(f'--input {item!r}: NAME=VALUE with a lower-case name this script does not set itself, and a value')
+            if name == 'source_inputs' and not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', value):
+                raise Failure('--input source_inputs must be a git tree id')
+            inputs[name] = value
+        reported = {}
+        for item in args.input_file:
+            name, sep, path = item.partition('=')
+            if not sep or not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not path or name in inputs or name in WRAP_INPUTS or name in reported:
+                raise Failure(f'--input-file {item!r}: NAME=PATH with a lower-case name this script does not set itself, and a path')
+            reported[name] = Path(path)
+        if args.aggregate and reported:
+            raise Failure('--input-file is for a command this script runs, not --aggregate')
         if args.aggregate:
             facts = json.loads(Path(args.aggregate).read_text())
             known = {'command', 'exit_code', 'output', 'output_sha256', 'inputs', 'runner'}
@@ -216,6 +289,11 @@ def main(argv):
             if args.lanes_from:
                 inputs['lane_definition_sha256'] = lane_inputs(args.verifier, args.lanes_from, args.check, tree, command)
             exit_code, output_sha256 = run_command(command)
+            for name, path in reported.items():
+                lines = path.read_text().splitlines() if path.exists() else []
+                value = ','.join(sorted({line.strip() for line in lines if line.strip()})) or 'none'
+                # The signer takes inputs of at most 500 characters: a longer list is recorded as its count and digest.
+                inputs[name] = value if len(value) <= 500 else f'{value.count(",") + 1} entries, sha256 {hashlib.sha256(value.encode()).hexdigest()}'
         if git('rev-parse', 'HEAD').stdout.decode().strip() != commit or (tracked_dirty() if args.aggregate else dirty()):
             raise Failure('the checkout changed while the command ran; nothing was signed')
         request = {'commit': commit, 'check': args.check, 'command': command, 'exit_code': exit_code,
@@ -240,7 +318,13 @@ def main(argv):
             return 0 if exit_code == 0 else exit_code
         git('index-pack', '--stdin', stdin=base64.b64decode(answer['object_pack_base64'], validate=True))
         ref, tag = f'refs/notes/evidence/{tree}/{record}', f'refs/tags/evidence/{tree}/{record}'
-        for name in (tag, ref):
+        indexes = []
+        key = inputs.get('source_inputs')
+        if key is not None:
+            # A record that signs the input key it was measured for is also indexed under it, as the CI signer's records are
+            # (docs/per-crate-test-signing.md): another tree with the same key finds it by one prefix.
+            indexes = [f'refs/tags/evidence/input/{args.check}/{key}/{record}', f'refs/notes/evidence-input/{args.check}/{key}/{record}']
+        for name in (tag, ref, *indexes):
             if not git('for-each-ref', '--format=%(objectname)', name).stdout.strip():
                 git('update-ref', name, record, '0' * len(record))
         result = {'record': record, 'ref': ref, 'tag': tag, 'tree': tree, 'check': args.check, 'exit_code': exit_code,
@@ -254,8 +338,12 @@ def main(argv):
                     path.write_bytes(shown.stdout)
                     keys = ['--keys', str(path)]
             if keys:
+                # A per-crate record (one crate, one input key) is checked as that crate's: the tree's newest record of the check may be
+                # another crate's, and once one crate's failed record is on the tree it answered "not verified" for every crate signed after.
+                crate = inputs.get('crate', '')
+                per_crate = ['--crate-key', f'{crate}={key}'] if key is not None and re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9._-]*', crate) else []
                 checked = subprocess.run([sys.executable, args.verifier, '--repo', '.', '--tree', tree,
-                                          '--check', args.check, *keys], capture_output=True)
+                                          '--check', args.check, *keys, *per_crate], capture_output=True)
                 result['verified'] = checked.returncode == 0
                 if checked.returncode != 0:
                     result['verification'] = checked.stdout.decode(errors='replace')[-500:]
@@ -267,12 +355,13 @@ def main(argv):
             extra = {}
             if token:
                 header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-                extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader',
-                         'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
-            pushed = git('push', '--quiet', args.push, f'{tag}:{tag}', f'{ref}:{ref}', check=False, env_extra=extra)
-            if pushed.returncode != 0:
-                text = pushed.stderr.decode(errors='replace').replace(token, '***') if token else pushed.stderr.decode(errors='replace')
-                raise Failure(f'push failed: {text.strip()[-500:]}')
+                count = int(os.environ.get('GIT_CONFIG_COUNT', '0'))
+                extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                         f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
+            try:
+                push_refs(args.push, [tag, ref, *indexes], extra)
+            except Failure as failure:
+                raise Failure(str(failure).replace(token, '***') if token else str(failure))
             result['pushed'] = True
         print(json.dumps(result, indent=2), file=sys.stderr)
         return 0 if exit_code == 0 else exit_code

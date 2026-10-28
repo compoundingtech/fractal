@@ -25,15 +25,21 @@ export const gatewayAttachments = (
       return conversationPortFailure(cause)
     }
   },
-  upload: async ({ bytes, mediaType }) => {
+  upload: async ({ bytes, mediaType, signal }) => {
+    signal?.throwIfAborted()
     try {
-      const capabilities = Native.decodeUnknownSync(Native.Capabilities)((await client.capabilities()).value)
+      const response = await client.capabilities({ signal })
+      signal?.throwIfAborted()
+      const capabilities = Native.decodeUnknownSync(Native.Capabilities)(response.value)
       if (!hasConversationCapability(capabilities, 'control.messages')) {
         return { _tag: 'Refused', reason: 'ungranted', detail: 'This device is not granted attachment upload.' }
       }
-      const response = await client.uploadBlob(bytes, mediaType)
-      return { _tag: 'Success', value: Native.decodeUnknownSync(Native.BlobUpload)(response.value) }
+      const uploaded = await client.uploadBlob(bytes, mediaType, { signal })
+      signal?.throwIfAborted()
+      return { _tag: 'Success', value: Native.decodeUnknownSync(Native.BlobUpload)(uploaded.value) }
     } catch (cause) {
+      signal?.throwIfAborted()
+      if (cause instanceof Error && cause.name === 'AbortError') throw cause
       return conversationPortFailure(cause)
     }
   },
@@ -102,7 +108,7 @@ export const gatewayMessageSend =
       if (cause instanceof ClientError && cause.response.code === 'stale-fence') {
         return { _tag: 'Refused', reason: 'stale-fence', detail: cause.response.message, error: cause.response }
       }
-      // st could not confirm the send in time, and it may still complete: only the identical
+      // Fractal could not confirm the send in time, and it may still complete: only the identical
       // request (same id, key and parameters) is safe to send again.
       if (cause instanceof ClientError && appliedAnswer(cause) === 'unknown') {
         return { _tag: 'Refused', reason: 'unconfirmed', detail: cause.response.message, error: cause.response }

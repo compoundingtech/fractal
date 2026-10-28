@@ -55,7 +55,26 @@ const RETRY_DELAYS: [Duration; 5] = [
 /// How long a fresh request may take to prove st is answering after its stream dropped.
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 
-/// The subscription ID of the open terminal.
+/// `default`, or `STUI_FEED_TIMER_CAP_MS` when that is shorter: a cap on the quiet check, the
+/// ping, the pong wait and the retry delays above. Only the end-to-end tests set it, so they need
+/// not wait 20 s to see a silent link dropped.
+fn timer(default: Duration) -> Duration {
+    static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
+    let cap = *CAP.get_or_init(|| {
+        std::env::var("STUI_FEED_TIMER_CAP_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+            .map(Duration::from_millis)
+    });
+    cap.map_or(default, |cap| cap.min(default))
+}
+
+/// The wait before the attempt after `failures` failed ones.
+fn retry_delay(failures: usize) -> Duration {
+    timer(RETRY_DELAYS[failures.min(RETRY_DELAYS.len() - 1)])
+}
+
+/// The prefix of generation-scoped terminal subscription IDs.
 const TERMINAL: &str = "terminal";
 /// The subscription ID of the open conversation.
 const CONVERSATION: &str = "conversation";
@@ -108,7 +127,7 @@ impl Window {
 }
 
 /// The glasses capability version whose glasses are splits of tab groups.
-const GLASSES_VERSION: u32 = 1;
+const GLASSES_VERSION: u64 = 1;
 
 /// The most glasses st keeps live for one person.
 const GLASSES: usize = 100;
@@ -126,7 +145,7 @@ pub enum Update {
     Degraded(String),
     /// The granted glasses shape, delivered before its window. The embedding UI chooses how
     /// to store glasses for this version; the feed owns no application state.
-    GlassesVersion(u32),
+    GlassesVersion(u64),
     /// Optional inventory admission and the member build, discovered once per connection.
     InventorySupport { granted: bool, member_build: Option<String> },
     /// A window's current items, in st's display order.
@@ -143,7 +162,7 @@ pub enum Update {
     /// st's window is no longer followed (a Missions list left the screen): the rows held for it
     /// are out of date and must not be shown as current.
     WindowStopped(Window),
-    Terminal(TerminalUpdate),
+    Terminal { generation: u64, update: TerminalUpdate },
     /// The open conversation's entries. `replace` means these are its newest page and every
     /// earlier entry is gone; otherwise they are new or revised entries, matched by ID.
     Conversation {
@@ -194,6 +213,8 @@ pub enum Command {
     /// Follow this agent's terminal, found among its runtimes, in place of any other.
     Follow {
         runtime_ids: Vec<String>,
+        /// The UI attempt that owns all results, including queued screens and failures.
+        generation: u64,
     },
     Unfollow,
     /// Follow the missions window or leave it: the whole window is large, so it is followed only while
@@ -228,10 +249,15 @@ struct Conversing {
     /// When to subscribe again after a failure; `None` while subscribed.
     retry_at: Option<Instant>,
     failures: usize,
+    /// When it began failing without a page in between: a failure st or the feed retries is
+    /// said only once it has lasted `REPORT_AFTER`.
+    failing_since: Option<Instant>,
 }
 
 /// The terminal being followed.
 struct Following {
+    generation: u64,
+    subscription: String,
     runtime_id: String,
     terminal_id: String,
     /// The incarnation first attached. A different one means the terminal restarted.
@@ -343,8 +369,10 @@ pub async fn run_members_with_sidebar(
                     if let Some(current) = following.as_mut() {
                         current.attachment_id = None;
                         current.retry_at = None;
-                        let _ =
-                            updates.send(Update::Terminal(TerminalUpdate::Reconnecting(reason)));
+                        let _ = updates.send(Update::Terminal {
+                            generation: current.generation,
+                            update: TerminalUpdate::Reconnecting(reason),
+                        });
                     }
                     for current in &mut conversing {
                         current.retry_at = None;
@@ -361,7 +389,7 @@ pub async fn run_members_with_sidebar(
             return;
         }
         // Wait before trying again, still honouring an unfollow meanwhile.
-        let delay = RETRY_DELAYS[failures.min(RETRY_DELAYS.len() - 1)];
+        let delay = retry_delay(failures);
         // Device gateways have no peer-online channel. Keep their retry ceiling short,
         // with jitter so clients returning together do not all reconnect at once.
         let jitter = Duration::from_millis((uuid::Uuid::now_v7().as_u128() % 500) as u64);
@@ -382,14 +410,15 @@ pub async fn run_members_with_sidebar(
                     }
                     // Not connected: the next connection subscribes afresh anyway.
                     Some(Command::Resubscribe { .. }) => {}
-                    Some(Command::Follow { runtime_ids }) => {
+                    Some(Command::Follow { runtime_ids, generation }) => {
                         following = None;
                         match resolve(&clients[member], &runtime_ids).await {
                             Ok((runtime_id, terminal_id)) => following = Some(Following {
+                                generation, subscription: format!("{TERMINAL}/{generation}"),
                                 runtime_id, terminal_id, incarnation: None, attachment_id: None, retry_at: None, failures: 0,
                             }),
                             Err(reason) => {
-                                let _ = updates.send(Update::Terminal(TerminalUpdate::Ended { restarted: false, reason }));
+                                let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended { restarted: false, reason } });
                             }
                         }
                     }
@@ -496,14 +525,14 @@ async fn connected(
     // so one slow answer from a busy daemon never rereads every window.
     let heard = stream.heard();
     let mut pinged: Option<Instant> = None;
-    let mut probe = tokio::time::interval(QUIET_CHECK);
+    let mut probe = tokio::time::interval(timer(QUIET_CHECK));
     probe.tick().await;
-    // Glasses are followed only where st grants them in the shape this stui reads (splits of
-    // tab groups, version 1); elsewhere stui keeps them on the device. A member still on the
-    // earlier shape would send glasses this stui cannot decode, and that drops the connection.
+    // Glasses are followed only where st grants them in the shape this Fractal TUI reads (splits of
+    // tab groups, version 1); elsewhere Fractal TUI keeps them on the device. A member still on the
+    // earlier shape would send glasses this Fractal TUI cannot decode, and that drops the connection.
     let capabilities = match client.capabilities().await {
         Ok(capabilities) => capabilities,
-        Err(error) => return Ended::Dropped(error.plain()),
+        Err(error) => return Ended::Dropped(error.human()),
     };
     let version = if glasses {
         capabilities
@@ -563,7 +592,7 @@ async fn connected(
     }
     if inventory_granted {
         for inventory in inventories.windows() {
-            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
+            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
         }
     }
     for current in conversing.iter_mut() {
@@ -595,18 +624,18 @@ async fn connected(
         tokio::select! {
             _ = probe.tick() => {
                 let quiet = heard.quiet_for();
-                if quiet < QUIET_BEFORE_PING {
+                if quiet < timer(QUIET_BEFORE_PING) {
                     pinged = None;
                     *failures = 0;
                 } else {
                     match pinged {
                         None => {
                             if let Err(error) = stream.ping().await {
-                                return Ended::Dropped(error.plain());
+                                return Ended::Dropped(error.human());
                             }
                             pinged = Some(Instant::now());
                         }
-                        Some(at) if at.elapsed() >= PONG_WAIT => {
+                        Some(at) if at.elapsed() >= timer(PONG_WAIT) => {
                             return Ended::Dropped(if remote {
                                 "the member stopped answering".into()
                             } else {
@@ -626,7 +655,7 @@ async fn connected(
                 let received = std::time::Instant::now();
                 *failures = 0;
                 match event {
-                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more } => {
+                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         // A frame already on its way when the window was left: the socket was
                         // heard from, but nothing of the window comes back.
@@ -634,8 +663,7 @@ async fn connected(
                             continue;
                         }
                         *failures = 0;
-                        window_retries.loaded(window);
-                        pending_reports.cancel(window);
+                        window_loaded(&mut window_retries, &mut pending_reports, window);
                         let rows = windows.entry(window).or_default();
                         rows.clear();
                         rows.extend(items.into_iter().map(|item| (item.header().id.clone(), item)));
@@ -643,13 +671,12 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more } => {
+                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
                         }
-                        window_retries.loaded(window);
-                        pending_reports.cancel(window);
+                        window_loaded(&mut window_retries, &mut pending_reports, window);
                         let rows = windows.entry(window).or_default();
                         for id in removes {
                             rows.remove(&id);
@@ -662,8 +689,9 @@ async fn connected(
                     // st keeps a conversation's subscription and retries it itself; it says why
                     // so the last copy shown can say it is stale (the owner's host is away).
                     CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
-                        let Some(current) = conversing.iter().find(|current| current.id == id) else { continue };
-                        let message = fractal_client::plain_message(code.as_ref(), &message);
+                        let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
+                        if !current.failed_long(Instant::now()) { continue; }
+                        let message = fractal_client::human_message(code.as_ref(), &message);
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent: false }).is_err() {
                             return Ended::Closed;
                         }
@@ -676,38 +704,30 @@ async fn connected(
                         if let Some(window) = Window::from_id(&id)
                             && !(left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
                         {
-                            if matches!(window, Window::Inventory(_)) {
-                                if let Some(message) = message {
-                                    let plain = fractal_client::plain_message(code.as_ref(), &message);
-                                    pending_reports.report(window, Instant::now(), plain);
-                                }
-                                continue;
-                            }
-                            // Said once, with st's own reason when it gave one (its source is
-                            // not ready); the retries are quiet until the window loads.
-                            let first = window_retries.failed(window, Instant::now());
-                            if first && let Some(message) = message {
-                                let message = fractal_client::plain_message(code.as_ref(), &message);
-                                pending_reports.report(window, Instant::now(), message);
-                            }
+                            // An inventory too: st keeps reading it, but a read that then finds
+                            // nothing new sends nothing, so unless it is asked for again its
+                            // reason would stand until the list next changed.
+                            let reason = message.map(|message| fractal_client::human_message(code.as_ref(), &message));
+                            window_failed(&mut window_retries, &mut pending_reports, window, Instant::now(), reason);
                         }
                     }
                     CollectionEvent::Conversation { id, session_id, replace, items, has_more, header, .. } => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
-                        current.failures = 0;
+                        current.served();
                         if updates.send(Update::Conversation { target: current.target.clone(), session_id, replace, has_more, items, header }).is_err() {
                             return Ended::Closed;
                         }
                     }
                     CollectionEvent::Error { id, code, message } if id.starts_with(CONVERSATION) => {
-                        let message = fractal_client::plain_message(code.as_ref(), &message);
+                        let message = fractal_client::human_message(code.as_ref(), &message);
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
                         let permanent = !conversation_may_clear(code.as_ref());
                         // Anything else may clear: the agent starts, its host comes back, its
                         // history arrives. Ask again after a backoff.
                         if !permanent {
-                            current.retry_at = Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                            current.retry_at = Some(Instant::now() + retry_delay(current.failures));
                             current.failures += 1;
+                            if !current.failed_long(Instant::now()) { continue; }
                         }
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent }).is_err() {
                             return Ended::Closed;
@@ -719,27 +739,20 @@ async fn connected(
                                 continue;
                             }
                             if matches!(window, Window::Inventory(_)) {
-                                let plain = fractal_client::plain_message(code.as_ref(), &message);
+                                let plain = fractal_client::human_message(code.as_ref(), &message);
                                 pending_reports.report(window, Instant::now(), plain);
                                 continue;
                             }
-                            // Said once, and only if it lasts; the retries are quiet until it loads.
-                            if window_retries.failed(window, Instant::now()) {
-                                let message = fractal_client::plain_message(code.as_ref(), &message);
-                                pending_reports.report(window, Instant::now(), message);
-                            }
-                        } else if id == TERMINAL {
-                            terminal_failed(updates, following, code, message);
+                            let reason = fractal_client::human_message(code.as_ref(), &message);
+                            window_failed(&mut window_retries, &mut pending_reports, window, Instant::now(), Some(reason));
+                        } else if following.as_ref().is_some_and(|current| current.subscription == id)
+                            && let Err(error) = fail_following(client, stream, updates, following, code, message).await
+                        {
+                            return Ended::Dropped(error.to_string());
                         }
                     }
                     CollectionEvent::Screen { id, screen } => {
-                        if id != TERMINAL {
-                            continue;
-                        }
-                        if let Some(current) = following.as_mut() {
-                            current.failures = 0;
-                        }
-                        if updates.send(Update::Terminal(TerminalUpdate::Screen(Box::new(screen.value)))).is_err() {
+                        if !terminal_screen(updates, following, &id, screen.value) {
                             return Ended::Closed;
                         }
                     }
@@ -748,10 +761,14 @@ async fn connected(
             command = commands.recv() => match command {
                 Some(Command::Reconnect) => {}
                 None => {
-                    stop_following(client, stream, following).await;
+                    let _ = stop_following(client, stream, following).await;
                     return Ended::Closed;
                 }
-                Some(Command::Unfollow) => stop_following(client, stream, following).await,
+                Some(Command::Unfollow) => {
+                    if let Err(error) = stop_following(client, stream, following).await {
+                        return Ended::Dropped(error.to_string());
+                    }
+                }
                 Some(Command::Missions { follow }) => {
                     if follow == *missions {
                         continue;
@@ -776,14 +793,14 @@ async fn connected(
                     *inventories = wanted;
                     if !inventory_granted { continue; }
                     for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
-                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.plain()); }
+                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.human()); }
                         let window = Window::Inventory(inventory);
                         windows.remove(&window); window_retries.loaded(window);
                         pending_reports.cancel(window);
                         if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
                     }
                     for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
-                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.plain()); }
+                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
                     }
                 }
                 Some(Command::Converse { targets }) => {
@@ -819,11 +836,14 @@ async fn connected(
                         }
                     }
                 }
-                Some(Command::Follow { runtime_ids }) => {
-                    stop_following(client, stream, following).await;
+                Some(Command::Follow { runtime_ids, generation }) => {
+                    if let Err(error) = stop_following(client, stream, following).await {
+                        return Ended::Dropped(error.to_string());
+                    }
                     match resolve(client, &runtime_ids).await {
                         Ok((runtime_id, terminal_id)) => {
                             *following = Some(Following {
+                                generation, subscription: format!("{TERMINAL}/{generation}"),
                                 runtime_id, terminal_id, incarnation: None, attachment_id: None, retry_at: None, failures: 0,
                             });
                             if let Err(error) = follow(client, stream, updates, following).await {
@@ -831,7 +851,7 @@ async fn connected(
                             }
                         }
                         Err(reason) => {
-                            let _ = updates.send(Update::Terminal(TerminalUpdate::Ended { restarted: false, reason }));
+                            let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended { restarted: false, reason } });
                         }
                     }
                 }
@@ -854,13 +874,14 @@ async fn connected(
                     if window == Window::Missions && !*missions {
                         continue;
                     }
-                    let result = if window == Window::Arrangements {
-                        match sidebar_person {
+                    let result = match window {
+                        Window::Arrangements => match sidebar_person {
                             Some(person) => stream.subscribe_arrangements(window.id(), person, window.limit(), None).await,
                             None => continue,
-                        }
-                    } else {
-                        stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+                        },
+                        Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory) => continue,
+                        Window::Inventory(inventory) => inventory.subscribe(stream).await,
+                        _ => stream.subscribe(window.id(), window.id(), window.limit(), None, None).await,
                     };
                     if let Err(error) = result {
                         return Ended::Dropped(error.to_string());
@@ -892,6 +913,21 @@ fn jitter(wait: Duration) -> Duration {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| u64::from(since.subsec_nanos()) % 1000);
     wait.mul_f64(spread as f64 / 2000.0)
+}
+
+/// `window` failed at `now` in a way that may mend: it is asked for again after a wait that grows,
+/// and st's reason for its first failure since it last loaded is said only once it has lasted.
+/// The retries are quiet until it loads.
+fn window_failed(retries: &mut WindowRetries, reports: &mut PendingReports, window: Window, now: Instant, reason: Option<String>) {
+    if retries.failed(window, now) && let Some(reason) = reason {
+        reports.report(window, now, reason);
+    }
+}
+
+/// `window` was served: its wait and any reason held for it are moot.
+fn window_loaded(retries: &mut WindowRetries, reports: &mut PendingReports, window: Window) {
+    retries.loaded(window);
+    reports.cancel(window);
 }
 
 /// Why a window is not being served, held until it has lasted `REPORT_AFTER`: a window that
@@ -947,7 +983,7 @@ impl WindowRetries {
     /// its first failure since it last loaded, the one worth telling the person about.
     fn failed(&mut self, window: Window, now: Instant) -> bool {
         let failures = self.failures.entry(window).or_default();
-        let wait = RETRY_DELAYS[(*failures).min(RETRY_DELAYS.len() - 1)];
+        let wait = retry_delay(*failures);
         self.at.insert(window, now + wait + jitter(wait));
         *failures += 1;
         *failures == 1
@@ -1002,6 +1038,35 @@ fn send_window(
         .is_ok()
 }
 
+/// Do not relabel a queued frame from an old subscription with the current UI generation.
+fn terminal_screen(updates: &mpsc::Sender<Update>, following: &mut Option<Following>, id: &str, screen: TerminalScreen) -> bool {
+    let Some(current) = following.as_mut().filter(|current| current.subscription == id) else {
+        return true;
+    };
+    current.failures = 0;
+    updates.send(Update::Terminal {
+        generation: current.generation,
+        update: TerminalUpdate::Screen(Box::new(screen)),
+    }).is_ok()
+}
+
+/// Unsubscribe before classifying an error: the server can retain presence/opened bookkeeping
+/// after dropping its failed receiver, including when no first screen was ever sent.
+async fn fail_following(
+    client: &Client,
+    stream: &mut CollectionStream,
+    updates: &mpsc::Sender<Update>,
+    following: &mut Option<Following>,
+    code: Option<ErrorCode>,
+    message: String,
+) -> Result<(), ClientError> {
+    if let Some(current) = following.as_mut() {
+        clear_following(client, stream, current).await?;
+    }
+    terminal_failed(updates, following, code, message);
+    Ok(())
+}
+
 /// A terminal subscription ended with an error. A terminal out of reach attaches again after a
 /// backoff; one whose process exited (`terminal-ended`), or any other refusal, stops following.
 fn terminal_failed(
@@ -1014,6 +1079,7 @@ fn terminal_failed(
         return;
     };
     current.attachment_id = None;
+    let generation = current.generation;
     let plain = terminal_reason(code.as_ref(), &message);
     let update = match code {
         // A daemon from before terminal-unavailable also says stale-fence when the owner is
@@ -1028,7 +1094,7 @@ fn terminal_failed(
             | ErrorCode::RuntimeAuthorityIndeterminate,
         ) => {
             current.retry_at =
-                Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                Some(Instant::now() + retry_delay(current.failures));
             current.failures += 1;
             TerminalUpdate::Reconnecting(plain)
         }
@@ -1040,7 +1106,7 @@ fn terminal_failed(
             }
         }
     };
-    let _ = updates.send(Update::Terminal(update));
+    let _ = updates.send(Update::Terminal { generation, update });
 }
 
 /// Attach to the followed terminal and subscribe to it on this socket. A refused attach ends
@@ -1054,6 +1120,7 @@ async fn follow(
     let Some(current) = following.as_mut() else {
         return Ok(());
     };
+    let generation = current.generation;
     current.retry_at = None;
     let attachment = match attach(
         client,
@@ -1065,47 +1132,48 @@ async fn follow(
     {
         Ok(attachment) => attachment,
         Err(Refusal::Restarted) => {
-            *following = None;
-            let _ = updates.send(Update::Terminal(TerminalUpdate::Ended {
+            stop_following(client, stream, following).await?;
+            let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended {
                 restarted: true,
                 reason: "Terminal restarted".into(),
-            }));
+            }});
             return Ok(());
         }
         Err(Refusal::Unavailable(reason)) => {
+            clear_following(client, stream, current).await?;
             current.retry_at =
-                Some(Instant::now() + RETRY_DELAYS[current.failures.min(RETRY_DELAYS.len() - 1)]);
+                Some(Instant::now() + retry_delay(current.failures));
             current.failures += 1;
-            let _ = updates.send(Update::Terminal(TerminalUpdate::Reconnecting(reason)));
+            let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Reconnecting(reason) });
             return Ok(());
         }
         Err(Refusal::Failed(reason)) => {
-            *following = None;
-            let _ = updates.send(Update::Terminal(TerminalUpdate::Ended {
+            stop_following(client, stream, following).await?;
+            let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended {
                 restarted: false,
                 reason,
-            }));
+            }});
             return Ok(());
         }
     };
-    let Some(capability) = attachment.stream_capability.clone() else {
-        *following = None;
-        let _ = updates.send(Update::Terminal(TerminalUpdate::Ended {
-            restarted: false,
-            reason: "st returned no stream capability for the terminal".into(),
-        }));
-        return Ok(());
-    };
     current.incarnation = Some(attachment.runtime_incarnation.clone());
     current.attachment_id = Some(attachment.attachment_id.clone());
-    let _ = updates.send(Update::Terminal(TerminalUpdate::Attached {
+    let Some(capability) = attachment.stream_capability.clone() else {
+        stop_following(client, stream, following).await?;
+        let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Ended {
+            restarted: false,
+            reason: "st returned no stream capability for the terminal".into(),
+        }});
+        return Ok(());
+    };
+    let _ = updates.send(Update::Terminal { generation, update: TerminalUpdate::Attached {
         terminal_id: current.terminal_id.clone(),
         attachment_id: attachment.attachment_id,
         incarnation: attachment.runtime_incarnation.clone(),
-    }));
+    }});
     stream
         .subscribe_terminal(
-            TERMINAL,
+            &current.subscription,
             &current.terminal_id,
             Some(&attachment.runtime_incarnation),
             &capability,
@@ -1120,7 +1188,22 @@ impl Conversing {
             target,
             retry_at: None,
             failures: 0,
+            failing_since: None,
         }
+    }
+
+    /// It failed at `now` in a way that is retried: whether it has kept failing, with no page in
+    /// between, for `REPORT_AFTER`. A read st restarts because its list moved under it (a cursor
+    /// gap, an expired page cursor) mends within that and is never put in front of the person.
+    fn failed_long(&mut self, now: Instant) -> bool {
+        let since = *self.failing_since.get_or_insert(now);
+        now.duration_since(since) >= REPORT_AFTER
+    }
+
+    /// A page arrived: whatever was failing has mended.
+    fn served(&mut self) {
+        self.failures = 0;
+        self.failing_since = None;
     }
 }
 
@@ -1135,22 +1218,35 @@ async fn converse(
         .await
 }
 
-/// Stop following: leave the subscription and end the viewer record.
+/// Clear server bookkeeping even if its terminal receiver has already failed.
+async fn clear_following(
+    client: &Client,
+    stream: &mut CollectionStream,
+    current: &mut Following,
+) -> Result<(), ClientError> {
+    stream.unsubscribe(&current.subscription).await?;
+    if let (Some(attachment_id), Some(incarnation)) = (current.attachment_id.take(), current.incarnation.as_ref()) {
+        let client = client.clone();
+        let terminal = current.terminal_id.clone();
+        let incarnation = incarnation.clone();
+        tokio::spawn(async move {
+            let _ = detach(&client, &terminal, &attachment_id, &incarnation).await;
+        });
+    }
+    Ok(())
+}
+
+/// Do not forget the subscription ID until its cleanup command has been sent.
 async fn stop_following(
     client: &Client,
     stream: &mut CollectionStream,
     following: &mut Option<Following>,
-) {
-    let Some(current) = following.take() else {
-        return;
-    };
-    let _ = stream.unsubscribe(TERMINAL).await;
-    if let (Some(attachment_id), Some(incarnation)) = (current.attachment_id, current.incarnation) {
-        let client = client.clone();
-        tokio::spawn(async move {
-            let _ = detach(&client, &current.terminal_id, &attachment_id, &incarnation).await;
-        });
+) -> Result<(), ClientError> {
+    if let Some(current) = following.as_mut() {
+        clear_following(client, stream, current).await?;
     }
+    *following = None;
+    Ok(())
 }
 
 enum Refusal {
@@ -1166,7 +1262,7 @@ enum Refusal {
 fn terminal_reason(code: Option<&ErrorCode>, message: &str) -> String {
     match code {
         Some(ErrorCode::StaleFence) if !message.is_empty() => message.to_owned(),
-        _ => fractal_client::plain_message(code, message),
+        _ => fractal_client::human_message(code, message),
     }
 }
 
@@ -1174,7 +1270,7 @@ fn terminal_reason(code: Option<&ErrorCode>, message: &str) -> String {
 fn refusal(error: ClientError) -> Refusal {
     let reason = match &error {
         ClientError::Api(code, message, _) => terminal_reason(Some(code), message),
-        other => other.plain(),
+        other => other.human(),
     };
     if error.is_transient() {
         Refusal::Unavailable(reason)
@@ -1196,10 +1292,9 @@ async fn resolve(client: &Client, runtime_ids: &[String]) -> Result<(String, Str
     Err("that agent has no terminal right now".into())
 }
 
-/// Whether a refused conversation may load if asked again. Only st's word that it keeps no
-/// start for the transcript (`timeline-history-incomplete`) is final: asking again cannot help.
+/// Missing retained history and a peer upgrade requirement cannot clear by retrying.
 fn conversation_may_clear(code: Option<&ErrorCode>) -> bool {
-    !matches!(code, Some(ErrorCode::TimelineHistoryIncomplete))
+    !matches!(code, Some(ErrorCode::TimelineHistoryIncomplete | ErrorCode::PeerTooOld))
 }
 
 /// How many times a fenced terminal request is tried while it races a busy store.
@@ -1354,6 +1449,8 @@ mod tests {
 
     fn following() -> Option<Following> {
         Some(Following {
+            generation: 1,
+            subscription: format!("{TERMINAL}/1"),
             runtime_id: "runtime/demo".into(),
             terminal_id: "terminal/demo".into(),
             incarnation: Some("demo:i1".into()),
@@ -1365,9 +1462,34 @@ mod tests {
 
     fn terminal_update(updates: &mpsc::Receiver<Update>) -> TerminalUpdate {
         match updates.try_recv().unwrap() {
-            Update::Terminal(update) => update,
+            Update::Terminal { generation, update } => {
+                assert_eq!(generation, 1);
+                update
+            },
             other => panic!("expected a terminal update, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_old_terminal_subscription_screen_is_not_relabelled_as_the_new_generation() {
+        let (tx, rx) = mpsc::channel();
+        let mut current = following();
+        let state = current.as_mut().unwrap();
+        state.generation = 2;
+        state.subscription = format!("{TERMINAL}/2");
+        state.failures = 4;
+        let screen = || {
+            let envelope: fractal_client::Envelope<TerminalScreen> = serde_json::from_str(
+                include_str!("../../../docs/st3/client-v0/fixtures/terminal-screen.json")
+            ).unwrap();
+            envelope.value
+        };
+        assert!(terminal_screen(&tx, &mut current, "terminal/1", screen()));
+        assert!(rx.try_recv().is_err());
+        assert_eq!(current.as_ref().unwrap().failures, 4);
+        assert!(terminal_screen(&tx, &mut current, "terminal/2", screen()));
+        assert!(matches!(rx.try_recv(), Ok(Update::Terminal { generation: 2, update: TerminalUpdate::Screen(_) })));
+        assert_eq!(current.as_ref().unwrap().failures, 0);
     }
 
     #[test]
@@ -1396,6 +1518,101 @@ mod tests {
             retries.failed(Window::Agents, start),
             "after loading, a failure is said again"
         );
+    }
+
+    /// What a fake link does at a moment: st restarts the window's read, or serves it.
+    #[derive(Clone, Copy)]
+    enum Link {
+        Resync,
+        Served,
+    }
+
+    /// Replays `events` (seconds after the start) of one window through the feed's bookkeeping,
+    /// waking every 100 ms as its loop would, until `until` seconds. Returns each reason said and
+    /// the moments the window was asked for again.
+    fn replay(window: Window, events: &[(f64, Link)], until: f64) -> (Vec<(f64, String)>, Vec<f64>) {
+        let start = Instant::now();
+        let mut retries = WindowRetries::default();
+        let mut reports = PendingReports::default();
+        let (mut said, mut asked) = (Vec::new(), Vec::new());
+        let mut events = events.iter().peekable();
+        let mut tick = 0.0;
+        while tick <= until {
+            let now = start + Duration::from_secs_f64(tick);
+            while let Some((_, link)) = events.next_if(|(at, _)| *at <= tick) {
+                match link {
+                    Link::Resync => window_failed(&mut retries, &mut reports, window, now, Some("st hit a problem: the read exceeded its server deadline".into())),
+                    Link::Served => window_loaded(&mut retries, &mut reports, window),
+                }
+            }
+            asked.extend(retries.due(now).into_iter().map(|_| tick));
+            said.extend(reports.due(now).into_iter().map(|(_, reason)| (tick, reason)));
+            tick += 0.1;
+        }
+        (said, asked)
+    }
+
+    #[test]
+    fn an_inventory_whose_read_st_restarts_is_asked_for_again_and_a_flap_says_nothing() {
+        // Nathan, 2026-10: the bar kept flipping from stale to live. An inventory (the machines
+        // list) whose read st restarted was never asked for again; st's next good read found
+        // nothing new and sent nothing, so its reason went up after 20 s and stood until the list
+        // next changed. Each restart of its read must ask for it again and say nothing while it
+        // mends.
+        let machines = Window::Inventory(Inventory::Machines);
+        let mut flap = Vec::new();
+        for cycle in 0..12 {
+            let at = f64::from(cycle) * 25.0;
+            flap.push((at, Link::Resync));
+            // Asked again after a second or so, st serves it with a snapshot.
+            flap.push((at + 2.0, Link::Served));
+        }
+        let (said, asked) = replay(machines, &flap, 300.0);
+        assert!(said.is_empty(), "a read that mends is never put in front of the person: {said:?}");
+        assert_eq!(asked.len(), 12, "each restarted read is asked for again, once: {asked:?}");
+    }
+
+    #[test]
+    fn a_window_that_stays_unserved_is_said_once_and_asked_for_again_without_a_busy_loop() {
+        // st restarts the read every 1.5 s while it cannot serve it, for five minutes.
+        let flap = (0..200).map(|tick| (f64::from(tick) * 1.5, Link::Resync)).collect::<Vec<_>>();
+        for window in [Window::Agents, Window::Inventory(Inventory::Machines)] {
+            let (said, asked) = replay(window, &flap, 300.0);
+            assert_eq!(said.len(), 1, "{window:?}: said once: {said:?}");
+            assert!((REPORT_AFTER.as_secs_f64()..REPORT_AFTER.as_secs_f64() + 0.2).contains(&said[0].0), "{window:?}: once it has lasted: {said:?}");
+            assert!(said[0].1.contains("server deadline"), "in st's words: {said:?}");
+            // The waits grow to 30 s: about a dozen asks in five minutes, never one per resync.
+            assert!(asked.len() <= 16, "{window:?}: asked {} times: {asked:?}", asked.len());
+            assert!(asked.windows(2).all(|pair| pair[1] - pair[0] >= 0.9), "{window:?}: {asked:?}");
+        }
+    }
+
+    #[test]
+    fn a_conversation_whose_read_st_restarts_says_nothing_until_it_has_lasted() {
+        // Nathan, 2026-10: "roster changed" kept showing: a conversation whose read st restarted
+        // (its list moved under it) said "the list changed while it was being read" at once,
+        // and the next page took it away again.
+        let start = Instant::now();
+        let mut current = Conversing::new("agent/tester".into());
+        let mut said = Vec::new();
+        // A restart every 1.5 s, and a page every 9 s between them, for five minutes.
+        for tick in 0..200 {
+            let at = start + Duration::from_millis(tick * 1500);
+            if tick % 6 == 5 {
+                current.served();
+            } else if current.failed_long(at) {
+                said.push(tick);
+            }
+        }
+        assert!(said.is_empty(), "a read that keeps mending says nothing: {said:?}");
+
+        // One that stays wrong is said once it has lasted, and the next page clears it.
+        let mut current = Conversing::new("agent/tester".into());
+        assert!(!current.failed_long(start));
+        assert!(!current.failed_long(start + REPORT_AFTER - Duration::from_millis(1)));
+        assert!(current.failed_long(start + REPORT_AFTER));
+        current.served();
+        assert!(!current.failed_long(start + REPORT_AFTER * 2), "a page starts the clock over");
     }
 
     fn api_error(code: ErrorCode, message: &str) -> ClientError {
@@ -1439,10 +1656,15 @@ mod tests {
     }
 
     #[test]
-    fn only_incomplete_history_stops_a_conversation_retrying() {
+    fn incomplete_history_and_old_peers_stop_a_conversation_retrying() {
         assert!(!conversation_may_clear(Some(
             &ErrorCode::TimelineHistoryIncomplete
         )));
+        assert!(!conversation_may_clear(Some(&ErrorCode::PeerTooOld)));
+        assert_eq!(
+            fractal_client::human_message(Some(&ErrorCode::PeerTooOld), "raw diagnostic"),
+            "This host runs an older Fractal version; update it to open subagent conversations.",
+        );
         for code in [
             ErrorCode::CursorGap,
             ErrorCode::StaleFence,
@@ -1469,7 +1691,7 @@ mod tests {
             "subject `agent/x` has indeterminate runtime authority",
         ));
         assert!(
-            matches!(&refused, Refusal::Unavailable(reason) if reason == "st cannot tell yet which host runs this")
+            matches!(&refused, Refusal::Unavailable(reason) if reason == "Fractal cannot tell yet which host runs this")
         );
         let refused = refusal(api_error(
             ErrorCode::Forbidden,
@@ -1481,7 +1703,7 @@ mod tests {
     #[test]
     fn stale_fence_on_the_stream_follows_again_and_the_attach_decides_if_it_restarted() {
         // st says stale-fence for an owner briefly out of reach or a viewer that idled, not only
-        // for a restart: stui follows again, and `attach` refuses a changed incarnation.
+        // for a restart: Fractal TUI follows again, and `attach` refuses a changed incarnation.
         let (tx, rx) = mpsc::channel();
         let mut current = following();
         terminal_failed(

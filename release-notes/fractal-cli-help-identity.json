@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show fractal in CLI help and version output, including legacy aliases, and list the browser web command in root help. Versions retain the embedded package version and source SHA; daily release tags are selected after the binary is built.",
+  "replay": { "status": "none", "detail": "none" },
+  "schema": { "status": "none", "detail": "none" },
+  "rules": { "status": "none", "detail": "none" },
+  "compatibility": { "status": "none", "detail": "The st and st3 executable aliases, environment variables, command names and wire formats remain unchanged." },
+  "downtime": { "status": "none", "detail": "none" },
+  "manual": { "status": "none", "detail": "none" },
+  "recovery": { "status": "none", "detail": "none" }
+}

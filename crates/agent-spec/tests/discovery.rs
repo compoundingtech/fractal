@@ -18,7 +18,7 @@ use agent_spec::{
 };
 
 #[test]
-fn discovery_accepts_st2_version_one_and_rejects_st3_version_two() {
+fn discovery_accepts_kdl_v1_and_rejects_kdl_v2() {
     let tmp = tempfile::tempdir().unwrap();
     write(
         tmp.path(),

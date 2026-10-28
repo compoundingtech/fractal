@@ -1,4 +1,4 @@
-//! The part of `store` that moved up from st3-store.
+//! The part of `store` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 #[cfg(test)]
@@ -92,7 +92,7 @@ pub use fractal_attention::store::limits::ACCOUNT_READING_WINDOW_MS;
 pub use fractal_attention::store::subagents::{
     EndedSubagent, SUBAGENT_KINDS, SUBAGENT_LEASE_MS, SubagentSweep, SubagentView,
 };
-pub use runtime::SmalltalkRuntime;
+pub use runtime::FractalRuntime;
 #[cfg(any(test, feature = "test-support"))]
 pub use smallclaims::sqlite::STATEMENTS_RUN;
 use crate::resource::newer_comment;
@@ -124,6 +124,8 @@ pub mod runtime;
 pub mod owned_sets_tests;
 #[cfg(test)]
 pub mod roster_fresh_proof_tests;
+#[cfg(test)]
+pub mod projection_catch_up_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 

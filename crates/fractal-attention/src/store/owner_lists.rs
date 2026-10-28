@@ -1,4 +1,4 @@
-//! The part of `store::owner_lists` that moved up from st3-seats.
+//! The part of `store::owner_lists` that moved up from fractal-seats.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AttentionListStore;
 use super::*;
@@ -26,8 +26,8 @@ impl OwnerView {
 
     fn list(self, store: &Store) -> &OwnerList {
         match self {
-            Self::Glasses => &store.smalltalk.glass_list,
-            Self::Arrangements => &store.smalltalk.arrangement_list,
+            Self::Glasses => &store.fractal.glass_list,
+            Self::Arrangements => &store.fractal.arrangement_list,
         }
     }
 

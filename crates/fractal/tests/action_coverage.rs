@@ -548,21 +548,19 @@ impl Daemon {
     }
 
     fn state(root: &Path, node: &str) -> AppState {
-        AppState {
-            owning_person: None,
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.into(),
-            pty_root: root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: Some(root.join("native")),
-            planner_default: Default::default(),
-        }
+        AppState { owning_person: None,
+        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.join("native")),
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     fn socket(&self) -> PathBuf {
@@ -692,7 +690,7 @@ impl Daemon {
         let mut fence = self.fence(WORKER).await;
         fence.mission_generation = Some(work.generation);
         fence.step_definition = Some(work.definition_hash);
-        fence.attempt = Some(work.attempt);
+        fence.attempt = Some(u64::from(work.attempt));
         fence.readiness_epoch = Some(u64::from(work.readiness_epoch));
         fence.runtime_incarnation = Some("4242:fixture".into());
         fence
@@ -763,12 +761,15 @@ impl Daemon {
     }
 
     fn cli_command(&self, actor: &str, args: &[&str]) -> tokio::process::Command {
+        self.cli_command_format(actor, args, true)
+    }
+
+    fn cli_command_format(&self, actor: &str, args: &[&str], json_output: bool) -> tokio::process::Command {
         let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
         command
             .args([
                 "--endpoint",
                 self.socket().to_str().unwrap(),
-                "--json",
                 "--daemon-wait",
                 "0",
             ]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST3_INCARNATION").env_remove("FRACTAL_INCARNATION")
@@ -782,6 +783,8 @@ impl Daemon {
             .env("XDG_DATA_HOME", self.root.path().join("data"))
             .env("HOME", self.root.path().join("home"))
             .env("ST3_PERSON", actor)
+            .env("NO_COLOR", "1")
+            .args(json_output.then_some("--json"))
             .args(args);
         if actor.starts_with("agent/") {
             command.env("ST_AGENT", actor);
@@ -823,7 +826,7 @@ fn cli_value(output: Output) -> Value {
         .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stdout)))
 }
 
-// Call the same typed builders stui uses. The inventory guard below compares this dispatch
+// Call the same typed builders Fractal TUI uses. The inventory guard below compares this dispatch
 // with the generated contract so a newly offered action cannot silently escape the matrix.
 async fn dispatch(
     client: &Client,
@@ -855,6 +858,7 @@ async fn dispatch(
         "mission.approve-revision" => mission_approve_revision, "mission.cancel" => mission_cancel,
         "mission.cancel-revision" => mission_cancel_revision, "mission.revise" => mission_revise,
         "mission.start" => mission_start, "pairing.revoke" => pairing_revoke,
+        "private-notes.write" => private_notes_write,
         "review.approve" => review_approve, "review.reject" => review_reject, "review.request-changes" => review_request_changes,
         "runtime.context-clear" => runtime_context_clear, "runtime.reset" => runtime_reset,
         "runtime.restart" => runtime_restart, "runtime.signal" => runtime_signal, "runtime.stop" => runtime_stop,
@@ -2045,11 +2049,13 @@ async fn existing_authored_suspension_exits_with_stop_then_start() {
             evidence: vec![suspended.id.clone()], expected_subject: None, idempotency_key: Some(key),
         }).unwrap();
     }
-    cli_value(
-        daemon
-            .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])
-            .await,
-    );
+    let refused_start = daemon
+        .cli(PERSON, &["agents", "start", WORKER, "--as", PERSON])
+        .await;
+    assert!(!refused_start.status.success());
+    let error = String::from_utf8_lossy(&refused_start.stderr);
+    assert!(error.contains("start-suspended"), "{error}");
+    assert!(error.contains("st agents resume"), "{error}");
     assert_eq!(
         fractal_daemon::suspension::current(daemon.store(), WORKER)
             .unwrap()
@@ -2527,6 +2533,140 @@ async fn glasses_save_delete_and_read_survive_stale_bases_and_restarts() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_schedules_list_pages_declarations_across_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.apply(r#"version 2
+schedule "a" { host "action-coverage"; at "2100-01-01T00:00:00Z"; work { mission "example/harvest"; workspace "/tmp/harvest" } }
+schedule "b" { host "action-coverage"; at "2100-01-02T00:00:00Z"; work { mission "example/harvest"; workspace "/tmp/harvest" } }
+"#, "schedule-list-declarations");
+    let mut original = None;
+    for pass in 0..2 {
+        let first = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+        ]).await);
+        assert_eq!(first["value"]["collection"], "schedules");
+        assert_eq!(first["value"]["basis"], "local-replicated-declarations");
+        assert_eq!(first["value"]["coverage"]["unheard_after_ms"], 60_000);
+        assert_eq!(first["value"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(first["value"]["items"][0]["id"], "schedule/a");
+        assert_eq!(first["value"]["items"][0]["primary_host_id"], "host/action-coverage");
+        assert_eq!(first["value"]["page"]["has_more"], true);
+        let cursor = first["value"]["page"]["next_cursor"].as_str().unwrap();
+        let second = cli_value(daemon.cli(PERSON, &[
+            "schedules", "ls", "--as", PERSON, "--limit", "1", "--unheard-after", "1m",
+            "--cursor", cursor,
+        ]).await);
+        assert_eq!(second["value"]["items"].as_array().unwrap().len(), 1);
+        assert_eq!(second["value"]["items"][0]["id"], "schedule/b");
+        assert_eq!(second["value"]["page"]["has_more"], false);
+        let declarations = [
+            first["value"]["items"][0]["declaration"].clone(),
+            second["value"]["items"][0]["declaration"].clone(),
+        ];
+        if let Some(expected) = &original {
+            assert_eq!(&declarations, expected);
+        } else {
+            original = Some(declarations);
+        }
+        if pass == 0 {
+            daemon.restart().await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_list_rendering_is_unchanged_by_quarantined_deploy_claims() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    let daemon = Daemon::new_member("host-b").await;
+    let mut registry = fractal_schema::registry().clone();
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(registry.claims.remove(kind).is_some());
+    }
+    daemon.store().set_claim_registry(registry);
+    daemon.store().bind_fleet(FLEET).unwrap();
+    daemon.apply(
+        &format!("version 2\nagent \"example-reader\" {{ host \"host-b\"; workspace {:?}; harness \"claude\" {{}} }}\nmission \"example/inspect\" state=\"ready\" {{ goal \"Inspect the graph.\"; step \"work\" {{ assigned-to \"agent/example-reader\" }} }}\n", daemon.root.path().display().to_string()),
+        "deploy-reader-baseline",
+    );
+    let commands: &[&[&str]] = &[
+        &["agents", "ls"], &["missions", "ls"], &["work", "ls"],
+        &["alerts", "ls", "--as", PERSON], &["terminals", "ls"],
+        &["launch", "ls"], &["lanes", "ls"], &["sets", "ls"],
+        &["documents", "ls"],
+    ];
+    // Generic list envelopes carry a fresh request ID and snapshot creation time
+    // even when the graph is unchanged. Compare every other rendered line,
+    // including snapshot identity/store cut and all collection/page contents.
+    let stable_output = |bytes: &[u8]| {
+        std::str::from_utf8(bytes).unwrap().lines()
+            .filter(|line| !line.starts_with("REQUEST ID ") && !line.starts_with("  CREATED AT "))
+            .map(str::to_owned).collect::<Vec<_>>()
+    };
+    let mut baseline = Vec::new();
+    for arguments in commands {
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert!(!output.stdout.is_empty(), "{arguments:?}");
+        baseline.push((stable_output(&output.stdout), output.stderr));
+    }
+    assert!(baseline[0].0.iter().any(|line| line.contains("example-reader")));
+    assert!(baseline[1].0.iter().any(|line| line.contains("example/inspect")));
+    let source = Store::open_memory("host-a").unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    let examples = [
+        json!({
+            "version": 1, "host": "host-a", "actor": "agent/example-executor",
+            "operation": "install", "trainId": "train/example",
+            "old": {"packagePath": "/nix/store/old-example", "narHash": "sha256-example-old", "commit": "a".repeat(40)},
+            "new": {"packagePath": "/nix/store/new-example", "narHash": "sha256-example-new", "commit": "b".repeat(40)},
+            "issuedAt": "2026-10-24T10:00:00Z", "expiresAt": "2026-10-24T14:00:00Z",
+            "failureRestore": false, "previewDigest": "example-preview-digest",
+            "compatSignoffId": "example-signoff"
+        }),
+        json!({"version": 1, "goId": "example-go"}),
+        json!({"version": 1, "goId": "example-go", "operation": "install", "result": "succeeded"}),
+        json!({"version": 1, "stopId": "example-stop", "scope": "installer-entry", "hosts": ["host-a", "host-b"], "liftCondition": "example release"}),
+        json!({"version": 1, "stopId": "example-stop", "releaseGoId": "example-release"}),
+        json!({"version": 1, "trainId": "train/example", "oldCommit": "a".repeat(40), "newCommit": "b".repeat(40)}),
+    ];
+    for (kind, fields) in fractal_schema::deploy::KINDS.into_iter().zip(examples) {
+        source.append_claim(&ClaimInput {
+            subject: "resource/deploy/example".into(), kind: kind.into(),
+            actor: Some("agent/example-executor".into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
+    let exchange = source.export_replication_exchange(
+        FLEET, &daemon.store().replication_inventory().unwrap(),
+    ).unwrap();
+    assert_eq!(exchange.envelopes.len(), 6);
+    daemon.store().receive_replication_exchange("host-a", FLEET, &exchange).unwrap();
+    let admission = daemon.store().validate_replication_backlog().unwrap();
+    assert_eq!((admission.valid, admission.unknown, admission.invalid), (0, 6, 0));
+    daemon.store().project_replication_backlog().unwrap();
+    let records = daemon.store().replica_records(true).unwrap();
+    assert_eq!(records.len(), 6);
+    for kind in fractal_schema::deploy::KINDS {
+        assert!(records.iter().any(|record| record.kind.as_deref() == Some(kind)
+            && record.state == "unknown"
+            && record.error_code.as_deref() == Some("unknown-claim-kind")));
+    }
+    for (arguments, (stdout, stderr)) in commands.iter().zip(baseline) {
+        let output = daemon.cli_command_format(PERSON, arguments, false).output().await.unwrap();
+        assert!(output.status.success(), "{arguments:?}: {}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(stable_output(&output.stdout), stdout, "{arguments:?}: list rendering changed");
+        assert_eq!(output.stderr, stderr, "{arguments:?}: list diagnostics changed");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_reads_preserve_operational_views_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -2620,6 +2760,39 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 .status,
             "ready"
         );
+    }
+}
+
+/// What a run waits on reads the daemon's published lists, as a daemon serves them; before and
+/// after a restart, the same run reads the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_waiting_on_reads_published_lists_after_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    daemon.apply("version 2\nmission \"example/inspect\" state=\"ready\" { goal \"Inspect the graph.\"; step \"work\" { assigned-to \"agent/example/worker\" } }\n", "inspect-mission");
+    let run = daemon.start("example/inspect", "inspect-run");
+    daemon.store().set_step_state(&run.steps[0].subject, "ready", None).unwrap();
+    for _ in 0..2 {
+        fractal_daemon::api::start_published_lists(&daemon.state);
+        let cut = daemon.store().index().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            fractal_daemon::api::wait_published_lists_at_least(daemon.store(), cut),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let output = daemon.cli(PERSON, &["missions", "waiting-on", &run.subject]).await;
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let waiting: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!((waiting["run"].as_str(), waiting["verdict"].as_str()), (Some(run.subject.as_str()), Some("moving")));
+        assert_eq!(waiting["open"][0]["path"], "work");
+        assert_eq!(waiting["open"][0]["kind"], "ready");
+        assert_eq!(waiting["open"][0]["who"], WORKER);
+        daemon.restart().await;
     }
 }
 
@@ -5099,6 +5272,153 @@ async fn cli_seat_suspension_and_resume_wait_for_durable_owner_acknowledgements(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_persons_rename_migrates_current_work_and_reviews_across_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const NEW_PERSON: &str = "person/robin";
+    let mut daemon = Daemon::new().await;
+    daemon.worker();
+    daemon.store().append_claim(&ClaimInput {
+        subject: "message/cli-known-rename-person".into(),
+        kind: "message.sent".into(),
+        actor: Some(NEW_PERSON.into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!(NEW_PERSON)),
+            ("to".into(), json!(WORKER)),
+            ("content".into(), json!("The new person already participates in the graph.")),
+            ("status".into(), json!("sent")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some("cli-known-rename-person".into()),
+    }).unwrap();
+    daemon.apply(
+        r#"version 2
+mission "example/person-rename" state="ready" {
+  goal "Review the person routing repair."
+  step "review" { agentless; gate "accept" type="human" mode="approve" { reviewer "person/avery"; question "Is the repair acceptable?" } }
+}
+"#,
+        "person-rename-mission",
+    );
+    let run = daemon.start("example/person-rename", "person-rename-run");
+    let review_step = &run.steps[0].subject;
+    daemon.reconcile();
+    let review_request = daemon
+        .store()
+        .gate_request_for_owner(review_step)
+        .unwrap()
+        .unwrap();
+    let ask = cli_value(
+        daemon
+            .cli(
+                WORKER,
+                &[
+                    "work",
+                    "ask",
+                    "--for",
+                    PERSON,
+                    "--title",
+                    "Choose the repaired routing",
+                    "--reason",
+                    "An open request must move to the new person.",
+                    "--new-run",
+                    "person-rename-ask",
+                    "--as",
+                    WORKER,
+                    "--idempotency-key",
+                    "person-rename-ask",
+                ],
+            )
+            .await,
+    );
+    let ask_step = ask["subject"].as_str().unwrap();
+    let original_work = daemon.store().step_run(ask_step).unwrap().unwrap();
+    assert_eq!(original_work.assigned_to.as_deref(), Some(PERSON));
+    let original_ask = daemon
+        .store()
+        .claims_for(ask_step, Some("work.person-asked"))
+        .unwrap();
+    assert_eq!(original_ask.len(), 1);
+    let original_reviews: Value = daemon.transport().get("/v1/reviews").await.unwrap();
+    assert_eq!(original_reviews.as_array().unwrap().len(), 1);
+    assert_eq!(original_reviews[0]["reviewer"], PERSON);
+
+    let args = [
+        "persons",
+        "rename",
+        PERSON,
+        NEW_PERSON,
+        "--as",
+        PERSON,
+        "--idempotency-key",
+        "person-rename-repair",
+    ];
+    daemon.restart().await;
+    let report = cli_value(daemon.cli(PERSON, &args).await);
+    assert_eq!(report["old_person"], PERSON);
+    assert_eq!(report["new_person"], NEW_PERSON);
+    assert_eq!(report["reassigned_steps"], json!([ask_step]));
+    assert_eq!(report["reassigned_reviews"], json!([review_step]));
+    assert!(report["run_requesters"].as_array().unwrap().contains(&json!(run.subject)));
+    let ask_mission = daemon
+        .store()
+        .mission_run(&original_work.run)
+        .unwrap()
+        .unwrap()
+        .mission;
+    let mut missions_to_republish = vec!["mission/example/person-rename".to_owned(), ask_mission];
+    missions_to_republish.sort();
+    assert_eq!(report["missions_to_republish"], json!(missions_to_republish));
+    assert!(
+        report["namespace_notice"]
+            .as_str()
+            .unwrap()
+            .contains("not automatically moved")
+    );
+    let index = daemon.store().index().unwrap();
+    assert_eq!(cli_value(daemon.cli(PERSON, &args).await), report);
+    assert_eq!(daemon.store().index().unwrap(), index);
+    daemon.restart().await;
+    assert_eq!(cli_value(daemon.cli(PERSON, &args).await), report);
+    assert_eq!(daemon.store().index().unwrap(), index, "rename replay wrote twice");
+
+    let moved = daemon.store().step_run(ask_step).unwrap().unwrap();
+    assert_eq!(moved.assigned_to.as_deref(), Some(NEW_PERSON));
+    assert_eq!(moved.status, original_work.status);
+    assert_eq!(moved.attempt, original_work.attempt);
+    assert_eq!(moved.definition_hash, original_work.definition_hash);
+    assert_eq!(daemon.store().mission_run(&run.subject).unwrap().unwrap().requester, PERSON);
+    let asks = daemon
+        .store()
+        .claims_for(ask_step, Some("work.person-asked"))
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&asks).unwrap(),
+        serde_json::to_value(&original_ask).unwrap(),
+    );
+    let unchanged_review = daemon
+        .store()
+        .claim_by_id(&review_request.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&unchanged_review).unwrap(),
+        serde_json::to_value(&review_request).unwrap(),
+    );
+    let reviews: Value = daemon.transport().get("/v1/reviews").await.unwrap();
+    assert_eq!(reviews.as_array().unwrap().len(), 1);
+    assert_eq!(reviews[0]["owner"].as_str(), Some(review_step.as_str()));
+    assert_eq!(reviews[0]["reviewer"], NEW_PERSON);
+    assert_eq!(reviews[0]["request"], review_request.id);
+    assert!(daemon.store().attention_items(Some(PERSON)).unwrap().is_empty());
+    let attention = daemon.store().attention_items(Some(NEW_PERSON)).unwrap();
+    assert!(attention.iter().any(|item| item.subject == ask_step));
+    assert!(attention.iter().any(|item| item.subject == *review_step));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_human_reviews_act_on_the_current_card_after_restart() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -5270,7 +5590,7 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
         .collect();
     assert_eq!(
         offered, documented,
-        "add reducer and transport evidence when stui gains an effect"
+        "add reducer and transport evidence when Fractal TUI gains an effect"
     );
     let source = include_str!("../../fractal-tui/src/ui/glass.rs");
     let declaration = source
@@ -5298,7 +5618,7 @@ fn action_inventory_matches_contract_and_has_existing_test_references() {
         .collect();
     assert_eq!(
         offered, documented,
-        "add coverage when the stui palette grows"
+        "add coverage when the Fractal TUI palette grows"
     );
 }
 
@@ -5576,7 +5896,7 @@ async fn custom_reply_survives_fences_cli_and_daemon_restarts() {
     let manifest = daemon.root.path().join("garden-review.json");
     std::fs::write(
         &manifest,
-        include_str!("../../../examples/st3/custom-review.json"),
+        include_str!("../../../examples/fractal/custom-review.json"),
     )
     .unwrap();
     let registered = cli_value(
@@ -5791,7 +6111,7 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     let manifest = daemon.root.path().join("decision-tree.json");
     std::fs::write(
         &manifest,
-        include_str!("../../../examples/st3/decision-tree.json"),
+        include_str!("../../../examples/fractal/decision-tree.json"),
     )
     .unwrap();
     let registered = cli_value(
@@ -6220,7 +6540,7 @@ async fn image_file_reference_manifest_registers_validates_replicates_and_restar
         fields[name] = value;
         malformed.push(fields);
     }
-    let source = include_str!("../../../examples/st3/image-file-reference.json");
+    let source = include_str!("../../../examples/fractal/image-file-reference.json");
     reference_manifest_proof(source, good.clone(), malformed).await;
     // The media type is optional; the hash and file identity remain required.
     let mut without_media = good;
@@ -6260,7 +6580,7 @@ async fn onepassword_field_reference_manifest_registers_validates_replicates_and
     ] {
         malformed.push(json!({"locator":locator}));
     }
-    let source = include_str!("../../../examples/st3/onepassword-field-reference.json");
+    let source = include_str!("../../../examples/fractal/onepassword-field-reference.json");
     reference_manifest_proof(
         source,
         json!({"locator":"op://garden-vault/seed-service/token"}),
@@ -6464,4 +6784,83 @@ async fn terminal_retirement_refuses_first_sends_and_survives_cli_retry_and_rest
             .iter()
             .all(|subject| subject.subject != WORKER || subject.member.is_none())
     );
+}
+
+/// `st devices fabric` changes only what st owns: `enable` exposes the client gateway socket,
+/// `status` lists the `st-device-…` peers, and `disable` removes those and the exposure while a
+/// peer someone added by hand stays.
+#[test]
+fn cli_devices_fabric_enable_status_and_disable_touch_only_st_peers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    const PHONE: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const BY_HAND: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let root = tempfile::tempdir().unwrap();
+    let bin = root.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = root.path().join("fabric-calls");
+    let peers = json!({"peers": [
+        {"node": PHONE, "name": "st-device-0123456789ab", "allow": ["st3-client-v0"]},
+        {"node": BY_HAND, "name": "demo-phone", "allow": ["st3-client-v0"]},
+    ]});
+    std::fs::write(
+        bin.join("fabric"),
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{calls}'\ncase \"$1\" in\n  peers) echo '{peers}';;\n  \
+             expose|unexpose|remove) ;;\n  *) exit 1;;\nesac\n",
+            calls = calls.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("fabric"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let st = |args: &[&str]| {
+        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+            .env_remove("ST_AGENT")
+            .env_remove("ST_MISSION_RUN")
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .env("HOME", root.path().join("home"))
+            .env("PATH", &bin)
+            .args(["--json", "devices", "fabric"])
+            .args(args)
+            .output()
+            .unwrap();
+        cli_value(output)
+    };
+    let recorded = || std::fs::read_to_string(&calls).unwrap_or_default();
+
+    assert_eq!(
+        st(&["status"]),
+        json!({"service": null, "enabled": false, "granted": []})
+    );
+    assert_eq!(recorded(), "", "status without an exposure asks Fabric nothing");
+
+    assert_eq!(
+        st(&["enable"]),
+        json!({"service": "st3-client-v0", "enabled": true})
+    );
+    let expose = recorded();
+    assert!(
+        expose.starts_with("expose st3-client-v0 --socket ") && expose.ends_with("st3-client.sock\n"),
+        "{expose}"
+    );
+    assert!(root.path().join("state/st3/fabric-gateway.toml").exists());
+
+    assert_eq!(
+        st(&["status"]),
+        json!({"service": "st3-client-v0", "enabled": true, "granted": ["st-device-0123456789ab"]})
+    );
+    assert_eq!(
+        st(&["disable"]),
+        json!({"service": "st3-client-v0", "enabled": false, "removed": ["st-device-0123456789ab"]})
+    );
+    assert_eq!(
+        recorded().strip_prefix(&expose).unwrap(),
+        "peers --json\npeers --json\nremove st-device-0123456789ab\nunexpose st3-client-v0\n",
+        "the peer added by hand stays"
+    );
+    assert!(!root.path().join("state/st3/fabric-gateway.toml").exists());
 }

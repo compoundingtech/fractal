@@ -1,6 +1,6 @@
 # omp is a fifth native driver with its own channel and a hard version gate
 
-Status: accepted; admission policy revised 2026-10-02, explicit operator exception added 2026-10-03 for [#819](https://github.com/compoundingtech/smalltalk/issues/819)
+Status: accepted; admission policy revised 2026-10-02, explicit operator exception added 2026-10-03 for [#819](https://github.com/compoundingtech/fractal/issues/819)
 
 ## Context
 
