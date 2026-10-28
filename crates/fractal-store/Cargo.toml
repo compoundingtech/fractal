@@ -26,6 +26,7 @@ kdl = "6"
 libc = "0.2"
 opentelemetry = "0.30"
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
+parking_lot = "0.12"
 pty-client = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
 pty-core = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

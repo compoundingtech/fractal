@@ -776,13 +776,10 @@ impl SeatsStore for Store {
     }
 
     fn request_agent_roster_refresh(&self) {
-        if let Some(wake) = self.fractal.agent_roster_refresh.get() {
-            let _ = self.fractal.agent_roster_requested_at.compare_exchange(
-                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            wake.notify_one();
-        }
+        // A summary or assistant read requests freshness without necessarily reading the
+        // ordinary agents list. Register demand here so no requesting caller can omit it.
+        self.note_agent_roster_read();
+        self.fractal.wake_read_roster();
     }
 
     fn request_agent_roster_history(&self) {

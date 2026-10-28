@@ -18,6 +18,7 @@ pub mod attention;
 pub mod delivery;
 pub mod deploy;
 pub mod evidence;
+pub mod agents_publication;
 pub mod missions;
 pub mod seats;
 pub mod helper_launchers;

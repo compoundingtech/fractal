@@ -97,13 +97,26 @@ impl AttentionStore for Store {
         }
         let mut attempt = Attempt(&self.fractal, false);
         let requested = &self.fractal.agent_roster_requested_at;
-        let pending = requested.swap(0, std::sync::atomic::Ordering::AcqRel);
+        let (generation, pending) = {
+            let _generation = self.fractal.agent_roster_request_generation.lock();
+            (self.fractal.presented_agents.generation(),
+                requested.swap(0, std::sync::atomic::Ordering::AcqRel))
+        };
         let result = refresh();
         attempt.1 = result.is_ok();
         if result.is_err() && pending != 0 {
-            // Still unanswered: keep the oldest request time unless a newer request is waiting.
-            let _ = requested.compare_exchange(0, pending, std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed);
+            // Reset and restore share this lock, so a reset cannot land between the
+            // generation check and restoring its unanswered request.
+            let _generation = self.fractal.agent_roster_request_generation.lock();
+            if self.fractal.presented_agents.generation() == generation {
+                #[cfg(any(test, feature = "test-support"))]
+                if let Some(checked) = self.fractal.agent_roster_restore_checked.lock().as_ref()
+                {
+                    checked();
+                }
+                let _ = requested.compare_exchange(0, pending, std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Relaxed);
+            }
         }
         if result.is_ok() {
             self.fractal.agent_roster_overdue_warned.store(false, std::sync::atomic::Ordering::Release);
