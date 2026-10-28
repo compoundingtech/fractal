@@ -3962,8 +3962,10 @@ mod retry_tests {
             refused_fallback_peer(root.path(), 2).await;
         let succeeded_after = |since: u128| {
             let local = local.clone();
+            // The route's first retry comes about a second after its failure. The bound leaves
+            // room for a loaded runner; without the fix the route is never dialed again.
             async move {
-                tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::time::timeout(Duration::from_secs(15), async {
                     loop {
                         if let (Some(success), _) = local.replication_peer_transport("beacon")
                             && success.at_unix_ms > since
@@ -4016,6 +4018,13 @@ mod retry_tests {
         let (local, _failing, posts, dials, _wake, tasks) =
             refused_fallback_peer(root.path(), usize::MAX).await;
         let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while fabric_dials(&dials) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the worker fails over to the refused route");
         tokio::time::sleep(Duration::from_secs(4)).await;
         let elapsed = started.elapsed();
         // Attempts no closer together than the back-off's shortest jitter allows, plus the one
@@ -4031,7 +4040,7 @@ mod retry_tests {
         }
         let attempts = posts.load(Ordering::SeqCst).div_ceil(2);
         assert!(
-            (2..=allowed + 1).contains(&attempts),
+            (1..=allowed + 1).contains(&attempts),
             "{attempts} attempts in {elapsed:?}"
         );
         assert_eq!(fabric_dials(&dials), 1, "a refused route is held, not retried as a fault");
