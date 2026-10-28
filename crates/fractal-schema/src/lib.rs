@@ -4920,7 +4920,6 @@ mod tests {
                 "work.released",
                 "work.renewed",
                 "work.submitted",
-                "work.wait-ended",
             ]
         );
         assert_eq!(
