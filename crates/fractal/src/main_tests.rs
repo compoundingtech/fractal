@@ -50,12 +50,13 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
 #[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
-        "st", "repair", "dry-run", "--subject", "agent/example-first",
+        "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
         "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
     ]).unwrap();
-    let Command::Repair { command: RepairCommand::DryRun { subjects, classes } } = cli.command else {
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes, ignored_actor } } = cli.command else {
         panic!("expected filtered repair dry-run");
     };
+    assert_eq!(ignored_actor.as_deref(), Some("agent/own"));
     assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
     assert_eq!(classes, ["revoked-legacy-runtime-start"]);
     let path = repair_plan_path(&subjects, &classes).unwrap();
@@ -64,6 +65,77 @@ fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     assert!(path.contains(&format!("classes={}",
         urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
     assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
+}
+
+#[test]
+fn repair_actor_path_binds_the_literal_seat_before_requests() {
+    for arguments in [
+        vec!["st", "repair", "apply", "--as", "agent/own", "orpv0:token"],
+        vec!["st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/target",
+            "--class", "revoked-legacy-runtime-start"],
+        vec!["st", "conversations", "status", "--as", "agent/own", "--idempotency-key", "key"],
+    ] {
+        let own = Cli::try_parse_from(&arguments).unwrap();
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/peer"), None).is_err());
+        for actor in ["agent/peer", "person/other", "own", "requester"] {
+            let mut mismatched = arguments.clone();
+            let index = mismatched.iter().position(|arg| *arg == "--as").unwrap() + 1;
+            mismatched[index] = actor;
+            let cli = Cli::try_parse_from(mismatched).unwrap();
+            assert!(guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_err());
+        }
+    }
+    let absent = Cli::try_parse_from(["st", "repair", "apply", "orpv0:token"]).unwrap();
+    assert!(guard_mutating_cli_actor(&absent.command, Some("agent/own"), None).is_err());
+    assert!(guard_mutating_cli_actor(&absent.command, None, None).is_ok());
+    let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+    assert!(guard_mutating_cli_actor(&read.command, Some("agent/own"), None).is_ok());
+}
+
+#[test]
+fn repair_actor_path_keeps_unrelated_subjects_and_classes_out() {
+    let store = Store::open_memory("repair-actor-test").unwrap();
+    let subjects = vec!["agent/target".to_owned()];
+    let classes = vec!["revoked-legacy-runtime-start".to_owned()];
+    let mut plan = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &[], &subjects, &classes,
+    ).unwrap();
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_ok());
+    let mut item: fractal_daemon::model::OperationalRepairItem = serde_json::from_value(
+        serde_json::json!({
+            "id": "repair/test", "class": classes[0], "subject": "agent/unrelated",
+            "affected_subjects": [], "reason": "test"
+        })
+    ).unwrap();
+    plan.items.push(item.clone());
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+    item.subject = subjects[0].clone();
+    item.class = "unrelated-class".into();
+    plan.items = vec![item];
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+}
+
+#[test]
+fn repair_apply_guidance_preserves_actorless_humans_and_effective_agent_aliases() {
+    let human = fractal_drivers::contracts::env_with("ST_AGENT", &|_| None);
+    assert_eq!(repair_apply_guidance("orpv0:token", human.as_deref()),
+        "fractal repair apply orpv0:token");
+    for variable in ["ST_AGENT", "FRACTAL_AGENT"] {
+        let own = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
+            (name == variable).then(|| "agent/own".to_owned())
+        });
+        let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+        guard_mutating_cli_actor(&read.command, own.as_deref(), None).unwrap();
+        assert_eq!(repair_apply_guidance("orpv0:token", own.as_deref()),
+            "fractal repair apply --as agent/own orpv0:token", "{variable}");
+    }
+}
+
+#[test]
+fn repair_apply_actor_requests_use_only_the_new_attributed_route() {
+    assert_eq!(repair_apply_path(None), "/v1/repair/apply");
+    assert_eq!(repair_apply_path(Some("agent/own")), "/v1/repair/apply-attributed");
 }
 
 #[test]
@@ -398,15 +470,13 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
     };
-    let state = fractal_daemon::api::AppState {
-        owning_person: None,
-        store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0).0,
-        node: "todo-liveness".into(), state_dir: root.path().into(),
-        pty_root: root.path().join("pty"), pty_binary: "pty".into(),
-        fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { owning_person: None,
+    store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+    event_notify: tokio::sync::watch::channel(0).0,
+    node: "todo-liveness".into(), state_dir: root.path().into(),
+    pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+    fleet_id: None, configured_peers: vec![], client_relay: None,
+    native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let path = root.path().join("api.sock");
     let socket = path.clone();
     let server = tokio::spawn(async move {
@@ -835,7 +905,7 @@ fn missions_tree_fixture_renders_all_sections() {
 }
 
 #[test]
-fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
+fn a_conversation_reads_as_tui_shows_it_and_raw_keeps_every_entry() {
     let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h55886ab30a77 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude.json"
     ))
@@ -1345,7 +1415,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
             "<smalltalk-message id=\"0123456789abcdef\" from=\"agent/run-1/wake.claude\" \
                  to=\"agent/run-1/wake.omp-2\" subject=\"Cross-harness consensus: idle\" \
                  sha256=\"{}\" graph=\"message/0123456789abcdef\">\nFACT QUARTZ\n</smalltalk-message>",
-            fractal_drivers::ding::st3_body_sha256("FACT QUARTZ")
+            fractal_drivers::ding::fractal_body_sha256("FACT QUARTZ")
         )
     );
     assert_eq!(omp["meta"]["messageId"], "message/0123456789abcdef");
@@ -2391,22 +2461,19 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             ))
             .unwrap();
     }
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "pi-delivery-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "pi-delivery-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -2485,22 +2552,19 @@ async fn trace_after_index_reads_the_first_bounded_page() {
                 .store_index
         })
         .collect::<Vec<_>>();
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "trace-cursor-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "trace-cursor-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -2562,22 +2626,19 @@ async fn trace_wait_starts_after_existing_events() {
             .unwrap()
             .store_index;
     }
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "wait-cursor-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "wait-cursor-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -2651,7 +2712,7 @@ fn conversation_follow_is_explicit_and_bounded() {
 
 #[test]
 fn conversation_follow_emits_new_entries_and_revisions_once() {
-    let entry = |id: &str, sequence: u64, revision: u32| {
+    let entry = |id: &str, sequence: u64, revision: u64| {
         serde_json::from_value::<ClientTimelineEntry>(json!({
             "id": id,
             "sequence": sequence,
@@ -2670,7 +2731,7 @@ fn conversation_follow_emits_new_entries_and_revisions_once() {
     assert!(unseen_timeline_entries(&initial, &mut seen).is_empty());
     let changed = vec![
         entry("timeline-entry/b", 2, 1),
-        entry("timeline-entry/a", 1, 2),
+        entry("timeline-entry/a", 1, u64::from(u32::MAX) + 1),
     ];
     assert_eq!(
         unseen_timeline_entries(&changed, &mut seen),
@@ -5704,22 +5765,19 @@ fn a_provenance_reads_as_one_line() {
 async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("message-read-state").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "message-read-state".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("message-read-state").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "message-read-state".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -5801,15 +5859,12 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
-    let state = AppState {
-        store: store.clone(), notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
-        state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
-        client_relay: None, native_session_home: None, owning_person: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { store: store.clone(), notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+    state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+    client_relay: None, native_session_home: None, owning_person: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
     for _ in 0..100 {
@@ -7465,7 +7520,7 @@ async fn a_projected_message_envelope_names_the_graph_recipient_and_exact_body_h
             "<smalltalk-message id=\"fact\" from=\"agent/run-1/wake.left\" \
                  to=\"agent/run-1/wake.right\" subject=\"Fact\" sha256=\"{}\" \
                  graph=\"message/fact\">\nFACT &lt;b&gt;QUARTZ&lt;/b&gt;\n</smalltalk-message>",
-            fractal_drivers::ding::st3_body_sha256("FACT <b>QUARTZ</b>")
+            fractal_drivers::ding::fractal_body_sha256("FACT <b>QUARTZ</b>")
         )
     );
 }
@@ -7693,7 +7748,7 @@ fn mission_follow_stops_for_completed_and_standing_runs() {
 }
 
 #[test]
-fn a_runtime_driver_retries_a_transient_st3_api_outage() {
+fn a_runtime_driver_retries_a_transient_fractal_api_outage() {
     let mut last_warning = None;
     tolerate_driver_api_outage(
         "agent/run/worker",
@@ -7736,22 +7791,19 @@ async fn serve_test_store(
     node: &str,
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: node.into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();

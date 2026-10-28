@@ -127,7 +127,7 @@ impl Window {
 }
 
 /// The glasses capability version whose glasses are splits of tab groups.
-const GLASSES_VERSION: u32 = 1;
+const GLASSES_VERSION: u64 = 1;
 
 /// The most glasses st keeps live for one person.
 const GLASSES: usize = 100;
@@ -145,7 +145,7 @@ pub enum Update {
     Degraded(String),
     /// The granted glasses shape, delivered before its window. The embedding UI chooses how
     /// to store glasses for this version; the feed owns no application state.
-    GlassesVersion(u32),
+    GlassesVersion(u64),
     /// Optional inventory admission and the member build, discovered once per connection.
     InventorySupport { granted: bool, member_build: Option<String> },
     /// A window's current items, in st's display order.
@@ -1270,10 +1270,9 @@ async fn resolve(client: &Client, runtime_ids: &[String]) -> Result<(String, Str
     Err("that agent has no terminal right now".into())
 }
 
-/// Whether a refused conversation may load if asked again. Only st's word that it keeps no
-/// start for the transcript (`timeline-history-incomplete`) is final: asking again cannot help.
+/// Missing retained history and a peer upgrade requirement cannot clear by retrying.
 fn conversation_may_clear(code: Option<&ErrorCode>) -> bool {
-    !matches!(code, Some(ErrorCode::TimelineHistoryIncomplete))
+    !matches!(code, Some(ErrorCode::TimelineHistoryIncomplete | ErrorCode::PeerTooOld))
 }
 
 /// How many times a fenced terminal request is tried while it races a busy store.
@@ -1540,10 +1539,15 @@ mod tests {
     }
 
     #[test]
-    fn only_incomplete_history_stops_a_conversation_retrying() {
+    fn incomplete_history_and_old_peers_stop_a_conversation_retrying() {
         assert!(!conversation_may_clear(Some(
             &ErrorCode::TimelineHistoryIncomplete
         )));
+        assert!(!conversation_may_clear(Some(&ErrorCode::PeerTooOld)));
+        assert_eq!(
+            fractal_client::human_message(Some(&ErrorCode::PeerTooOld), "raw diagnostic"),
+            "This host runs an older Fractal version; update it to open subagent conversations.",
+        );
         for code in [
             ErrorCode::CursorGap,
             ErrorCode::StaleFence,

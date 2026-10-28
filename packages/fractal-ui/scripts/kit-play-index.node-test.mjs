@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { storyIdsFromIndex } from './kit-play-index.mjs'
-import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, KIT_CASE_OVERRIDES, APP_CASE_OVERRIDES, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
+import { commitSetCases, diagonalCase, fullCases, BOTH_WIDTHS, MERGE_ONLY, KIT_CASE_OVERRIDES, APP_CASE_OVERRIDES, APP_MODULE_SUITE_IDS, FULL_CASE_OVERRIDES, validateCaseOverrides } from './kit-play-commit-set.mjs'
 import { aggregateShards, shardStories } from './kit-play-shards.mjs'
 
 const story = { type: 'story', id: 'kit--sample', importPath: './Sample.stories.tsx' }
@@ -158,6 +158,7 @@ test('the strict case set measures the filter once, keeps functional corners, an
     [freezeId, [['dark', 1100], ['light', 1100]]],
     ...densityIds.map(id => [id, [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]]),
     [focusReturnId, [['dark', 899], ['light', 440]]],
+    ...APP_MODULE_SUITE_IDS.map(id => [id, [['dark', 1440]]]),
   ])
   const omittedBenchmarkCases = [
     { id: 'fractal-ui-sidebar-tree--filter-keystroke-to-paint', scheme: 'dark', width: 440 },
@@ -207,15 +208,25 @@ test('drawer density and focus-return regressions retain real breakpoint viewpor
   assert.deepEqual(fullCases([focusReturnId]), expected)
   assert.deepEqual(commitSetCases([focusReturnId], { mergeOnlyIds: [], bothWidthsIds: [] }).cases, expected)
 })
+test('production module suites run each state once, dark at desktop width, and are not named by the per-commit set', () => {
+  const states = ['loading', 'empty', 'populated', 'failed-tool', 'offline', 'unavailable', 'scripted-repair']
+  assert.deepEqual(APP_MODULE_SUITE_IDS, [
+    ...states.map(state => `fractal-app-liveagentworkspace--${state}`),
+    ...states.map(state => `fractal-app-conversationpane--${state}`),
+  ])
+  assert.deepEqual(fullCases(APP_MODULE_SUITE_IDS), APP_MODULE_SUITE_IDS.map(id => ({ id, scheme: 'dark', width: 1440 })))
+  assert.equal(fullCases(APP_MODULE_SUITE_IDS).length, 14)
+  for (const id of APP_MODULE_SUITE_IDS) assert.ok(!MERGE_ONLY.includes(id) && !BOTH_WIDTHS.includes(id), `${id} is not named by the per-commit set`)
+})
 test('kit-only fixtures scope their policy explicitly without making app cases optional in production', () => {
   const ids = [benchmarkId, nativeOverlayId, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
-  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId, ...densityIds, focusReturnId])
+  assert.deepEqual([...APP_CASE_OVERRIDES.keys()], [freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS])
   assert.doesNotThrow(() => validateCaseOverrides(entries, KIT_CASE_OVERRIDES))
   assert.throws(() => validateCaseOverrides(entries), /names fractal-narrow-layout--sidebar-drag-unmount-cleanup, which is not a known story/)
 })
 test('strict case policy rejects unknown stories and aliases without a kept same-source base', () => {
-  const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...aliasIds, ...baseIds]
+  const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...aliasIds, ...baseIds]
   const entries = Object.fromEntries(ids.map(id => [id, { ...story, id }]))
   assert.doesNotThrow(() => validateCaseOverrides(entries))
   assert.throws(() => validateCaseOverrides(entries, new Map([['kit--unknown', []]])), /not a known story/)
@@ -289,7 +300,7 @@ test('the gate receipt declares the intended benchmark corner and alias omission
   try {
     const build = join(directory, 'build'), output = join(directory, 'receipt')
     await mkdir(build)
-    const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...aliasIds, ...baseIds]
+    const ids = [benchmarkId, functionalId, nativeOverlayId, freezeId, ...densityIds, focusReturnId, ...APP_MODULE_SUITE_IDS, ...aliasIds, ...baseIds]
     await writeFile(join(build, 'index.json'), JSON.stringify({ entries: Object.fromEntries(ids.map(id => [id, { ...story, id }])) }))
     const child = spawn(process.execPath, [fileURLToPath(new URL('./kit-play-gate.mjs', import.meta.url)), build, output], {
       env: { ...process.env, KIT_PLAY_SET: 'all', PLAYWRIGHT_MODULE: 'must-not-import-browser-for-case-contract' },
@@ -301,8 +312,8 @@ test('the gate receipt declares the intended benchmark corner and alias omission
     })
     assert.equal(code, 1)
     const receipt = JSON.parse(await readFile(join(output, 'receipt.json'), 'utf8'))
-    assert.equal(receipt.expectedCases, 37)
-    assert.equal(receipt.omitted.cases, 23)
+    assert.equal(receipt.expectedCases, 51)
+    assert.equal(receipt.omitted.cases, 65)
     assert.deepEqual(receipt.omitted.stories, aliasIds.toSorted())
     assert.deepEqual(receipt.caseOverrides[benchmarkId], [['dark', 1440]])
     assert.match(receipt.fatalError, /must-not-import-browser-for-case-contract/)

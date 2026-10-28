@@ -297,6 +297,7 @@ pub const ALL_SCOPES: &[&str] = &[
     "control.pairing",
 ];
 const ACTIONS: &[&str] = &[
+    "private-notes.write",
     "arrangement.edit",
     "attention.resolve",
     "review.approve",
@@ -355,6 +356,7 @@ const ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 const AVAILABLE_ACTIONS: &[&str] = &[
+    "private-notes.write",
     "custom.reply",
     "prompt.respond",
     "arrangement.edit",
@@ -423,7 +425,7 @@ pub struct LocalWebSession {
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
     pub actor: String,
-    /// The concrete graph person whose explicitly delegated authority is exercised.
+    /// The concrete graph person or local agent whose authority is exercised.
     pub authority_actor: String,
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
@@ -2025,8 +2027,11 @@ pub fn session_message_body(state: &AppState, claim: &ClaimRecord, participants:
 }
 
 fn timeline_order(a: &Value, b: &Value) -> std::cmp::Ordering {
-    a["timestamp"].as_str().cmp(&b["timestamp"].as_str())
-        .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
+    crate::external_sessions::compare_timeline_positions(
+        (a["timestamp"].as_str().unwrap_or_default(), a["sequence"].as_u64().unwrap_or(0), 0, a["id"].as_str().unwrap_or_default()),
+        (b["timestamp"].as_str().unwrap_or_default(), b["sequence"].as_u64().unwrap_or(0), 0, b["id"].as_str().unwrap_or_default()),
+        crate::external_sessions::TimelineOrder::TimestampSequence,
+    )
 }
 
 /// The conversation header (client contract `conversation-blocks.v1` §3): derived from a
@@ -2392,7 +2397,7 @@ pub fn native_slice_page_at_generation(
     };
     drop(preparation);
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, true,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2408,7 +2413,7 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS, managed,
+                None, CLIENT_MAX_PAGE_ITEMS, managed, true,
             )?.0)
         } else {
             None
@@ -2519,7 +2524,7 @@ pub fn native_head_fence(
 /// on with a fresh budget), and refuses (`page-cursor-expired`) only when that many consecutive
 /// entries are all hidden.
 #[allow(clippy::too_many_arguments)]
-fn canonical_native_slice(
+pub fn canonical_native_slice(
     state: &AppState,
     snapshot: &ClientSnapshot,
     source: &crate::external_sessions::ExternalSession,
@@ -2530,9 +2535,10 @@ fn canonical_native_slice(
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
     managed: Option<&super::ManagedSessionOwner>,
+    prepare_display: bool,
 ) -> Result<(conversation_blocks::PreparedSlice, u64), ApiError> {
     let mut slice = conversation_blocks::read_slice(
-        source, session, session_id, order, before, limit,
+        source, session, session_id, order, before, limit, prepare_display,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
     let mut scanned = slice.items.len();
@@ -2552,6 +2558,7 @@ fn canonical_native_slice(
         let mut next = conversation_blocks::read_slice(
             source, session, session_id, order, boundary.as_ref(),
             (limit - slice.items.len()).min(budget),
+            prepare_display,
         )?;
         scanned += next.items.len();
         if next.basis != slice.basis || next.generation != slice.generation {
@@ -2580,11 +2587,6 @@ pub const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
 /// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
 /// that keeps its identity and place, so the page it is on still opens and continues past it.
-/// A stored page's position for one entry; the stored projection sorts by it alone.
-pub fn stored_timeline_position(item: &Value) -> u64 {
-    item["sequence"].as_u64().unwrap_or(u64::MAX)
-}
-
 pub fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
     item["type"] = json!("error");
     item["role"] = json!("system");
@@ -3259,6 +3261,12 @@ pub fn timeline_value(
     })
 }
 
+/// Stable identity shared by stored projection and conversation replay selection.
+pub fn timeline_claim_entry_id(session_id: &str, claim: &ClaimRecord, suffix: &str) -> String {
+    let digest = hex::encode(Sha256::digest(format!("{}:{suffix}", claim.id).as_bytes()));
+    format!("timeline-entry/{}/{}", session_id.trim_start_matches("session/"), &digest[..24])
+}
+
 pub fn timeline_first_page(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -3267,6 +3275,23 @@ pub fn timeline_first_page(
     query: &ClientListQuery,
     native_read_error: Option<ApiError>,
     managed: Option<&super::ManagedSessionOwner>,
+) -> Result<Json<Value>, ApiError> {
+    timeline_first_page_with_extent(state, snapshot, session, session_id, query, native_read_error, managed, None)
+}
+
+pub type TimelineExtentVisitor<'a> = &'a mut dyn FnMut(&[Value]);
+
+/// Capture the complete bounded stored projection beside its display window for replay loss checks.
+#[allow(clippy::too_many_arguments)]
+pub fn timeline_first_page_with_extent(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    session_id: String,
+    query: &ClientListQuery,
+    native_read_error: Option<ApiError>,
+    managed: Option<&super::ManagedSessionOwner>,
+    extent: Option<TimelineExtentVisitor<'_>>,
 ) -> Result<Json<Value>, ApiError> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
@@ -3440,10 +3465,7 @@ pub fn timeline_first_page(
     let mut items = Vec::<Value>::new();
     let mut explicit = BTreeMap::<String, usize>::new();
     let mut tool_calls = BTreeSet::<String>::new();
-    let entry_id = |claim: &ClaimRecord, suffix: &str| {
-        let digest = hex::encode(Sha256::digest(format!("{}:{suffix}", claim.id).as_bytes()));
-        format!("timeline-entry/{session_leaf}/{}", &digest[..24])
-    };
+    let entry_id = |claim: &ClaimRecord, suffix: &str| timeline_claim_entry_id(&session_id, claim, suffix);
     let applies_to_incarnation = |fields: &Value| {
         let observed = fields.get("incarnation_id").and_then(Value::as_str);
         observed.is_none() || incarnation.is_none() || observed == incarnation
@@ -3682,7 +3704,7 @@ pub fn timeline_first_page(
         let notice_timestamp = items
             .iter()
             .filter_map(|item| item["timestamp"].as_str())
-            .max()
+            .max_by_key(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
             .unwrap_or(&snapshot.created_at);
         let mut notice = |code: &str, message: &str, details: Value| {
             notice_sequence = notice_sequence.saturating_add(1);
@@ -3710,7 +3732,10 @@ pub fn timeline_first_page(
         });
         items.extend([query_notice, prefix_notice].into_iter().flatten());
     }
-    items.sort_by_key(stored_timeline_position);
+    items.sort_by(timeline_order);
+    if let Some(extent) = extent {
+        extent(&items);
+    }
     let header = conversation_page_header(state, session, &session_id, &items, false);
     // A conversation opens at its newest bounded window. The cursor walks toward older
     // windows, while each individual page remains chronological for straightforward rendering.
@@ -4252,9 +4277,11 @@ pub struct Fence {
     pub runtime_desired_revision: Option<String>,
     pub terminal_sequence: Option<u64>,
     pub preview_token: Option<String>,
+    pub private_notes: Option<crate::private_notes::NotesFence>,
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
+    if action == "private-notes.write" { return Some("control.work"); }
     if matches!(
         action,
         "agent.create"

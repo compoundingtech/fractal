@@ -20,6 +20,7 @@ struct Owner {
     auth: FleetAuth,
     received: Arc<Mutex<Vec<Value>>>,
     capabilities: Arc<Mutex<Value>>,
+    capability_bytes: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 fn signed(owner: &Owner, body: &[u8], value: Value) -> Response {
@@ -30,6 +31,10 @@ fn signed(owner: &Owner, body: &[u8], value: Value) -> Response {
         store_index: 0,
         value,
     }).unwrap();
+    signed_bytes(owner, body, bytes)
+}
+
+fn signed_bytes(owner: &Owner, body: &[u8], bytes: Vec<u8>) -> Response {
     let headers = owner.auth.response_headers_for(
         CLIENT_READ_PATH, "owner-node", &bytes, &FleetAuth::body_digest(body),
     ).unwrap();
@@ -53,6 +58,9 @@ async fn inspect(State(owner): State<Owner>, headers: HeaderMap, body: Bytes) ->
     assert!(body.is_empty());
     assert!(!headers.contains_key("x-st3-features"));
     owner.auth.verify(&headers, "GET", CLIENT_READ_PATH, &body, Some("gateway-node"), None).unwrap();
+    if let Some(bytes) = owner.capability_bytes.lock().clone() {
+        return signed_bytes(&owner, &body, bytes);
+    }
     let capabilities = owner.capabilities.lock().clone();
     signed(&owner, &body, capabilities)
 }
@@ -60,9 +68,16 @@ async fn inspect(State(owner): State<Owner>, headers: HeaderMap, body: Bytes) ->
 async fn paged_messages(State(owner): State<Owner>, headers: HeaderMap, body: Bytes) -> Response {
     owner.auth.verify(&headers, "POST", CLIENT_READ_PATH, &body, Some("gateway-node"), None).unwrap();
     let request: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(request["request"]["messages_paging"], true);
+    let session_detail = request["request"]["operation"] == "session-detail";
+    if !session_detail {
+        assert_eq!(request["request"]["messages_paging"], true);
+    }
     owner.received.lock().push(request);
-    signed(&owner, &body, serde_json::json!({"kind":"messages","items":[],"cut":{"kind":"head","state":"complete"}}))
+    signed(&owner, &body, if session_detail {
+        serde_json::json!({"kind":"session","id":"session/external-child-test"})
+    } else {
+        serde_json::json!({"kind":"messages","items":[],"cut":{"kind":"head","state":"complete"}})
+    })
 }
 
 async fn fixture(advertised: bool) -> (tempfile::TempDir, ClientRelay, Owner, tokio::task::JoinHandle<()>) {
@@ -81,8 +96,10 @@ async fn fixture(advertised: bool) -> (tempfile::TempDir, ClientRelay, Owner, to
     let owner = Owner {
         auth: relay.auth.clone(), received: Arc::default(),
         capabilities: Arc::new(Mutex::new(serde_json::json!({"capabilities":[
-            {"id":"messages-paging","version":2,"state":"granted"}
+            {"id":"messages-paging","version":2,"state":"granted"},
+            {"id":"session-detail-child-id","version":1,"state":"granted"}
         ]}))),
+        capability_bytes: Arc::default(),
     };
     let route = if advertised { post(paged_messages).get(inspect) } else { post(old_messages) };
     let router = Router::new().route(CLIENT_READ_PATH, route).with_state(owner.clone());
@@ -142,6 +159,81 @@ async fn only_exact_granted_version_two_allows_a_v2_post() {
         *owner.capabilities.lock() = capabilities;
         let error = relay.read("host/owner-node", &request(true)).await.unwrap_err();
         assert_eq!(error.downcast_ref::<ClientReadRejected>().unwrap().code, "unsupported-capability");
+        assert!(owner.received.lock().is_empty());
+    }
+    server.abort();
+}
+
+fn session_detail_request() -> ClientReadRequest {
+    ClientReadRequest {
+        authority_actor: "person/alex".into(),
+        relay: None,
+        request: ClientReadOperation::SessionDetail {
+            session_id: "session/external-child-test".into(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn session_detail_never_reaches_a_post_only_old_peer() {
+    let (_root, relay, owner, server) = fixture(false).await;
+    let error = relay.read("host/owner-node", &session_detail_request()).await.unwrap_err();
+    let rejected = error.downcast_ref::<ClientReadRejected>().unwrap();
+    assert_eq!(rejected.code, "peer-too-old");
+    assert!(rejected.message.contains("update it to open subagent conversations"));
+    assert!(owner.received.lock().is_empty(), "the old closed-enum decoder is never probed");
+    server.abort();
+}
+
+#[tokio::test]
+async fn session_detail_requires_the_exact_granted_child_id_capability_at_every_hop() {
+    let (_root, relay, owner, server) = fixture(true).await;
+    for capabilities in [
+        serde_json::json!({}),
+        serde_json::json!({"capabilities":[]}),
+        serde_json::json!({"capabilities":[{"id":"messages-paging","version":2,"state":"granted"}]}),
+        serde_json::json!({"capabilities":[{"id":"session-detail-child-id","version":2,"state":"granted"}]}),
+        serde_json::json!({"capabilities":[{"id":"session-detail-child-id","version":1,"state":"ungranted"}]}),
+    ] {
+        *owner.capabilities.lock() = capabilities;
+        let mut request = session_detail_request();
+        let error = relay.read("host/owner-node", &request).await.unwrap_err();
+        assert_eq!(error.downcast_ref::<ClientReadRejected>().unwrap().code, "peer-too-old");
+        request.relay = Some(ClientReadRoute {
+            target: "host/owner-node".into(), path: vec!["first-gateway".into()], hops_left: 3,
+        });
+        let error = relay.forward(&request).await.unwrap_err();
+        assert_eq!(error.downcast_ref::<ClientReadRejected>().unwrap().code, "peer-too-old");
+        assert!(owner.received.lock().is_empty());
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn session_detail_succeeds_with_the_advertised_three_field_child_id_protocol() {
+    let (_root, relay, owner, server) = fixture(true).await;
+    let detail = relay.read("host/owner-node", &session_detail_request()).await.unwrap();
+    assert_eq!(detail["kind"], "session");
+    assert_eq!(owner.received.lock().len(), 1);
+    server.abort();
+}
+
+#[tokio::test]
+async fn authenticated_unreadable_capabilities_refuse_without_a_session_detail_post() {
+    let (_root, relay, owner, server) = fixture(true).await;
+    for bytes in [
+        b"not JSON".to_vec(),
+        serde_json::to_vec(&serde_json::json!({"value":{"capabilities":[]}})).unwrap(),
+        serde_json::to_vec(&serde_json::json!({
+            "api_version":"future.v9","request_id":"request/test","snapshot_host":"owner-node",
+            "store_index":0,"value":{"capabilities":[
+                {"id":"session-detail-child-id","version":1,"state":"granted"}
+            ]}
+        })).unwrap(),
+    ] {
+        *owner.capability_bytes.lock() = Some(bytes);
+        let error = relay.read("host/owner-node", &session_detail_request()).await.unwrap_err();
+        assert_eq!(error.downcast_ref::<ClientReadRejected>().unwrap().code, "peer-too-old");
         assert!(owner.received.lock().is_empty());
     }
     server.abort();

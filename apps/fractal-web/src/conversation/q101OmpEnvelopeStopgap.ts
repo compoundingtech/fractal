@@ -1,4 +1,4 @@
-// q101 STOPGAP: remove this module and its fromTimeline hook when st adapters preserve OMP
+// q101 STOPGAP: remove this module and its fromTimeline hook when Fractal adapters preserve OMP
 // customType/details as typed TimelineBlocks (including Unsupported), and the four curated
 // envelope projection tests pass against those blocks. external_sessions.rs currently drops them.
 // This is a bounded, whole-body producer-grammar recognizer, NOT an XML/prose classifier.

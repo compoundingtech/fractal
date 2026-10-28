@@ -9,7 +9,7 @@ export type SendPorts<R> = {
 
 export type SendOutcome<R> =
   | { how: 'sent' }
-  /** st may have taken it and has not said: `request` is what to send again, unchanged but for its fence. */
+  /** Fractal may have taken it and has not said: `request` is what to send again, unchanged but for its fence. */
   | { how: 'unconfirmed'; request: R }
   | { how: 'failed'; error: unknown };
 
@@ -49,7 +49,7 @@ export function resendMessage<R extends { fence: unknown }>(ports: SendPorts<R> 
   return deliver(ports, async () => ({ ...request, fence: await ports.fence() }), request);
 }
 
-/** `original` is the unconfirmed request being sent again: whatever st does not answer, it stays unconfirmed. */
+/** `original` is the unconfirmed request being sent again: whatever Fractal does not answer, it stays unconfirmed. */
 async function deliver<R>(ports: SendPorts<R>, next: () => Promise<R>, original?: R): Promise<SendOutcome<R>> {
   let last: unknown;
   let wait = 50;
@@ -59,7 +59,7 @@ async function deliver<R>(ports: SendPorts<R>, next: () => Promise<R>, original?
     try { request = await next(); } catch (error) { return original ? { how: 'unconfirmed', request: original } : { how: 'failed', error }; }
     try { await ports.send(request); return { how: 'sent' }; } catch (error) { last = error; }
     if (outcomeUnknown(last)) {
-      // st may have taken it: the identical request gets st's first answer, never a second message.
+      // Fractal may have taken it: the identical request gets Fractal's first answer, never a second message.
       await ports.wait(REPEAT_AFTER_MS);
       try { await ports.send(request); return { how: 'sent' }; } catch (error) { last = error; }
       // The first may still land, so a new request could be a second message: keep this one.

@@ -36,8 +36,8 @@ import { DiagnosticsBoundary } from './DiagnosticsBoundary';
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
 // @react-navigation/bottom-tabs' native navigator) holding a UINavigationController per tab
 // (@react-navigation/native-stack). It keeps the system look and fonts. Everything inside a
-// screen is React, drawn like stui: IBM Plex Mono on the Mocha palette, or on its light
-// counterpart where a screen follows the system appearance.
+// screen is React, drawn like the Fractal terminal UI: IBM Plex Mono on the Mocha palette,
+// or on its light counterpart where a screen follows the system appearance.
 
 const Tabs = createNativeBottomTabNavigator<TabParams>();
 const Stack = createNativeStackNavigator<StackParams>();
@@ -45,9 +45,9 @@ const Stack = createNativeStackNavigator<StackParams>();
 function navigationFor(palette: Theme, base: typeof DarkTheme) {
   return { ...base, colors: { ...base.colors, primary: palette.accent, background: palette.base, card: palette.mantle, text: palette.text, border: palette.surface0, notification: palette.person } };
 }
-// stui's palette as the navigation theme: Mocha everywhere, and light where a screen follows the system appearance.
-const stuiNavigation = { dark: navigationFor(theme, DarkTheme), light: navigationFor(lightTheme, DefaultTheme) };
-const navigationTheme = stuiNavigation.dark;
+// The Fractal terminal UI palette as the navigation theme: Mocha everywhere, and light where a screen follows the system appearance.
+const fractalNavigation = { dark: navigationFor(theme, DarkTheme), light: navigationFor(lightTheme, DefaultTheme) };
+const navigationTheme = fractalNavigation.dark;
 
 const ICONS: Record<Tab, string> = { Now: 'bell', Resources: 'folder', Fleet: 'server.rack', Spaces: 'app' };
 
@@ -74,14 +74,14 @@ function TabStack({ tab }: { tab: Tab }) {
     contentStyle: { backgroundColor: colors.background },
     statusBarStyle,
   };
-  // A screen drawn in stui's palette that follows the system appearance (SchemeScreen).
-  const stui = scheme === 'dark' ? theme : lightTheme;
+  // A screen drawn in the Fractal terminal UI palette that follows the system appearance (SchemeScreen).
+  const palette = scheme === 'dark' ? theme : lightTheme;
   const schemeOptions: NativeStackNavigationOptions = {
-    headerTintColor: stui.accent,
-    headerStyle: { backgroundColor: stui.mantle },
-    headerTitleStyle: { color: stui.text },
-    headerLargeTitleStyle: { color: stui.text },
-    contentStyle: { backgroundColor: stui.base },
+    headerTintColor: palette.accent,
+    headerStyle: { backgroundColor: palette.mantle },
+    headerTitleStyle: { color: palette.text },
+    headerLargeTitleStyle: { color: palette.text },
+    contentStyle: { backgroundColor: palette.base },
     statusBarStyle,
   };
   return <Stack.Navigator screenOptions={stackOptions}>
@@ -186,12 +186,12 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
   return <ThemeProvider value={systemSurface ? {
     ...(scheme === 'dark' ? DarkTheme : DefaultTheme),
     colors: { ...(scheme === 'dark' ? DarkTheme.colors : DefaultTheme.colors), primary: colors.action, background: colors.background, card: colors.grouped, text: colors.text, border: colors.separator, notification: colors.attention },
-  } : schemeSurface ? stuiNavigation[scheme] : navigationTheme}><Tabs.Navigator
+  } : schemeSurface ? fractalNavigation[scheme] : navigationTheme}><Tabs.Navigator
     initialRouteName={initial}
     screenOptions={({ route }) => ({
       headerShown: false,
       tabBarActiveTintColor: systemSurface ? colors.action : theme.accent,
-      // Spaces: one rounded rect, as stui's ▢.
+      // Spaces: one rounded rect, as the Fractal terminal UI's ▢.
       tabBarIcon: { type: 'sfSymbol', name: ICONS[route.name as Tab] as never },
       tabBarStyle: { display: tabBarHidden(route) ? 'none' : 'flex' },
     })}

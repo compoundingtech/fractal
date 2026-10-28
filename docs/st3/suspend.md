@@ -26,7 +26,7 @@ exists. This check reads no transcript, appends no claims, and leaves the seat r
 
 A seat suspends only at a clean boundary. Core does not read harness state. Each driver adds
 `quiescent` and `blocking` to the `harness.observed` claims it already publishes, and core reads
-those two fields. Core adds its own blockers, so st refuses a suspend with a typed list of
+those two fields. Core adds its own blockers, so Fractal refuses a suspend with a typed list of
 reasons:
 
 | reason | meaning |
@@ -36,7 +36,7 @@ reasons:
 | `unsent-input` | text sits in the harness's composer |
 | `starting`, `harness-indeterminate`, `harness-unobserved` | the driver cannot yet show the harness is idle |
 | `claimed-work` | the seat holds a claimed step, whose lease would lapse |
-| `subagent-running` | st still records a subagent for the seat |
+| `subagent-running` | Fractal still records a subagent for the seat |
 | `native-session-unbound` | the driver has reported no native session it can resume; Claude and pi write a transcript only with their first turn |
 
 The owner checks the same reasons again before it stops anything. A refused suspend leaves the
@@ -117,7 +117,7 @@ Older daemons accepted suspends whose declaration already selects a session. For
 accepts such a declaration when its one selector (omp `--resume TRANSCRIPT`, `--resume=TRANSCRIPT`
 or `-r TRANSCRIPT`; pi `--session TRANSCRIPT` or `--session=TRANSCRIPT`) is an absolute path of
 the suspended session's own transcript: the file name and the header both name that session, and
-the seat's transcript inventory resolves to the same file. st then replaces the authored selector
+the seat's transcript inventory resolves to the same file. Fractal then replaces the authored selector
 with its single selector for the checked path. A selector that names another session, a relative
 path, a missing, unreadable or mismatched transcript, an inventory entry that is a different file
 (`transcript-ambiguous`), a second or conflicting selection flag, or any other harness is refused
@@ -213,4 +213,4 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
 The boot canaries cover single-host suspend and resume for every harness. The isolated two-node
 fleet test moves an omp seat with tracked and untracked changes and its prior conversation,
 checks occupied-target refusal, verifies the live native ID, and delivers mail after the move. See
-[scripts/st3-boot-canaries](../../scripts/st3-boot-canaries/README.md).
+[scripts/fractal-boot-canaries](../../scripts/fractal-boot-canaries/README.md).

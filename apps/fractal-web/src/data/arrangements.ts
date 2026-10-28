@@ -33,7 +33,7 @@ export interface ArrangementInventoryGateway {
 }
 
 /** The generated client cancels each request through its own `requestOptions.signal`; discovery stays shared. */
-export const st3InventoryGateway = ({ baseUrl, fetchImpl }: {
+export const fractalInventoryGateway = ({ baseUrl, fetchImpl }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof globalThis.fetch
 }): ArrangementInventoryGateway & Pick<FractalClient, 'discover'> => {

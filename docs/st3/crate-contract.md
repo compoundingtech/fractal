@@ -1,4 +1,4 @@
-# st3 crates: what is where and who may use what
+# Fractal crates: what is where and who may use what
 
 Twenty packages carry what used to be the single `st3` package and its end-to-end tests:
 

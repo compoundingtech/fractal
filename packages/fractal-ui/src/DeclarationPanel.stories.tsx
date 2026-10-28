@@ -28,8 +28,8 @@ const meta = {
   excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Declaration Panel',
   render: Frame,
-  parameters: { layout: 'fullscreen', docs: { description: { component: 'Read-only canonical declaration for one agent or mission: KDL tinted with kit tokens, sticky line numbers, copy-all and an optional provenance line. Ready, loading, unavailable and failed states; a `json` language marks the labelled structured fallback used where st serves no KDL. Presentational and host-agnostic: the web app hosts it in a modal today and can host it in a tab later.' } } },
-  args: { scheme: 'dark', title: 'agent/example/ui-design', state: { _tag: 'Ready', text: agentDeclarationKdl, language: 'kdl', source: 'Canonical KDL · revision rev-41d2a0c7 · environment values redacted by st' } },
+  parameters: { layout: 'fullscreen', docs: { description: { component: 'Read-only canonical declaration for one agent or mission: KDL tinted with kit tokens, sticky line numbers, copy-all and an optional provenance line. Ready, loading, unavailable and failed states; a `json` language marks the labelled structured fallback used where Fractal serves no KDL. Presentational and host-agnostic: the web app hosts it in a modal today and can host it in a tab later.' } } },
+  args: { scheme: 'dark', title: 'agent/example/ui-design', state: { _tag: 'Ready', text: agentDeclarationKdl, language: 'kdl', source: 'Canonical KDL · revision rev-41d2a0c7 · environment values redacted by Fractal' } },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<PanelArgs>
 export default meta

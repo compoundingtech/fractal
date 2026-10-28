@@ -45,7 +45,7 @@ The review waits without occupying the worker. Read the file and run result befo
 fractal alerts approve STEP_RUN_ID --as person/ada --reason 'The README is ready.'
 ```
 
-A rejected gate fails its condition. Use a feedback gate when changes should route back to the worker rather than end as rejection; see the [worked examples](https://github.com/compoundingtech/fractal/blob/main/examples/st3/README.md).
+A rejected gate fails its condition. Use a feedback gate when changes should route back to the worker rather than end as rejection; see the [worked examples](https://github.com/compoundingtech/fractal/blob/main/examples/fractal/README.md).
 
 ## Revise a live run explicitly
 

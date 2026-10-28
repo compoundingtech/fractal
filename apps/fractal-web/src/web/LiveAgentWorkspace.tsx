@@ -1,5 +1,7 @@
+import { selectedFaviconState, tabTitle, useTabMetadata } from './useTabMetadata.ts'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
+import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
 import type * as TerminalDetailModule from '../terminal/TerminalDetail.tsx'
@@ -50,7 +52,7 @@ import { RosterLoading, RosterStaleNotice, RosterUnavailable, SidebarEmptyState 
 import { useAgentsLastObservedAt } from './lastObserved.tsx'
 import { ResponsiveAgentSidebar, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
 import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
-import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
+import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
 import { RosterDecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 
 const emptyAgents: readonly Agent[] = []
@@ -78,6 +80,7 @@ const LiveSidebarAgentRow = React.memo((props: {
   const agent = feed._tag === 'Observed' ? feed.value : undefined
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const frozenAt = React.useContext(RosterFrozenAt)
+  const [, requestThreadFocus] = useAtom(subagentThreadFocus(props.agentRef))
   const item = React.useMemo(() => {
     if (agent === undefined) return undefined
     if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission })
@@ -85,7 +88,11 @@ const LiveSidebarAgentRow = React.memo((props: {
     return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
   }, [agent, stale, props.needsMe, props.childId, mission])
   const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
-  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} />
+  const onSubagentsPress = React.useCallback(() => {
+    props.select(props.agentRef)
+    requestThreadFocus(value => value + 1)
+  }, [props.select, props.agentRef, requestThreadFocus])
+  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -505,6 +512,11 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     previousNeedsYou.current = next
     return next
   }, [agents, subjects])
+  const offline = connection._tag !== 'Live'
+  useTabMetadata({
+    title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),
+    faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
+  })
   // Filtering uses observed status, not wall time; ticking cannot change membership.
   const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
