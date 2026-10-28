@@ -1,7 +1,7 @@
 import { FractalClient, type TerminalRoute } from '../../clients/typescript/fractal-client';
 import { TerminalRouteMemory } from '@fractal/views';
 import { gatewayFetch } from './gatewayFetch';
-import { closeFabricTarget, fabricTargetStats, openFabricTarget } from './modules/st-fabric';
+import { closeFabricTarget, fabricTargetStats, openFabricTarget } from './modules/fractal-fabric';
 import type { FabricTarget } from './fabricTarget';
 import type { TerminalRouting } from './terminalRoute';
 
