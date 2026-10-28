@@ -238,6 +238,16 @@ being pending once the remote no longer has it, or after 24 hours if GC never de
 any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
 next pull.
 
+A stalled pull alerts within minutes. `scripts/evidence-log-watch` (`scripts/evidence-log-watch.timer`, every 2 minutes)
+fetches only the head of `refs/evidence-log/main` from the remote, not the log host's own copy, so a pull that commits but
+does not publish counts as stalled too. It reads the `as_of` time from the head's subject. A head older than 360 s (three
+missed pulls, inside the verifier's 600 s) is a stall, and so is a head that cannot be read for that long. The watcher
+then runs `EVIDENCE_LOG_WATCH_NOTIFY`, a JSON argv with the alert line appended: once when the stall begins, hourly while
+it lasts, and once when the log moves again. A notification that fails is sent again on the next run. Not every gap is a
+stall. On 2026-10-28 a gate reported 21 per-crate passes as unlogged although the pulls ran on time: evidence-gc had
+written its GC lines (03:42Z) for keys whose deletion was still pending, and those keys belonged to open pull requests.
+GC now keeps the crate keys of live trees.
+
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
 one file at the head. The signer is a command that signs standard input (`ssh-keygen -Y sign -n git -f KEY`, or the same
