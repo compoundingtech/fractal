@@ -329,7 +329,7 @@ host's temporary-filesystem quota when debug binaries are copied by parallel cas
 
 On Linux, tests that launch isolated daemons, drivers, PTYs or long-lived CLI children call
 `fractal_daemon::test_support::supervise_test()` before creating their fixtures. It runs that exact test
-under `scripts/st3_test_process.py`, a detached subreaper watching pidfds for the Rust runner
+under `scripts/fractal_test_process.py`, a detached subreaper watching pidfds for the Rust runner
 and its launcher. Success, failure, panic, timeout, SIGTERM and SIGKILL of the runner all
 end the owned process tree. Each test has its own process group; detached children are
 adopted and killed and reaped before the supervisor returns the test's status. Exited adopted
@@ -350,7 +350,7 @@ their tasks end with their test runtime. New process-spawning fixtures should us
 The workspace suite still covers the token-free two-node messaging fault matrix. Its
 previous-release channel archive is pinned in `.github/messaging-compat-baseline.json`. Its
 provider stand-in runs the omp channel hook's TypeScript with Node 24's built-in type stripping;
-the default devShell supplies that `node`. See [the eval contract](../evals/st3/messaging-faults/README.md).
+the default devShell supplies that `node`. See [the eval contract](../evals/fractal/messaging-faults/README.md).
 
 ### Rolling compatibility baselines
 
@@ -417,7 +417,7 @@ workflows in the ordinary final validation.
 
 `boot_canaries::*` in `linux-tests` boots real seats of every harness Fractal drives (Claude, Codex, pi,
 omp, OpenCode) against a real Fractal daemon and real `pty` sessions, with a token-free stand-in for
-the provider (`scripts/st3-boot-canaries`; see its README). Five scenarios per harness: a fresh
+the provider (`scripts/fractal-boot-canaries`; see its README). Five scenarios per harness: a fresh
 seat, a restarted seat, a daemon restart while the predecessor is still the latest runtime
 observation, a driver re-exec into a replaced binary, and five seats launching at once. Each seat
 must claim its step with its current incarnation and read a Fractal message within the time bound, and
@@ -534,8 +534,8 @@ existing scope.
 
 ### Current-product boundary
 
-Every required Linux stage runs `scripts/check-st-boundary-test` and
-`scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
+Every required Linux stage runs `scripts/check-fractal-boundary-test` and
+`scripts/check-fractal-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
 in st3/Fractal TUI, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 

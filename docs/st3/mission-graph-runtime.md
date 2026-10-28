@@ -164,7 +164,7 @@ The release decision is a final mission product. The human gate is a mission-lev
 A human gate uses `mode="approve"` by default. On a worker-owned step, `mode="feedback"`
 offers `approved` and `changes-requested` instead of approve and reject. A request for changes
 requires free text, sends it to the worker, and starts a new attempt with that text appended to
-the step goals. See [the feedback example](../../examples/st3/human-feedback.kdl).
+the step goals. See [the feedback example](../../examples/fractal/human-feedback.kdl).
 
 After acceptance, cleanup stops both agents before the run becomes completed.
 
@@ -1576,7 +1576,7 @@ agent "parser" {
 - With `remove-at-run-end=#true`, Fractal removes the worktree after the agent's run ends and its runtime stops. For a top-level seat without an owning run, an explicit stop ends it. The branch stays in the repository.
 - Fractal keeps a worktree that has uncommitted or untracked changes, and records a `checkout-kept` warning. It also keeps a worktree whose workspace a current member still uses.
 
-[`fan-out.kdl`](../../examples/st3/fan-out.kdl) gives three parallel workers one checkout each.
+[`fan-out.kdl`](../../examples/fractal/fan-out.kdl) gives three parallel workers one checkout each.
 
 ## Native message delivery and work wake
 
@@ -2120,7 +2120,7 @@ Eligibility reads register the absent binding as a dependency. Its later publica
 
 `cargo test -p fractal-daemon --lib revision_seat_tests -- --test-threads=4` covers completed four-seat declarations, repeated cutover, current agent-card ownership, explicit stops, changed/removed declarations, both revision writers, transactional rollback after canonical carry, quiet writer-queue controls, dynamic declaration refusal, failed reopen refusal, replication, dependency waits, retry backoff, stale-generation fencing, recurring readiness episodes, fault deduplication and event-driven recovery.
 
-`scripts/st3-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
+`scripts/fractal-revision-seat-eval/run ST3_FIXTURE_BINARY OUTPUT_DIR` runs actual CLI controls on a private daemon and real PTYs, using invented garden seats and `sleep` commands. It checks four builders across repeated revisions, explicit stop, removal and intentional cancellation with finally cleanup. It also removes a mission-owned binding after its declaring step completes, checks the missing-agent fault delivered to the requester, restores eligibility and cancels the control. All sockets, HOME/XDG directories and terminal roots are isolated. It writes `result.json` and tears down its own runtimes.
 
 ## Immutable documents
 
