@@ -345,20 +345,29 @@ fn wait_for_fabric_inbox_code(
             eprintln!("Waiting for a join code in this machine's Fabric inbox…");
             announced = true;
         }
-        // Any event, or the deadline, means look again. A watch that reports an error may not
-        // report the code either, so it ends the wait.
-        let mut events = match woken.recv_timeout(remaining) {
-            Ok(event) => vec![event],
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Vec::new(),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                anyhow::bail!("the watch on the Fabric inbox stopped")
-            }
-        };
-        events.extend(woken.try_iter());
-        for event in events {
-            event.context("the watch on the Fabric inbox failed")?;
-        }
+        await_fabric_inbox_event(&woken, remaining)?;
     }
+}
+
+/// Wait up to `remaining` for the inbox watch to report a change: any event, or the deadline,
+/// means look again. A watch that reports an error may not report the code either, so the
+/// error ends the wait.
+fn await_fabric_inbox_event(
+    woken: &std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    remaining: Duration,
+) -> Result<()> {
+    let mut events = match woken.recv_timeout(remaining) {
+        Ok(event) => vec![event],
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            anyhow::bail!("the watch on the Fabric inbox stopped")
+        }
+    };
+    events.extend(woken.try_iter());
+    for event in events {
+        event.context("the watch on the Fabric inbox failed")?;
+    }
+    Ok(())
 }
 
 /// The directories a delivered code passes through, with their inodes so a recreated one is
@@ -1732,5 +1741,22 @@ mod invite_route_tests {
         let missing = home.path().join("missing");
         let error = wait_for_fabric_inbox_code(&missing, Duration::from_secs(60), true).unwrap_err();
         assert!(error.to_string().contains("no Fabric home"), "{error:#}");
+    }
+
+    #[test]
+    fn a_watch_error_ends_the_fabric_inbox_wait() {
+        let (events, woken) = std::sync::mpsc::channel();
+        events.send(Ok(notify::Event::default())).unwrap();
+        events.send(Err(notify::Error::generic("inotify watch limit reached"))).unwrap();
+        let began = std::time::Instant::now();
+        let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
+        assert!(began.elapsed() < Duration::from_secs(30));
+        assert!(format!("{error:#}").contains("inotify watch limit reached"), "{error:#}");
+
+        events.send(Ok(notify::Event::default())).unwrap();
+        await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap();
+        drop(events);
+        let error = await_fabric_inbox_event(&woken, Duration::from_secs(60)).unwrap_err();
+        assert!(error.to_string().contains("stopped"), "{error:#}");
     }
 }
