@@ -1257,12 +1257,12 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
     )
 }
 
-const MEMBERSHIP_OWNER: &str = "person/grace";
-const MEMBERSHIP_SUBJECT: &str = "arrangement/person/grace/019a0000-0000-7000-8000-000000000002";
+const MEMBERSHIP_OWNER: &str = "person/avery";
+const MEMBERSHIP_SUBJECT: &str = "arrangement/person/avery/019a0000-0000-7000-8000-000000000002";
 const MEMBERSHIP_PATH: &str =
-    "/v1/client/arrangements/grace/019a0000-0000-7000-8000-000000000002/memberships?person=person%2Fgrace";
+    "/v1/client/arrangements/avery/019a0000-0000-7000-8000-000000000002/memberships?person=person%2Favery";
 /// A live member: another of the owner's arrangements, visible while it is created and unretired.
-const MEMBERSHIP_MEMBER: &str = "arrangement/person/grace/019a0000-0000-7000-8000-000000000003";
+const MEMBERSHIP_MEMBER: &str = "arrangement/person/avery/019a0000-0000-7000-8000-000000000003";
 
 /// Grow the container's move history and retained absent members, not the live page, to catch
 /// membership reads that fold old edits or scan absent heads.
@@ -1315,7 +1315,7 @@ fn seed_memberships(store: &Store, scale: f64) -> String {
             json!([
                 {"op":"place","member":MEMBERSHIP_MEMBER,"bucket":null,"key":if edit_index % 2 == 0 { "a1" } else { "a0" }},
                 // A distinct variant nibble keeps these from naming the container or live member.
-                {"op":"remove","member":format!("arrangement/person/grace/019a0000-0000-7000-9000-{edit_index:012}")},
+                {"op":"remove","member":format!("arrangement/person/avery/019a0000-0000-7000-9000-{edit_index:012}")},
             ]),
         );
     }
