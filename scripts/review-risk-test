@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """The deterministic risk floor of a review: each named rule fires on what it names, stays quiet on an ordinary change, and the level
 is the highest of what fired."""
+import importlib.machinery
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
@@ -13,7 +15,16 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 
 
+def load_review_risk():
+    loader = importlib.machinery.SourceFileLoader("review_risk", str(HERE / "review-risk"))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader("review_risk", loader))
+    loader.exec_module(module)
+    return module
+
+
 class ReviewRisk(unittest.TestCase):
+    module = load_review_risk()
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="review-risk-")
         self.addCleanup(self.temporary.cleanup)
@@ -109,6 +120,24 @@ class ReviewRisk(unittest.TestCase):
         self.write("crates/fractal-store/src/store/inline.rs",
                    self.SOURCE + "\n" + self.TESTS.replace("        run();\n", "        run();\n" + fixture) + "\n" + after)
         self.assertEqual(self.rules(self.risk()).get("schema"), "high")
+
+    def test_a_test_module_closed_early_with_code_indented_after_it_is_still_scored(self):
+        """Indentation is not syntax: an indented `}` closes the module, and indented production code follows, closed by a column-0 `}`."""
+        crafted = (self.SOURCE + "\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn it_runs() {\n        run();\n    }\n    }\n"
+                   '    pub mod shipped {\n        pub const SCHEMA: &str = "CREATE TABLE evil(x)";\n        pub fn go() {}\n    }\n}\n')
+        self.assertIsNone(self.module.test_block_start(crafted))
+        self.start_from(self.SOURCE)
+        self.write("crates/fractal-store/src/store/inline.rs", crafted)
+        self.assertEqual(self.rules(self.risk()).get("schema"), "high")
+
+    def test_braces_in_strings_comments_and_chars_do_not_hide_or_fake_the_end_of_a_test_module(self):
+        honest = ("#[cfg(test)]\nmod tests {\n    // a stray } in a comment\n    /* and { another /* nested } */ */\n"
+                  '    const OPEN: &str = "{";\n    const RAW: &str = r#"}"#;\n    fn c() -> (char, char) { (\'}\', \'{\') }\n}\n')
+        self.assertEqual(self.module.test_block_start(self.SOURCE + "\n" + honest), 3)
+        for broken in ('#[cfg(test)]\nmod tests {\n    const S: &str = "unterminated;\n}\n',
+                       "#[cfg(test)]\nmod tests {\n    /* unterminated\n}\n",
+                       "#[cfg(test)]\nmod tests {\n    fn a() {}\n    }\n    fn b() {\n}\n"):
+            self.assertIsNone(self.module.test_block_start(self.SOURCE + "\n" + broken))
 
     def test_deleting_data_is_high_in_source_and_ignored_in_tests(self):
         self.write("crates/fractal-store/src/store/plain_tests.rs", 'fn t() { exec("DELETE FROM t"); }\n')

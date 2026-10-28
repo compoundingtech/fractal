@@ -76,6 +76,8 @@ def unquote(name):
 
 
 TEST_MODULE = re.compile(r"^#\[cfg\(test\)\]\n(?:pub(?:\([a-z]+\))? )?mod tests \{\n", re.M)
+RAW_STRING = re.compile(r'b?r(#*)"')
+CHAR_LITERAL = re.compile(r"'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")
 HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -96,7 +98,59 @@ def test_block_start(text):
         rest.pop()
     if not rest or rest[-1] != "}" or any(line and not line[0].isspace() for line in rest[:-1]):
         return None
+    if not closes_only_at_the_end("\n".join(rest)):
+        return None
     return text.count("\n", 0, found.start()) + 1
+
+
+def closes_only_at_the_end(body):
+    """True when BODY, the text after `mod tests {`, holds balanced braces that bring the module's depth to zero only at the very last
+    character. Indentation is not syntax: without this, an indented `}` could close the module early and production code after it
+    would pass for test code. Braces in comments, strings and char literals are not counted; anything the scan cannot tell (an
+    unterminated string or comment) is not a test block, so it fails closed."""
+    depth, index, size = 1, 0, len(body)
+    while index < size:
+        char = body[index]
+        if body.startswith("//", index):
+            index = body.find("\n", index)
+            if index < 0:
+                return False
+        elif body.startswith("/*", index):
+            nesting = 1
+            index += 2
+            while nesting:
+                opens, closes = body.find("/*", index), body.find("*/", index)
+                if closes < 0:
+                    return False
+                if 0 <= opens < closes:
+                    nesting, index = nesting + 1, opens + 2
+                else:
+                    nesting, index = nesting - 1, closes + 2
+        elif char == "r" and RAW_STRING.match(body, index) and not (index and (body[index - 1].isalnum() or body[index - 1] == "_")):
+            raw = RAW_STRING.match(body, index)
+            end = body.find('"' + raw.group(1), raw.end())
+            if end < 0:
+                return False
+            index = end + 1 + len(raw.group(1))
+        elif char == '"':
+            index += 1
+            while index < size and body[index] != '"':
+                index += 2 if body[index] == "\\" else 1
+            if index >= size:
+                return False
+            index += 1
+        elif char == "'":
+            literal = CHAR_LITERAL.match(body, index)
+            index = literal.end() if literal else index + 1
+        elif char == "{":
+            depth, index = depth + 1, index + 1
+        elif char == "}":
+            depth, index = depth - 1, index + 1
+            if depth == 0:
+                return not body[index:].strip()
+        else:
+            index += 1
+    return False
 
 
 def read_diff(repo, base, head):
