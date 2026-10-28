@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 from unittest import mock
@@ -104,6 +105,74 @@ class PoolTreeTest(unittest.TestCase):
                 self.assertFalse((tree / 'ignored').exists())
                 self.assertFalse((tree / 'nested').exists())
                 git(repo, 'worktree', 'remove', '--force', str(tree))
+
+    def pool_repo(self, scratch):
+        repo = Path(scratch) / 'repo'
+        repo.mkdir()
+        git(repo, 'init', '-q')
+        (repo / 'tracked').write_text('first')
+        git(repo, 'add', '.')
+        git(repo, 'commit', '-q', '-m', 'first')
+        return repo
+
+    def test_an_index_lock_is_cleared_only_when_no_process_is_left_in_the_tree(self):
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.dict(os.environ, GIT_ENV, clear=True):
+            repo = self.pool_repo(scratch)
+            pool = Path(scratch) / 'pool'
+            with contextlib.chdir(repo):
+                tree = st_test.prepare_tree(pool, 0, git(repo, 'rev-parse', 'HEAD'))
+                lock = Path(git(tree, 'rev-parse', '--path-format=absolute', '--git-path', 'index.lock'))
+                lock.write_text('')
+                # Something is still at work in the tree: the lock may be live, so it stays and the run fails.
+                busy = subprocess.Popen(['sleep', '60'], cwd=tree)
+                self.addCleanup(busy.wait)
+                self.addCleanup(busy.kill)
+                with self.assertRaisesRegex(st_test.Failure, rf'index.lock and processes {busy.pid} still in it'):
+                    st_test.prepare_tree(pool, 0, git(repo, 'rev-parse', 'HEAD'))
+                self.assertTrue(lock.exists())
+                busy.kill()
+                busy.wait()
+                # Nothing is left in the tree: the lock is stale, removed, and said so; the checkout goes ahead.
+                said = io.StringIO()
+                with contextlib.redirect_stderr(said):
+                    self.assertEqual(st_test.prepare_tree(pool, 0, git(repo, 'rev-parse', 'HEAD')), tree)
+                self.assertFalse(lock.exists())
+                self.assertIn('removed a stale', said.getvalue())
+
+    def test_a_holder_killed_in_its_checkout_leaves_the_tree_to_the_next_holder(self):
+        with tempfile.TemporaryDirectory() as scratch, mock.patch.dict(os.environ, GIT_ENV, clear=True):
+            repo = self.pool_repo(scratch)
+            pool = Path(scratch) / 'pool'
+            with contextlib.chdir(repo):
+                tree = st_test.prepare_tree(pool, 0, git(repo, 'rev-parse', 'HEAD'))
+                lock = git(tree, 'rev-parse', '--path-format=absolute', '--git-path', 'index.lock')
+                (repo / 'tracked').write_text('second')
+                git(repo, 'commit', '-q', '-am', 'second')
+                commit = git(repo, 'rev-parse', 'HEAD')
+                # The holder takes the lease and, in the tree, starts writing the index as git's checkout does; then it is killed (SIGKILL,
+                # as a stopped scope's leftovers are). Its lease ends with it; the lock git was writing stays behind.
+                holder = subprocess.Popen([sys.executable, '-c', textwrap.dedent('''
+                    import fcntl, os, sys, time
+                    lease = open(sys.argv[1], 'w')
+                    fcntl.flock(lease, fcntl.LOCK_EX)
+                    open(sys.argv[2], 'w').close()
+                    print('writing', flush=True)
+                    time.sleep(60)
+                    '''), str(pool / 'tree-0.lock'), lock], cwd=tree, stdout=subprocess.PIPE, text=True)
+                self.addCleanup(holder.wait)
+                self.addCleanup(holder.kill)
+                self.assertEqual(holder.stdout.readline().strip(), 'writing')
+                holder.kill()
+                holder.wait()
+                holder.stdout.close()
+                self.assertTrue(Path(lock).exists())
+                with mock.patch.object(st_test, 'POOL_WAIT_SECONDS', 0.05), contextlib.redirect_stderr(io.StringIO()) as said:
+                    n, lease = st_test.acquire_tree(pool, 1, rank=50)
+                    self.addCleanup(lease.close)
+                    self.assertEqual(st_test.prepare_tree(pool, n, commit), tree)
+                self.assertEqual((n, git(tree, 'rev-parse', 'HEAD'), (tree / 'tracked').read_text()), (0, commit, 'second'))
+                self.assertFalse(Path(lock).exists())
+                self.assertIn('removed a stale', said.getvalue())
 
 
 class StTest(unittest.TestCase):
@@ -2081,6 +2150,28 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(by({'ST_AGENT': 'agent/crew/leads/lead-2', 'CARGO_PRIORITY_CALLER': 'agent/crew/hot/x/hot-builder'}), 4)
         self.assertEqual(by({'ST_AGENT': '', 'CARGO_PRIORITY_CALLER': 'agent/crew/leads/lead-2'}), 4)
         self.assertEqual(st_test.priority_rank({'ST_AGENT': 'agent/x', 'CARGO_PRIORITY_FILE': str(priority) + '.missing'}), 50)
+
+    def test_a_free_tree_with_a_process_still_in_it_is_skipped_until_the_process_ends(self):
+        (self.root / 'tree-0').mkdir(parents=True)
+        left = subprocess.Popen(['sleep', '60'], cwd=self.root / 'tree-0')  # what a run that lost tree-0 left at work in it
+        self.addCleanup(left.wait)
+        self.addCleanup(left.kill)
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            n, lock = st_test.acquire_tree(self.root, 2, rank=50)              # another tree is free: that one, at once
+            self.assertEqual(n, 1)
+            got = []
+            waiter = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=50)))
+            waiter.start()
+            time.sleep(0.5)
+            self.assertEqual(got, [])                                           # tree-0's lease is free, but the tree is not
+            left.kill()
+            left.wait()
+            waiter.join(5)
+            lock.close()
+        self.assertEqual(got[0][0], 0)
+        got[0][1].close()
+        self.assertEqual(said.getvalue().count(f'processes {left.pid} still work in it'), 2)  # once per waiter, not on every look
 
     def test_an_interrupted_waiter_leaves_no_ticket(self):
         self.root.mkdir(parents=True)
