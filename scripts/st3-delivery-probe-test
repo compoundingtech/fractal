@@ -348,14 +348,15 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, PROBE_TEST_API_KEY="fixture-private-key"):
             capture = probe.ChannelStderr()
         reader = asyncio.StreamReader()
-        reader.feed_data(b"st: failure fixture-private-key token=fixture-token Bearer fixture-bearer\n"
+        reader.feed_data(b"fractal: failure fixture-private-key token=fixture-token Bearer fixture-bearer\n"
                          b"st: failed https://fixture-user:fixture-password@example.invalid/\n"
                          b"st: Authorization: fixture-auth\n"
                          b"<smalltalk-message>\nst: private message body\n</smalltalk-message>\n")
         reader.feed_eof()
         await capture.drain(reader)
         report = capture.report()
-        self.assertIn("st: failure", report["diagnostic"])
+        self.assertIn("fractal: failure", report["diagnostic"])
+        self.assertIn("st: failed", report["diagnostic"])
         for private in ("fixture-private-key", "fixture-token", "fixture-bearer", "fixture-user",
                         "fixture-password", "fixture-auth", "private message body"):
             self.assertNotIn(private, json.dumps(report))

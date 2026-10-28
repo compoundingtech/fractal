@@ -822,7 +822,7 @@ impl Args {
 
 /// What `st ui --classic` says now that spaces are Fractal TUI's only layout.
 const CLASSIC_GONE: &str =
-    "The classic layout is gone: run plain `fractal ui`, or `fractal ui --space NAME` to open a named space";
+    "The classic layout is gone: run plain `fractal tui`, or `fractal tui --space NAME` to open a named space";
 
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
@@ -906,7 +906,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return ui::run_demo(&args);
     }
     if !io::stdout().is_terminal() {
-        anyhow::bail!("fractal ui needs an interactive terminal");
+        anyhow::bail!("fractal tui needs an interactive terminal");
     }
     let _quality_session = ui::slo::Session::start();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -1027,7 +1027,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("plain `fractal ui`") && error.contains("`fractal ui --space NAME`"),
+            error.contains("plain `fractal tui`") && error.contains("`fractal tui --space NAME`"),
             "{error}"
         );
     }

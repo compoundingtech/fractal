@@ -2,7 +2,7 @@
 name = "fractal-tiles-registry"
 version = "0.1.0"
 edition = "2024"
-description = "Root's tile registry, read by st's tile launcher and by the sekrets gateway"
+description = "Root's tile registry, read by Fractal's tile launcher and by the sekrets gateway"
 license = "MIT"
 
 [dependencies]

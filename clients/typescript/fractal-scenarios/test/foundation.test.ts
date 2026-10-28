@@ -39,8 +39,8 @@ const emptyDefinition: WorldDefinition = {
   slices: (ctx) => {
     const world = base()
     return {
-      roster: { ...world.slices.roster, state: { agents: [], runtimes: [], machines: [], order: [] }, timeline: [] },
-      details: { ...world.slices.details, state: { missions: [], work: [] }, timeline: [] },
+      roster: { ...world.slices.roster, state: { sessions: [], devices: [], agents: [], runtimes: [], machines: [], order: [] }, timeline: [] },
+      details: { ...world.slices.details, state: { launches: [], launch_variants: [], missions: [], work: [] }, timeline: [] },
       attention: { ...world.slices.attention, state: { attention: [], messages: [] }, timeline: [] },
       conversation: { ...world.slices.conversation, state: { threads: [] }, timeline: [] },
       terminal: { ...world.slices.terminal, state: { terminals: [] }, timeline: [] },
@@ -413,14 +413,14 @@ describe('foundation contracts', () => {
       : { kind: 'error', id: 'terminal', code: 'stale-fence', retryable: false })])
   })
 
-  it('rejects a strict-valid known session upsert in a roster rather than storing it as future data', () => {
+  it('rejects a strict-valid known session upsert in details rather than storing it as future data', () => {
     const original = base()
     const member = original.cast.agents[0]!
     const session: Session = { kind: 'session', id: member.session, revision: '1', updated_at: new Date(original.now).toISOString(),
       owner_id: member.id, started_at: new Date(original.now).toISOString(), state: 'running', timeline_cursor: 'cursor/foundation' }
-    const roster: Slice<'roster'> = { ...original.slices.roster, timeline: [{ _tag: 'changes', at_ms: 1_000, store: 0, upserts: [session], removes: [] }] }
-    expect(decodeSlice(original.id, roster)).toEqual([])
-    expect(() => foldSlice(roster, 1_000)).toThrow('a session upsert has no place in this slice')
+    const details: Slice<'details'> = { ...original.slices.details, timeline: [{ _tag: 'changes', at_ms: 1_000, store: 0, upserts: [session], removes: [] }] }
+    expect(decodeSlice(original.id, details)).toEqual([])
+    expect(() => foldSlice(details, 1_000)).toThrow('a session upsert has no place in this slice')
   })
 
   it('drops discarded unknown declarations when regenerating the empty roster variant', () => {

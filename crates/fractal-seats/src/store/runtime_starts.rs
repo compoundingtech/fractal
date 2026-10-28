@@ -80,6 +80,61 @@ fn same_runtime_start_request(actual: &ClaimRecord, expected: &ClaimRecord) -> b
         && actual.body == expected.body
 }
 
+/// Dispatch rejection and ordinary revocation use the same writer-fenced nonlaunch proof.
+fn cancel_undispatched_runtime_start_tx(tx: &Transaction<'_>, origin: &str, id: &str) -> Result<bool> {
+    let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+    if operation.dispatched || operation.finished || operation.revoked_by.is_none() {
+        return Ok(false);
+    }
+    let mut result = json!({"error":"start was revoked before dispatch","producer_closed":true,"closure_kind":"never-dispatched"});
+    closed_runtime_start_result(&operation, origin, &mut result)?;
+    tx.execute(/* sqlite-large-value: allow-for-now lv-haddf2c06fbd7 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
+        params![id, serde_json::to_string(&result)?])?;
+    Ok(true)
+}
+
+/// The recovery fence is evaluated against the admission/dispatch writer snapshot, not
+/// a planner read. It also remains available to the backend's physical spawn guard.
+fn recovery_intent_current(
+    connection: &Connection,
+    origin: &str,
+    operation: &RuntimeStartOperation,
+) -> Result<bool> {
+    if operation.body["stale_failed_start"].is_null() {
+        return Ok(true);
+    }
+    let Some(request) = operation.body.get("request").filter(|request| !request.is_null()) else {
+        return Ok(false);
+    };
+    let request: ClaimRecord = serde_json::from_value(request.clone())?;
+    let Some(original) = retained_runtime_start_request(connection, origin, &request.id)? else {
+        return Ok(false);
+    };
+    if !same_runtime_start_request(&original, &request)
+        || original.subject != operation.subject
+        || now_ms().saturating_sub(original.accepted_at_unix_ms)
+            > fractal_store::restart::FAILED_START_RETRY_MAX_AGE_MS
+    {
+        return Ok(false);
+    }
+    let selected = current_desired_row_tx(connection, &operation.subject)?;
+    if selected.as_ref().is_none_or(|selected| selected.kind != "agent"
+        || Some(selected.claim_id.as_str()) != operation.body["selected_token"].as_str()
+        || Some(selected.claim_id.as_str()) != original.body.pointer("/evidence/0").and_then(Value::as_str))
+    {
+        return Ok(false);
+    }
+    let changed: bool = connection.query_row(/* sqlite-large-value: allow-for-now lv-hd1113350febe owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND store_index>?2 AND {UNREPAIRED_CLAIM}
+         AND (kind IN ('intent.desired','agent.retired') OR (kind='runtime.action.requested'
+         AND json_extract(body,'$.fields.action') IN ('suspend','resume','stop','terminate','restart','restart-when-idle'))))
+         OR EXISTS(SELECT 1 FROM local_observations WHERE subject=?1 AND after_store_index>=?2
+         AND kind='runtime.action.requested' AND json_extract(body,'$.fields.action')
+         IN ('suspend','resume','stop','terminate','restart','restart-when-idle'))"
+    ), params![operation.subject, original.store_index], |row| row.get(0))?;
+    Ok(!changed)
+}
+
 fn runtime_start_requests_retained(
     connection: &Connection,
     origin: &str,
@@ -157,6 +212,7 @@ pub trait RuntimeStartsStore {
     fn runtime_start_counts(&self) -> Result<(u64, u64)>;
     fn unresolved_runtime_start_counts(&self) -> Result<(u64, u64)>;
     fn runtime_start_revoked(&self, id: &str) -> Result<bool>;
+    fn runtime_start_intent_current(&self, id: &str) -> Result<bool>;
     fn revoke_runtime_start(&self, id: &str, request: &str) -> Result<()>;
     fn finish_runtime_start(&self, id: &str, result: &Value) -> Result<()>;
     /// Recover only exact retained nonlaunch proof, validated under the writer fence.
@@ -602,13 +658,9 @@ impl RuntimeStartsStore for Store {
             operation: &mut RuntimeStartOperation,
             limit: usize,
         ) -> Result<RuntimeStartAdmission> {
-        if let Some(actor) = operation
-            .body
-            .pointer("/request/actor")
-            .and_then(Value::as_str)
-        {
-            self.graph.ensure_principal_key(actor).map_err(|error| anyhow::anyhow!(
-                "runtime-start admission refused: cannot prepare signing key for actor {actor}: {error}"
+        if operation.body.pointer("/request/actor").and_then(Value::as_str).is_some() {
+            self.graph.ensure_principal_key("agent/st3/reconciler").map_err(|error| anyhow::anyhow!(
+                "runtime-start admission refused: cannot prepare signing key for actor agent/st3/reconciler: {error}"
             ))?;
         }
         self.connection.batched(|tx| -> Result<RuntimeStartAdmission> {
@@ -630,9 +682,22 @@ impl RuntimeStartsStore for Store {
                 return Ok(RuntimeStartAdmission::Superseded);
             }
             let selected = selected.map(|row| row.claim_id);
+            if !recovery_intent_current(tx, self.origin(), operation)? {
+                return Ok(RuntimeStartAdmission::Superseded);
+            }
+            let superseded = operation.body["stale_failed_start"].as_str().map(str::to_owned);
+            if let Some(id) = superseded.as_deref() {
+                let failed = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read).optional()?;
+                if failed.is_none_or(|failed| failed.subject != operation.subject || !failed.finished
+                    || !failed.applied || failed.cleanup_verified
+                    || !failed.result.as_ref().is_some_and(|result| result["error"].is_string()))
+                {
+                    return Ok(RuntimeStartAdmission::Superseded);
+                }
+            }
             let busy: bool = tx.query_row(
-                /* sqlite-large-value: allow-for-now lv-h983d9fe42c24 owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND ({PENDING}))"),
-                [&operation.subject], |row| row.get(0))?;
+                /* sqlite-large-value: allow-for-now lv-h6fd1a416b28c owner=fractal_seats::store::runtime_starts TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM local_runtime_starts WHERE subject=?1 AND (?2 IS NULL OR id<>?2) AND ({PENDING}))"),
+                params![operation.subject, superseded.as_deref()], |row| row.get(0))?;
             if busy { return Ok(RuntimeStartAdmission::SeatBusy); }
             if !operation.body["request"].is_null() {
                 let request: ClaimRecord = serde_json::from_value(operation.body["request"].clone())?;
@@ -662,7 +727,8 @@ impl RuntimeStartsStore for Store {
                     fields.insert("incarnation_id".into(), Value::from(incarnation));
                 }
                 let control = ClaimInput { subject: operation.subject.clone(), kind: "runtime.action.requested".into(),
-                    actor: request.actor.clone(), fields, evidence: vec![request.id.clone()],
+                    actor: request.actor.as_ref().map(|_| "agent/st3/reconciler".into()),
+                    fields, evidence: vec![request.id.clone()],
                     expected_subject: None, idempotency_key: Some(key.clone()) };
                 let control = if request.actor.is_none() {
                     let duplicate: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM local_observations WHERE dedupe_key=?1)",
@@ -688,6 +754,13 @@ impl RuntimeStartsStore for Store {
                 operation.body["control_request"] = Value::from(control.id.clone());
                 operation.body["control_request_receipt"] = serde_json::to_value(&control)?;
                 pin_evidence(tx, &operation.id, self.origin(), &control.id)?;
+            }
+            if let Some(id) = superseded.as_deref() {
+                let request = operation.body.pointer("/request/id").and_then(Value::as_str)
+                    .context("failed-start recovery requires its original request")?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h32d0f4bf9e74 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2) WHERE id=?1",
+                    params![id, request])?;
+                retain_runtime_start_producer_closed_tx(tx, self.origin(), id, None)?;
             }
             let mut fields = BTreeMap::from([
                 ("action".into(), Value::from("start")),
@@ -724,6 +797,12 @@ impl RuntimeStartsStore for Store {
 
     fn dispatch_runtime_start(&self, id: &str, limit: usize) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
+            let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+            if !recovery_intent_current(tx, self.origin(), &operation)? {
+                tx.execute(/* sqlite-large-value: allow-for-now lv-he8f98f77d11c owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,'restart-intent-superseded') WHERE id=?1", [id])?;
+                cancel_undispatched_runtime_start_tx(tx, self.origin(), id)?;
+                return Ok(false);
+            }
             let running: usize = tx.query_row("SELECT COUNT(*) FROM local_runtime_starts WHERE finished=0 AND dispatched=1", [], |row| row.get(0))?;
             if running >= limit { return Ok(false); }
             Ok(tx.execute(/* sqlite-large-value: allow-for-now lv-ha2a0e9b6e6e1 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET dispatched=1 WHERE id=?1 AND dispatched=0 AND finished=0 AND revoked_by IS NULL", [id])? == 1)
@@ -769,6 +848,12 @@ impl RuntimeStartsStore for Store {
         ).map_err(Into::into)
     }
 
+    fn runtime_start_intent_current(&self, id: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        let operation = connection.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
+        recovery_intent_current(&connection, self.origin(), &operation)
+    }
+
     fn runtime_start_revoked(&self, id: &str) -> Result<bool> {
         self.readers
             .get()
@@ -782,7 +867,7 @@ impl RuntimeStartsStore for Store {
 
     fn revoke_runtime_start(&self, id: &str, request: &str) -> Result<()> {
         self.connection.batched(|tx| -> Result<()> {
-            tx.execute(/* sqlite-large-value: allow-for-now lv-h32d0f4bf9e74 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2) WHERE id=?1", params![id, request])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hb6b2eba1fa02 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET revoked_by=COALESCE(revoked_by,?2) WHERE id=?1", params![id, request])?;
             pin_evidence(tx, id, self.origin(), request)?;
             Ok(())
         })
@@ -848,13 +933,7 @@ impl RuntimeStartsStore for Store {
 
     fn cancel_undispatched_runtime_start(&self, id: &str) -> Result<bool> {
         self.connection.batched(|tx| -> Result<bool> {
-            let operation = tx.query_row("SELECT * FROM local_runtime_starts WHERE id=?1", [id], read)?;
-            if operation.dispatched || operation.finished || operation.revoked_by.is_none() { return Ok(false); }
-            let mut result = json!({"error":"start was revoked before dispatch","producer_closed":true,"closure_kind":"never-dispatched"});
-            closed_runtime_start_result(&operation, self.origin(), &mut result)?;
-            tx.execute(/* sqlite-large-value: allow-for-now lv-haddf2c06fbd7 owner=fractal_seats::store::runtime_starts TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_runtime_starts SET finished=1,cleanup_verified=1,result=?2 WHERE id=?1",
-                params![id, serde_json::to_string(&result)?])?;
-            Ok(true)
+            cancel_undispatched_runtime_start_tx(tx, self.origin(), id)
         }).map_err(|error| anyhow::anyhow!("{error}"))?
     }
 
@@ -1056,6 +1135,81 @@ mod tests {
     use super::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::*;
     use fractal_missions::store::runtime_starts_tests_shared_seats::{format_cuts, operation, publish, receipt};
+
+    #[test]
+    fn stale_failed_start_recovery_fences_interleaved_controls_at_admission_and_dispatch() {
+        for action in ["suspend", "resume", "terminate"] {
+            for boundary in ["admission", "dispatch", "physical-guard"] {
+                let store = Store::open_memory("node").unwrap();
+                let subject = "agent/example/worker";
+                publish(&store,
+                    "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }",
+                    "recovery-declaration");
+                let token = store.selected_desired_token(subject).unwrap();
+                let desired = serde_json::to_value(store.desired_subjects_named(&[subject.into()])
+                    .unwrap().remove(0)).unwrap();
+                let mut failed = operation("stale-failed-start", subject, token.clone());
+                failed.body["subject"] = desired.clone();
+                assert_eq!(store.admit_runtime_start(&mut failed, 2).unwrap(), RuntimeStartAdmission::Admitted);
+                store.finish_runtime_start(&failed.id, &json!({"error":"unverified failure","producer_closed":false})).unwrap();
+                store.runtime_start_applied(&failed.id).unwrap();
+                let request = store.append_claim(&ClaimInput {
+                    subject: subject.into(), kind: "runtime.action.requested".into(),
+                    actor: Some("person/example".into()),
+                    fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+                    evidence: token.iter().cloned().collect(), expected_subject: None,
+                    idempotency_key: Some("recovery-request".into()),
+                }).unwrap();
+                let mut replacement = operation("replacement", subject, token);
+                replacement.body["subject"] = desired;
+                replacement.body["request"] = serde_json::to_value(&request).unwrap();
+                replacement.body["stale_failed_start"] = Value::from(failed.id.clone());
+                // The planner's successful preflight is deliberately separated from the writer.
+                assert!(recovery_intent_current(&store.readers.get(), store.origin(), &replacement).unwrap());
+                if boundary != "admission" {
+                    assert_eq!(store.admit_runtime_start(&mut replacement, 2).unwrap(), RuntimeStartAdmission::Admitted);
+                    if boundary == "physical-guard" {
+                        assert!(store.dispatch_runtime_start(&replacement.id, 2).unwrap());
+                    }
+                }
+                let control = ClaimInput {
+                    subject: subject.into(), kind: "runtime.action.requested".into(),
+                    actor: (action != "terminate").then(|| "person/example".into()),
+                    fields: BTreeMap::from([
+                        ("action".into(), Value::from(action)),
+                        ("runtime_id".into(), Value::from("example.worker")),
+                        ("terminal".into(), Value::from(true)),
+                    ]),
+                    evidence: vec![request.id.clone()], expected_subject: None,
+                    idempotency_key: Some("interleaved-control".into()),
+                };
+                if action == "terminate" {
+                    store.connection.batched(|tx| insert_local_observation_tx(tx, store.origin(), &control, now_ms()))
+                        .unwrap().unwrap();
+                } else {
+                    store.append_claim(&control).unwrap();
+                }
+                if boundary == "admission" {
+                    assert_eq!(store.admit_runtime_start(&mut replacement, 2).unwrap(), RuntimeStartAdmission::Superseded);
+                    let retained = store.runtime_start_for(subject).unwrap().unwrap();
+                    assert_eq!(retained.id, failed.id);
+                    assert!(!retained.cleanup_verified, "the obsolete request must not release its old hold");
+                    assert!(store.operation_claim(&format!("agent-restart-attempt:{}", request.id)).unwrap().is_none());
+                } else {
+                    assert!(!store.runtime_start_intent_current(&replacement.id).unwrap());
+                    if boundary == "dispatch" {
+                        assert!(!store.dispatch_runtime_start(&replacement.id, 2).unwrap());
+                        assert!(store.runtime_start_revoked(&replacement.id).unwrap());
+                        let canceled = store.runtime_start_for(subject).unwrap().unwrap();
+                        assert!(canceled.finished && canceled.cleanup_verified);
+                        assert_eq!(canceled.result.as_ref().unwrap()["closure_kind"], "never-dispatched");
+                        store.runtime_start_applied(&replacement.id).unwrap();
+                        assert!(store.runtime_start_for(subject).unwrap().is_none());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn retirement_proof_requires_the_exact_subject_operation_request_and_incarnation() {
@@ -1317,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn keyless_agent_restart_mints_its_key_or_refuses_before_any_admission() {
+    fn reconciler_restart_mints_its_key_or_refuses_before_any_admission() {
         for blocked in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let store = Store::open(&directory.path().join("claims.db"), "node").unwrap();
@@ -1347,7 +1501,7 @@ mod tests {
                 connection
                     .query_row(
                         "SELECT COUNT(*) FROM held_keys WHERE principal=?1",
-                        [actor],
+                        ["agent/st3/reconciler"],
                         |row| row.get::<_, u64>(0),
                     )
                     .unwrap()
@@ -1359,7 +1513,7 @@ mod tests {
             if blocked {
                 assert!(
                     format!("{:#}", admitted.unwrap_err())
-                        .contains("cannot prepare signing key for actor agent/example/keyless")
+                        .contains("cannot prepare signing key for actor agent/st3/reconciler")
                 );
                 assert!(store.pending_runtime_starts().unwrap().is_empty());
                 assert_eq!(held(&store.readers.get()), 0);
@@ -1382,7 +1536,8 @@ mod tests {
                 assert_eq!(held(&store.readers.get()), 1);
                 let control: ClaimRecord =
                     serde_json::from_value(start.body["control_request_receipt"].clone()).unwrap();
-                assert_eq!(control.actor.as_deref(), Some(actor));
+                assert_eq!(control.actor.as_deref(), Some("agent/st3/reconciler"));
+                assert_eq!(control.body["evidence"][0], request.id);
                 assert!(store.runtime_start_for(actor).unwrap().is_some());
             }
         }
@@ -1449,7 +1604,7 @@ mod tests {
             assert_eq!(admitted, RuntimeStartAdmission::Admitted);
             let control: ClaimRecord =
                 serde_json::from_value(start.body["control_request_receipt"].clone()).unwrap();
-            assert_eq!(control.actor, request.actor);
+            assert_eq!(control.actor.as_deref(), Some("agent/st3/reconciler"));
             assert_eq!(control.body["fields"]["operation"], start.id);
             assert_eq!(control.body["evidence"], json!([request.id]));
             assert!(control.operation_id.is_some());

@@ -1891,16 +1891,12 @@ fn driver_member(
     shutdown_timeout_ms: u64,
 ) -> Result<MemberSpec, St3Error> {
     let name = one_string_with_children(driver)?;
-    let children = driver.children().ok_or_else(|| {
-        St3Error::new(
-            "missing-driver-body",
-            format!("harness `{name}` has no body"),
-        )
-    })?;
+    let defaults = KdlDocument::new();
+    let children = driver.children().unwrap_or(&defaults);
     let model = child_string(children, "model")?;
     let effort = child_string(children, "effort")?;
     let extra = child_strings(children, "args")?.unwrap_or_default();
-    let mut provider = vec![name.clone()];
+    let mut provider = vec![child_string(children, "executable")?.unwrap_or_else(|| name.clone())];
     if name == "claude" {
         // A typed Claude harness is always the real interactive TUI and always carries st3's
         // native channel. `dev-channels #true` is retained only so declarations written before
@@ -2628,14 +2624,11 @@ fn validate_restart_forms(document: &KdlDocument) -> Result<(), St3Error> {
 fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
     ensure_no_properties(node)?;
     let provider = one_string_with_children(node)?;
-    let body = node.children().ok_or_else(|| {
-        St3Error::new(
-            "missing-driver-body",
-            format!("harness `{provider}` has no body"),
-        )
-    })?;
+    let defaults = KdlDocument::new();
+    let body = node.children().unwrap_or(&defaults);
     let allowed: &[&str] = match provider.as_str() {
         "claude" => &[
+            "executable",
             "model",
             "effort",
             "dev-channels",
@@ -2645,6 +2638,7 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
             "account-pool",
         ],
         "codex" => &[
+            "executable",
             "model",
             "effort",
             "args",
@@ -2652,9 +2646,9 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
             "account",
             "account-pool",
         ],
-        "pi" => &["model", "effort", "args", "message"],
-        "omp" => &["model", "effort", "args", "message", "seed"],
-        "opencode" => &["model", "args", "message"],
+        "pi" => &["executable", "model", "effort", "args", "message"],
+        "omp" => &["executable", "model", "effort", "args", "message", "seed"],
+        "opencode" => &["executable", "model", "args", "message"],
         _ => return Err(St3Error::new("unknown-driver", "unknown typed driver")),
     };
     if body
@@ -2690,6 +2684,14 @@ fn validate_driver(node: &KdlNode) -> Result<(), St3Error> {
     reject_unknown_children(body, allowed, "harness", &provider)?;
     for child in allowed {
         unique_child(body, child)?;
+    }
+    if let Some(executable) = child_string(body, "executable")?
+        && (executable.trim().is_empty() || executable.contains('\0'))
+    {
+        return Err(St3Error::new(
+            "invalid-harness-executable",
+            "harness executable must be a nonempty executable name or path without NUL bytes",
+        ));
     }
     if provider == "claude"
         && let Some(node) = unique_child(body, "dev-channels")?
@@ -4910,6 +4912,69 @@ message "external" {
         }
         for key in [crate::suspension::RESUME_ENV, crate::suspension::CONTINUE_ENV, crate::suspension::CONTINUE_PATH_ENV] {
             assert_eq!(parse_test_intent(&declaration("omp", "/transcript.jsonl", "", &format!("env {{\n {key} \"native\"\n}}\n")), "node").unwrap_err().code, "invalid-native-seed");
+        }
+    }
+
+    #[test]
+    fn harness_bare_nodes_use_the_same_defaults_as_empty_bodies() {
+        for harness in ["claude", "codex", "pi", "omp", "opencode"] {
+            let declaration = |body: &str| format!(
+                "version 2\nagent \"worker\" {{\n workspace \"/work\"\n harness \"{harness}\"{body}\n}}\n"
+            );
+            let bare = parse_test_intent(&declaration(""), "node").unwrap();
+            let empty = parse_test_intent(&declaration(" {}"), "node").unwrap();
+            let member = |intent: &NormalizedIntent| {
+                serde_json::to_value(intent.subjects["agent/node.worker"].member.as_ref().unwrap()).unwrap()
+            };
+            assert_eq!(member(&bare), member(&empty), "{harness}");
+        }
+        assert_eq!(
+            parse_test_intent("version 2\nagent \"worker\" { harness \"unknown\"; }\n", "node")
+                .unwrap_err().code,
+            "unknown-driver"
+        );
+    }
+
+    #[test]
+    fn harness_executable_changes_only_the_native_program() {
+        for harness in ["claude", "codex", "pi", "omp", "opencode"] {
+            let declaration = |executable: &str| format!(
+                "version 2\nagent \"worker\" {{\n workspace \"/work\"\n harness \"{harness}\" {{ {executable} model \"example\"; args \"--example\"; }}\n}}\n"
+            );
+            let original = parse_test_intent(&declaration(""), "node").unwrap();
+            for executable in ["/opt/harness builds/native", "native-alternate"] {
+                let custom = parse_test_intent(
+                    &declaration(&format!("executable {executable:?};")), "node"
+                ).unwrap();
+                let launch = |intent: &NormalizedIntent| {
+                    let LaunchSpec::Argv(argv) = &intent.subjects["agent/node.worker"]
+                        .member.as_ref().unwrap().launch else { panic!("typed argv expected"); };
+                    argv.clone()
+                };
+                let mut expected = launch(&original);
+                let native = expected.iter().position(|arg| arg == "--").unwrap() + 1;
+                expected[native] = executable.into();
+                assert_eq!(launch(&custom), expected);
+                assert_eq!(custom.subjects["agent/node.worker"].member.as_ref().unwrap().driver.as_deref(), Some(harness));
+            }
+        }
+    }
+
+    #[test]
+    fn harness_executable_rejects_invalid_shapes_and_values() {
+        for executable in [
+            "executable \"\";",
+            "executable \"  \";",
+            "executable \"bad\\u{0}path\";",
+            "executable 42;",
+            "executable \"/one\" \"/two\";",
+            "executable \"/one\" { child \"x\"; }",
+            "executable \"/one\"; executable \"/two\";",
+        ] {
+            let source = format!(
+                "version 2\nagent \"worker\" {{ harness \"codex\" {{ {executable} }} }}\n"
+            );
+            assert!(parse_test_intent(&source, "node").is_err(), "{executable}");
         }
     }
 

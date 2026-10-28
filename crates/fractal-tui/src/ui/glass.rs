@@ -3086,6 +3086,20 @@ impl Ui {
         self.glasses.palette.is_some()
     }
 
+    /// Confirmation-like states never accept a held key as a fresh press.
+    pub(super) fn confirmation_open(&self) -> bool {
+        use resource_sidebar::PaletteMode as Mode;
+
+        self.confirm.is_some()
+            || self.answering.is_some()
+            || match self.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()) {
+                Some(Mode::ConfirmPlace { .. } | Mode::ConfirmCreate { .. } | Mode::Delete { .. }) => true,
+                // Deliberately exhaustive: every new mode must choose its repeat policy.
+                None | Some(Mode::New { .. } | Mode::Rename { .. } | Mode::Manage { .. }
+                    | Mode::Move { .. } | Mode::Add { .. }) => false,
+            }
+    }
+
     /// The wheel scrolls the palette's list as content, three rows a step; the selection
     /// stays where it is until a key moves it.
     pub(crate) fn scroll_palette(&mut self, up: bool) {
@@ -3520,7 +3534,7 @@ impl Ui {
                 glasses.save();
             }
             Err(error) if current => self.flash(format!(
-                "Fractal did not keep a space yet ({error}); Fractal TUI will try again"
+                "Fractal did not keep a space yet ({error}); the Fractal terminal UI will try again"
             )),
             Err(_) => {}
         }
@@ -7286,6 +7300,108 @@ mod tests {
         press(&mut ui, KeyCode::Down, KeyModifiers::NONE);
         let palette = ui.glasses.palette.as_ref().unwrap();
         assert_eq!((palette.selected, palette.top), (1, None));
+    }
+
+    #[test]
+    fn held_down_moves_every_row_in_the_palette_and_sidebar_over_an_attached_terminal() {
+        use crossterm::event::{Event, KeyEventKind};
+
+        for kind in [KeyEventKind::Press, KeyEventKind::Repeat] {
+            let mut ui = glass();
+            ui.live = true;
+            let shell = "terminal/example-shell".to_owned();
+            ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
+            ui.terminal = Some(crate::ui::TerminalView {
+                agent: shell.clone(),
+                title: "shell".into(),
+                name: "shell".into(),
+                lines: Vec::new(),
+                cursor: None,
+                stale: None,
+                ended: None,
+                native: None,
+            });
+            ctrl(&mut ui, 'k');
+            assert!(ui.terminal_focused(), "the terminal stays focused under the palette");
+            let count = ui.matches(ui.glasses.palette.as_ref().unwrap()).len();
+            assert!(count > 6);
+            ui.effects.clear();
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.glasses.palette.as_ref().unwrap().selected,
+                    n.min(count - 1),
+                    "{kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            let release = KeyEvent::new_with_kind(
+                KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Release,
+            );
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.glasses.palette.as_ref().unwrap().selected, count - 1);
+            let enter = KeyEvent::new_with_kind(
+                KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Repeat,
+            );
+            ui.input_event(Event::Key(enter));
+            assert!(ui.palette_open(), "held Enter must not open the selection");
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell.clone())));
+            assert!(ui.effects.is_empty(), "navigation must not request daemon work");
+
+            // Every confirmation mode needs a fresh press, even over a terminal.
+            use resource_sidebar::PaletteMode as Mode;
+            ui.resource_sidebar.writable = true;
+            for (mode, commit) in [
+                (Mode::ConfirmPlace {
+                    subject: "agent/example/atlas/builder".into(), folder: None,
+                }, 'm'),
+                (Mode::ConfirmCreate {
+                    subject: "agent/example/atlas/builder".into(), name: "Review".into(),
+                }, 'm'),
+                (Mode::Delete { id: "folder-demo".into() }, 'y'),
+            ] {
+                ui.open_sidebar_palette(mode.clone());
+                assert!(ui.confirmation_open());
+                for code in [KeyCode::Char('m'), KeyCode::Char('y'), KeyCode::Enter, KeyCode::Down] {
+                    for event_kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+                        let key = KeyEvent::new_with_kind(code, KeyModifiers::NONE, event_kind);
+                        ui.input_event(Event::Key(key));
+                        assert_eq!(
+                            ui.glasses.palette.as_ref().and_then(|palette| palette.sidebar.as_ref()),
+                            Some(&mode),
+                            "{event_kind:?} {code:?} must leave the confirmation open"
+                        );
+                        assert!(ui.effects.is_empty(), "{event_kind:?} must never commit {mode:?}");
+                    }
+                }
+                press(&mut ui, KeyCode::Char(commit), KeyModifiers::NONE);
+                assert!(!ui.palette_open(), "a fresh press commits {mode:?}");
+                assert!(matches!(&ui.effects[..], [Effect::EditArrangement(_)]));
+                ui.effects.clear();
+                ui.resource_sidebar.writing = false;
+            }
+
+            // Normal sidebar navigation must own repeats just as it owns presses.
+            ui.glasses.palette = None;
+            ui.toggle_sidebar();
+            ui.resource_sidebar.observe(&ui.world);
+            ui.resource_sidebar.filter = "agent".into();
+            let count = ui.resource_sidebar.rows().len();
+            assert!(count > 1, "the fixture has multiple ordinary list rows");
+            for n in 1..=50 {
+                let key = KeyEvent::new_with_kind(KeyCode::Down, KeyModifiers::NONE, kind);
+                ui.input_event(Event::Key(key));
+                assert_eq!(
+                    ui.resource_sidebar.selected,
+                    n.min(count - 1),
+                    "sidebar {kind:?} event {n} must move exactly one row, clamped"
+                );
+            }
+            ui.input_event(Event::Key(release));
+            assert_eq!(ui.resource_sidebar.selected, count - 1);
+            assert_eq!(ui.focused_pane(), Some(Pane::Terminal(shell)));
+            assert!(ui.effects.is_empty(), "sidebar navigation must stay local");
+        }
     }
 
     #[test]

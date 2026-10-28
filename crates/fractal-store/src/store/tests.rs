@@ -1965,17 +1965,17 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
         assert_eq!(
             lines
                 .iter()
-                .filter(|line| line.starts_with("st: projection full replay "))
+                .filter(|line| line.starts_with("fractal: projection full replay "))
                 .cloned()
                 .collect::<Vec<_>>(),
             [format!(
-                "st: projection full replay phase=startup/project-replication-backlog reason={reason} frontier={expected_frontier} target={target}"
+                "fractal: projection full replay phase=startup/project-replication-backlog reason={reason} frontier={expected_frontier} target={target}"
             )],
             "{reason}"
         );
         let details = lines
             .iter()
-            .filter_map(|line| line.strip_prefix("st: projection failure detail "))
+            .filter_map(|line| line.strip_prefix("fractal: projection failure detail "))
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         if matches!(reason, "incremental-error:internal" | "operation-conflict"
@@ -2007,9 +2007,9 @@ fn full_replay_logs_every_guard_and_incremental_error_once() {
                 };
                 assert_eq!(details[0]["claim_kind"], expected_kind);
                 let detail_position = lines.iter().position(|line|
-                    line.starts_with("st: projection failure detail ")).unwrap();
+                    line.starts_with("fractal: projection failure detail ")).unwrap();
                 let replay_position = lines.iter().position(|line|
-                    line.starts_with("st: projection full replay ")).unwrap();
+                    line.starts_with("fractal: projection full replay ")).unwrap();
                 assert!(detail_position < replay_position);
             }
         } else {

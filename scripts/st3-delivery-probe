@@ -66,7 +66,7 @@ class ChannelStderr:
             # envelope dumps are not. A truncated partial line cannot pass this prefix.
             line = line.strip()
             payload = re.search(r"<smalltalk-message|\{|\b(?:body|content|messages|prompt)\s*[:=]", line, re.I)
-            if not line.startswith(("st:", "error:", "Error:")):
+            if not line.startswith(("fractal:", "st:", "error:", "Error:")):
                 if payload:
                     break
                 continue

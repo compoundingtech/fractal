@@ -108,6 +108,9 @@ pub struct Step {
     pub name: String,
     pub state: StepState,
     pub owner: Option<String>,
+    /// Rendering-only ownership identity; excluded from the serialized view.
+    #[serde(skip)]
+    pub owner_is_system: bool,
     pub note: Option<String>,
     pub after: Vec<String>,
     pub age: String,
@@ -116,6 +119,13 @@ pub struct Step {
     pub gates: Vec<String>,
     pub attempt: u32,
     pub blockers: Vec<String>,
+}
+
+impl Step {
+    /// Human-only ownership text; the serialized `owner` remains unchanged.
+    pub fn human_owner(&self) -> Option<&str> {
+        if self.owner_is_system { Some("Fractal") } else { self.owner.as_deref() }
+    }
 }
 
 /// Raw step facts, independent of state-specific blocker presentation and queue notes.
@@ -380,6 +390,7 @@ pub fn adapt<'a>(
                         name: step.path.clone(),
                         state: shown.map_or(StepState::Unknown, |shown| shown.word),
                         owner: shown.and_then(|shown| owner_text(&shown.owner, reader)),
+                        owner_is_system: shown.is_some_and(|shown| matches!(shown.owner, Actor::St)),
                         note: shown.and_then(|shown| shown.note.clone()),
                         after: vec![],
                         age: display.age(&step.since, now),

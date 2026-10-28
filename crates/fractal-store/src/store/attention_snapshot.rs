@@ -985,6 +985,7 @@ impl Store {
             } else {
                 match code {
                     "access-denied" => ObserverCondition::Access(reason),
+                    "local-observer-budget" => ObserverCondition::LocalBudget(reason),
                     "rate-limited" => ObserverCondition::RateLimited {
                         reason,
                         outlasted: fields["next_check_unix_ms"]

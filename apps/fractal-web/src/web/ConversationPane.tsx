@@ -9,6 +9,7 @@ import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
+import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
@@ -128,6 +129,9 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
 }) {
   const source = useDataSource()
   const grants = useGrants()
+  const images = transcriptImagesFor(source)
+  React.useSyncExternalStore(images.subscribe, images.snapshot, images.snapshot)
+  React.useLayoutEffect(images.acquire, [images])
   const composer = React.useRef<HTMLDivElement>(null)
   const tail = React.useRef<HTMLElement | null>(null)
   const tailRef = React.useCallback((node: HTMLElement | null) => {
@@ -201,6 +205,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
       onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
+      attachmentImages={{ state: images.state, load: (attachment, messageId) => { void images.load(attachment, messageId) } }}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
       onLoadImage={(src) => { const url = openableImageUrl(src); if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer') }}
       onRetrySend={grants.messageSend === 'granted' ? (id) => {

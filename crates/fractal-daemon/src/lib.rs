@@ -40,6 +40,8 @@ pub mod driver_hook;
 pub use fractal_store::environment;
 pub use fractal_kernel::evidence;
 pub use fractal_api_mailbox::subagent_sessions;
+/// Pairing grants a device the client gateway over Fabric; revoking it removes the grant.
+pub use fractal_kernel::fabric_gateway;
 pub use fractal_kernel::fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub use fractal_store::silent;

@@ -286,6 +286,92 @@ mod tests {
             .unwrap();
     }
 
+    #[test]
+    fn only_a_renewal_answers_with_the_lease_view() {
+        let query = |view: Option<&str>| super::super::work::WorkActionQuery { view: view.map(Into::into) };
+        assert!(!query(None).lease_view("renew").unwrap());
+        assert!(!query(None).lease_view("progress").unwrap());
+        assert!(query(Some("lease")).lease_view("renew").unwrap());
+        for (view, action) in [(Some("lease"), "progress"), (Some("full"), "renew")] {
+            assert_eq!(query(view).lease_view(action).unwrap_err().code, "invalid-work-view");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_lease_view_renewal_commits_the_lease_without_folding_the_steps_history() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        let source = "version 2\nmission \"lease-view\" state=\"ready\" { goal \"Hold work.\"; step \"work\" { assigned-to \"agent/node.worker\" } }";
+        let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+        let plan = state
+            .store
+            .mission(&intent, IntentInput { kdl: source.into(), source_name: None })
+            .unwrap();
+        state.store.apply(&intent, &plan.subject_tokens, "lease-mission").unwrap();
+        let run = state
+            .store
+            .create_mission_run(&MissionRunRequest {
+                mission: "lease-view".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "lease-run".into(),
+            })
+            .unwrap();
+        let subject = &run.steps[0].subject;
+        state.store.set_step_state(subject, "ready", None).unwrap();
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: "agent/node.worker".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/node.worker".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("running")),
+                    ("incarnation_id".into(), json!("current")),
+                ]),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        let request = |key: &str| WorkRequest {
+            wait_ms: None,
+            wait_on: None,
+            actor: Some("agent/node.worker".into()),
+            incarnation: Some("current".into()),
+            summary: None,
+            reason: None,
+            evidence: vec![],
+            idempotency_key: key.into(),
+        };
+        state.store.work_action(subject, "claim", &request("lease-claim")).unwrap();
+        let renew = |key: &'static str, lease_view: bool| {
+            work_action_response_viewing(
+                state.clone(),
+                "renew".into(),
+                subject.clone(),
+                request(key),
+                None,
+                None,
+                lease_view,
+            )
+        };
+        let lean = renew("lease-renew", true).await.unwrap().0;
+        let replayed = renew("lease-renew", true).await.unwrap().0;
+        let committed = state.store.step_run(subject).unwrap().unwrap();
+        assert_eq!(lean.claim_expires_at_unix_ms, committed.claim_expires_at_unix_ms);
+        assert_eq!(lean.claim_incarnation, committed.claim_incarnation);
+        assert_eq!(replayed.claim_expires_at_unix_ms, lean.claim_expires_at_unix_ms);
+        assert!(lean.execution_started_at_unix_ms.is_none());
+        assert!(replayed.execution_started_at_unix_ms.is_none());
+        // Without the lease view, the same renewal still answers with the folded view.
+        let full = renew("full-renew", false).await.unwrap().0;
+        assert!(full.execution_started_at_unix_ms.is_some());
+    }
+
     #[tokio::test]
     async fn renewal_acknowledges_committed_lease_and_preserves_incarnation_and_retry_fences() {
         let root = tempfile::tempdir().unwrap();

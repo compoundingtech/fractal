@@ -32,6 +32,7 @@ export type FixtureConversationChunk = Omit<ConversationChunk, 'entries'> & {
 
 type Entry = TimelineEntry | ProposedReasoningEntry | UnrecognizedEntry
 type ToolResultEntry = Extract<Entry, { type: 'tool_result' }>
+type MessageEntry = Extract<Entry, { type: 'message' }>
 type PositionedResult = { readonly entry: ToolResultEntry; readonly at: number }
 
 const entryTimestamp = (entry: Exclude<Entry, UnrecognizedEntry>): string =>
@@ -324,6 +325,7 @@ interface CachedItem {
   readonly entry: Entry
   readonly result: ToolResultEntry | undefined
   readonly active: boolean
+  readonly mailbox: MessageEntry | undefined
   readonly item: ConversationItem
 }
 
@@ -637,7 +639,12 @@ export class LiveTimeline {
     this.itemsBefore.length = from
     const shown = this.shownMessageIds()
     const userMailContent = new Set<string>()
+    const mailboxHeaders = new Map<string, MessageEntry>()
     for (const entry of this.ordered) {
+      if (entry.type === 'message' && !isTurnHeader(entry)) {
+        const key = mailboxPairKey(entry)
+        if (key !== undefined) mailboxHeaders.set(key, entry)
+      }
       if (entry.type === 'message' && entry.role === 'user' && entry.body.from?.startsWith('person/')) {
         const id = this.ownSendIds.get(entry.body.message_id)
         const key = mailboxPairKey(entry)
@@ -680,7 +687,13 @@ export class LiveTimeline {
       }
       if (entry.type === 'tool_call')
         items.push(this.cached({ entry, result: this.joined.get(at), active: this.active }))
-      else items.push(this.cached({ entry, result: undefined, active: true }))
+      else {
+        const key = entry.type === 'content' ? mailboxPairKey(entry) : undefined
+        items.push(this.cached({
+          entry, result: undefined, active: true,
+          mailbox: key === undefined ? undefined : mailboxHeaders.get(key),
+        }))
+      }
     }
     this.items = items
     this.dirtyFrom = this.ordered.length
@@ -730,16 +743,19 @@ export class LiveTimeline {
     entry,
     result,
     active,
+    mailbox,
   }: {
     readonly entry: Exclude<Entry, { type: 'truncation' }>
     readonly result: ToolResultEntry | undefined
     readonly active: boolean
+    readonly mailbox?: MessageEntry
   }): ConversationItem {
     const key = entry.type === 'content' && entry.role === 'user' && entry.body.media_type === 'text/plain'
       ? mailboxPairKey(entry) : undefined
     const id = (key === undefined ? undefined : this.ownSendContentIds.get(key)) ?? entry.id
     const hit = this.cache.get(entry.id)
-    if (hit !== undefined && hit.entry === entry && hit.result === result && hit.active === active && hit.item.id === id)
+    if (hit !== undefined && hit.entry === entry && hit.result === result && hit.active === active &&
+      hit.mailbox === mailbox && hit.item.id === id)
       return hit.item
     let item: ConversationItem
     if (entry.type === 'tool_result') item = joinResult({ call: undefined, entry })
@@ -750,8 +766,23 @@ export class LiveTimeline {
           ? joinResult({ call: own, entry: result })
           : own
     }
+    if (item._tag === 'Text' && mailbox?.body.attachments !== undefined) {
+      item = {
+        ...item,
+        attachments: [
+          ...item.attachments,
+          ...mailbox.body.attachments.map((attachment) => ({
+            id: attachment.blob,
+            mediaType: attachment.media_type,
+            ...(Option.isSome(attachment.name) ? { name: attachment.name.value } : {}),
+            size: attachment.size,
+            messageId: mailbox.body.message_id,
+          })),
+        ],
+      }
+    }
     if (item._tag === 'Text' && item.id !== id) item = { ...item, id }
-    this.cache.set(entry.id, { entry, result, active, item })
+    this.cache.set(entry.id, { entry, result, active, mailbox, item })
     return item
   }
 }

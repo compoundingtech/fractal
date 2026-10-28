@@ -1,4 +1,4 @@
-import { theme } from './theme';
+import { theme, type Theme } from './theme';
 
 // How each kind of conversation entry is drawn, by theme token. stui's renderer reads the same
 // table and writes it to fixtures/clients/conversation-style.json; the conversation screen
@@ -18,10 +18,10 @@ export type ConversationRules = {
   bundle: { folded: string; opened: string; label: string; last: string };
 };
 
-/** A theme token's colour: `tool_bg` is `theme.toolBg`. */
-export function tokenColor(token: string): string {
+/** A theme token's colour: `tool_bg` is `theme.toolBg`, or the same token in another palette. */
+export function tokenColor(token: string, from: Theme = theme): string {
   const name = token.replace(/_(.)/g, (_, letter: string) => letter.toUpperCase());
-  const color = (theme as Record<string, string>)[name];
+  const color = (from as Record<string, string>)[name];
   if (!color) throw new Error(`the theme has no ${token}`);
   return color;
 }

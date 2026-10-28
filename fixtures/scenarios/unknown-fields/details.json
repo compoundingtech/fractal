@@ -9,6 +9,8 @@
     "seed": 19
   },
   "state": {
+    "launch_variants": [],
+    "launches": [],
     "missions": [
       {
         "active_runs": 1,
