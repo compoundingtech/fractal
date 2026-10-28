@@ -520,6 +520,9 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// Ends, without waiting, what a runtime that is not running left in its work scope: a build
     /// or test its harness started that outlived it.
     fn end_leftovers(&self, _runtime_id: &str, _terminal: bool) {}
+    /// Ends, without waiting, the lane of a seat that stopped for good: the jobs it started in
+    /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane.
+    fn end_lane(&self, _runtime_id: &str) {}
 }
 
 pub struct NativeRuntime {
@@ -886,6 +889,10 @@ impl RuntimeControl for NativeRuntime {
         } else {
             self.exec.end_leftovers_later(runtime_id);
         }
+    }
+
+    fn end_lane(&self, runtime_id: &str) {
+        fractal_runtime::end_lane(runtime_id);
     }
 }
 
@@ -6971,6 +6978,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
+            // A seat stopped for good (an explicit stop, or no declaration left) ends its lane and
+            // the jobs in it. A stop for a restart of a live declaration keeps them.
+            let desired = self.store.selected_desired_token(subject)?;
+            let explicit_stop = match &desired {
+                Some(token) => self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop"),
+                None => false,
+            };
+            if desired.is_none() || explicit_stop {
+                self.runtime.end_lane(runtime_id);
+            }
             let mut fields = BTreeMap::from([
                 ("status".into(), Value::String("stopped".into())),
                 ("runtime_id".into(), Value::String(runtime_id.into())),
@@ -20124,6 +20141,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         /// How many keys `send_key_if` takes before it fails, when set.
         keys_before_error: Mutex<Option<usize>>,
         leftovers: Mutex<Vec<(String, bool)>>,
+        lanes_ended: Mutex<Vec<String>>,
     }
 
     #[test]
@@ -20431,6 +20449,9 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 .lock()
                 .unwrap()
                 .push((runtime_id.into(), terminal));
+        }
+        fn end_lane(&self, runtime_id: &str) {
+            self.lanes_ended.lock().unwrap().push(runtime_id.into());
         }
     }
 
@@ -27983,6 +28004,8 @@ mission "proof" state="ready" {{
                 expected_starts,
                 "{name}"
             );
+            // An exit of a live declaration, relaunched or not, keeps the seat's lane and its jobs.
+            assert!(runtime.lanes_ended.lock().unwrap().is_empty(), "{name}");
         }
     }
 
@@ -29347,6 +29370,8 @@ agent "worker" {
             &*runtime.leftovers.lock().unwrap(),
             &[("node.worker".to_owned(), true)]
         );
+        // Stopped for good: its lane ends too.
+        assert_eq!(&*runtime.lanes_ended.lock().unwrap(), &["node.worker".to_owned()]);
         assert_eq!(
             actual_field(
                 &store

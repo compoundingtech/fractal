@@ -1,8 +1,11 @@
-//! Seat lanes: a CPU and memory cap around a seat's scope (docs/st3/seat-lanes.md).
+//! Seat lanes: a CPU and memory cap around a seat (docs/st3/seat-lanes.md).
 //!
-//! A seat that declares `capacity cores=N memory="SIZE"` starts in a scope whose cgroup holds
-//! `CPUQuota` and `MemoryMax`, so the harness and everything it starts share the cap. Only on a Linux host whose config turns lanes on; elsewhere the declaration is logged as
-//! not enforced and the seat starts as it does without one.
+//! A seat that declares `capacity cores=N memory="SIZE"` gets a slice of its own,
+//! `app-lanes-<seat>.slice`, that holds `CPUQuota` and `MemoryMax`. Each launch of its harness is
+//! a scope inside it, so the harness and everything it starts share the cap, and a job the seat
+//! starts as a unit of its own in the slice outlives a restart of the harness. The slice ends when
+//! the seat stops for good. Only on a Linux host whose config turns lanes on; elsewhere the
+//! declaration is logged as not enforced and the seat starts as it does without one.
 
 use std::collections::BTreeMap;
 use std::hash::{Hash as _, Hasher as _};
@@ -70,19 +73,15 @@ impl Capacity {
         Ok(Self { cores, memory })
     }
 
-    /// The scope properties that hold this lane. The kernel kills inside a lane that goes over
-    /// its memory, and only the process it kills ends (`OOMPolicy=continue`; systemd's default
-    /// stops the whole scope, the seat with it). Swap is bounded to a quarter of the lane, so the
+    /// The slice properties that hold this lane. Swap is bounded to a quarter of the lane, so the
     /// excess is killed in the lane instead of moving to the host's swap. No `MemoryHigh`: a
     /// throttle just below the limit stalls the task that reaches it instead of capping it.
-    pub(crate) fn properties(&self) -> Vec<String> {
+    pub(crate) fn slice_properties(&self) -> Vec<String> {
         vec![
-            format!("--slice={LANES_SLICE}"),
-            format!("--property=CPUQuota={}%", u64::from(self.cores) * 100),
-            format!("--property=MemoryMax={}", self.memory),
-            format!("--property=MemorySwapMax={}", self.memory / 4),
-            "--property=OOMPolicy=continue".to_owned(),
-            format!("--property=TasksMax={TASKS_MAX}"),
+            format!("CPUQuota={}%", u64::from(self.cores) * 100),
+            format!("MemoryMax={}", self.memory),
+            format!("MemorySwapMax={}", self.memory / 4),
+            format!("TasksMax={TASKS_MAX}"),
         ]
     }
 
@@ -161,48 +160,129 @@ pub fn enforced() -> bool {
     ENFORCED.load(Ordering::Relaxed)
 }
 
-/// The lane a launch gets: its declared capacity, when this host enforces lanes and can.
-/// `systemd_254` is whether the user manager is systemd 254 or newer.
-pub(crate) fn applied(capacity: Option<Capacity>, unit: &str, systemd_254: bool) -> Option<Capacity> {
-    let capacity = capacity?;
-    if !enforced() {
-        eprintln!("st3: {unit} declares capacity {capacity}, not enforced: lanes are off on this host");
-        return None;
+/// A seat's slice: `app-lanes-<seat>.slice`, inside [`LANES_SLICE`]. A dash in a slice name
+/// nests it, so the seat's own dashes become underscores.
+pub fn seat_slice(runtime_id: &str) -> String {
+    let seat: String = crate::isolate::sanitize(runtime_id)
+        .chars()
+        .map(|character| if character == '-' { '_' } else { character })
+        .collect();
+    format!("app-lanes-{seat}.slice")
+}
+
+/// A lane a launch starts in: the seat's capped slice.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Lane {
+    pub(crate) slice: String,
+}
+
+impl Lane {
+    /// What the launch's scope adds: it starts in the seat's slice, and an OOM kill inside it ends
+    /// only the process the kernel killed (`OOMPolicy=continue`; systemd's default stops the whole
+    /// scope, the seat with it).
+    pub(crate) fn scope_arguments(&self) -> Vec<String> {
+        vec![
+            format!("--slice={}", self.slice),
+            "--property=OOMPolicy=continue".to_owned(),
+        ]
     }
-    if crate::isolation_mode() == crate::Isolation::Scope && !systemd_254 {
-        eprintln!(
-            "st3: WARN {unit} declares capacity {capacity}, not enforced: a lane needs systemd 254 or newer \
-             (OOMPolicy on a scope)"
-        );
-        return None;
+}
+
+/// The lane a launch of `runtime_id` starts in: its declared capacity, when this host enforces
+/// lanes and can. The seat's slice holds the capacity before anything starts in it, so a laned
+/// harness never runs uncapped; a slice that cannot be capped refuses the launch.
+pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Option<Lane>> {
+    let Some(capacity) = capacity else {
+        return Ok(None);
+    };
+    if !enforced() {
+        eprintln!("st3: {runtime_id} declares capacity {capacity}, not enforced: lanes are off on this host");
+        return Ok(None);
     }
     if crate::isolation_mode() != crate::Isolation::Scope {
         eprintln!(
-            "st3: WARN {unit} declares capacity {capacity}, not enforced: this host has no systemd user scopes \
+            "st3: WARN {runtime_id} declares capacity {capacity}, not enforced: this host has no systemd user scopes \
              (macOS has no per-tree CPU or memory cap for a user process)"
         );
-        return None;
+        return Ok(None);
     }
-    Some(capacity)
+    if !crate::isolate::systemd_254() {
+        eprintln!(
+            "st3: WARN {runtime_id} declares capacity {capacity}, not enforced: a lane needs systemd 254 or newer \
+             (OOMPolicy on a scope)"
+        );
+        return Ok(None);
+    }
+    let slice = seat_slice(runtime_id);
+    let output = crate::isolate::systemctl()
+        .args(["--user", "set-property", "--runtime", &slice])
+        .args(capacity.slice_properties())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .with_context(|| format!("cap the lane {slice}"))?;
+    if !output.status.success() {
+        bail!(
+            "cap the lane {slice}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(Some(Lane { slice }))
+}
+
+/// Ends the lane of `runtime_id`, when it has one: everything still running in its slice, the
+/// jobs the seat started included, then the slice's limits. In the background, since the units in
+/// it get their own stop timeouts. For a seat that stopped for good; a restart keeps its lane.
+pub fn end(runtime_id: &str) {
+    if crate::isolation_mode() != crate::Isolation::Scope {
+        return;
+    }
+    let slice = seat_slice(runtime_id);
+    crate::isolate::end_later(format!("lane:{slice}"), move || {
+        let loaded = crate::isolate::systemctl()
+            .args(["--user", "show", "--property=LoadState", "--value", &slice])
+            .output()
+            .context("read the lane's state")?;
+        if String::from_utf8_lossy(&loaded.stdout).trim() != "loaded" {
+            return Ok(());
+        }
+        for verb in ["stop", "revert"] {
+            let output = crate::isolate::systemctl()
+                .args(["--user", verb, &slice])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .with_context(|| format!("{verb} the lane {slice}"))?;
+            anyhow::ensure!(
+                output.status.success(),
+                "{verb} the lane {slice}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    });
 }
 
 /// What a laned task's environment adds so its builds stay in the lane. The cargo shim and the
 /// test runner on the build hosts run in place under `BUILDS_SLICE_ACTIVE` instead of moving into
-/// `builds.slice` (`scripts/st-test` reads its own cgroup's limits instead). The managed sccache server compiles
-/// in `builds.slice`, so a lane names a server socket of its own and the client starts that server
-/// inside the lane, on the same on-disk cache. A seat that names its own sccache server keeps it.
+/// `builds.slice` (`scripts/st-test` reads its own cgroup's limits instead). The host's sccache
+/// server compiles in `builds.slice`, so a lane names a server socket of its own and the client
+/// starts that server inside the lane, on the same on-disk cache; a seat that names its own sccache
+/// server keeps it. `FRACTAL_LANE_SLICE` names the slice, for a job the seat starts as its own unit
+/// there (`systemd-run --user --slice=...`) so that it outlives a restart of the harness.
 pub(crate) fn environment(
-    unit: &str,
+    lane: &Lane,
     environment: impl Fn(&str) -> Option<String>,
 ) -> Vec<(&'static str, String)> {
-    let mut added = vec![("BUILDS_SLICE_ACTIVE", "1".to_owned())];
+    let mut added = vec![
+        ("BUILDS_SLICE_ACTIVE", "1".to_owned()),
+        ("FRACTAL_LANE_SLICE", lane.slice.clone()),
+    ];
     if environment("SCCACHE_SERVER_UDS").is_none()
         && environment("SCCACHE_SERVER_PORT").is_none()
         && let Some(runtime) = environment("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty())
     {
-        // A unit name is longer than a socket path may be, so the socket is named by its hash.
+        // A slice name can be longer than a socket path may be, so the socket is named by its hash.
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        unit.hash(&mut hasher);
+        lane.slice.hash(&mut hasher);
         added.push((
             "SCCACHE_SERVER_UDS",
             format!("{runtime}/sccache-lane-{:016x}.sock", hasher.finish()),
@@ -257,32 +337,46 @@ mod tests {
     }
 
     #[test]
-    fn properties_cap_cpu_and_memory_and_an_oom_ends_only_its_process() {
-        let properties = Capacity { cores: 2, memory: 4 * GIB }.properties();
+    fn the_slice_caps_cpu_and_memory_and_an_oom_ends_only_its_process() {
         assert_eq!(
-            properties,
+            Capacity { cores: 2, memory: 4 * GIB }.slice_properties(),
             [
-                "--slice=app-lanes.slice",
-                "--property=CPUQuota=200%",
-                "--property=MemoryMax=4294967296",
-                "--property=MemorySwapMax=1073741824",
-                "--property=OOMPolicy=continue",
-                "--property=TasksMax=8192",
+                "CPUQuota=200%",
+                "MemoryMax=4294967296",
+                "MemorySwapMax=1073741824",
+                "TasksMax=8192",
             ]
         );
+        let lane = Lane { slice: seat_slice("fleet.example.seat-1") };
+        assert_eq!(
+            lane.scope_arguments(),
+            ["--slice=app-lanes-fleet.example.seat_1.slice", "--property=OOMPolicy=continue"]
+        );
+    }
+
+    #[test]
+    fn a_seat_slice_nests_only_under_the_lanes_slice() {
+        // A dash nests a slice, so the seat's own become underscores; other unsafe bytes do too.
+        assert_eq!(seat_slice("fleet.factory.seat-lanes.01-a"), "app-lanes-fleet.factory.seat_lanes.01_a.slice");
+        assert_eq!(seat_slice("a b/c"), "app-lanes-a_b_c.slice");
+        assert_eq!(seat_slice("same"), seat_slice("same"), "a restart finds its seat's slice again");
     }
 
     #[test]
     fn builds_stay_in_the_lane_and_a_declared_sccache_server_is_kept() {
         let runtime = |key: &str| (key == "XDG_RUNTIME_DIR").then(|| "/run/user/1000".to_owned());
-        let added = environment("st3-a-very-long-seat-name.scope", runtime);
+        let lane = Lane { slice: seat_slice("fleet.example.a-very-long-seat-name") };
+        let added = environment(&lane, runtime);
         assert_eq!(added[0], ("BUILDS_SLICE_ACTIVE", "1".to_owned()));
-        let (key, socket) = &added[1];
+        assert_eq!(added[1], ("FRACTAL_LANE_SLICE", lane.slice.clone()));
+        let (key, socket) = &added[2];
         assert_eq!(*key, "SCCACHE_SERVER_UDS");
         assert!(socket.starts_with("/run/user/1000/sccache-lane-") && socket.len() < 108);
-        assert_ne!(environment("st3-another.scope", runtime)[1], added[1]);
+        assert_eq!(environment(&lane, runtime)[2], added[2], "a restart reuses the seat's server");
+        let other = Lane { slice: seat_slice("fleet.example.other") };
+        assert_ne!(environment(&other, runtime)[2], added[2]);
 
         let own = |key: &str| (key == "SCCACHE_SERVER_UDS").then(|| "/elsewhere.sock".to_owned());
-        assert_eq!(environment("st3-a.scope", own), [("BUILDS_SLICE_ACTIVE", "1".to_owned())]);
+        assert_eq!(environment(&lane, own).len(), 2);
     }
 }

@@ -21,17 +21,28 @@ a merge lane (see [lanes.md](lanes.md)) and keeps that one meaning.
 ## Linux mechanism
 
 Every seat already runs in its own transient user scope, created by `systemd-run --user --scope` in
-`crates/fractal-runtime/src/isolate.rs`. The user manager on our hosts has cpu, io, memory and pids
-delegated, so no root is needed. A lane is that same scope started in `app.slice/app-lanes.slice`
-with these properties (`crates/fractal-runtime/src/lane.rs`):
+`crates/fractal-runtime/src/isolate.rs`, one per launch of its harness. The user manager on our
+hosts has cpu, io, memory and pids delegated, so no root is needed. A lane is a slice of the seat's
+own, `app.slice/app-lanes.slice/app-lanes-<seat>.slice` (the seat's dashes become underscores, since
+a dash nests a slice), capped before anything starts in it (`crates/fractal-runtime/src/lane.rs`):
 
-| Property | Value | Why |
-| --- | --- | --- |
-| `CPUQuota` | `cores × 100%` | caps CPU time |
-| `MemoryMax` | `memory` | caps RAM; the kernel kills inside the lane past it |
-| `MemorySwapMax` | `memory / 4` | the excess is killed in the lane, not moved to the host's swap |
-| `OOMPolicy` | `continue` | only the killed process ends; systemd's default stops the whole scope, the seat with it |
-| `TasksMax` | 8192 | as `builds.slice` |
+| On | Property | Value | Why |
+| --- | --- | --- | --- |
+| the seat's slice | `CPUQuota` | `cores × 100%` | caps CPU time |
+| | `MemoryMax` | `memory` | caps RAM; the kernel kills inside the lane past it |
+| | `MemorySwapMax` | `memory / 4` | the excess is killed in the lane, not moved to the host's swap |
+| | `TasksMax` | 8192 | as `builds.slice` |
+| each harness scope | `OOMPolicy` | `continue` | only the killed process ends; systemd's default stops the whole scope, the seat with it |
+
+Each launch of the harness is a scope inside the slice. A restart (a context rotation, a crash, a
+declaration change) ends the old scope with what the harness started in it, as today, and starts the
+new one in the same slice. A job the seat wants to outlive a restart, such as a queued `st-test` run,
+starts as a unit of its own in the slice: the harness's environment names it in
+`FRACTAL_LANE_SLICE`, so `systemd-run --user --unit=st-test-<seat>-… --slice="$FRACTAL_LANE_SLICE" …`
+runs it inside the seat's cap and beside, not inside, the harness's scope. The slice ends, and every
+job in it with it, when the seat stops for good: the reconciler ends it when a stop completes and the
+seat's declaration is an explicit stop or gone. A stop for a restart of a live declaration keeps it.
+Ending a lane also removes the slice's runtime limits (`systemctl --user revert`).
 
 There is no `MemoryHigh`. Measured on a build host (systemd 259): with `MemoryHigh` at 90% a child
 asking for twice the lane sat in `mem_cgroup_handle_over_high` indefinitely (lane memory pressure
@@ -39,7 +50,7 @@ asking for twice the lane sat in `mem_cgroup_handle_over_high` indefinitely (lan
 it the child is killed (exit 137) and the task that started it keeps running. A lane needs systemd
 254 or newer (`OOMPolicy` on a scope); an older user manager logs the lane as not enforced.
 
-The cap is a property of the scope's cgroup, so every descendant is inside it, a child that leaves
+The cap is a property of the slice's cgroup, so every descendant is inside it, a child that leaves
 its session included. The one thing that can take a child out is a process that asks systemd for a
 new scope elsewhere. Today three do:
 
@@ -53,8 +64,8 @@ in place only when its own cgroup, or an ancestor, holds a real `memory.max` and
 quota (a lane's scope does, and so does `builds.slice`); otherwise it starts the check in
 `builds.slice` as before. The host's sccache server runs in `builds.slice`, so
 compiles sent to it would leave the lane: a lane sets `SCCACHE_SERVER_UDS` to a socket of its own,
-and the client starts that server inside the lane, on the same on-disk cache. A seat that names its
-own server keeps it. The build admission queue (slots, load and memory checks) still applies to a
+and the client starts that server inside the lane, on the same on-disk cache (the socket is named for
+the seat, so a restarted harness reuses it). A seat that names its own server keeps it. The build admission queue (slots, load and memory checks) still applies to a
 laned seat in step 1; its slots go only after lanes have run on every Linux member for a day without
 a guard trip.
 
@@ -63,8 +74,8 @@ reconciler sets from the declaration (replacing any value the seat's own `env` n
 runtime removes before the harness starts. A task (`pty`, `exec`) an agent declares beside its
 harness is not in the harness's lane.
 
-A stopped seat's scope is ended with its seat (`isolate::end_scope`), so its lane is removed with
-it; `--collect` removes a scope that empties on its own.
+A stopped harness's scope is ended with it (`isolate::end_scope`); `--collect` removes a scope that
+empties on its own. The lane outlives it until the seat stops for good (above).
 
 ## The host guard
 
@@ -123,12 +134,22 @@ build with this change.
 ## Step 1 deliverable
 
 Behind the switch, a seat that declares `capacity cores=… memory=…` on its agent (top-level or
-inside a mission) starts in a capped scope, its builds stay inside it, and stopping the seat
-removes the lane. `a_laned_harness_runs_in_its_capped_scope_and_stopping_removes_it`
-(`crates/fractal-runtime/src/pty.rs`) shows it for a terminal seat's harness;
-`a_lane_caps_the_task_and_every_child_and_stopping_removes_it`
-(`crates/fractal-runtime/src/process.rs`, skipped without user scopes) shows the caps, that a child
-that left its session stays in the lane and shares its one core, and that the lane is gone after a
-stop; `a_child_over_its_lane_memory_is_killed_and_the_task_keeps_running` (ignored until the guard
-subtracts lanes) shows a child over the lane's memory is killed and the task keeps running.
+inside a mission) runs in a capped slice of its own, its builds stay inside it, a job it starts as
+its own unit there outlives a restart of its harness, and stopping the seat for good removes the
+lane. The tests:
+
+- `a_lane_caps_the_seat_keeps_its_jobs_across_a_restart_and_ends_for_good`
+  (`crates/fractal-runtime/src/process.rs`, skipped without systemd 254 user scopes): the slice's
+  limits, `OOMPolicy` on the scope, a child that left its session stays in the lane and shares its
+  one core, a job unit in the slice survives a stop and relaunch, and ending the lane ends the job,
+  the slice and its limits; with the switch off, no lane.
+- `a_laned_harness_runs_in_its_seats_capped_slice_until_the_lane_ends`
+  (`crates/fractal-runtime/src/pty.rs`): the same for a terminal seat's harness.
+- `a_child_over_its_lane_memory_is_killed_and_the_task_keeps_running` (ignored by default; run by
+  hand where the guard subtracts lanes, after telling whoever runs it): a child over the lane's
+  memory is killed and the task keeps running.
+- `a_stop_ends_what_an_ended_harness_left_running` and `restart_types_follow_success_and_failure`
+  (`crates/fractal-reconcile/src/reconcile.rs`): an explicit stop ends the lane; an exit or a
+  relaunch of a live declaration keeps it.
+
 Mission-level and step-level declarations, bursts and admission are step 2.

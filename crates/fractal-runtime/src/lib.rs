@@ -39,8 +39,8 @@ pub use priority::{
     set_configured as set_configured_seat_priority, work_prefix,
 };
 pub use lane::{
-    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, enforced as lanes_enforced,
-    parse_memory as parse_lane_memory, set_enforced as set_lanes_enforced,
+    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, end as end_lane, enforced as lanes_enforced,
+    parse_memory as parse_lane_memory, seat_slice, set_enforced as set_lanes_enforced,
 };
 pub use peer_process::PeerProcessIdentity;
 pub use process::{

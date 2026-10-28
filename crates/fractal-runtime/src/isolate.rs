@@ -163,27 +163,29 @@ pub fn wrap(unit: &str, program: &OsStr, arguments: &[&OsStr]) -> Command {
 }
 
 /// Construct the launcher with its final environment before selecting the host systemd session.
-/// A declared `capacity` becomes the scope's lane when this host enforces lanes ([`crate::lane`]).
+/// A `lane` ([`crate::lane::prepare`]) places the scope in the seat's capped slice.
 pub(crate) fn wrap_in(
     unit: &str,
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
-    capacity: Option<crate::lane::Capacity>,
+    lane: Option<&crate::lane::Lane>,
 ) -> Command {
-    // Detection sets the expansion flag, so it runs first. The flag is systemd 254's, which also
-    // supports OOMPolicy on a scope.
-    let isolation = mode();
-    let expansion_flag = *SCOPE_EXPANSION_FLAG.get().unwrap_or(&true);
     wrap_for_mode(
-        isolation,
-        expansion_flag,
+        mode(),
+        *SCOPE_EXPANSION_FLAG.get().unwrap_or(&true),
         unit,
         program,
         arguments,
         environment,
-        crate::lane::applied(capacity, unit, expansion_flag),
+        lane,
     )
+}
+
+/// Whether the user manager is systemd 254 or newer, which also supports OOMPolicy on a scope.
+pub(crate) fn systemd_254() -> bool {
+    // Detection sets the flag, so it runs first.
+    mode() == Isolation::Scope && *SCOPE_EXPANSION_FLAG.get().unwrap_or(&false)
 }
 
 fn wrap_for_mode(
@@ -193,7 +195,7 @@ fn wrap_for_mode(
     program: &OsStr,
     arguments: &[&OsStr],
     environment: Option<&std::collections::BTreeMap<String, String>>,
-    lane: Option<crate::lane::Capacity>,
+    lane: Option<&crate::lane::Lane>,
 ) -> Command {
     match isolation {
         Isolation::Scope => {
@@ -215,12 +217,12 @@ fn wrap_for_mode(
                 command.env_clear().envs(environment);
             }
             if let Some(lane) = lane {
-                command.args(lane.properties());
+                command.args(lane.scope_arguments());
                 let value = |key: &str| match environment {
                     Some(environment) => environment.get(key).cloned(),
                     None => std::env::var(key).ok(),
                 };
-                command.envs(crate::lane::environment(unit, value));
+                command.envs(crate::lane::environment(lane, value));
             }
             instance_scope_environment(&mut command, environment);
             command.arg("--").arg(program).args(arguments);
@@ -706,7 +708,7 @@ mod tests {
             ("PATH".to_owned(), "/bin".to_owned()),
             ("XDG_RUNTIME_DIR".to_owned(), "/run/user/1000".to_owned()),
         ]);
-        let lane = crate::lane::Capacity { cores: 2, memory: 4 << 30 };
+        let lane = crate::lane::Lane { slice: crate::lane::seat_slice("work") };
         let command = wrap_for_mode(
             Isolation::Scope,
             true,
@@ -714,11 +716,11 @@ mod tests {
             OsStr::new("provider"),
             &[OsStr::new("--flag")],
             Some(&environment),
-            Some(lane),
+            Some(&lane),
         );
         let arguments = command.get_args().collect::<Vec<_>>();
         let separator = arguments.iter().position(|arg| *arg == OsStr::new("--")).unwrap();
-        for property in lane.properties() {
+        for property in lane.scope_arguments() {
             assert!(arguments[..separator].contains(&OsStr::new(&property)), "{property}");
         }
         assert_eq!(&arguments[separator + 1..], [OsStr::new("provider"), OsStr::new("--flag")]);
@@ -730,6 +732,7 @@ mod tests {
                 .map(|value| value.to_string_lossy().into_owned())
         };
         assert_eq!(set("BUILDS_SLICE_ACTIVE").as_deref(), Some("1"));
+        assert_eq!(set("FRACTAL_LANE_SLICE"), Some(lane.slice.clone()));
         assert!(set("SCCACHE_SERVER_UDS").unwrap().starts_with("/run/user/1000/sccache-lane-"));
 
         let detached = wrap_for_mode(
@@ -739,7 +742,7 @@ mod tests {
             OsStr::new("provider"),
             &[],
             Some(&environment),
-            Some(lane),
+            Some(&lane),
         );
         assert!(detached.get_args().next().is_none());
         assert!(detached.get_envs().all(|(key, _)| key != "BUILDS_SLICE_ACTIVE"));
