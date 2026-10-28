@@ -4,7 +4,7 @@ Status: proposed design for [#832](https://github.com/compoundingtech/fractal/is
 and [#841](https://github.com/compoundingtech/fractal/issues/841). This note grants no
 authority and implements no command. Nathan's 2026-10-14 disposition cancels Slice 0
 and the scratch-pair proof on our machines. Johannes's agent runs that replication proof
-on Johannes's machines; requests for needed st changes go to #832. No Docker or container
+on Johannes's machines; requests for needed Fractal changes go to #832. No Docker or container
 backend is permitted on any of our machines. Approval in principle covers this design note
 only, not an interim mechanism, tool, root helper or implementation.
 
@@ -110,7 +110,7 @@ Transport is not authority. Use scope-specific Fabric keys, home and ALPN, with 
 grants limited to the two attested scratch identities; never mount the production Fabric
 home or grant shell/exec. A Tailscale comparison needs separately provisioned disposable
 identities and ACLs permitting only these members and the test endpoints. Tailnet membership
-alone does not admit an st member. Provisioning disposable transport identities is an
+alone does not admit a Fractal member. Provisioning disposable transport identities is an
 operator prerequisite and must not borrow a production credential. Restrict DNS, relays and
 egress explicitly for the selected backend; changing the transport must not widen authority.
 
@@ -248,7 +248,7 @@ transport enrollment is reserved by this design note.
 
 ## Review and next assignment
 
-Factory records needed st changes for Johannes's replication proof on his machines. Intake then checks the threat matrix, bootstrap identity,
+Factory records needed Fractal changes for Johannes's replication proof on his machines. Intake then checks the threat matrix, bootstrap identity,
 cross-host attestation, protocol/import coverage, deadline recovery and OS boundary. The
 remaining implementation decisions are the qualified first backend and caller verifier,
 trusted launcher enrollment, manifest encoding, transport provisioning and resource limits.
@@ -326,7 +326,7 @@ first-run dates are void. Completed source and security reviews remain historica
 not execution authority or evidence of replication, isolation or cleanup.
 
 Johannes's agent performs the replication proof on Johannes's machines. Factory watches
-[#832](https://github.com/compoundingtech/fractal/issues/832) for requests for needed st
+[#832](https://github.com/compoundingtech/fractal/issues/832) for requests for needed Fractal
 changes. Our machines run our work; a machine request from Johannes's side stays on his
 machines unless Nathan explicitly directs otherwise.
 

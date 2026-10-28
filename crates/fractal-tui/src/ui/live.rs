@@ -962,13 +962,11 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Degraded(reason) => {
                     ui.quality.live(false);
                     // st answered; only its live stream is being replaced. Not offline, and
-                    // nothing on screen is cleared.
+                    // nothing on screen is cleared. Not flashed either: it reconnects by itself,
+                    // the bar says connecting meanwhile, and clicking it says why.
                     extras.live = false;
                     extras.offline = None;
                     extras.offline_since = None;
-                    ui.flash(format!(
-                        "Live stream lost ({reason}); Fractal answers, reconnecting"
-                    ));
                     extras.degraded = Some(reason);
                     attached = None;
                     changed = true;
@@ -3727,7 +3725,7 @@ mod tests {
     #[test]
     fn attach_deadline_retry_key_reopens_the_same_terminal() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let mut ui = Ui::new(crate::ui::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::test_world());
         ui.live = true;
         let agent = "terminal/attach-deadline-test";
         ui.open_in_glass(
@@ -3787,7 +3785,7 @@ mod tests {
     }
 
     #[test]
-    fn a_running_stui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
+    fn a_running_tui_says_diverged_or_behind_from_the_notice_the_windows_carry_and_live_otherwise() {
         use super::super::view::Link;
         let diverged = fractal_client::SyncNotice { state: "diverged".into(), peers: vec![peer("host/harbor", 5, true)] };
         let shown = running_world(Some(&diverged));
@@ -3851,7 +3849,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("requests");
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3892,7 +3890,7 @@ mod tests {
     fn a_name_another_process_wrote_cannot_put_control_characters_in_the_flash() {
         use super::super::pane::Pane;
         use super::super::requests::Place;
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.link = super::super::view::Link::Live;
         let known = world.agents.items()[1].id.clone();
         let mut ui = Ui::new(world);
@@ -3917,7 +3915,7 @@ mod tests {
 
     #[test]
     fn initial_subject_waits_for_live_inventory_and_opens_only_once() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let mut assistant = world.agents.items()[0].clone();
         assistant.id = "agent/st/assistant".into();
         assistant.name = "Fractal Assistant".into();
@@ -3957,7 +3955,7 @@ mod tests {
 
     #[test]
     fn initial_subject_is_cancelled_by_navigation_or_a_missing_live_agent() {
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let mut missing = Some("agent/st/assistant".to_owned());
         let before = ui.focus();
         focus_initial_subject(&mut ui, &mut missing, true, true);
@@ -3985,7 +3983,7 @@ mod tests {
     #[test]
     fn no_initial_subject_preserves_the_restored_space() {
         use super::super::pane::Pane;
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         ui.open_home();
@@ -4069,22 +4067,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let socket = root.path().join("daemon.sock");
         let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
-        let state = fractal_daemon::api::AppState {
-            owning_person: None,
-            store: store.clone(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "ui-hint".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-            assistant_receipts: Default::default(),
-        };
+        let state = fractal_daemon::api::AppState { owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "ui-hint".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
         let path = socket.clone();
         let server = tokio::spawn(async move {
             fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap();
@@ -4125,12 +4120,10 @@ mod tests {
         let socket = root.path().join("sidebar.sock");
         async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store = Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
-            let state = fractal_daemon::api::AppState {
-                owning_person: None,
-                store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
-                fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
-            };
+            let state = fractal_daemon::api::AppState { owning_person: None,
+            store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "sidebar-edit-test".into(), state_dir: root.into(), pty_root: root.join("pty"), pty_binary: "pty".into(),
+            fleet_id: None, configured_peers: vec![], client_relay: None, native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
             let path = socket.to_owned();
             let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state)).await.unwrap(); });
             for _ in 0..200 { if socket.exists() { break; } tokio::time::sleep(Duration::from_millis(5)).await; }
@@ -4177,22 +4170,19 @@ mod tests {
         ) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
-            let state = fractal_daemon::api::AppState {
-                owning_person: None,
-                store: store.clone(),
-                notify: Arc::new(tokio::sync::Notify::new()),
-                event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: "ui-actions".into(),
-                state_dir: root.into(),
-                pty_root: root.join("pty"),
-                pty_binary: "pty".into(),
-                fleet_id: None,
-                configured_peers: vec![],
-                client_relay: None,
-                native_session_home: None,
-                planner_default: Default::default(),
-                assistant_receipts: Default::default(),
-            };
+            let state = fractal_daemon::api::AppState { owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "ui-actions".into(),
+            state_dir: root.into(),
+            pty_root: root.join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
             let path = socket.to_owned();
             let server = tokio::spawn(async move {
                 fractal_daemon::api::serve_unix(&path, fractal_daemon::api::router(state))
@@ -4562,7 +4552,7 @@ mod tests {
             fractal_conversation_ui::Density::Full,
         );
         let body_start = doc.messages[0].1.start as u16;
-        let ui = Ui::new(super::super::demo::world());
+        let ui = Ui::new(super::super::demo::test_world());
         let mut terminal =
             Terminal::new(ratatui::backend::TestBackend::new(90, body_start)).unwrap();
         terminal
@@ -4602,22 +4592,19 @@ mod tests {
                 })
                 .unwrap();
         }
-        let state = fractal_daemon::api::AppState {
-            owning_person: None,
-            store: store.clone(),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "person-read".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: root.path().join("unused-pty"),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: fractal_daemon::model::PlannerSpec::default(),
-            assistant_receipts: Default::default(),
-        };
+        let state = fractal_daemon::api::AppState { owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "person-read".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: root.path().join("unused-pty"),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
         let socket = root.path().join("daemon.sock");
         let server_path = socket.clone();
         let server = tokio::spawn(async move {
@@ -4652,7 +4639,7 @@ mod tests {
                 images: Vec::new(),
             },
         };
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let agent = world.agents.items()[0].clone();
         let agent_id = agent.id.clone();
         world.agents = Load::Ready(vec![agent]);
@@ -4783,7 +4770,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
         for child in [false, true] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             ui.live = true;
             let target = if child {
                 "session/tester-child".to_owned()

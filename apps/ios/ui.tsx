@@ -8,14 +8,14 @@ import { markdown } from './markdown';
 import { StackActions } from '@react-navigation/native';
 import { navigationRef } from './navigation';
 
-// Shared renderers retain the legacy stui presentation by default. SchemeScreen scopes stui's
+// Shared renderers retain the legacy Fractal terminal UI presentation by default. SchemeScreen scopes its
 // palette, in its light or dark form as the system appearance is, to screens that follow it;
 // SystemScreen scopes system text, semantic appearance and grouped rows to the migrated native surfaces.
 
 export const SIZE = 14;
 export const LINE = 20;
 
-/** How a scope draws: stui's fixed Mocha, stui's palette following the system appearance, or system colours. */
+/** How a scope draws: the Fractal terminal UI's fixed Mocha, its palette following the system appearance, or system colours. */
 type Scope = 'fixed' | 'scheme' | 'system';
 const AppearanceScope = createContext<Scope>('fixed');
 /** The system appearance, read live: every reader draws again when it changes, without a restart. */
@@ -50,7 +50,7 @@ export function SystemScreen({ children }: { children: ReactNode }) {
   return <AppearanceScope.Provider value="system"><View style={{ flex: 1, backgroundColor: colors.background }}>{children}</View></AppearanceScope.Provider>;
 }
 
-/** stui's look in the system appearance: Mocha when dark, its light palette when light, switching live. */
+/** The Fractal terminal UI's look in the system appearance: Mocha when dark, its light palette when light, switching live. */
 export function SchemeScreen({ children }: { children: ReactNode }) {
   const palette = useScheme() === 'light' ? lightTheme : theme;
   return <AppearanceScope.Provider value="scheme"><View style={{ flex: 1, backgroundColor: palette.base }}>{children}</View></AppearanceScope.Provider>;
@@ -160,7 +160,7 @@ function Runs({ runs, base, onDocument = openDocumentLink }: { runs: Run[]; base
   return <>{runs.map((run, index) => <Text key={index} style={appearance.system ? [base, run.style === 'bold' && { fontWeight: '600' }, run.style === 'code' && { fontFamily: fonts.regular }, run.style === 'link' && { color: appearance.colors.action, textDecorationLine: 'underline' }] : runStyle(run, base, appearance.palette)} onPress={run.document ? () => onDocument(run.document!) : run.url ? () => void Linking.openURL(run.url!) : run.path ? () => showPath(run.path!) : undefined}>{run.text}</Text>)}</>;
 }
 
-/** Markdown as stui renders a reply: peach headings, lavender bullets, code in a gutter. */
+/** Markdown as the Fractal terminal UI renders a reply: peach headings, lavender bullets, code in a gutter. */
 export function Markdown({ text, color = theme.text, selectable = true, onDocument }: { text: string; color?: string; selectable?: boolean; onDocument?: DocumentOpener }) {
   const appearance = useTextAppearance();
   const { palette } = appearance;

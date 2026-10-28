@@ -1,7 +1,7 @@
-// Project decoded st3 conversation chunks into the conversation view model.
+// Project decoded Fractal conversation chunks into the conversation view model.
 // LiveTimeline preserves unchanged item identities and re-projects only the touched suffix.
 
-import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry } from '@fractal/client/schema'
+import { TimelineEntryId, Timestamp, type TimelineBlock, type TimelineEntry, type SubagentSummary } from '@fractal/client/schema'
 import type { ConversationChunk, ConversationEntry, UnrecognizedEntry } from '@fractal/sdk/effect'
 import { DateTime, Option, Schema } from 'effect'
 
@@ -14,7 +14,7 @@ import { inspectPreview } from './inspect.ts'
 import { recordTranscriptTelemetry } from './telemetry.ts'
 
 /**
- * Fixture-only D08 proposal, not part of the st3 wire contract.
+ * Fixture-only D08 proposal, not part of the Fractal wire contract.
  * Live SDK chunks never decode reasoning as this proposed entry.
  */
 export const ProposedReasoningEntry = Schema.Struct({
@@ -71,23 +71,29 @@ const joinResult = ({
 }: {
   readonly call: ToolCallItem | undefined
   readonly entry: ToolResultEntry
-}): ToolCallItem =>
-  call !== undefined
-    ? { ...call, status: entry.body.status, result: resultOf(entry) }
+}): ToolCallItem => {
+  const result = resultOf(entry)
+  const skipped = result.metadata?.__synthetic === true && result.metadata.source === 'interrupt_skipped'
+  const status = skipped ? 'success' : entry.body.status
+  const settled = skipped ? { ...result, isError: false } : result
+  return call !== undefined
+    ? { ...call, status, result: settled, ...(skipped ? { skipped: true } : {}) }
     : {
         _tag: 'ToolCall',
         id: entry.id,
         callId: entry.body.call_id,
         name: 'tool result',
         input: undefined,
-        status: entry.body.status,
-        result: resultOf(entry),
+        status,
+        result: settled,
+        ...(skipped ? { skipped: true } : {}),
         callSeen: false,
         at: entryTimestamp(entry),
       }
+}
 
 /**
- * st's native-transcript reader (`external_sessions.rs` `push_message`) emits a `message` entry
+ * Fractal's native-transcript reader (`external_sessions.rs` `push_message`) emits a `message` entry
  * carrying only the harness's own message id before each transcript message's parts. It is a turn
  * header, not a Fractal delivery (those always name `from`/`to`), so it renders nothing; the
  * parts after it carry the content.
@@ -96,7 +102,7 @@ const isTurnHeader = (entry: Entry) =>
   entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined
 
 /**
- * Ids st mints for a mailbox message's own content (`client_v0.rs`): the native projection
+ * Ids Fractal mints for a mailbox message's own content (`client_v0.rs`): the native projection
  * pairs `<leaf>/<digest16>-message` with `<leaf>/<digest16>-content`; the stored fallback mints
  * `<leaf>/<digest24>`. Harness turns carry `native-<n>` or their driver's own ids. Provenance is
  * read from the entry itself, so it holds when the header is paged out of the window.
@@ -104,7 +110,7 @@ const isTurnHeader = (entry: Entry) =>
 const MAILBOX_CONTENT_ID = /^timeline-entry\/[^/]+\/(?:[0-9a-f]{16}-content|[0-9a-f]{24})$/
 
 /**
- * Join only st-minted mailbox pairs, never adjacent harness prose. Native pairs share a digest;
+ * Join only Fractal-minted mailbox pairs, never adjacent harness prose. Native pairs share a digest;
  * stored pairs have separate digests but share their claim's session, timestamp and sequence slot.
  */
 const mailboxPairKey = (entry: Entry): string | undefined => {
@@ -117,7 +123,7 @@ const mailboxPairKey = (entry: Entry): string | undefined => {
 }
 const decodeUnknownJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown))
 
-/** st3 explicitly marks unsupported omp entries; ordinary prose/JSON is never guessed at. */
+/** Fractal explicitly marks unsupported omp entries; ordinary prose/JSON is never guessed at. */
 const unrecognizedOmpItem = (
   entry: Extract<Entry, { type: 'content' }>,
 ): ConversationItem | undefined => {
@@ -137,9 +143,9 @@ const unrecognizedOmpItem = (
 }
 
 /**
- * String convention emitted by st's external_sessions.rs `push_native_block`, matching the
+ * String convention emitted by Fractal's external_sessions.rs `push_native_block`, matching the
  * reasoning-label semantics in fractal-conversation-ui/src/adapt.rs. No duration is available.
- * TODO(st#2010): typed reasoning — https://github.com/compoundingtech/fractal/issues/2010
+ * TODO(fractal#2010): typed reasoning — https://github.com/compoundingtech/fractal/issues/2010
  */
 const parseNativeReasoning = (entry: Extract<Entry, { type: 'content' }>): ConversationItem | undefined => {
   const prefix = '[reasoning]\n'
@@ -295,7 +301,7 @@ const baseItemOf = ({
         id: entry.id,
         kind: 'error',
         text: entry.body.message,
-        detail: entry.body.code,
+        detail: entry.body.code === undefined ? undefined : `Code: ${entry.body.code}`,
         retryable: entry.body.retryable,
         at: entryTimestamp(entry),
       }
@@ -431,7 +437,7 @@ export interface TimelineProjection {
  * unanswered call becomes `interrupted`) re-projects in full. Items keep their object identity
  * while their entry, joined result and activity input are unchanged.
  *
- * Entries keep the order st delivered them in. Each replace page arrives ordered by its own
+ * Entries keep the order Fractal delivered them in. Each replace page arrives ordered by its own
  * projection's rule (the native page by `(timestamp, sequence)`, the stored fallback by
  * `sequence`), but a chunk names neither its projection nor where a delta entry merges into the
  * window, so the fold imposes no ordering of its own: deltas append, revisions stay in place,
@@ -469,6 +475,21 @@ export class LiveTimeline {
 
   get size(): number {
     return this.entries.size
+  }
+
+  /** Task views alone supply child conversation identities; roster session_id belongs to the parent. */
+  get subagents(): readonly SubagentSummary[] {
+    const children = new Map<string, SubagentSummary>()
+    for (const entry of this.entries.values()) {
+      if (entry.type !== 'content' && entry.type !== 'tool_call' && entry.type !== 'tool_result') continue
+      for (const block of entry.body.blocks ?? []) {
+        if (block.view?.type !== 'task' || !('agents' in block.view)) continue
+        for (const child of block.view.agents ?? []) {
+          if (child.conversation !== undefined) children.set(child.conversation.session_id, child)
+        }
+      }
+    }
+    return [...children.values()]
   }
 
   /** Applies one follow frame (CAG.CLI.WEB.CNV-R01/R02); returns whether anything changed. */

@@ -78,8 +78,8 @@ An extracted archive can also be installed with `./install.sh --bin-dir
 command payload is `st3`, the relative `fractal` and `st` links, and `pty`. The source migration
 tool remains available as the separate `fractal-migrate` Cargo package.
 
-`fractal` opens the same terminal interface; `fractal tui` opens it explicitly, and
-`fractal web` opens the web interface. Other arguments behave like `st`. Release and
+The opt-in `fractal` alias opens the same terminal interface; `st ui` opens it explicitly, and
+`st web` opens the web interface. Other arguments behave like `st`. Release and
 source installers add `fractal -> st3` only when the destination is free or already
 links to this installation's `st3`. They leave foreign files, directories and links
 intact, and do not introduce the alias when a foreign `fractal` exists elsewhere on
@@ -89,7 +89,7 @@ own `~/.st-instance/NAME/bin`, not the default command directory. Default Nix an
 Home Manager installations do not expose `fractal`; those paths require explicit opt-in.
 
 Bare `fractal` follows bare `st`'s first-run setup and terminal/agent guards;
-`fractal tui` follows explicit `st ui`. Setup records an owned `fractal` symlink
+The alias also forwards explicit UI commands. Setup records an owned `fractal` symlink
 in its uninstall manifest. Uninstall also discovers that alias beside a recorded
 `st3` when upgrading an older manifest, and preserves a foreign replacement of
 `fractal`, including inside a named instance. The ownership check applies only to
@@ -154,9 +154,9 @@ GitHub's Actions cache nor FlakeHub. The `nix-release-proof` artifact records th
 targets, and output paths. The scheduled check starts four hours before the daily release schedule
 to catch package breakage early.
 
-The st3 Nix check uses nextest to give each test its own process, including CPU-budget and
+The Fractal Nix check uses nextest to give each test its own process, including CPU-budget and
 delivery-presence fixtures. Python, Node, and the Linux process utilities are declared test inputs;
-the st3 messaging compatibility binary is the published release archive pinned by
+the Fractal messaging compatibility binary is the published release archive pinned by
 `.github/messaging-compat-baseline.json` and supplied through `ST3_MESSAGING_COMPAT_BIN` by the check’s `preCheck` inside the sandbox.
 The native runtime suite and documentation tests remain covered.
 

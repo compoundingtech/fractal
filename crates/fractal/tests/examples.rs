@@ -108,7 +108,7 @@ fn authored_model_gates(source: &str) -> Vec<String> {
 fn planning_mode_eval_uses_one_dynamic_codex_planner() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/planning-mode");
+        .join("evals/fractal/planning-mode");
     let source = fs::read_to_string(root.join("eval.kdl")).expect("read planning mode eval");
     assert_eq!(
         authored_harness_counts(&source, "planning-mode/eval.kdl"),
@@ -126,7 +126,7 @@ fn planning_mode_eval_uses_one_dynamic_codex_planner() {
 fn every_tracked_st3_example_uses_the_normative_grammar() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("examples/st3");
+        .join("examples/fractal");
     let mut files = walkdir::WalkDir::new(&root)
         .follow_links(false)
         .into_iter()
@@ -151,7 +151,7 @@ fn github_review_example_removes_its_checkout_and_temp_build_files() {
     use std::process::Command;
 
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
-    let source = fs::read_to_string(root.join("examples/st3/github-intake-work.kdl")).unwrap();
+    let source = fs::read_to_string(root.join("examples/fractal/github-intake-work.kdl")).unwrap();
     let document: kdl::KdlDocument = source.parse().unwrap();
     let review = document
         .nodes()
@@ -201,7 +201,7 @@ fn github_review_example_removes_its_checkout_and_temp_build_files() {
         );
     }
     assert!(source.contains("TMPDIR=${ST_WORKSPACE}/tmp"));
-    let intake = fs::read_to_string(root.join("examples/st3/github-intake.kdl")).unwrap();
+    let intake = fs::read_to_string(root.join("examples/fractal/github-intake.kdl")).unwrap();
     assert!(intake.contains("--workspace /srv/example/intake"));
 }
 
@@ -226,7 +226,7 @@ fn example_files(directory: &str) -> Vec<PathBuf> {
 fn walkthrough_work_warns_before_the_worker_seat_exists() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("examples/st3/walkthrough-work.kdl");
+        .join("examples/fractal/walkthrough-work.kdl");
     let source = fs::read_to_string(&file).expect("read walkthrough work mission");
     let intent = fractal_daemon::parse_intent(&source, "local").expect("parse walkthrough work mission");
     let store = fractal_daemon::store::Store::open_memory("local").unwrap();
@@ -252,7 +252,7 @@ fn walkthrough_work_warns_before_the_worker_seat_exists() {
 #[test]
 fn every_harness_seat_example_declares_the_shared_worker_seat() {
     let mut providers = Vec::new();
-    for file in example_files("examples/st3/seats") {
+    for file in example_files("examples/fractal/seats") {
         let source = fs::read_to_string(&file).expect("read seat example");
         let intent = fractal_daemon::parse_intent(&source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
@@ -314,7 +314,7 @@ fn every_harness_seat_example_declares_the_shared_worker_seat() {
 fn no_example_mission_owns_runtimes_without_work() {
     // A mission with no steps completes as soon as it starts and stops everything it owns, so a
     // step-less mission can never be a standing agent, observer, subscription, or schedule.
-    for file in example_files("examples/st3") {
+    for file in example_files("examples/fractal") {
         let source = fs::read_to_string(&file).expect("read example");
         let intent = fractal_daemon::parse_intent(&source, "local")
             .unwrap_or_else(|error| panic!("{}: {error}", file.display()));
@@ -370,7 +370,7 @@ fn is_eval_document(path: &std::path::Path) -> bool {
 fn every_native_st3_eval_uses_the_normative_grammar() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3");
+        .join("evals/fractal");
     let mut files = walkdir::WalkDir::new(&root)
         .max_depth(3)
         .follow_links(false)
@@ -394,7 +394,7 @@ fn every_native_st3_eval_uses_the_normative_grammar() {
 fn eval_personas_do_not_duplicate_runtime_work_instructions() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3");
+        .join("evals/fractal");
     for entry in walkdir::WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -432,7 +432,7 @@ fn eval_personas_do_not_duplicate_runtime_work_instructions() {
 fn continuous_stewardship_has_two_serial_cycles_and_a_latest_only_wake() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/continuous-stewardship/eval.kdl");
+        .join("evals/fractal/continuous-stewardship/eval.kdl");
     let source = fs::read_to_string(&file).unwrap();
     let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     let mission = &intent.missions["eval/continuous-stewardship"];
@@ -462,7 +462,7 @@ fn continuous_stewardship_has_two_serial_cycles_and_a_latest_only_wake() {
 fn automatic_intake_pins_its_review_mission() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/automatic-github-intake/eval.kdl");
+        .join("evals/fractal/automatic-github-intake/eval.kdl");
     let source = fs::read_to_string(&file).unwrap();
     let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     let revision = &intent.missions["eval/automatic-github-intake/review"].revision;
@@ -473,7 +473,7 @@ fn automatic_intake_pins_its_review_mission() {
 fn migration_rehearsal_uses_an_exact_migration_document_and_no_custom_prompt() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/agent-migration-rehearsal/eval.kdl");
+        .join("evals/fractal/agent-migration-rehearsal/eval.kdl");
     let source = fs::read_to_string(&file).unwrap();
     let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     assert!(intent.document_refs.contains(
@@ -486,7 +486,7 @@ fn migration_rehearsal_uses_an_exact_migration_document_and_no_custom_prompt() {
 fn st3_eval_inventory_has_twenty_two_model_free_and_twenty_one_model_backed_evals() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3");
+        .join("evals/fractal");
     let model_free = [
         "attention-inbox",
         "constraint-inheritance",
@@ -578,7 +578,7 @@ fn st3_eval_inventory_has_twenty_two_model_free_and_twenty_one_model_backed_eval
 fn codex_compaction_delivery_eval_proves_staging_steering_and_post_compaction_delivery() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/codex-compaction-message-delivery");
+        .join("evals/fractal/codex-compaction-message-delivery");
     let source = fs::read_to_string(root.join("eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&source, "codex-compaction-message-delivery/eval.kdl"),
@@ -604,7 +604,7 @@ fn codex_compaction_delivery_eval_proves_staging_steering_and_post_compaction_de
 fn native_session_import_eval_uses_raw_ptys_and_all_five_drivers() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/native-session-import");
+        .join("evals/fractal/native-session-import");
     let source = fs::read_to_string(root.join("eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&source, "native-session-import/eval.kdl"),
@@ -636,7 +636,7 @@ fn native_session_import_eval_uses_raw_ptys_and_all_five_drivers() {
 fn cross_harness_message_wake_is_black_box_and_uses_all_account_backed_harnesses() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/cross-harness-message-wake");
+        .join("evals/fractal/cross-harness-message-wake");
     let source = fs::read_to_string(root.join("eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&source, "cross-harness-message-wake/eval.kdl"),
@@ -668,7 +668,7 @@ fn cross_harness_message_wake_is_black_box_and_uses_all_account_backed_harnesses
 fn work_wake_reliability_covers_normal_lifecycle_wakes_without_priming_the_worker() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/work-wake-reliability");
+        .join("evals/fractal/work-wake-reliability");
     let source = fs::read_to_string(root.join("eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&source, "work-wake-reliability/eval.kdl"),
@@ -706,7 +706,7 @@ fn work_wake_reliability_covers_normal_lifecycle_wakes_without_priming_the_worke
 fn seat_queue_moves_one_run_and_gates_the_head_without_priming_the_seat() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/seat-queue");
+        .join("evals/fractal/seat-queue");
     let source = fs::read_to_string(root.join("eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&source, "seat-queue/eval.kdl"),
@@ -799,7 +799,7 @@ fn every_selected_eval_uses_current_grammar_and_harness_policy() {
         "network-smoke",
         "network-isolation",
     ] {
-        let st3_file = root.join("st3").join(name).join("eval.kdl");
+        let st3_file = root.join("fractal").join(name).join("eval.kdl");
         let st3_source = fs::read_to_string(&st3_file).expect("read st3 eval");
         let st3_document: kdl::KdlDocument = st3_source.parse().expect("parse st3 KDL");
 
@@ -852,12 +852,12 @@ fn selected_eval_harness_counts_match_the_inventory() {
     let mut model_gates = Vec::new();
 
     for (name, st3_expected) in expected {
-        let st3_source = fs::read_to_string(root.join("st3").join(name).join("eval.kdl")).unwrap();
+        let st3_source = fs::read_to_string(root.join("fractal").join(name).join("eval.kdl")).unwrap();
         let st3_counts = authored_harness_counts(&st3_source, &format!("st3 {name}"));
         assert_eq!(st3_counts, st3_expected, "st3 {name}");
         model_gates.extend(authored_model_gates(&st3_source));
     }
-    let mission_lift = fs::read_to_string(root.join("st3/mission-document-lift/eval.kdl")).unwrap();
+    let mission_lift = fs::read_to_string(root.join("fractal/mission-document-lift/eval.kdl")).unwrap();
     assert_eq!(
         authored_harness_counts(&mission_lift, "st3 mission-document-lift"),
         (0, 1)
@@ -875,7 +875,7 @@ fn selected_eval_harness_counts_match_the_inventory() {
 fn license_and_ghost_bug_keep_the_complete_team_loop_in_the_graph() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3");
+        .join("evals/fractal");
     let cases = [
         (
             "license-mit",
@@ -944,7 +944,7 @@ fn license_and_ghost_bug_keep_the_complete_team_loop_in_the_graph() {
 fn mission_document_lift_produces_and_uses_one_exact_mission_output() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/mission-document-lift");
+        .join("evals/fractal/mission-document-lift");
     let source = fs::read_to_string(root.join("eval.kdl")).unwrap();
     let intent = fractal_daemon::parse_intent(&source, "local").unwrap();
     let mission = &intent.missions["eval/mission-document-lift"];
@@ -979,7 +979,7 @@ fn mission_document_lift_produces_and_uses_one_exact_mission_output() {
 fn license_mit_st3_fixture_matches_its_claude_team() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/license-mit");
+        .join("evals/fractal/license-mit");
     for seat in ["sup", "worker"] {
         let workspace = root.join(seat);
         assert_eq!(
@@ -996,7 +996,7 @@ fn license_mit_st3_fixture_matches_its_claude_team() {
 fn restart_continuity_fixture_matches_its_claude_team() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/restart-continuity");
+        .join("evals/fractal/restart-continuity");
     for seat in ["sup", "worker"] {
         let workspace = root.join(seat);
         assert_eq!(
@@ -1012,7 +1012,7 @@ fn restart_continuity_fixture_matches_its_claude_team() {
 fn signal_rename_keeps_work_structure_in_the_mission_graph() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/signal-rename/eval.kdl");
+        .join("evals/fractal/signal-rename/eval.kdl");
     let source = fs::read_to_string(&file).expect("read Signal Rename eval");
     assert!(!source.contains("wait-team-done"));
     assert!(!source.contains("message \"kickoff"));
@@ -1135,7 +1135,7 @@ fn signal_rename_keeps_work_structure_in_the_mission_graph() {
 fn restart_continuity_keeps_recovery_state_in_the_mission_graph() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/restart-continuity/eval.kdl");
+        .join("evals/fractal/restart-continuity/eval.kdl");
     let source = fs::read_to_string(&file).expect("read Restart continuity eval");
     assert!(!source.contains("message \"kickoff"));
 
@@ -1216,7 +1216,7 @@ fn restart_continuity_keeps_recovery_state_in_the_mission_graph() {
 fn fork_in_the_road_keeps_parallel_debate_in_the_mission_graph() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/fork-in-the-road/eval.kdl");
+        .join("evals/fractal/fork-in-the-road/eval.kdl");
     let source = fs::read_to_string(&file).expect("read Fork in the road eval");
     assert!(!source.contains("message \"kickoff"));
 
@@ -1353,7 +1353,7 @@ fn fork_in_the_road_keeps_parallel_debate_in_the_mission_graph() {
 fn poisoned_pr_keeps_review_state_in_the_mission_graph() {
     let file = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3/poisoned-pr/eval.kdl");
+        .join("evals/fractal/poisoned-pr/eval.kdl");
     let source = fs::read_to_string(&file).expect("read Poisoned pull request eval");
     assert!(!source.contains("message \"kickoff"));
 
@@ -1399,7 +1399,7 @@ fn poisoned_pr_keeps_review_state_in_the_mission_graph() {
 fn new_paid_evals_keep_work_and_products_in_the_mission_graph() {
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("evals/st3");
+        .join("evals/fractal");
     let cases = [
         (
             "test-writing",
@@ -1465,20 +1465,20 @@ fn new_paid_eval_fixtures_match_their_native_harnesses() {
         .join("../..")
         .join("evals");
 
-    let test_root = root.join("st3/test-writing");
+    let test_root = root.join("fractal/test-writing");
     for seat in ["sup", "worker"] {
         let workspace = test_root.join(seat);
         assert!(workspace.join("AGENTS.md").is_file());
         assert!(!workspace.join("CLAUDE.md").exists());
     }
 
-    let weird_root = root.join("st3/weird-git-setup");
+    let weird_root = root.join("fractal/weird-git-setup");
     assert!(weird_root.join("persona/AGENTS.md").is_file());
     let setup = fs::read_to_string(weird_root.join("setup-megarepo.sh")).unwrap();
     assert!(setup.contains("persona/AGENTS.md"));
     assert!(!setup.contains("persona/CLAUDE.md"));
 
-    let skill_root = root.join("st3/claude-skill-inheritance");
+    let skill_root = root.join("fractal/claude-skill-inheritance");
     assert_eq!(
         fs::read_to_string(skill_root.join("repo/CLAUDE.md")).unwrap(),
         "@PERSONA.md\n"
@@ -1500,10 +1500,10 @@ fn every_example_previews_cleanly_once_its_seats_exist() {
     let store = fractal_daemon::store::Store::open_memory("local").unwrap();
     let root = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     for seat in [
-        "examples/st3/seats/omp.kdl",
-        "examples/st3/seats/chief.kdl",
-        "examples/st3/seats/planner.kdl",
-        "examples/st3/seats/reviewer.kdl",
+        "examples/fractal/seats/omp.kdl",
+        "examples/fractal/seats/chief.kdl",
+        "examples/fractal/seats/planner.kdl",
+        "examples/fractal/seats/reviewer.kdl",
     ] {
         let source = fs::read_to_string(root.join(seat)).expect("read seat example");
         let intent = fractal_daemon::parse_intent(&source, "local").expect("parse seat example");
@@ -1530,7 +1530,7 @@ fn every_example_previews_cleanly_once_its_seats_exist() {
             .apply(&intent, &preview.subject_tokens, seat)
             .unwrap_or_else(|error| panic!("{seat}: {error}"));
     }
-    for file in example_files("examples/st3") {
+    for file in example_files("examples/fractal") {
         if file
             .parent()
             .is_some_and(|parent| parent.ends_with("seats"))

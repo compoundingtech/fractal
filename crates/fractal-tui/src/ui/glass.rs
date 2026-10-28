@@ -2267,12 +2267,13 @@ impl Ui {
         // No label at the left: the bar starts at what is live (Nathan, 2026-10-06).
         let mut spans = vec![Span::styled(" ", bar(theme::strong(theme::ACCENT)))];
         let (glyph, word, color) = match &self.world.link {
-            Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged", theme::RED),
-            Link::Live if !self.world.stale.is_empty() => ("◐", "stale", theme::YELLOW),
-            Link::Live if !self.world.behind.is_empty() => ("◐", "behind", theme::YELLOW),
-            Link::Live => ("●", "live", theme::GREEN),
-            Link::Connecting => (self.spinner(), "connecting", theme::YELLOW),
-            Link::Offline(_) => ("○", "offline", theme::RED),
+            Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged".to_owned(), theme::RED),
+            // Stale says which list: the word alone sent the person hunting for why.
+            Link::Live if !self.world.stale.is_empty() => ("◐", stale_word(&self.world.stale), theme::YELLOW),
+            Link::Live if !self.world.behind.is_empty() => ("◐", "behind".to_owned(), theme::YELLOW),
+            Link::Live => ("●", "live".to_owned(), theme::GREEN),
+            Link::Connecting => (self.spinner(), "connecting".to_owned(), theme::YELLOW),
+            Link::Offline(_) => ("○", "offline".to_owned(), theme::RED),
         };
         let link_text = format!("{glyph} {word}");
         // The connection opens what is known of it: this machine, or why it is not reached.
@@ -4271,9 +4272,9 @@ pub(crate) fn pane_subject(pane: &Pane) -> Option<(usize, Option<String>)> {
 
 /// The glasses capability version st grants this stui. From version 2 (#958) a split carries its
 /// ratio; an older st is never sent one.
-static GLASSES_VERSION: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+static GLASSES_VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-pub fn set_glasses_version(version: u32) {
+pub fn set_glasses_version(version: u64) {
     GLASSES_VERSION.store(version, std::sync::atomic::Ordering::Relaxed);
 }
 
@@ -4423,6 +4424,17 @@ fn visible_tabs(widths: &[u16], current: usize, room: u16) -> (usize, usize) {
         last += 1;
     }
     (first, last)
+}
+
+/// The bar's word while lists st stopped serving are shown from their last copy: `stale · Agents`,
+/// or `stale · Agents +1` for more. Each reason is `List: why`; clicking the word says the why.
+fn stale_word(stale: &[String]) -> String {
+    let first = stale.first().map_or("", |why| why.split(':').next().unwrap_or(why));
+    match stale.len() {
+        0 => "stale".to_owned(),
+        1 => format!("stale · {first}"),
+        count => format!("stale · {first} +{}", count - 1),
+    }
 }
 
 #[cfg(test)]
@@ -4575,7 +4587,7 @@ mod tests {
     }
 
     fn glass() -> Ui {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.glasses.sidebar.shown = false;
         ui
     }
@@ -4690,8 +4702,8 @@ mod tests {
     fn tab_badge_loading_demo_refreshes_indexes_through_startup_stage_three() {
         let mut ui = Ui::new(demo::loading());
         ui.demo = Some(Demo {
-            started: Instant::now(), loaded: false, streamed: 0, mail: false,
-            tool_done: false, cos_seen: None, harbor_seen: None,
+            started: Instant::now(), loaded: false,
+            world: demo::world(),
         });
         let tab = Tab::pane("agent:agent/example/atlas/builder");
         let pane = Pane::parse(&tab.pane);
@@ -4703,7 +4715,7 @@ mod tests {
             let badge = ui.tab_badge(&tab, pane.as_ref());
             assert!(badge.alerts.is_some(), "stage {stage}");
             if stage >= 2 {
-                assert_ne!(badge.activity, "~", "stage {stage}");
+                assert!(ui.world.agents.ready().is_some(), "stage {stage}");
             }
         }
         assert!(ui.demo.as_ref().unwrap().loaded);
@@ -4936,7 +4948,7 @@ mod tests {
     /// way: the same list beside the same card, never another section's list or card.
     #[test]
     fn a_new_alert_arriving_keeps_now_as_it_was() {
-        let alerts = demo::world()
+        let alerts = demo::test_world()
             .attention
             .items()
             .iter()
@@ -4944,7 +4956,7 @@ mod tests {
             .cloned()
             .collect::<Vec<_>>();
         let reading = |items: Vec<Attention>| {
-            let mut world = demo::world();
+            let mut world = demo::test_world();
             world.link = Link::Live;
             world.attention = Load::Ready(items);
             world
@@ -5026,7 +5038,7 @@ mod tests {
     }
 
     #[test]
-    fn a_glass_opens_on_home_with_the_status_line_and_plain_stui_has_neither() {
+    fn a_glass_opens_on_home_with_the_status_line_and_plain_tui_has_neither() {
         let ui = glass();
         let shown = screen(&ui);
         let first = shown.lines().next().unwrap();
@@ -6927,7 +6939,7 @@ mod tests {
         );
         ui.open_home();
         assert_eq!(ui.tab(), 0);
-        ui.set_world(demo::world());
+        ui.set_world(demo::test_world());
         assert_eq!(ui.focused_pane(), Some(Pane::List(0)));
         assert_eq!(ui.tab(), 0, "a world update kept Inbox");
         press(&mut ui, KeyCode::Esc, KeyModifiers::NONE);
@@ -7839,7 +7851,7 @@ mod tests {
 
     #[test]
     fn the_missions_list_reads_running_first_and_ages_finished_runs_out() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let yesterday = (chrono::Local::now() - chrono::Duration::days(1)).to_rfc3339();
         if let Load::Ready(missions) = &mut world.missions {
             let template = missions[0].clone();
@@ -7997,7 +8009,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell,
             title: "shell".into(),
@@ -8007,7 +8019,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,
@@ -8090,7 +8102,7 @@ mod tests {
         ui.live = true;
         let shell = "terminal/example-shell".to_owned();
         ui.open_in_glass(Pane::Terminal(shell.clone()), Open::Tab);
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         ui.terminal = Some(crate::ui::TerminalView {
             agent: shell.clone(),
             title: "shell".into(),
@@ -8100,7 +8112,7 @@ mod tests {
             stale: None,
             ended: None,
             native: Some(crate::ui::pty::NativeTerminal::spawn(
-                stui,
+                tui,
                 "example-shell",
                 "one".into(),
                 24,
@@ -8310,7 +8322,7 @@ mod tests {
     fn glasses_are_named_kept_on_the_device_and_switched_with_ctrl_g() {
         let dir = tempfile::tempdir().unwrap();
         let store = dir.path().join("glasses.json");
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.glasses = Glasses::open(None, Some(store.clone()));
         ctrl(&mut ui, 'k');
         typed(&mut ui, "atlas builder");

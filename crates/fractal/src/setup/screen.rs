@@ -602,7 +602,7 @@ fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
             return Outcome::Failed(format!("The Fractal channel plugin could not be installed: {error}"));
         }
         facts.integration = Tri::Yes;
-        note.push_str(if fractal_drivers::claude_channel::st3_policy_available() {
+        note.push_str(if fractal_drivers::claude_channel::fractal_policy_available() {
             "The Fractal channel is installed and the managed channel policy is present."
         } else {
             "The Fractal channel is installed. Seats start with Claude's development-channel flag, and Fractal accepts its one-time dialog."

@@ -1,5 +1,5 @@
 import type { CollectionSocket } from '@fractal/client'
-import { St3, St3Live } from '@fractal/sdk/effect'
+import { Fractal, FractalLive } from '@fractal/sdk/effect'
 import { Effect, Stream } from 'effect'
 import { expect, it } from 'vitest'
 import { installPageLifecycle } from './pageLifecycle.ts'
@@ -11,16 +11,16 @@ const settle = Effect.promise(async () => {
 it('pagehide sends 1001 synchronously and persisted pageshow resubscribes without a lifecycle timer', async () => {
   const sockets: { readonly socket: CollectionSocket; readonly commands: string[]; readonly closes: number[] }[] = []
   await Effect.gen(function* () {
-    const st3 = yield* St3
+    const fractal = yield* Fractal
     const target = new EventTarget()
     let resume: Effect.Effect<void> = Effect.void
     let disposed = false
     const uninstall = installPageLifecycle({ target, source: {
-      suspendSockets: st3.suspendSockets,
-      resumeSockets: () => { resume = st3.resumeSockets },
+      suspendSockets: fractal.suspendSockets,
+      resumeSockets: () => { resume = fractal.resumeSockets },
       dispose: async () => { disposed = true },
     } })
-    yield* Effect.forkChild(st3.followWindow({ _tag: 'Window', collection: 'agents', limit: 100 }).pipe(Stream.runDrain))
+    yield* Effect.forkChild(fractal.followWindow({ _tag: 'Window', collection: 'agents', limit: 100 }).pipe(Stream.runDrain))
     yield* settle
     expect(sockets).toHaveLength(1)
     expect(sockets[0]?.commands.filter((command) => JSON.parse(command).kind === 'subscribe')).toHaveLength(1)
@@ -39,7 +39,7 @@ it('pagehide sends 1001 synchronously and persisted pageshow resubscribes withou
     expect(sockets[1]?.closes[0]).toBe(1001)
     expect(disposed).toBe(true)
     uninstall()
-  }).pipe(Effect.provide(St3Live({
+  }).pipe(Effect.provide(FractalLive({
     baseUrl: 'http://gateway.test', maxFollows: 4,
     fetch: async () => new Response(JSON.stringify({ api_version: 'st3.client.v0', snapshot: { id: 'snapshot/proof', created_at: '2026-10-08T00:00:00Z', host_id: 'host/proof', projection_version: 'client-projection.v0', store_index: 1 }, value: {} })),
     socket: () => {

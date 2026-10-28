@@ -1,12 +1,12 @@
-// What was said in conversations, as st's search finds it: the rows the Agents search shows
-// under "said in conversations", as stui's Ctrl+K does. Only hits in an agent's conversation
-// open; st's freshness notes ride along, so a missing match is not read as "never said".
+// What was said in conversations, as Fractal's search finds it: the rows the Agents search shows
+// under "said in conversations", as the Fractal terminal UI's Ctrl+K does. Only hits in an agent's conversation
+// open; Fractal's freshness notes ride along, so a missing match is not read as "never said".
 import type { Agent, ConversationSearch } from '../../clients/typescript/fractal-client';
 import { agentName } from './agentsView';
 
 export type SaidRow = { key: string; agentId: string; name: string; excerpt: string; when: string };
 
-/** The rows for a search's hits, with the note st's freshness asks for (or ''). */
+/** The rows for a search's hits, with the note Fractal's freshness asks for (or ''). */
 export function saidRows(found: ConversationSearch, agents: Agent[]): { rows: SaidRow[]; note: string } {
   const rows = found.items
     .filter(hit => hit.agent_id)

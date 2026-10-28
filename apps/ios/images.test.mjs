@@ -16,7 +16,7 @@ assert.equal(pasted.mediaType, 'image/png');
 assert.equal(pasted.name, 'Pasted image');
 assert.equal(fromDataUri('not an image'), 'The clipboard did not hold an image Fractal can read.');
 
-// st's limits are said before anything is uploaded.
+// Fractal's limits are said before anything is uploaded.
 assert.equal(picked(png, 'image/jpg').mediaType, 'image/jpeg');
 assert.match(picked(png, 'image/heic', 'IMG_1.HEIC'), /IMG_1.HEIC is image\/heic; Fractal takes PNG, JPEG, GIF or WebP/);
 const huge = 'A'.repeat(Math.ceil((MAX_BYTES + 3) * 4 / 3));
