@@ -55,7 +55,7 @@ pub const IMAGE_ROWS: usize = 12;
 pub struct Key {
     pub conversation: String,
     pub entry: String,
-    pub revision: u32,
+    pub revision: u64,
     pub reference: String,
 }
 

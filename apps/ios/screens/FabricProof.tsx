@@ -4,7 +4,7 @@ import * as Crypto from 'expo-crypto';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { API_VERSION, FractalClient } from '../../../clients/typescript/fractal-client';
 import { verifyUnpairedFabricGateway } from '../fabricGatewayProof';
-import { dialFabric, fabricIdentity, fabricStats, stopFabric } from '../modules/st-fabric';
+import { dialFabric, fabricIdentity, fabricStats, stopFabric } from '../modules/fractal-fabric';
 import type { FabricProfile, FabricProofInput } from '../fabricProof';
 import { FabricSession, nativeRefusedAfter, type ProofState } from '../fabricSession';
 import { Button, Note, Screen, SectionHeader, T } from '../ui';

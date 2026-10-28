@@ -82,7 +82,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
     // What the default install writes outside its own directories: st's Claude plugin
     // marketplace, and the copies of the st skill that seats install into harness directories.
     let skill_copies = fractal_daemon::skill::untouched_installs();
-    let plugin_files = fractal_drivers::claude_channel::st3_marketplace_root()
+    let plugin_files = fractal_drivers::claude_channel::fractal_marketplace_root()
         .ok()
         .and_then(|root| root.ancestors().nth(2).map(Path::to_path_buf))
         .filter(|root| root.ends_with("st/plugins") && root.exists());
@@ -176,7 +176,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
         println!("stopped\tthe daemon this instance started without a service");
     }
     if instance.is_none()
-        && let Err(error) = fractal_drivers::claude_channel::remove_st3_channel(true)
+        && let Err(error) = fractal_drivers::claude_channel::remove_fractal_channel(true)
         // No `claude` on this machine means there is no plugin registration to remove.
         && !error.chain().any(|cause| {
             cause

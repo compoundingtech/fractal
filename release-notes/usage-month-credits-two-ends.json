@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "An api-key account's credits used this month are read from the two ends of the month, so st usage no longer reads every day of the month to show them",
+  "replay": {
+    "status": "none",
+    "detail": "No claim kind or replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change and no client contract change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "The credits figure is the same; only how much of the month is read changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery change."
+  }
+}

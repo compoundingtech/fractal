@@ -94,10 +94,10 @@ DISPLAY_RULES = (
     )),
     ("iOS", "apps/ios/presentation.ts", ("'Small Talk'",)),
     ("iOS tests", "apps/ios/presentation.test.mjs", ("'Small Talk'",)),
-    ("iOS", "apps/ios/modules/st-dictation/ios/StDictationModule.swift", (
+    ("iOS", "apps/ios/modules/fractal-dictation/ios/FractalDictationModule.swift", (
         "Small Talk in Settings",
     )),
-    ("iOS", "apps/ios/modules/st-fabric/prepare-phone.mjs", ("Small Talk Fabric Proof",)),
+    ("iOS", "apps/ios/modules/fractal-fabric/prepare-phone.mjs", ("Small Talk Fabric Proof",)),
     ("macOS", "apps/macos/listen/Info.plist", (
         "<key>CFBundleDisplayName</key>\n  <string>Small Talk</string>",
         "Small Talk listens while you dictate a message in Small Talk,",
@@ -110,13 +110,13 @@ DISPLAY_RULES = (
     )),
     ("CLI tests", "scripts/onboarding-e2e", ("Smalltalk Assistant",)),
     ("CLI tests", "scripts/onboarding-fixtures/test_rig.py", ("Smalltalk Assistant",)),
-    ("Release output", "scripts/release-smalltalk-daily", ("f'Smalltalk {tag}'",)),
-    ("Release output", "scripts/release-smalltalk-edge", ("f'Smalltalk edge",)),
+    ("Release output", "scripts/release-fractal-daily", ("f'Smalltalk {tag}'",)),
+    ("Release output", "scripts/release-fractal-edge", ("f'Smalltalk edge",)),
     ("Release output", "scripts/release_notes.py", ("f'Smalltalk {tag} at",)),
-    ("CLI", "scripts/st3-seat-queue-eval/report", ("## Small Talk\\n",)),
+    ("CLI", "scripts/fractal-seat-queue-eval/report", ("## Small Talk\\n",)),
     ("UI snapshot", "fixtures/clients/transcripts/noise.expected.json", ('"from": "Small Talk"',)),
-    ("Release output", ".github/workflows/release-smalltalk.yml.genie.ts", ("Smalltalk $TAG",)),
-    ("Release output", ".github/workflows/release-smalltalk.yml", ("Smalltalk $TAG",)),
+    ("Release output", ".github/workflows/release-fractal.yml.genie.ts", ("Smalltalk $TAG",)),
+    ("Release output", ".github/workflows/release-fractal.yml", ("Smalltalk $TAG",)),
     ("Coupled docs", "apps/ios/README.md", (
         "Smalltalk Dev, amber", "Smalltalk, ordinary",
     )),

@@ -1,9 +1,16 @@
 import { Agent, AgentId, Revision, RuntimeId, decodeUnknownSync, type AgentEncoded } from '@fractal/client/schema'
 import { decodeResourceRow, openAgent, type DecodedAgent } from '@fractal/sdk/effect'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import type { SidebarAgentRowData } from '@fractal/ui/assistant-ui'
 
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
+import { sidebarRow } from '../web/sidebarRow.ts'
+import { AgentRowDetails, sidebarRowAccessibleName, sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
 import { createProjections, fleetFromAgents, terminalSubjectForAgent } from './projections.ts'
+
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 /** The live roster path: the SDK keeps a row with open leaves or reports it undecodable. */
 const decodeRosterResource = (raw: unknown) => {
@@ -97,6 +104,115 @@ test('projects authoritative native subagents, distinguishes absence and retains
   expect(projections.fleetFromAgents([openAgent(decode({ ...encoded, subagents: [] }))]).agents[0]).not.toBe(first)
   expect(fleetFromAgents([row]).agents[0]?.subagents).toBeUndefined()
 })
+
+const subagentWire = {
+  kind: 'agent', id: 'agent/subagent-report', name: 'Report', host_id: 'host/example',
+  runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'idle',
+  revision: '1', updated_at: '2026-10-18T12:00:00Z',
+} satisfies AgentEncoded
+
+const decodeSubagentRoster = (wire: AgentEncoded) => {
+  const decoded = decodeRosterResource(wire)
+  if (decoded.kind !== 'agent') throw new TypeError('Expected an agent roster row')
+  return decoded
+}
+
+const subagentDetailsText = (result: SidebarAgentRowData) =>
+  renderToStaticMarkup(createElement(AgentRowDetails, { row: result }))
+    .match(/>Subagents<\/dt><dd[^>]*>([^<]*)/)?.[1]
+
+for (const [path, decode] of [
+  ['decodeResourceRow', decodeSubagentRoster],
+  ['openAgent', (wire: AgentEncoded) => openAgent(decodeUnknownSync(Agent, 'strict')(wire))],
+] as const) {
+  test.each([
+    { name: 'opencode', driver: 'opencode', fact: { _tag: 'NonObserving', name: 'opencode' }, harness: undefined, cause: 'Harness' },
+    { name: 'pi', driver: 'pi', fact: { _tag: 'NonObserving', name: 'pi' }, harness: undefined, cause: 'Harness' },
+    { name: 'claude', driver: 'claude', fact: { _tag: 'Observing', name: 'claude' }, harness: 'claude', cause: 'DaemonVersion' },
+    { name: 'unknown exec', driver: 'exec', fact: { _tag: 'Unknown', name: 'exec' }, harness: undefined, cause: 'Harness' },
+    { name: 'absent driver', driver: undefined, fact: { _tag: 'Unknown' }, harness: undefined, cause: 'Harness' },
+  ] as const)(`${path} preserves $name capability through visible missing-report copy`, ({ driver, fact, harness, cause }) => {
+    const projected = fleetFromAgents([decode({
+      ...subagentWire, ...(driver === undefined ? {} : { driver }),
+    })]).agents[0]!
+    expect(projected.driver).toEqual(fact)
+    expect(projected.harness).toBe(harness)
+    expect(projected.subagents).toBeUndefined()
+    const result = sidebarRow({ agent: projected, stale: false })
+    const text = cause === 'Harness' ? 'Not reported by this harness' : 'Not reported by this daemon version'
+    expect(result.subagentObservation).toEqual({ _tag: 'NotReported', reason: { _tag: cause } })
+    expect(result.subagentCount).toBeUndefined()
+    expect(sidebarRowAccessibleName(result)).toBe('Report, Idle')
+    expect(subagentDetailsText(result)).toBe(text)
+    expect(sidebarRowDescription(result)).toBe(`Report. Host: example. Status: Idle; live observation. ${harness === undefined ? '' : `Harness: ${harness}. `}Terminal: terminal/subagent-report. ${text}. ID: agent/subagent-report.`)
+  })
+
+  test.each(['desired', 'starting'] as const)(`${path} keeps observing %s missing reports pending`, state => {
+    const projected = fleetFromAgents([decode({ ...subagentWire, driver: 'claude', state })]).agents[0]!
+    expect(projected.driver).toEqual({ _tag: 'Observing', name: 'claude' })
+    const result = sidebarRow({ agent: projected, stale: false })
+    expect(result.subagentObservation).toEqual({ _tag: 'Unavailable' })
+    expect(result.subagentCount).toBeUndefined()
+    expect(sidebarRowAccessibleName(result)).toBe('Report, ? subagents, Pending')
+    expect(subagentDetailsText(result)).toBe('Not reported yet')
+    expect(sidebarRowDescription(result)).toBe('Report. Host: example. Status: Pending; live observation. Harness: claude. Terminal: terminal/subagent-report. Not reported yet. ID: agent/subagent-report.')
+  })
+
+  test.each(['desired', 'starting', 'running'] as const)(`${path} preserves explicit zero while %s, including stale retention`, state => {
+    const project = createProjections()
+    const wire = { ...subagentWire, driver: 'claude', state, subagents: [] } satisfies AgentEncoded
+    const projected = project.fleetFromAgents([decode(wire)]).agents[0]!
+    expect(projected.driver).toEqual({ _tag: 'Observing', name: 'claude' })
+    expect(project.fleetFromAgents([decode({ ...wire, revision: '2' })]).agents[0]).toBe(projected)
+    for (const stale of [false, true]) {
+      const result = sidebarRow({ agent: projected, stale })
+      const status = `${stale ? 'Last verified · ' : ''}${state === 'running' ? 'Idle' : 'Pending'}`
+      expect(result.subagentObservation).toEqual({ _tag: 'Reported' })
+      expect(result.subagentCount).toBe(0)
+      expect(sidebarRowAccessibleName(result)).toBe(`Report, ${status}`)
+      expect(subagentDetailsText(result)).toBe('0 collapsed children')
+      expect(sidebarRowDescription(result)).toBe(`Report. Host: example. Status: ${status}; ${stale ? 'stale' : 'live'} observation. Harness: claude. Terminal: terminal/subagent-report. Subagents: 0. ID: agent/subagent-report.`)
+    }
+  })
+
+  test(`${path} retains a stale reported child without inventing nested reporting`, () => {
+    const projected = fleetFromAgents([decode({
+      ...subagentWire, driver: 'omp', subagents: [{
+        id: 'reviewer', driver: 'omp', description: 'Review',
+        lease_expires_at: '2026-10-18T12:01:00Z',
+      }],
+    })]).agents[0]!
+    expect(projected.driver).toEqual({ _tag: 'Observing', name: 'omp' })
+    const result = sidebarRow({ agent: projected, stale: true })
+    expect(result.subagentObservation).toEqual({ _tag: 'Reported' })
+    expect(result.subagentCount).toBe(1)
+    expect(subagentDetailsText(result)).toBe('1 collapsed children')
+    expect(sidebarRowAccessibleName(result)).toBe('Report, 1 subagent, Last verified · Idle')
+    expect(sidebarRowDescription(result)).toBe('Report. Host: example. Status: Last verified · Idle; stale observation. Harness: omp. Terminal: terminal/subagent-report. Subagents: 1. ID: agent/subagent-report.')
+    const child = result.children[0]!
+    expect(child.freshness).toBe('stale')
+    expect(child.subagentObservation).toEqual({ _tag: 'NotReported', reason: { _tag: 'Harness' } })
+    expect(subagentDetailsText(child)).toBe('Not reported by this harness')
+    expect(sidebarRowDescription(child)).toBe(`Review. Host: example. Status: Not observed; stale observation. Harness: omp. Not reported by this harness. ID: ${child.ref}.`)
+  })
+
+  test(`${path} invalidates retained rows only when driver facts change`, () => {
+    const project = createProjections()
+    const opencode = project.fleetFromAgents([decode({ ...subagentWire, driver: 'opencode' })])
+    expect(project.fleetFromAgents([decode({ ...subagentWire, driver: 'opencode', revision: '2' })])).toBe(opencode)
+    const pi = project.fleetFromAgents([decode({ ...subagentWire, driver: 'pi' })])
+    expect(pi.agents[0]).not.toBe(opencode.agents[0])
+    expect(pi.agents[0]?.driver).toEqual({ _tag: 'NonObserving', name: 'pi' })
+    expect(project.fleetFromAgents([decode({ ...subagentWire, driver: 'pi' })])).toBe(pi)
+    const unknown = project.fleetFromAgents([decode({ ...subagentWire, driver: 'exec' })])
+    expect(unknown.agents[0]?.driver).toEqual({ _tag: 'Unknown', name: 'exec' })
+    expect(project.fleetFromAgents([decode({ ...subagentWire, driver: 'exec' })])).toBe(unknown)
+    const absent = project.fleetFromAgents([decode(subagentWire)])
+    expect(absent.agents[0]).not.toBe(unknown.agents[0])
+    expect(absent.agents[0]?.driver).toEqual({ _tag: 'Unknown' })
+    expect(project.fleetFromAgents([decode(subagentWire)])).toBe(absent)
+  })
+}
 
 test.each([
   ['agent/example', 'terminal/example'],
@@ -284,7 +400,7 @@ test('agent roster preserves usage scope, requested checkout, workspace and huma
   })
 })
 
-test('omitted st roster facts remain Unknown, including session timestamps', () => {
+test('omitted Fractal roster facts remain Unknown, including session timestamps', () => {
   expect(fleetFromAgents([row]).agents[0]).toMatchObject({
     usage: { _tag: 'Unknown' }, checkout: { _tag: 'Unknown' }, workspace: { _tag: 'Unknown' },
     blockedOn: { _tag: 'Unknown' }, ask: { _tag: 'Unknown' },

@@ -1,12 +1,12 @@
 // What an image in a conversation, a message or an ask says before and instead of its pixels, as
-// stui says it (docs/clients/ui-contract.md, "Images"): its name, type and real size, that it is
+// The Fractal terminal UI says it (docs/clients/ui-contract.md, "Images"): its name, type and real size, that it is
 // loading, or why it cannot be shown. Never the file's path. Kept apart from React so it is tested.
 import { megabytes } from './images';
 import type { VisibleImageState } from './visibleConversationImages';
 
 export type ImageFacts = { name?: string; mediaType: string; size?: number };
 
-/** `garden.png · image/png · 71 KB`; a size st does not know yet says so. */
+/** `garden.png · image/png · 71 KB`; a size Fractal does not know yet says so. */
 export function imageLabel(image: ImageFacts): string {
   const size = image.size === undefined || image.size <= 0 ? 'size unknown' : megabytes(image.size);
   return [image.name, image.mediaType || 'image', size].filter(Boolean).join(' · ');
@@ -37,7 +37,7 @@ export function imageWords<T>(state: VisibleImageState<T>, image: ImageFacts): {
 }
 
 /**
- * Images read from st, as data URIs, kept up to a total size: the newest stay, the oldest leave.
+ * Images read from Fractal, as data URIs, kept up to a total size: the newest stay, the oldest leave.
  * A URI is about 4/3 of its bytes. The decoded pixels are not here: React Native's iOS loader
  * decodes an image at the size of the view that draws it, which is how a huge image is scaled
  * down before it is held, and frees them when that view goes.
@@ -97,11 +97,11 @@ export class ImageReads {
 }
 
 /**
- * The cache key of an image: the message (or ask step) it is read by, then its sha256. st decides
+ * The cache key of an image: the message (or ask step) it is read by, then its sha256. Fractal decides
  * per carrier whether the session may read a sha256, so bytes read through one carrier are never
  * handed to another that names the same sha256, such as an attachment element typed into a prompt.
  */
 export function imageKey(image: { sha256: string; message: string }): string { return `${image.message} ${image.sha256}`; }
 
-/** The phone's images read from st: up to 16 MB of them stay for when they are shown again. */
+/** The phone's images read from Fractal: up to 16 MB of them stay for when they are shown again. */
 export const IMAGES = new ImageReads(new ImageCache(16 * 1024 * 1024));

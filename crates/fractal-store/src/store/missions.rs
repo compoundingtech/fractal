@@ -102,6 +102,27 @@ pub fn normalize_intent_missions(
 }
 
 impl Store {
+    /// Incoming named edges, using the target index rather than scanning declaration bodies.
+    /// While a preexisting store's edge index is still being folded in bounded background
+    /// steps, the same answer comes straight from the selected declarations.
+    pub fn declared_resource_referrers(&self, subject: &str) -> Result<Vec<Value>> {
+        let connection = self.readers.get();
+        if resource_references::backfilling(&connection)? {
+            return resource_references::referrers_from_declarations(&connection, subject);
+        }
+        let mut statement = connection.prepare_cached(
+            "SELECT owner, name, reason FROM declared_resource_edges WHERE target=?1 ORDER BY owner, name",
+        )?;
+        let rows = statement.query_map([subject], |row| {
+            Ok(json!({
+                "owner": row.get::<_, String>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "reason": row.get::<_, Option<String>>(2)?,
+            }))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     pub fn mission_spec(
         &self,
         mission_id: &str,
@@ -955,11 +976,11 @@ impl Store {
         for (subject, desired) in &intent.subjects {
             let current = desired_row_at(&connection, subject, at_index).map_err(internal)?;
             let revision = desired_revision(desired);
+            let changed = !desired_matches(current.as_ref(), desired, &revision)?;
             tokens.insert(
                 subject.clone(),
                 intent_leaves_at(&connection, subject, at_index).map_err(internal)?,
             );
-            let changed = current.as_ref().is_none_or(|row| row.revision != revision);
             if changed {
                 changes.push(SubjectChange {
                     subject: subject.clone(),

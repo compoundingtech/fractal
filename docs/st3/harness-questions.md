@@ -1,7 +1,7 @@
 # Harness questions
 
 A seat's harness can ask its person a question natively: a multiple-choice prompt the harness
-shows in its own interface. st records that such a question exists, how it is shaped and how it
+shows in its own interface. Fractal records that such a question exists, how it is shaped and how it
 ended, so other clients can tell the question is waiting. It records **ids and positions only,
 never text**. The question text, option labels, free-text answers and notes stay in the harness's
 own timeline; a client that shows the question joins its text from there.
@@ -80,5 +80,5 @@ same native call is refused even after history expiry or checkpoint trimming, in
 the resolution status is `expired`. Its original resolution and receipt remain authoritative.
 
 A question stays pending until the harness writes its end. The harness adapter writes `expired`
-or `cancelled` when the harness gives up on or withdraws a question; st does not end a pending
+or `cancelled` when the harness gives up on or withdraws a question; Fractal does not end a pending
 question by itself.

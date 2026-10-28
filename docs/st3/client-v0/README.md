@@ -1,4 +1,4 @@
-# st client v0 contract
+# Fractal client v0 contract
 
 Status: implemented client boundary with operational projections, resumable events, authenticated
 pairing, fenced actions, streamed terminal screens, and generated Rust and Swift clients. The files
@@ -188,7 +188,7 @@ or snapshot fence. Live-share is typed foreground/live time, separate from laten
 A paired phone can store its APNs device token with [`push.register`](push.md) and remove it with
 `push.unregister`, advertised as the optional `push-registration` capability. The token stays on
 the member that issued the pairing; it is never a claim, never replicated and never logged.
-Revoking or expiring the pairing removes it. st does not send pushes yet.
+Revoking or expiring the pairing removes it. Fractal does not send pushes yet.
 
 ### Person ask respondents
 
@@ -265,6 +265,64 @@ Generated clients decode an unfamiliar value as `Unknown` without dropping the r
 this differs from an absent field, which means no lifecycle was declared.
 See [agent declarations](../../site/reference/configuration.md#definitions-do-not-start-work).
 
+
+### Owner-local private notes
+
+`GET /v1/client/private-notes/{uri}` accepts one fully percent-encoded canonical
+`dev.schickling.agent-private-notes://HOST/IDENTITY` URI. The pure canonical URI
+contract lives in `fractal-schema::private_notes`; clients never send a filesystem path or UID.
+The response is a `PrivateNotesSubject` envelope value with `ref`, `family`,
+`schema`, `data`, `actions`, and `live`. Its data contains the current Markdown and
+the carrier-generation/revision fence; `live` is null. Missing bytes are empty
+only when the declaration and owned resource directory already exist.
+
+The daemon's `private_notes_catalogs` configuration lists absolute owner-local
+catalog roots. Each source must declare the exact self URI in
+`agents/HOST/IDENTITY/agent.kdl`; its filesystem byte authority remains
+`resources/private-notes.md`. Resolution refuses divergent carriers, symlink
+traversal, foreign ownership, and group/world-writable sources or destinations.
+No Markdown, notes revision, content digest, or local recovery receipt enters
+fleet claims, collections, or replication.
+
+Private notes are ordinary subjects: reads require `read.projections`, and writes
+require `control.work` plus a concrete person or local agent acting party.
+The same ordinary Unix actor admission and paired-session authentication used by
+other subjects apply. Pairing keeps its normal limited default, optional narrowing
+to ordinary limited scopes, and explicit `full_control` grant; notes add no
+credentials, scopes, or bootstrap endpoints.
+Public claim writes cannot create, complete, or revoke pairings, and paired
+sessions retain their stored-scope, expiry, and revocation checks.
+
+Agents are instructed by policy not to write private notes. This is not a
+person-only credential boundary: a permitted agent request is attributed as an
+agent, never as the configured person. Write observations identify the exact
+URI, action, operation, stage, authority actor, session actor, and transport
+without publishing Markdown or content-derived metadata.
+
+The ordinary URI resource receives an idempotent `resource.observed` requested
+observation before bytes can change, and a completed observation only after its
+durable local receipt. Audit-publication failure is not completed success:
+exact-key retry reconciles the same outcome without another replacement.
+Cross-listener retries of a paired session preserve the original intent's
+transport and actor metadata. URI facts contain only the URI; attribution is
+observation metadata, not a second authority for private bytes.
+
+
+`private-notes.write` requires `control.work`, an acting party, the returned
+action fence, a stable idempotency key, the canonical URI, and complete Markdown.
+Supported writers must use this API: writes serialize across daemon processes,
+compare carrier generation and revision, then durably record intent before an
+atomic owned sibling replacement.
+Exact retries recover the private outcome without overwriting a newer edit.
+The local-only result carries its successor fence as `ActionResult.private_notes`.
+Its `affected_ids` is empty because a canonical notes URI is not a generic graph ID;
+unrelated collection projections do not receive notes invalidations.
+Changed key reuse conflicts; stale editors and replaced carriers are refused.
+An interrupted replacement remains `private-notes-indeterminate` until its exact
+key is reconciled. External filesystem editors are not coordinated writers;
+changes between operations invalidate the next revision fence.
+Markdown must fit the existing 1 MiB encoded response bound, with room reserved
+for URI/fence and snapshot metadata; writes cannot create an unreadable oversized response.
 ### Agent activity and human blocking
 
 A declaration-driven relaunch reports `state: "restarting"` while the previous runtime stops
@@ -305,7 +363,7 @@ and omp report both edges, pi only the end, so pi never shows it).
 
 The omp extension correlates an ask with its tool-call ID. Unrelated results leave it blocked; the
 matching answer emits a new unblocked activity frame. The pi-family channel retains all three axes
-while retrying publication and across st binary replacement. Each published harness observation is
+while retrying publication and across Fractal binary replacement. Each published harness observation is
 a complete snapshot, including explicit null clearing for absent blocking metadata, composer state,
 and exit, so legacy optional-field backfill cannot resurrect an answered ask. A delayed observation
 from a previous runtime incarnation never changes the current agent.
@@ -317,8 +375,34 @@ on the seat, has not ended, and has a lease that runs past the read. Each one ha
 own `id`, its `subagent_type`, a one-line `description`, its `driver` and `session_id`, the
 `work_id` of the step the seat held when it appeared, `started_at`, and `lease_expires_at`. A
 subagent is part of its agent, not a resource of its own, and has no actions. The list is read
-per request, so a lease that runs out leaves it at the next read without a new claim. A daemon
-older than the field omits it; clients read a missing list as empty.
+per request, so a lease that runs out leaves it at the next read without a new claim. The field
+is omitted when the agent's driver does not report subagents, or by an older daemon. An absent
+field means not reported, while an empty list means the driver reports no running subagents.
+Claude, Codex, and OMP report subagents; Pi and OpenCode do not.
+
+### Declared resources
+
+An agent's or mission's `resources` lists the resources its current declaration names, in authored
+order: each has its `name`, ordinary resource `subject`, authored `kind` (`uri` or `subject`),
+URI `resolution`, and nullable `reason`. A mission's list comes from its current published
+revision. The owner stores typed edges, while the shared smallclaims subject stores the immutable
+URI. Its ID is `resource/uri/` followed by the lowercase hex SHA-256 of the exact URI's bytes;
+different owners naming that URI resolve to the same subject.
+
+The list is read-only; change it by reapplying the seat declaration or publishing a new mission
+revision (see [declared resources](../../site/reference/configuration.md#declared-resources)). Removing an edge does
+not delete its subject or other owners' references. A URI edge has `resolution: "resolved"` and
+a string `uri` when its locator is available, or `resolution: "unresolved"` and no `uri` while
+the URI declaration is unavailable locally. Explicit subject edges have `resolution: "not-applicable"`
+and no `uri`: they need no URI locator, and this state does not assert subject existence.
+A daemon older than the field omits it; clients read a missing list as empty.
+
+These declared references are distinct from `GET /v1/client/resources`, which lists resource
+observations. Declaring a URI does not fetch it, create an observation, or start an observer.
+
+`GET /v1/resource-references/{subject}` on the privileged local API returns the declarations
+that reference that ordinary resource subject, without scanning all declarations. This is not a
+paired-client route and does not grant ownership or make a shared URI target eligible for cleanup.
 
 ### Native harness inventory
 
@@ -444,7 +528,7 @@ On macOS, verify the HTTPS route with an unauthenticated request to
 If Tailscale Serve returns `502` when pointed at the Unix socket, run a persistent
 launchd-managed bridge from a loopback-only TCP port to `st3-client.sock`, then
 point Tailscale Serve at that port. The bridge must bind `127.0.0.1`, reconnect to
-the socket for each request, and start independently of the st daemon so a daemon
+the socket for each request, and start independently of the Fractal daemon so a daemon
 restart does not leave the HTTPS route pointing at an absent process. Recheck the
 HTTPS route after every rollout, then make an authenticated paired-client read.
 
@@ -458,7 +542,7 @@ the served gateway. To remove the carrier without changing graph credentials or 
 tailscale serve reset
 ```
 
-Warning: `tailscale serve reset` clears all Serve configuration on the host, not only the st
+Warning: `tailscale serve reset` clears all Serve configuration on the host, not only the Fractal
 gateway.
 
 The equivalent trusted-peer Fabric carrier lifecycle is:
@@ -737,9 +821,9 @@ when both are omitted, ending now when `until_ms` is omitted. It requires `read.
 value is `UsagePeriod { since_ms, until_ms, rows }`, with one `UsageRow` per agent, mission run,
 step, model, paying account and host, largest first. A row carries the token counts (`total`,
 `input`, `output`, `cache_write`, `cache_write_1h`, `cached`), `cost_microusd` (API-equivalent
-cost: the harness's own figure when it reports one, else st's pricing table, named by `pricing`),
+cost: the harness's own figure when it reports one, else Fractal's pricing table, named by `pricing`),
 `reported_cost_microusd` (the part the harness reported) and `unpriced_tokens` (tokens neither
-could price, which a client shows as unknown cost, never as free). An identity st does not know,
+could price, which a client shows as unknown cost, never as free). An identity Fractal does not know,
 such as the mission run of a standing seat, is absent from the row. A period whose start is after
 its end is `validation-failed`. `limits` lists each account's selected limits reading: `account`
 (a label such as `claude/<digest>`, or `DRIVER/unknown`), `driver`, optional `account_ref`,
@@ -861,7 +945,7 @@ and `documentReferencesGet(subject:)`; TypeScript `documentGet(name)`,
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
 for example `stui 0.1.0+a0c135e3`, `smalltalk-ios 1.0 (42)` or `st 0.1.0+a0c135e3`. The Rust
 crate sends what `fractal_client::set_client_name` was given; the TypeScript client takes `client` in
-its options, and Swift `client:` in its initializer. The header is optional, and st shows it as
+its options, and Swift `client:` in its initializer. The header is optional, and Fractal shows it as
 reported: it is never identity or authority, and no client is refused, slowed or warned for its
 version.
 
@@ -873,7 +957,7 @@ conversation or terminal stream, and every client that made a request in the las
 uses (`person`), the reported `client`, the paired `device_id` and `device_name` when a paired
 device's session is acting, the `member` it reached, `via` (`local` for the member's own Unix
 socket; `gateway` for a paired device through the client gateway, which a Tailscale forward and
-Fabric both reach, so st cannot tell them apart; `tailscale` when Tailscale Serve names itself),
+Fabric both reach, so Fractal cannot tell them apart; `tailscale` when Tailscale Serve names itself),
 whether it is `connected` now with how many open `streams`, `since` and `last_seen`, and what it
 `follows`: windows by name, `conversation:ID` and `terminal:ID`. Another member's clients are on
 that member's list. The Rust method is `Client::clients_list()`, Swift `clientsList()` and
@@ -960,7 +1044,7 @@ gate) and an optional `reason`, which the reject and request-changes actions req
 the card's ID and revision. A gate asked again (a retried step's new attempt, or a newer build's
 wording) gets a new card, so an action through the old one returns `stale-fence` and writes
 nothing. A client then re-reads attention and, if a card of the same `attention_kind` for the
-same `source_id` is open, acts once more through it; it does not retry the old card. A review st
+same `source_id` is open, acts once more through it; it does not retry the old card. A review Fractal
 no longer asks returns `validation-failed`, and its message says why: who already answered it
 and how, or what moved on since it was asked. The terminal UI does both.
 
@@ -994,7 +1078,7 @@ answered, when Claude's terminal shows it was refused (Claude reports no event f
 when the seat's runtime incarnation changes. Its action attaches to the seat's terminal to answer
 there.
 
-A prompt st can deliver an answer to lists its `answers` under `action_parameters["prompt.respond"]`
+A prompt Fractal can deliver an answer to lists its `answers` under `action_parameters["prompt.respond"]`
 with its `target_id` and `episode`, and offers the typed action `prompt.respond`:
 
 | Prompt | `answers` | What is sent as `answer` |
@@ -1071,8 +1155,8 @@ for combined families, and `run` for an `after-run` step.
 ## Harness-neutral session timeline
 
 The timeline schema deliberately contains no Claude, Codex, Pi, OMP, or transcript-file types. A
-session has ordered entries with a strictly increasing `sequence`, stable entry ID, RFC 3339
-timestamp, `role` (`system`, `user`, `assistant`, or `tool`), and one typed body:
+session has chronologically ordered entries with a source-local `sequence`, stable entry ID,
+RFC 3339 timestamp, `role` (`system`, `user`, `assistant`, or `tool`), and one typed body:
 
 - `message`: logical turn metadata;
 - `content`: text or an attachment reference with a media type;
@@ -1088,6 +1172,25 @@ Incremental timeline events use `append`, `replace`, or `finalize`. `replace` ta
 entry and increments its revision; it cannot change the entry's ID, sequence, role, or type.
 `finalize` makes the entry immutable. Tool results must refer to a preceding tool call. Timeline
 pages and updates are bounded by the negotiated byte and item limits.
+
+Presentation order is numeric timestamp, then source sequence, then stable entry ID. Native
+harness counters and graph-derived counters are separate namespaces: comparing them without
+time can put a new tool call before an hours-old status. The gateway preserves both counters
+as source evidence; clients must not re-sort merged entries by sequence alone. `replace` and
+`finalize` also preserve the original append timestamp, so a revision changes content rather
+than moving the entry. A graph delivery header and its content share a timestamp and retain
+their adjacent sequence slots.
+
+HTTP opens at the newest bounded chronological window; its page cursor walks backward (a keyset
+cursor for a native transcript, a frozen projection for a stored timeline). Conversation changes
+and WebSocket follow frames use the same chronology. The conversation cursor independently
+tracks graph-store position, local-observation position, and native-source high-water sequence.
+Its native mark is the source's newest native sequence, not just the latest display window's, so
+graph-only windows cannot rewind it: when the 200-entry window is truncated, the gateway reads
+the newest native entries by sequence beside it (at most one window more). A change omitted by
+the byte/item-bounded replay window, native or graph, is still a `cursor-gap` requiring
+resynchronization; new native activity is never silently discarded merely because graph
+counters are larger.
 
 Pi-family native replay recognizes OMP's message-level `role: "toolResult"` records: the
 `toolCallId` correlates the result with its call, `isError` selects error or success status, and
@@ -1154,10 +1257,10 @@ normally reach this limit through the `native-entry-too-large` guard above, so t
 continuation; the `timeline-entry-too-large` entry carries only the entry's size and has no
 continuation.
 
-External process sessions remain listed even when st cannot identify a native transcript.
+External process sessions remain listed even when Fractal cannot identify a native transcript.
 Opening their timeline returns a non-retryable `unsupported-capability` error with
 `details.reason: native-session-unidentified` and `details.session_id`, explaining that the
-agent was not started by st and its saved session could not be identified. Clients show this
+agent was not started by Fractal and its saved session could not be identified. Clients show this
 as the no-conversation state, rather than treating the listed session as missing. The same
 verdict applies to the conversation stream. OMP `__omp_worker_*` internal modes are helpers,
 not external harness sessions, and are excluded from discovery.
@@ -1708,11 +1811,11 @@ must distinguish unavailable, ungranted, and unsupported features.
 `GET /v1/client/conversations/{id}/stream` opens one authenticated WebSocket
 with subprotocol `fractal.client.conversation.v0`. A client may pass `after=CURSOR` to
 resume. `{id}` may be a session ID, an agent peer ID (resolved to its current
-session), or a st message ID with a session peer. A cursor remains tied to the
+session), or a Fractal message ID with a session peer. A cursor remains tied to the
 resolved session, so a new agent incarnation needs a fresh stream.
 The first envelope has a `ConversationChanges` value with an empty `items`
 array and a `next_cursor` when opening at the live edge. Later envelopes contain
-new chronological `TimelineEntry` values, including st messages, and a cursor to
+new chronological `TimelineEntry` values, including Fractal messages, and a cursor to
 save after applying the batch. The owner sends no WebSocket data while idle.
 Clients load existing rows from the timeline endpoint, not from this live-edge envelope.
 After a `cursor-gap`, reload that authoritative timeline page and reopen at the live edge
@@ -1739,7 +1842,7 @@ daemon's WebSocket bridge with a single-use capability. The Fabric-loopback gate
 local-terminal route, as it refuses every route outside `/v1/client/`. When the subject has a
 running PTY session under this host's configured PTY root and the daemon, at whichever `--endpoint`
 was given, does not answer within a second, the CLI attaches to the newest of those sessions without
-it, as the local user. It prints that st was not consulted, and the kernel-reported peer must still
+it, as the local user. It prints that Fractal was not consulted, and the kernel-reported peer must still
 be the PTY daemon the registry records. With no such session it says, after that second, which
 daemon it is still waiting for.
 
@@ -1928,7 +2031,7 @@ negotiated byte limits: at most 200 lines and 4096 bytes of text per line, with 
 ### Launch size
 
 A client that draws seats in a pane of fixed size publishes it as a claim on the person, so a seat
-st launches later starts at that size and the first attach needs no resize:
+Fractal launches later starts at that size and the first attach needs no resize:
 `POST /v1/claims` with `{"subject":"person/NAME","kind":"terminal.launch-geometry",
 "actor":"person/NAME","fields":{"rows":ROWS,"columns":COLUMNS}}`. Only the person may write it,
 and `rows` and `columns` must each fit a positive u16. At every terminal launch the reconciler
@@ -2520,6 +2623,50 @@ are current; each affected card keeps its previous `fault`, including a known nu
 A card with no previous value reports `"fault status unknown"` in that same field. The next
 refresh retries those faults even if no claim changed.
 
+### Immutable current publications
+
+The existing background roster refresher uses the shared generation-fenced published-list
+owner for one latest immutable complete presented roster, replacing it and notifying readers atomically.
+Rows, order, metadata and the encoded body belong to the same publication. Startup chunks and history rosters do not obtain
+a current publication revision. A failed refresh retains the previous publication and its
+original metadata. The failed-only `fresh=true` fallback described above is unchanged.
+
+An active revisioned subscription, a recent agents list read, or an explicit roster refresh
+request keeps source, presence and presentation refreshes active. Summary and assistant reads
+register demand through the refresh request itself; dropping the last subscription does not
+create an ordinary-read grace period. The single existing paced owner checks time-sensitive
+presentation at a one-second scheduling bound (plus admission and fold time), rather than adding
+a timer per subscriber. It rechecks demand after admission and again when its blocking worker
+starts. A new revisioned subscription requests a complete view. Without demand, including after
+queued notifications are consumed, inputs remain dirty but catch-up and trim do not refold the
+roster. Full projection reset clears the current publication and changes its epoch even while idle.
+Startup queues one complete publication after its bounded head, even before any read.
+An explicit or local-activity refresh request remains demand until that attempt answers it,
+including across admission and blocking-worker queues. A subscription wake alone is not such
+a request: dropping its last receiver can still cancel an otherwise unrequested refresh.
+Request capture and failed-fold restoration are serialized with projection reset, so a reset
+cannot resurrect a pending request belonging to the discarded generation.
+
+`AgentsPublicationMetadata` identifies the publication with an opaque UUID `node_epoch` and
+an increasing epoch-local `revision`. Restart, full projection reset or revision exhaustion starts a new epoch;
+no current publication is available until a complete roster is ready. Revisions can skip
+numbers. They are not history positions or replay cursors and cannot be compared across epochs.
+The `status_watermark` contains the node-local graph `store_index` and the roster-relevant
+`local_frontier`. It is not a cross-node freshness measure.
+
+The server fixes the presentation clock and retains delivery-presence assessments with the rows.
+It reads graph-backed subagents at the final pinned source cut. Later clock, presence or graph changes do not alter published
+rows. `materialized_at_ms` is that server presentation time in Unix milliseconds. It is not
+producer observation time, evidence receipt time or proof of row age.
+
+The canonical `AgentsPublication` definition contains `publication`, `items`, `order` and
+`has_more: false`. It is a complete current view, with no core row-count or encoded-byte cap.
+Legacy HTTP response budgets, pagination and HTTP and WebSocket wire grammars are unchanged.
+These definitions add no endpoint, WebSocket field or transport opt-in. The future descriptor
+name `collections.agents.revisioned.v1` does not announce availability and is not advertised.
+Atomic WebSocket snapshot chunking is separate work. No history, replay or producer-age
+transport is provided by these definitions.
+
 ## Missions and work window freshness
 
 The `missions` and `work` collection streams answer from lists the daemon's background
@@ -2634,7 +2781,7 @@ working against the unchanged scalar types. New consumers opt in explicitly.
 Capability `conversation-delivery-links` version 1 supports the optional top-level
 `TimelineEntry.delivers` message reference. Request it with
 `X-St3-Features: conversation-delivery-links.v1` (alongside any other features).
-A link names the Small Talk message consumed by that native user turn. Use
+A link names the Fractal message consumed by that native user turn. Use
 `message.read` to retrieve its full body; a clipped native envelope is a preview.
 Without this feature the field is omitted, including on relayed and cached pages.
 The updated Rust owner-relay client negotiates it and preserves it through typed
@@ -2701,6 +2848,18 @@ present in the harness transcript and full structured tool arguments are shown
 without secret or token filtering. Without the feature, the server returns known
 text/tool/status bodies with visible size-limit notices. Old clients can read those
 fallbacks but do not fetch images or expand a chunked remainder.
+
+Subagent `conversation.session_id` links encode the native parent, task id, and root
+routing session. A gateway resolves ownership from that routing session and forwards the
+unchanged child id to its owner; the child is not a managed parent conversation. Owners
+resolve managed parents through their bound transcript and require the native parent id
+to match before opening the child file. Descendants retain the root routing session.
+Session detail GETs use the same routing key through the internal peer `session-detail`
+read operation; transcript pages and content chunks retain the child id as well.
+Child links are generated from volatile transcript content, not persisted session inventory.
+All gateways and owners must run the three-field child-id encoding; mixed versions are
+not supported. Previously opened two-field links must be regenerated by reopening the
+parent conversation after upgrading.
 
 A block MAY also carry `view: {type, ...}`, a parsed typed projection discriminated by
 the open `type` string. The schema defines one closed definition per known type

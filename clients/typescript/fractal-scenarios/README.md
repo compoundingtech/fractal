@@ -43,7 +43,7 @@ const oneAgent = world.with({ roster: 'one-agent' }) // same cast, one slice rep
 
 // Real data layer over a fake gateway: pass both seams to the client or SDK.
 const replay = createReplay(world, { clock: realClock({ start: world.now }) })
-// St3Options: { socket: replay.socket, fetch: replay.fetch }
+// FractalOptions: { socket: replay.socket, fetch: replay.fetch }
 ```
 
 Components read wire state through `ScenarioProvider` and `useScenarioSlice(kind, project?)` from

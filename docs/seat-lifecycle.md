@@ -24,7 +24,13 @@ st agents restart agent/garden/worker --as person/ada
 st agents show agent/garden/worker
 ```
 
-When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `fractal agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
+When repeated failed starts have parked an agent, an authorized person's or agent's explicit restart permits one launch attempt for that request. Replaying the request or restarting the daemon does not grant another attempt. If the retry fails, the agent parks again and its cause stays visible in `st agents show` and the agents view. A new restart request permits a new retry. Provider version checks and native-session continuation still apply.
+
+A failed start with unverified producer closure can be superseded only by a still-current restart request accepted within the last hour. The selected desired declaration must still match the request, with no later suspension, resume, stop, termination or retirement; a current suspension also blocks recovery. Otherwise reconciliation records `restart-retired-obsolete-request` and completes the request as `retired` without launching or asserting producer closure. A new explicit restart is required after intent changes or expiry. The existing minimum failed-start age, absent-runtime check and kernel launch lock still apply. Synthesized start control requests are attributed to `agent/st3/reconciler`, with the original requester-authored restart retained as evidence; they do not impersonate a new request from that actor.
+
+Physical preflight does not release the failed operation. With the launch lock held, one admission writer transaction checks lifecycle intent, closes that exact failed hold, and records the replacement admission. Its retained `stale_failed_start` metadata keeps the same request fence active in the dispatch writer and the backend's physical launch guard, including after queueing or daemon restart. A control committed between preflight and admission leaves the old hold unresolved; a control committed after admission prevents dispatch or fails the physical launch guard.
+
+A queued recovery rejected before dispatch is revoked and completed by the existing `never-dispatched` cancellation protocol in the same writer transaction. Reconciliation applies that nonlaunch proof and frees admission, so a later valid restart can launch without restarting the daemon.
 
 The graph retains claimed work and pending mail. A relaunch continues the previous native session when the harness can; otherwise it starts a new session and recovers work from the graph. Stop and start explicitly when you want it off between uses:
 
@@ -44,7 +50,7 @@ A restart of an agent that is up and ready first asks it for its handoff and wai
 
 A restarted agent that cannot continue its conversation (another account, another model, a crash)
 gets a first message with the handoff it left and the live state of its work. See
-[agent handoff](st3/seat-continuity.md); an agent writes its handoff with `fractal agents handoff write`.
+[agent handoff](st3/seat-continuity.md); an agent writes its handoff with `st agents handoff write`.
 
 To preserve the exact conversation, wait until the agent has finished its turn and holds no claim:
 
@@ -91,13 +97,13 @@ agent "garden/interactive" {
 ```
 
 The daemon retires the agent after its process exits, including an unsuccessful exit or a
-process it discovers has vanished. It disappears from `fractal agents ls`; `fractal agents ls --all`,
-`fractal agents show agent/garden/interactive --all`, and subject history retain it. No launcher or
+process it discovers has vanished. It disappears from `st agents ls`; `st agents ls --all`,
+`st agents show agent/garden/interactive --all`, and subject history retain it. No launcher or
 post-exit wrapper needs to stay alive. Retirement takes precedence over the declaration's
 restart policy. An agent without `one-shot`, including one with `restart "never"`, keeps its
 usual lifecycle.
 
-`fractal agents start garden/interactive --as person/ada` restores the same declaration and native
+`st agents start garden/interactive --as person/ada` restores the same declaration and native
 session. Explicit restart, launch-setting changes, and suspend/resume still work while the
 agent is live. A one-shot mission agent stays retired for its current generation until explicitly
 started; a later generation can declare it again.
@@ -116,7 +122,7 @@ st agents workspace agent/garden/interactive --json
 ```
 
 The plain command prints only the declared workspace directory, so a local launcher can use
-`workspace=$(fractal agents workspace agent/garden/interactive)`. The JSON envelope also names
+`workspace=$(st agents workspace agent/garden/interactive)`. The JSON envelope also names
 `host_id`: the path belongs to that host, even when read through another fleet member. It is the
 workspace root, not an internal harness directory or a guarantee that the directory still exists.
 The read works while the agent is running, stopped, suspended, or retired as a one-shot. It follows
@@ -186,7 +192,7 @@ Import stops that exact process if it is still running, declares a durable agent
 `agent/import/HARNESS/ID`, where `ID` is the one in `session/external-ID`, and starts the harness
 resuming the same native session. The agent has no mission owner, so fractal keeps it running like any
 agent you declare, and it appears in `agents`, `terminals`, and `conversations`.
-`fractal subject show agent/import/HARNESS/ID` shows the declaration import wrote.
+`st subject show agent/import/HARNESS/ID` shows the declaration import wrote.
 
 Codex imports select the exact thread through fractal's strict resume handshake and pin the
 originating `CODEX_HOME`. Discovery currently reads `$HOME/.codex/sessions`, including a
@@ -321,7 +327,7 @@ st subject history agent/garden/worker --limit 20
 st doctor
 ```
 
-Ordinary `fractal agents ls` and `fractal agents tree` read the latest published roster without
+Ordinary `st agents ls` and `st agents tree` read the latest published roster without
 requesting a refresh. Immediately after starting or changing an agent they can show the
 earlier roster; after daemon startup the roster may still be being prepared. When you need
 to see your own write, pass its same-host receipt `store_index` as `min_cut` to the agents
@@ -349,17 +355,17 @@ the declaration without applying it, and `--description` says what the agent is 
 native startup argument. With no message, the agent starts idle. The Rust `fractal-client` crate exposes
 `agent_create` with the same creation options; TypeScript and Swift expose `agentCreate`.
 
-Ctrl+\\ detaches and leaves the agent running. `fractal terminals attach agent/builder.site` attaches
+Ctrl+\\ detaches and leaves the agent running. `st terminals attach agent/builder.site` attaches
 again later, from any machine in the fleet. A terminal on another host is attached PTY to PTY over
-Fabric when that host runs `fractal terminals expose-fabric` and grants your machine the protocol it
+Fabric when that host runs `st terminals expose-fabric` and grants your machine the protocol it
 prints; the owner's fractal daemon routes each tunnel straight to the PTY session. While that daemon is
 stopped or restarting, as during every deploy, it refuses new tunnels and its live remote attaches
-drop; `fractal terminals attach` reconnects once it is back. A host that needs attaches to work without
-its daemon runs `fractal terminals expose-fabric --exec`, which has Fabric start a process per attach.
-Otherwise it goes through the client gateway as your person, the same path the apps use. `fractal ui`
+drop; `st terminals attach` reconnects once it is back. A host that needs attaches to work without
+its daemon runs `st terminals expose-fabric --exec`, which has Fabric start a process per attach.
+Otherwise it goes through the client gateway as your person, the same path the apps use. `st ui`
 on a machine with its own fractal daemon attaches a terminal on this host to its PTY session, and one
 on another fleet host over Fabric when Fabric reaches the owner; the daemon only says where it lives.
-When Fabric cannot reach the owner, `fractal ui` goes through the client gateway and the terminal header
+When Fabric cannot reach the owner, `st ui` goes through the client gateway and the terminal header
 says so with Fabric's reason. An owner that refuses the incarnation is never worked around. A paired
 device with no daemon of its own, such as the phone, uses the gateway.
 
@@ -386,7 +392,7 @@ The client crates expose `terminal_create` and `terminal_end` (camel case in Typ
 ## Declare and update an agent
 
 An agent has a durable identity, harness, model, and workspace, kept running by Fractal. Write its
-declaration with `fractal agents start --print-kdl` and keep the file in Git:
+declaration with `st agents start --print-kdl` and keep the file in Git:
 
 ```sh
 cd ~/src/garden
@@ -431,7 +437,7 @@ See [model accounts](st3/accounts.md) for usage totals, weekly limits, and accou
 The agent starts its harness in the workspace with no prompt. It stays idle, taking no turn, until
 a person types in its terminal or a message is posted to it. An agent you declare as
 `fleet/PROJECT/...` may also publish, start, and revise missions under `fleet/PROJECT/*`;
-`fractal agents show` prints that authority. `fractal terminals attach agent/example/worker` opens its
+`st agents show` prints that authority. `st terminals attach agent/example/worker` opens its
 terminal from any fleet machine; Ctrl+\\ detaches without stopping it. On the agent's own host it
 connects straight to the PTY session, so a busy daemon cannot stall it. If the daemon does not
 answer within a second, fractal attaches to the agent's newest PTY session on that host without it and
@@ -439,11 +445,11 @@ says so.
 
 A running agent restarts when you apply a declaration that changes how it launches: its
 workspace, harness, model, effort, arguments or command. A change to its label, environment or
-restart policy keeps the running process and takes effect the next time it starts; use `fractal agents
+restart policy keeps the running process and takes effect the next time it starts; use `st agents
 restart agent/example/worker --as person/ada` to apply it now. Restart preserves the declaration,
 works for top-level and mission agents, and waits for a new running incarnation.
 
-Every relaunch of an agent continues its harness's last native session: `fractal agents restart`, a
+Every relaunch of an agent continues its harness's last native session: `st agents restart`, a
 changed launch, a harness that hung up or crashed, a daemon restart, and a stop followed by a
 start. Claude, Codex, pi, omp and OpenCode each resume the session their driver last reported for
 the agent, and a Claude agent whose workspace changed carries its transcript into the new
@@ -451,16 +457,16 @@ workspace's project. A harness that cannot continue that session (its transcript
 declaration selects its own session) starts a new one and records a
 `native-continue-unavailable` warning; later relaunches do not try that session again. Only a
 mission step with `fresh-context` starts an agent on a new session on purpose. `--timeout 2m` changes the default ten-minute
-wait; a failure or timeout explains why the agent is not running again. `fractal agents stop
+wait; a failure or timeout explains why the agent is not running again. `st agents stop
 agent/example/worker --as person/ada` stops an agent until you apply its file again. It ends every
 process the agent started, including builds and tests that outlived the harness, on hosts with a
 systemd user manager; [Stopping a session](st3/priority.md#stopping-a-session) says what
 other hosts miss. A mission agent you stop stays stopped while its run's generation lasts, across
-daemon restarts, and `fractal agents start` starts it again on its run's own declaration, creating no
+daemon restarts, and `st agents start` starts it again on its run's own declaration, creating no
 other agent.
 
-`fractal agents suspend agent/example/worker --as person/ada` stops a quiet agent and keeps its harness's
-own session; `fractal agents resume agent/example/worker --as person/ada` brings the agent back on that
+`st agents suspend agent/example/worker --as person/ada` stops a quiet agent and keeps its harness's
+own session; `st agents resume agent/example/worker --as person/ada` brings the agent back on that
 same session and checks it. An agent suspends only when it is idle, with no pending question,
 claimed step, or running subagent. A suspended agent stays declared, is not restarted, and keeps
 its mail until it resumes. [Suspending an agent](st3/suspend.md) has the details.
@@ -478,7 +484,7 @@ crash-loop hold. The Agent API uses this effective label; clearing it restores `
 The label must be non-empty. Like declaring an agent in free mode, a person or an agent may rename
 any agent. A bound harness must act as itself, and rename preserves the original declaring actor.
 
-[`examples/st3/agents`](../examples/st3/agents) has an agent file for each harness.
+[`examples/fractal/agents`](../examples/fractal/agents) has an agent file for each harness.
 
 Ordinary messages are `silent` or `wake` (the default for every sender and agent). Silent mail stays unread without waking; each real wake offers at most eight, with older mail available on demand. There is no per-agent wake policy or inferred question type. See [silent messages](st3/silent-messages.md).
 
@@ -486,7 +492,7 @@ Ordinary messages are `silent` or `wake` (the default for every sender and agent
 
 Starts run on two dedicated launch workers, with one outstanding operation per agent. A blocked launch retains its slot; revocation does not free it until the backend call returns. Other reconciliation, physical stops and safety checks continue. When both workers are occupied, another start remains durably queued and completion wakes its admission.
 
-`fractal agents show` displays `START` with the pending operation ID and queued, running, unknown, completed or revoked phase. `START JOBS` counts this owner's running launch calls and revoked calls still running. `START OPEN` counts unresolved operations, including revoked operations whose producer or runtime closure remains unverified after their launch call returned. These detail fields are local to the runtime owner. Revoked means authority was withdrawn; it does not mean the producer or runtime has ended. No launch input or environment is exposed in this view.
+`st agents show` displays `START` with the pending operation ID and queued, running, unknown, completed or revoked phase. `START JOBS` counts this owner's running launch calls and revoked calls still running. `START OPEN` counts unresolved operations, including revoked operations whose producer or runtime closure remains unverified after their launch call returned. These detail fields are local to the runtime owner. Revoked means authority was withdrawn; it does not mean the producer or runtime has ended. No launch input or environment is exposed in this view.
 
 Stop requests revoke pending starts before physical control. An absent observation does not establish a completed stop while a launch remains unresolved. A stale or revoked completion cannot write a start-success or starting observation. If a revoked runtime publishes later, cleanup requires its recorded operation tag and exact incarnation; missing or conflicting provenance leaves the operation unresolved and raises a diagnostic. Same-name replacement identity never authorizes that cleanup. A successful native PTY stop supplies positive retirement proof only after its generation-fenced process tree and work scope have ended. The writer binds that proof to the original operation, resulting incarnation and exact terminate request/result receipts before releasing admission; it does not depend on a live PID remaining in the exited registry entry.
 
@@ -518,7 +524,7 @@ The version-19 roll is forward-only. Operations' routine pre-roll backup remains
 
 Before either a requested pre-upgrade rollback cut or an emergency restoration capture:
 
-1. Record the member's exact binary SHA, resolved roots and a reviewed, explicit JSON array of owned runtime IDs. On that owner's daemon, run `fractal agents ls --all --json`, follow every returned cursor with `--cursor`, and retain all pages. Use each local agent's runtime ID, plus the exact runtime IDs of operations being closed and declared exec runtimes from the owner inventory. The roster is the latest publication, not a synchronous inventory: after startup it may be unavailable and after a write it may lag. A same-host receipt cut fences only graph publication, not the completeness of the service/process inventory. Historical agent rows are not proof of live writers. Supplement this with Operations' service/process inventory so an undeclared but live producer/runtime cannot be omitted. An unlisted live writer makes the capture inconsistent and prohibits swap-back. Resolve every unknown producer and runtime; an incomplete inventory prohibits swap-back. Do not enumerate or copy the exec/PTY trees to construct this list.
+1. Record the member's exact binary SHA, resolved roots and a reviewed, explicit JSON array of owned runtime IDs. On that owner's daemon, run `st agents ls --all --json`, follow every returned cursor with `--cursor`, and retain all pages. Use each local agent's runtime ID, plus the exact runtime IDs of operations being closed and declared exec runtimes from the owner inventory. The roster is the latest publication, not a synchronous inventory: after startup it may be unavailable and after a write it may lag. A same-host receipt cut fences only graph publication, not the completeness of the service/process inventory. Historical agent rows are not proof of live writers. Supplement this with Operations' service/process inventory so an undeclared but live producer/runtime cannot be omitted. An unlisted live writer makes the capture inconsistent and prohibits swap-back. Resolve every unknown producer and runtime; an incomplete inventory prohibits swap-back. Do not enumerate or copy the exec/PTY trees to construct this list.
 2. Withdraw launch authority, stop each owned runtime through ordinary incarnation-fenced controls, and obtain the per-operation evidence below while the daemon can still reconcile. `START JOBS=0` and `START OPEN=0` are necessary checks for modern operations, not closure proof. If a producer or runtime cannot be proved closed, preserve the store and roll forward. Stopping the daemon or losing a PID does not supply that proof.
 3. Quiesce the daemon under its service manager only after closure is established. Keep it stopped and prevent any listed runtime/producer from writing its records throughout the capture. If a writer cannot be quiesced, do not take a purportedly consistent capture.
 4. Take a SQLite backup and copy only the named generation/scope files into one new private archive, recording each listed file's presence or absence. The following Python 3.9-compatible recipe uses point lookups, not directory walks. A SQLite backup includes committed WAL contents; copying `claims.sqlite3` alone while a WAL exists is insufficient. The archive does not contain live sockets, processes or kernel locks.

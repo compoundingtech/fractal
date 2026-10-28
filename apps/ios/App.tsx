@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
-import { Linking, View, useColorScheme } from 'react-native';
+import { Linking, View } from 'react-native';
 import { DarkTheme, DefaultTheme, ThemeProvider, NavigationContainer, getFocusedRouteNameFromRoute, type RouteProp } from '@react-navigation/native';
 import { createNativeStackNavigator, type NativeStackNavigationOptions } from '@react-navigation/native-stack';
 import { createNativeBottomTabNavigator } from '@react-navigation/bottom-tabs/unstable';
@@ -14,7 +14,8 @@ import { openAlerts } from '@fractal/views';
 import { FULL_SCREEN, navigationRef, ROOTS, type StackParams, type TabParams } from './navigation';
 import { StoreProvider, useStore } from './store';
 import { parseDevLink, tabLabel, tabNamed, type Tab } from './tabs';
-import { systemColors, theme } from './theme';
+import { lightTheme, systemColors, theme, type Theme } from './theme';
+import { useScheme } from './ui';
 import { AgentsScreen, HistoryScreen } from './screens/Agents';
 import { ConversationScreen } from './screens/Conversation';
 import { FleetScreen, PairScreen } from './screens/Fleet';
@@ -35,15 +36,18 @@ import { DiagnosticsBoundary } from './DiagnosticsBoundary';
 // The chrome is native: one UITabBarController (react-native-screens' tabs, through
 // @react-navigation/bottom-tabs' native navigator) holding a UINavigationController per tab
 // (@react-navigation/native-stack). It keeps the system look and fonts. Everything inside a
-// screen is React, drawn like stui: IBM Plex Mono on the Mocha palette.
+// screen is React, drawn like the Fractal terminal UI: IBM Plex Mono on the Mocha palette,
+// or on its light counterpart where a screen follows the system appearance.
 
 const Tabs = createNativeBottomTabNavigator<TabParams>();
 const Stack = createNativeStackNavigator<StackParams>();
 
-const navigationTheme = {
-  ...DarkTheme,
-  colors: { ...DarkTheme.colors, primary: theme.accent, background: theme.base, card: theme.mantle, text: theme.text, border: theme.surface0, notification: theme.person },
-};
+function navigationFor(palette: Theme, base: typeof DarkTheme) {
+  return { ...base, colors: { ...base.colors, primary: palette.accent, background: palette.base, card: palette.mantle, text: palette.text, border: palette.surface0, notification: palette.person } };
+}
+// The Fractal terminal UI palette as the navigation theme: Mocha everywhere, and light where a screen follows the system appearance.
+const fractalNavigation = { dark: navigationFor(theme, DarkTheme), light: navigationFor(lightTheme, DefaultTheme) };
+const navigationTheme = fractalNavigation.dark;
 
 const ICONS: Record<Tab, string> = { Now: 'bell', Resources: 'folder', Fleet: 'server.rack', Spaces: 'app' };
 
@@ -59,15 +63,26 @@ const stackOptions: NativeStackNavigationOptions = {
 };
 
 function TabStack({ tab }: { tab: Tab }) {
-  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const scheme = useScheme();
   const colors = systemColors[scheme];
+  const statusBarStyle = scheme === 'dark' ? 'light' : 'dark';
   const systemOptions: NativeStackNavigationOptions = {
     headerTintColor: colors.action,
     headerStyle: { backgroundColor: colors.background },
     headerTitleStyle: { color: colors.text },
     headerLargeTitleStyle: { color: colors.text },
     contentStyle: { backgroundColor: colors.background },
-    statusBarStyle: scheme === 'dark' ? 'light' : 'dark',
+    statusBarStyle,
+  };
+  // A screen drawn in the Fractal terminal UI palette that follows the system appearance (SchemeScreen).
+  const palette = scheme === 'dark' ? theme : lightTheme;
+  const schemeOptions: NativeStackNavigationOptions = {
+    headerTintColor: palette.accent,
+    headerStyle: { backgroundColor: palette.mantle },
+    headerTitleStyle: { color: palette.text },
+    headerLargeTitleStyle: { color: palette.text },
+    contentStyle: { backgroundColor: palette.base },
+    statusBarStyle,
   };
   return <Stack.Navigator screenOptions={stackOptions}>
     {tab === 'Now' ? <Stack.Screen name="NowRoot" component={NowScreen} options={{ ...systemOptions, title: 'Now' }} /> :
@@ -81,7 +96,7 @@ function TabStack({ tab }: { tab: Tab }) {
     <Stack.Screen name="Documents" component={DocumentsScreen} options={{ title: 'Documents' }} />
     <Stack.Screen name="Document" component={DocumentScreen} options={{ title: 'Document' }} />
     <Stack.Screen name="Space" component={SpaceScreen} options={{ title: 'Space' }} />
-    <Stack.Screen name="Conversation" component={ConversationScreen} options={{ title: 'Conversation' }} />
+    <Stack.Screen name="Conversation" component={ConversationScreen} options={{ ...schemeOptions, title: 'Conversation' }} />
     <Stack.Screen name="Terminal" component={TerminalScreen} options={{ title: 'Terminal', contentStyle: { backgroundColor: theme.crust } }} />
     <Stack.Screen name="Mission" component={MissionScreen} options={{ title: 'Mission' }} />
     <Stack.Screen name="Attention" component={AttentionScreen} options={{ ...systemOptions, title: 'Alert' }} />
@@ -117,7 +132,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
   const homeCount = openAlerts(data.attention, caps?.session_actor).length;
   const paired = !!url && !!credential;
   const shownName = shownRoute?.name ?? ROOTS[order[0]];
-  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
+  const scheme = useScheme();
   const colors = systemColors[scheme];
   const target = (shownRoute?.params as { target?: string } | undefined)?.target;
   const shownMask = qualityVisibility(shownName, paired, target, data.agents, data.sessions);
@@ -167,15 +182,16 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
   // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   const initial = (__DEV__ ? tabNamed(process.env.EXPO_PUBLIC_FRACTAL_TEST_TAB ?? process.env.EXPO_PUBLIC_ST3_TEST_TAB) : null) ?? order[0];
   const systemSurface = shownName === 'NowRoot' || shownName === 'Attention';
+  const schemeSurface = shownName === 'Conversation';
   return <ThemeProvider value={systemSurface ? {
     ...(scheme === 'dark' ? DarkTheme : DefaultTheme),
     colors: { ...(scheme === 'dark' ? DarkTheme.colors : DefaultTheme.colors), primary: colors.action, background: colors.background, card: colors.grouped, text: colors.text, border: colors.separator, notification: colors.attention },
-  } : navigationTheme}><Tabs.Navigator
+  } : schemeSurface ? fractalNavigation[scheme] : navigationTheme}><Tabs.Navigator
     initialRouteName={initial}
     screenOptions={({ route }) => ({
       headerShown: false,
       tabBarActiveTintColor: systemSurface ? colors.action : theme.accent,
-      // Spaces: one rounded rect, as stui's ▢.
+      // Spaces: one rounded rect, as the Fractal terminal UI's ▢.
       tabBarIcon: { type: 'sfSymbol', name: ICONS[route.name as Tab] as never },
       tabBarStyle: { display: tabBarHidden(route) ? 'none' : 'flex' },
     })}

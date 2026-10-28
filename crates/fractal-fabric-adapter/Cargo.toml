@@ -2,7 +2,7 @@
 name = "fractal-fabric-adapter"
 version.workspace = true
 edition = "2024"
-description = "External local st fleet membership to Fabric runtime-peers adapter"
+description = "External local Fractal fleet membership to Fabric runtime-peers adapter"
 license = "MIT"
 
 [dependencies]

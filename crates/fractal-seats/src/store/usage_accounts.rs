@@ -92,7 +92,12 @@ impl<'a> Attribution<'a> {
             account.driver() == Some(driver.as_str()) && account.login_for(host).is_some()
         });
         let account = owners.next()?;
-        owners.next().is_none().then_some(account)
+        if owners.next().is_none() {
+            return Some(account);
+        }
+        // A harness that reads a key file with two accounts on this host: a seat that names no
+        // other file reads the default one, and one that names another recorded its account.
+        crate::accounts::default_key_file_account(self.accounts, &driver, host)
     }
 
     fn attribute(&mut self, connection: &Connection, rows: &mut [Value]) {
@@ -109,6 +114,16 @@ impl<'a> Attribution<'a> {
             }
         }
     }
+}
+
+/// The rows of the month so far. Credits need each series at the month's two ends and nothing
+/// between, so this seeks two boundaries, not the daily ones the planning estimate reads.
+fn month_rows(store: &Store, month_start: u64, until_ms: u64) -> Result<Vec<Value>> {
+    store.read_snapshot(|_| {
+        let boundaries = BTreeSet::from([month_start, until_ms]);
+        let rows = super::usage_period::boundary_rows(&store.readers.get(), &boundaries)?;
+        Ok(Store::usage_period_data_from_rows(rows.into_iter().map(Ok), month_start, until_ms)?.0)
+    })
 }
 
 /// The usage of a period against the declared accounts: every row and limit, and each
@@ -128,7 +143,7 @@ pub(super) fn attributed_usage(
     let month_start = month_start_ms(until_ms);
     let mut month_rows = if declared.iter().any(|account| account.monthly_credits_usd.is_some())
     {
-        let (mut rows, _) = store.usage_period_data(month_start, until_ms)?;
+        let mut rows = month_rows(store, month_start, until_ms)?;
         attribution.attribute(&connection, &mut rows);
         rows
     } else {
@@ -192,10 +207,22 @@ agent "keyed" { workspace "/tmp"; harness "omp" {}; }
 "#;
 
     fn spend(store: &Store, seat: &str, driver: &str, account: Option<&str>, model: &str, id: &str) {
+        spend_in(store, seat, driver, account, model, id, "inc-one");
+    }
+
+    fn spend_in(
+        store: &Store,
+        seat: &str,
+        driver: &str,
+        account: Option<&str>,
+        model: &str,
+        id: &str,
+        incarnation: &str,
+    ) {
         let mut fields = serde_json::from_value::<BTreeMap<String, Value>>(json!({
             "operation": "append", "entry_id": id, "source_id": id, "sequence": 1, "revision": 1,
             "role": "system", "entry_type": "usage", "final": true, "driver": driver,
-            "incarnation_id": "inc-one", "observed_at_unix_ms": now_ms() as u64,
+            "incarnation_id": incarnation, "observed_at_unix_ms": now_ms() as u64,
             "body": {"semantics": "response", "model": model, "input_tokens": 1_000_000, "output_tokens": 1000, "total_tokens": 1_001_000}
         }))
         .unwrap();
@@ -252,6 +279,91 @@ agent "keyed" { workspace "/tmp"; harness "omp" {}; }
         assert_eq!(key["credits"]["budget_microusd"], 200_000_000);
         assert!(key["credits"]["used_microusd"].as_u64().unwrap() > 0, "{key}");
         assert!(usage.accounts.iter().filter(|a| a["name"] != "ada/key").all(|a| a.get("credits").is_none()));
+    }
+
+    #[test]
+    fn two_key_accounts_on_a_host_read_an_unlabelled_omp_row_as_the_default_key() {
+        const KEYS: &str = r#"version 2
+account "ada/key" { provider "anthropic"; owner "person/ada"; auth-type "api-key"; harness "omp"; monthly-credits-usd 200; login "~/.config/anthropic/api-key" host="alder"; }
+account "ada/key-two" { provider "anthropic"; owner "person/ada"; auth-type "api-key"; harness "omp"; login "~/.config/anthropic/api-key-2" host="alder"; login "~/.config/anthropic/api-key-2" host="birch"; }
+agent "keyed" { workspace "/tmp"; harness "omp" {}; }
+"#;
+        let store = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_internal_intent(KEYS, "alder").unwrap();
+        store.apply_internal(&intent, "declare-keys").unwrap();
+        // The seat on this host named no key file, so it read the default key.
+        spend(&store, "agent/alder.keyed", "omp", None, "claude-sonnet-5-5", "k1");
+        let usage = store.attributed_usage(0, now_ms() as u64 + 1).unwrap();
+        let row = usage.rows.iter().find(|row| row["agent"] == "agent/alder.keyed").unwrap();
+        assert_eq!(row["account_ref"], "ada/key", "{row}");
+        // Only the second key has a login on the other host.
+        let mut other = row.clone();
+        other["host"] = json!("birch");
+        other["account"] = json!("");
+        other.as_object_mut().unwrap().remove("account_ref");
+        let mut rows = [other];
+        let connection = store.readers.get();
+        let declared = declared_accounts_at(&connection).unwrap();
+        Attribution::new(&declared).attribute(&connection, &mut rows);
+        assert_eq!(rows[0]["account_ref"], "ada/key-two", "{}", rows[0]);
+    }
+
+    #[test]
+    fn the_two_ended_month_read_returns_the_rows_the_daily_read_does() {
+        let store = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_internal_intent(DECLARATIONS, "alder").unwrap();
+        store.apply_internal(&intent, "declare-accounts").unwrap();
+        spend(&store, "agent/alder.keyed", "omp", None, "claude-sonnet-5-5", "m1");
+        spend(&store, "agent/alder.other", "omp", None, "claude-sonnet-5-5", "m2");
+
+        let until = now_ms() as u64 + 1;
+        let start = month_start_ms(until);
+        let key = |rows: &[Value]| {
+            let mut keyed = rows
+                .iter()
+                .map(|row| (row["agent"].as_str().unwrap().to_owned(), row["cost_microusd"].clone(), row["input_tokens"].clone()))
+                .collect::<Vec<_>>();
+            keyed.sort_by(|a, b| a.0.cmp(&b.0));
+            keyed
+        };
+        let (daily, _) = store.usage_period_data(start, until).unwrap();
+        let ends = month_rows(&store, start, until).unwrap();
+        assert_eq!(key(&ends).len(), 2, "{ends:?}");
+        assert_eq!(key(&ends), key(&daily));
+    }
+
+    #[test]
+    fn a_counter_that_restarts_mid_month_is_read_whole_by_the_two_ended_read() {
+        let store = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_internal_intent(DECLARATIONS, "alder").unwrap();
+        store.apply_internal(&intent, "declare-accounts").unwrap();
+        let model = "claude-sonnet-5-5";
+        // One incarnation spends twice, then the seat starts over as a new incarnation whose
+        // counter begins at zero, and spends again. Each incarnation is its own series.
+        spend_in(&store, "agent/alder.keyed", "omp", None, model, "c1", "inc-one");
+        spend_in(&store, "agent/alder.keyed", "omp", None, model, "c2", "inc-one");
+        spend_in(&store, "agent/alder.keyed", "omp", None, model, "c3", "inc-two");
+
+        let until = now_ms() as u64 + 1;
+        let start = month_start_ms(until);
+        let totals = |rows: &[Value]| {
+            let mut totals = rows
+                .iter()
+                .map(|row| (row["agent"].as_str().unwrap().to_owned(), row["total_tokens"].as_u64().unwrap()))
+                .collect::<Vec<_>>();
+            totals.sort();
+            totals
+        };
+        let (daily, _) = store.usage_period_data(start, until).unwrap();
+        let ends = month_rows(&store, start, until).unwrap();
+        // The first incarnation's two spends and the second's one: nothing before the restart is
+        // lost and nothing after it is counted twice.
+        assert_eq!(
+            totals(&ends),
+            [("agent/alder.keyed".to_owned(), 1_001_000), ("agent/alder.keyed".to_owned(), 2_002_000)],
+            "{ends:?}"
+        );
+        assert_eq!(totals(&ends), totals(&daily));
     }
 
     #[test]

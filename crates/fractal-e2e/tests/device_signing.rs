@@ -250,7 +250,7 @@ async fn pinned_read_only_pairing_verifies_the_root_without_enrolling_a_signing_
     device_name: "Pinned display".into(),
     person_id: PERSON.into(),
     full_control: None,
-    scopes: Some(vec!["read.projections".into()]), })
+    scopes: Some(vec!["read.projections".into()]), fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -330,7 +330,7 @@ async fn a_pre_pin_cli_completes_against_the_current_daemon() {
         device_name: "Older CLI".into(),
         person_id: PERSON.into(),
         full_control: signs.then_some(true),
-        scopes: None, })
+        scopes: None, fabric_gateway: None, })
             .await
             .unwrap()
             .value;
@@ -405,7 +405,7 @@ async fn pre_pin_response_shapes_work_for_pinned_messages_and_explicitly_unpinne
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
     let profile = root.path().join("client/devices.json");
     for (signs, unpinned) in [(true, false), (false, false), (false, true)] {
-        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Earlier member".into(), person_id: PERSON.into(), full_control: signs.then_some(true), scopes: None }).await.unwrap().value;
+        let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Earlier member".into(), person_id: PERSON.into(), full_control: signs.then_some(true), scopes: None, fabric_gateway: None }).await.unwrap().value;
         let previous = std::fs::read(&profile).ok();
         let key = SigningKey::generate(KeyAlgorithm::P256).unwrap();
         let result = complete_with_options(&profile, &base, &challenge.pairing_id, &challenge.code, key,
@@ -572,7 +572,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
             device_name: "CLI device".into(),
             person_id: PERSON.into(),
             full_control: Some(true),
-            scopes: None, })
+            scopes: None, fabric_gateway: None, })
                 .await
                 .unwrap()
                 .value;
@@ -784,7 +784,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         device_name: "Preflight device".into(),
         person_id: PERSON.into(),
         full_control: Some(true),
-        scopes: None, })
+        scopes: None, fabric_gateway: None, })
             .await
             .unwrap()
             .value;
@@ -858,7 +858,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         device_name: "Proxy regression".into(),
         person_id: PERSON.into(),
         full_control: Some(true),
-        scopes: None, })
+        scopes: None, fabric_gateway: None, })
             .await
             .unwrap()
             .value;
@@ -984,7 +984,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
     device_name: "Unwritable device".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -1074,7 +1074,7 @@ async fn shared_completion_persists_both_key_types_and_preserves_a_working_devic
         "read.projections".into(),
         "read.glasses".into(),
         "terminal.read".into(),
-    ]), })
+    ]), fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -1149,6 +1149,25 @@ async fn anonymous_pairing_advertisement_is_static_and_never_notes_presence() {
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert_eq!(response.json::<Value>().await.unwrap(), expected);
         assert_eq!(state.store.index().unwrap(), before);
+        // A client that says it understands the Fabric grant is told the member offers it; the
+        // answer is as static as the other.
+        let asked = http
+            .get(format!("{base}/v1/client/capabilities?accepts=fabric-gateway-grant"))
+            .header("x-st3-client", "anonymous-pairing-probe")
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(
+            asked["capabilities"],
+            json!([
+                {"id": "device-key-proofs", "version": 1, "state": "granted"},
+                {"id": "fabric-gateway-grant", "version": 1, "state": "granted"},
+            ])
+        );
+        assert_eq!(state.store.index().unwrap(), before);
         let presence = serde_json::to_string(&local.clients_list().await.unwrap()).unwrap();
         assert!(!presence.contains("anonymous-pairing-probe"));
     }
@@ -1185,7 +1204,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
     device_name: "Failed first attempt".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -1211,6 +1230,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
         code: challenge.code.clone(),
         device_public_key: attacker.clone(),
         key_storage: Some("software".into()),
+        fabric_node_id: None,
     },)
         .await;
     assert!(refused.is_err());
@@ -1265,6 +1285,7 @@ async fn refused_attacker_key_is_revoked_and_code_remains_usable_for_a_fresh_key
         code: challenge.code.clone(),
         device_public_key: attacker.clone(),
         key_storage: Some("software".into()),
+        fabric_node_id: None,
     },)
         .await
         .unwrap_err();
@@ -1315,7 +1336,7 @@ async fn missing_sealed_root_proof_does_not_consume_code_or_create_a_bearer() {
     device_name: "Historical proof".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -1406,7 +1427,7 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
     device_name: "Concurrent device".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -1421,6 +1442,7 @@ async fn simultaneous_completions_consume_once_and_enroll_only_the_winning_key()
         code: challenge.code.clone(),
         device_public_key: public,
         key_storage: Some("software".into()),
+        fabric_node_id: None,
     };
     let first_request = request(Device::new().public());
     let second_request = request(Device::new().public());
@@ -1479,22 +1501,19 @@ fn state_on(root: &Path, store: Store) -> AppState {
             smallclaims::fleet::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
-    AppState {
-        owning_person: None,
-        store: Arc::new(store),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "signing-node".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(store),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "signing-node".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: root.join("unused-pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 async fn wait_for_socket(socket: &Path) {
@@ -1567,7 +1586,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
     device_name: "Avery's phone".into(),
     person_id: PERSON.into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap();
     let paired = Client::fabric_pairing(&base).pairing_complete_person(&challenge.value.pairing_id,
@@ -1576,6 +1595,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
         code: challenge.value.code,
         device_public_key: phone.public(),
         key_storage: Some("secure-enclave".into()),
+        fabric_node_id: None,
     },)
         .await
         .unwrap()
@@ -1602,7 +1622,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
     device_name: "Hall display".into(),
     person_id: PERSON.into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap();
     let display = Client::fabric_pairing(&base).pairing_complete_person(&limited.value.pairing_id,
@@ -1611,6 +1631,7 @@ async fn a_message_signed_on_a_device_is_verified_and_attributed_to_its_person()
         code: limited.value.code,
         device_public_key: viewer.public(),
         key_storage: None,
+        fabric_node_id: None,
     },)
         .await
         .unwrap()
@@ -1994,4 +2015,136 @@ fn the_shared_vectors_match_the_bytes_the_daemon_verifies() {
             "{name}: the fixture's signature does not verify"
         );
     }
+}
+
+/// A pairing grants the device the client gateway over Fabric only when the person asked for it
+/// as they made the code, and revoking removes only a grant that pairing made.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pairing_grants_the_gateway_over_fabric_only_when_its_code_asked_for_it() {
+    use std::os::unix::fs::PermissionsExt as _;
+    const ASKED: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const NOT_ASKED: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let program = root.path().join("fabric");
+    let calls = root.path().join("fabric-calls");
+    let peers = json!({"peers": [{"node": ASKED, "name": "st-device-0123456789ab", "allow": ["demo-client/0"]}]});
+    std::fs::write(
+        &program,
+        format!("#!/bin/sh\necho \"$@\" >> '{}'\ncase \"$1\" in peers) echo '{peers}';; esac\n", calls.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fractal_daemon::fabric_gateway::GatewayExposure { service: "demo-client/0".into(), fabric: program }
+        .save(root.path())
+        .unwrap();
+    let recorded = || std::fs::read_to_string(&calls).unwrap_or_default();
+
+    let socket = root.path().join("st3.sock");
+    let served = socket.clone();
+    let app = fractal_daemon::api::router(state.clone());
+    let local_server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&served, app).await });
+    wait_for_socket(&socket).await;
+    let local = Client::unix_as(&socket, PERSON);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let gateway = fractal_daemon::api::fabric_router(state.clone());
+    let http_server = tokio::spawn(async move { axum::serve(listener, gateway).await });
+
+    let pair = |name: &'static str, fabric_gateway: Option<bool>, node: &'static str| {
+        let (local, base) = (local.clone(), base.clone());
+        async move {
+            let challenge = local
+                .pairing_begin_person(&PersonPairingBegin {
+                    api_version: fractal_client::API_VERSION.into(),
+                    device_name: name.into(),
+                    person_id: PERSON.into(),
+                    full_control: None,
+                    scopes: None,
+                    fabric_gateway,
+                })
+                .await
+                .unwrap();
+            Client::fabric_pairing(&base)
+                .pairing_complete_person(
+                    &challenge.value.pairing_id,
+                    &PairingComplete {
+                        api_version: fractal_client::API_VERSION.into(),
+                        code: challenge.value.code,
+                        device_public_key: Device::new().public(),
+                        key_storage: None,
+                        fabric_node_id: Some(node.into()),
+                    },
+                )
+                .await
+                .unwrap()
+                .value
+        }
+    };
+
+    // Asked for: granted, inbound-only, that one service.
+    let asked = pair("Asked phone", Some(true), ASKED).await;
+    assert_eq!(asked.fabric_grant.as_ref().unwrap()["state"], "granted");
+    assert_eq!(
+        recorded(),
+        format!("peers --json\nadd {ASKED} st-device-0123456789ab --inbound-only --allow demo-client/0\n")
+    );
+
+    // Not asked for, whether the flag is absent or false: the NodeID is not even kept, and Fabric
+    // is not touched.
+    for (name, flag) in [("Plain phone", None), ("Declined phone", Some(false))] {
+        let before = recorded();
+        let paired = pair(name, flag, NOT_ASKED).await;
+        assert_eq!(paired.fabric_grant.as_ref().unwrap()["state"], "not-requested");
+        assert_eq!(recorded(), before, "{name}: pairing without the ask must not touch Fabric");
+        let completed = state
+            .store
+            .claims_for_kind_at("custom.client.pairing-completed", None, true, 100)
+            .unwrap()
+            .claims;
+        assert!(
+            completed.iter().all(|claim| claim.body.pointer("/fields/fabric_node_id").and_then(Value::as_str) != Some(NOT_ASKED)),
+            "{name}: a NodeID that was not granted is not recorded"
+        );
+        let snapshot = local.capabilities().await.unwrap().snapshot.id;
+        local
+            .pairing_revoke(
+                &format!("action/revoke-{name}"),
+                &format!("revoke-{}", name.replace(' ', "-")),
+                Fence { snapshot_id: snapshot, ..Fence::default() },
+                fractal_client::TargetParameters {
+                    target_id: paired.device_id.clone(),
+                    reason: None,
+                    evidence: Vec::new(),
+                    summary: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(recorded(), before, "{name}: revoking a pairing with no grant must not touch Fabric");
+    }
+
+    // Revoking the one that was granted removes exactly that grant.
+    let snapshot = local.capabilities().await.unwrap().snapshot.id;
+    let before = recorded();
+    local
+        .pairing_revoke(
+            "action/revoke-asked-phone",
+            "revoke-asked-phone",
+            Fence { snapshot_id: snapshot, ..Fence::default() },
+            fractal_client::TargetParameters {
+                target_id: asked.device_id.clone(),
+                reason: None,
+                evidence: Vec::new(),
+                summary: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        recorded().strip_prefix(&before).unwrap(),
+        "peers --json\nremove st-device-0123456789ab\n"
+    );
+    local_server.abort();
+    http_server.abort();
 }
