@@ -21,7 +21,7 @@ fn executable(path: &Path, source: &str) {
 fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::path::PathBuf) {
     let socket = root.join("daemon.sock");
     let log = std::fs::File::create(root.join("daemon.log")).unwrap();
-    let binary = test_bin!("st3-fixture");
+    let binary = test_bin!("fractal-fixture");
     let mut service = Service(
         fractal_daemon::test_support::command(binary)
             .env_clear()
@@ -55,7 +55,7 @@ fn start_service(root: &Path, home: &Path, state_home: &Path) -> (Service, std::
 }
 
 fn doctor_report(home: &Path, socket: &Path) -> serde_json::Value {
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env_clear()
         .env("HOME", home)
         .arg("--endpoint")
@@ -95,7 +95,7 @@ mission "hermetic" state="ready" {
         .env("ST_AGENT", "agent/fixture/host")
         .args(["--noprofile", "--norc", "-c", "\"$@\"; status=$?; exit \"$status\"", "fixture-parent"])
         .arg(env).args(["-u", "ST_AGENT"])
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg("--endpoint").arg(&socket)
         .args(["apply"]).arg(source)
         .args(["--as", "person/pat", "--no-gate-check"])
@@ -129,7 +129,7 @@ fn client_without_runtime_dir_reaches_daemon_with_different_socket() {
     assert!(state_socket.as_os_str().len() > 108);
     assert_eq!(std::fs::read_link(&state_socket).unwrap(), socket);
 
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env_clear()
         .env("HOME", &home)
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -409,7 +409,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
         }
     });
     for expected_code in [0, 3] {
-        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .env_clear().env("HOME", &home).env("PATH", &bin)
             .env("GH_TOKEN", "fixture-local-credential").env("GITHUB_TOKEN", "fixture-secondary")
             .env("ST_SEKRETS_SOCKET", &socket).env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -436,7 +436,7 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
         let agent = identity.is_some();
         for json in [false, true] {
             let mut command =
-                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
             command
                 .env_clear()
                 .env("HOME", root.path())
@@ -498,7 +498,7 @@ fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
     )
     .unwrap();
     let run = || {
-        fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .env_clear()
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -538,7 +538,7 @@ fn developer_doctor_is_explicit_local_and_never_runs_cargo_or_gh() {
 
 #[test]
 fn developer_doctor_cannot_be_combined_with_performance() {
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .args(["doctor", "--developer", "--performance"])
         .output()
         .unwrap();
