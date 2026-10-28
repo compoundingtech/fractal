@@ -437,12 +437,27 @@ def run_base_copy(argv):
     os.execve(sys.executable, [sys.executable, str(path), *argv], dict(os.environ, **{REEXEC: commit}))
 
 
+FETCH_LOCK_TRIES, FETCH_LOCK_BACKOFF = 3, 2.0  # seconds before the second try, twice that before the third
+
+
 def fetch_base(base):
     """The base's commit at its current tip: a remote-tracking base (origin/main) is fetched first, since main moves; the lag and the
-    policy are read at that tip."""
+    policy are read at that tip. A shared clone has many worktrees and seats fetching at once, and git refuses to update a remote-tracking
+    ref another fetch moved under it ("cannot lock ref 'refs/remotes/origin/main': is at X but expected Y"): that fetch is tried again,
+    up to FETCH_LOCK_TRIES times with a short backoff, as the race is no failure of the run's (2026-10-27: one ended a run after its
+    44-minute wait for a pool tree). Any other fetch error fails at once."""
     remote, _, branch = base.partition('/')
     if branch:
-        git('fetch', '-q', remote, branch)
+        for attempt in range(1, FETCH_LOCK_TRIES + 1):
+            done = git('fetch', '-q', remote, branch, check=False)
+            if done.returncode == 0:
+                break
+            error = done.stderr.decode(errors='replace').strip()
+            if 'cannot lock ref' not in error or attempt == FETCH_LOCK_TRIES:
+                raise Failure(f'git fetch failed: {error[-400:]}')
+            print(f'fractal-test: another fetch moved {base} at the same moment; fetching again ({attempt + 1} of {FETCH_LOCK_TRIES})',
+                  file=sys.stderr, flush=True)
+            time.sleep(FETCH_LOCK_BACKOFF * attempt)
     return text(git('rev-parse', '--verify', '-q', base + '^{commit}'))
 
 
