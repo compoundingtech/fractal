@@ -8981,6 +8981,10 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
 /// stopped working (a turn's last response can arrive after its idle report). Otherwise it
 /// stays local and pending until one of those holds or the harness stops working.
 ///
+/// A reading equal to the slot's last replicated one never replicates again: it stays local and
+/// leaves nothing pending, since the replicated claim already says the same. Seats at rest
+/// re-sent an unchanged context occupancy, and its five-minute interval replicated each copy.
+///
 /// Responses keep arriving while a harness reports idle: its subagents and background tasks
 /// answer while the main loop waits. Replicating each of them at once wrote one claim every
 /// few seconds per busy seat, so after the turn's tally they wait for the interval too.
@@ -9014,27 +9018,35 @@ fn publish_due_usage_tx(
                 .map_or(claim.accepted_at_unix_ms, u128::from),
         ),
     };
-    let due = match &last {
-        None => true,
+    let (due, repeat) = match &last {
+        None => (true, false),
         Some((published_at, published_fields)) => {
-            let published: BTreeMap<String, Value> =
+            let mut published: BTreeMap<String, Value> =
                 serde_json::from_str(published_fields).unwrap_or_default();
+            // The publication may have added the native binding the reading lacks.
+            if !input.fields.contains_key("native_session_id") {
+                published.remove("native_session_id");
+            }
             let published_at = (*published_at).max(0) as u128;
-            resting_since.is_some_and(|since| published_at < since)
+            let repeat = published == input.fields;
+            let due = resting_since.is_some_and(|since| published_at < since)
                 || now.saturating_sub(published_at) >= USAGE_PUBLISH_INTERVAL_MS
                 || ["compactions", "model"]
                     .iter()
-                    .any(|name| published.get(*name) != input.fields.get(*name))
+                    .any(|name| published.get(*name) != input.fields.get(*name));
+            (due && !repeat, repeat)
         }
     };
     if !due {
         let local_id = local_observation_position(local)
             .ok_or_else(|| St3Error::new("internal", "a local observation has no position"))?;
+        // A repeat supersedes an older pending reading: the replicated claim is current again.
+        let pending = (!repeat).then_some(local_id as i64);
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h14dfeb90e40a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=?3
                  WHERE subject=?1 AND kind='harness.usage' AND slot=?2",
-                params![input.subject, slot, local_id as i64],
+                params![input.subject, slot, pending],
             )
             .map_err(internal)?;
         return Ok(None);

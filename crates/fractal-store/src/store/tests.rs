@@ -8253,6 +8253,68 @@ fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
     assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
 }
 
+/// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
+/// rest repeated the previous claim exactly, one per five-minute interval. An hour of the same
+/// reading every minute replicates once, and a reading that changes still replicates.
+#[test]
+fn an_unchanged_usage_reading_replicates_once_not_every_interval() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let mut sent = 0;
+    let mut read = |tokens: u64, at: u128| {
+        sent += 1;
+        let mut reading = harness_usage(subject, "context_occupancy", tokens, 0);
+        reading.idempotency_key = Some(format!("reading-{sent}"));
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let tokens = |store: &Store| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+    for tick in 1..=60 {
+        read(10, start + tick * minute);
+    }
+    assert_eq!(tokens(&store), [10], "an hour of the same reading at rest replicates once");
+    read(20, start + 61 * minute);
+    assert_eq!(tokens(&store), [10, 20], "a changed reading past its interval still replicates");
+    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 62, "the local log keeps every reading");
+}
+
+/// A pending reading that a repeat of the replicated one supersedes never replicates: when the turn
+/// ends, the replicated claim is already current.
+#[test]
+fn a_usage_reading_back_at_its_replicated_value_leaves_nothing_pending() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let read = |tokens: u64, key: &str, at: u128| {
+        let mut reading = harness_usage(subject, "context_occupancy", tokens, 0);
+        reading.idempotency_key = Some(key.into());
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let tokens = |store: &Store| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    state("idle", start);
+    read(10, "first", start + minute);
+    read(20, "changed", start + 2 * minute);
+    assert_eq!(tokens(&store), [10], "the change waits for its interval");
+    read(10, "back", start + 3 * minute);
+    state("working", start + 4 * minute);
+    state("idle", start + 5 * minute);
+    assert_eq!(tokens(&store), [10], "the turn's end has nothing newer to replicate");
+}
+
 #[test]
 fn a_system_runtime_action_stays_local_while_a_requested_one_replicates() {
     let store = Store::open_memory("node").unwrap();
