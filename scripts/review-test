@@ -182,6 +182,20 @@ class Review(unittest.TestCase):
         self.assertNotIn("+changed", prompt)
         self.assertIn("served from that record", prompt)
 
+    def test_an_indentation_only_change_is_read_again_not_served_from_the_record(self):
+        self.write("src/c.py", "if ready:\n    first()\n    second()\n")
+        self.commit("add c")
+        done, first = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.write("src/c.py", "if ready:\n  first()\n  second()\n")
+        self.commit("indent c")
+        self.say(answer(answers=[{"finding": "c was re-indented"}]))
+        done, second = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotEqual(first["patch_ids"]["src/c.py"], second["patch_ids"]["src/c.py"])
+        self.assertEqual(second["read"]["record"], ["src/a.txt"])
+        self.assertIn("src/c.py", self.prompts()[1])
+
     def test_a_round_without_answers_after_changes_fails(self):
         self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "r", "fix": "f"}]))
         self.assertEqual(self.review()[0].returncode, 0)

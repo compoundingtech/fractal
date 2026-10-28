@@ -82,13 +82,14 @@ def load_path(name, path):
 
 
 def patch_ids(repo, merge_base, head, paths):
-    """Per-file patch-id of the change's own diff against the merge base."""
+    """Per-file patch-id of the change's own diff against the merge base. --verbatim, not --stable: --stable ignores whitespace, so an
+    indentation-only change (meaningful in Python and YAML) would keep its id and be served from the record unread."""
     ids = {}
     for path in paths:
         diff = subprocess.run(["git", "diff", "--no-color", "--no-renames", f"{merge_base}", head, "--", path], cwd=repo, capture_output=True).stdout
         if not diff:
             continue
-        done = subprocess.run(["git", "patch-id", "--stable"], cwd=repo, input=diff, capture_output=True)
+        done = subprocess.run(["git", "patch-id", "--verbatim"], cwd=repo, input=diff, capture_output=True)
         out = done.stdout.decode().split()
         if out:
             ids[path] = out[0]
