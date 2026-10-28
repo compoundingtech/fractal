@@ -121,7 +121,7 @@ pub const APPEND: &[AppendProjector] = &[
     AppendProjector {
         name: "ordered-membership-flush",
         takes: Takes::Every,
-        project: |transaction, _| ordered_membership::flush(transaction),
+        project: ordered_membership::flush_claim,
     },
 ];
 

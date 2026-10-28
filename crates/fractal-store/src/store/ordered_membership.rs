@@ -49,14 +49,30 @@ pub fn create_schema(connection: &Connection) -> Result<()> {
             let filter = if table == "claims" {
                 families.iter().map(|family| format!("{identity} LIKE '{family}/%'")).collect::<Vec<_>>().join(" OR ")
             } else { "1".into() };
-            connection.execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-h94486564a73b owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS ordered_membership_{table}_{event};
-                 CREATE TRIGGER ordered_membership_{table}_{event} AFTER {event} ON {table} WHEN ({filter}) BEGIN
+            let name = format!("ordered_membership_{table}_{event}");
+            let definition = format!(
+                /* sqlite-large-value: allow-for-now lv-h0be6091a94f5 owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER {name} AFTER {event} ON {table} WHEN ({filter}) BEGIN
                  INSERT INTO local_ordered_membership_pending(subject)
                  SELECT {identity} WHERE EXISTS(SELECT 1 FROM declared_resource_edges
                      WHERE target={identity} AND relation='ordered-membership')
                  ON CONFLICT(subject) DO NOTHING; END;"
-            ))?;
+            );
+            let installed: Option<String> = connection.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [&name], |row| row.get(0),
+            ).optional()?;
+            // Like directive-note capture, upgrade changed definitions once without
+            // changing the schema cookie on reopen. These literals contain no whitespace.
+            let unchanged = installed.as_deref().is_some_and(|sql| {
+                sql.trim().trim_end_matches(';').split_whitespace()
+                    .eq(definition.trim().trim_end_matches(';').split_whitespace())
+            });
+            if !unchanged {
+                if installed.is_some() {
+                    connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-hca7d8cec0da7 owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER {name}"))?;
+                }
+                connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h98200b009b04 owner=fractal_store::store::ordered_membership TODO=trace-statement-and-value-representation */ &definition)?;
+            }
         }
     }
     Ok(())
@@ -178,6 +194,23 @@ pub fn container_changed(transaction: &Transaction<'_>, container: &str, index: 
         // A delayed legacy create can deactivate a previously observed v2 create.
         // Keep count rows for retained raw pairs, but not for an inactive empty container.
         transaction.execute(/* sqlite-large-value: allow-for-now lv-hf8a19ac0ce17 owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM ordered_membership_counts WHERE container=?1", [container])?;
+    }
+    Ok(())
+}
+
+/// Desired-state projectors can invalidate lifecycle outside the declared Sources
+/// (for example, terminal retirement). Conservatively flush every registered
+/// subject as well as declaration sources that can materialize another subject.
+/// Replay, repair and apply retain their unconditional transaction-wide flush.
+pub fn flush_claim(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    let registry = lifecycle::registry();
+    if registry.subject(&claim.subject).is_some()
+        || registry.entries().any(|entry| match entry.sources {
+            lifecycle::Sources::Kinds(kinds) => kinds.contains(&claim.kind.as_str()),
+            lifecycle::Sources::AnyClaim => false,
+        })
+    {
+        flush(transaction)?;
     }
     Ok(())
 }
