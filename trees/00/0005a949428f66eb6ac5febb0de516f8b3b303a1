@@ -8,3 +8,4 @@ record 89cc87a81348ec540072c13bff4e95019848e8cb linux-clippy 0 fleet/ci 2026-10-
 record bab3dda20dcade8169c0ae4302e3868a545af5dc genie-freshness 0 fleet/ci 2026-10-27T17:09:47Z
 record cef480408d882190e5e54d4b47f0f8809a1f092f linux-fleet-compat 0 fleet/ci 2026-10-27T17:14:49Z
 record cf38a69ffead3d1c8d4e98005a3530f982e8ea53 ci-script-tests 0 fleet/ci 2026-10-27T17:13:31Z
+gc 2026-10-28T03:42:40+00:00 04175f0c34c1496726c0e87b6e35c40ab11899b7bdd57ca193f9153abfc2c9d8

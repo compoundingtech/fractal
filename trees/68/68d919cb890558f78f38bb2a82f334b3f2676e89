@@ -8,3 +8,4 @@ record b9d2ce8f279f1b5ee88776974ed28fb21cc95d5b typescript-client 0 fleet/ci 202
 record e44a4b3f2c71b6e155b9408919f183f3f21dcac0 linux-tests 0 fleet/ci 2026-10-27T12:25:12Z
 record e7b39e33ae50ec4a779caba1b560a7bd611d60b9 linux-gate 0 fleet/ci 2026-10-27T12:34:33Z
 record fa53b6339c8c5de0741bc53d5cfd9da48fdb709e ci-script-tests 0 fleet/ci 2026-10-27T12:20:07Z
+gc 2026-10-28T03:42:40+00:00 04175f0c34c1496726c0e87b6e35c40ab11899b7bdd57ca193f9153abfc2c9d8
