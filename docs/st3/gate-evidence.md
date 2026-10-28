@@ -123,7 +123,13 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   of every open pull request head (`--open-heads-from FILE`, one commit a line; with `--fetch` each is fetched by id, so
   a fork's head works too) whatever its age; and the trees of main's first-parent commits within `main_days` of
   `as_of`, main's tip always.
-- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs.
+- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs, and every live tree's
+  per-crate `rust-tests` keys. Those keys come from main's `scripts/rust-test-keys` over main's `.st/rust-test-inputs.json`, as the gate keys a pull request
+  against its base. Until 2026-10-28 the per-crate keys were left out (the `rust-tests` policy declares no `inputs`), so a plan deleted
+  the crate keys that open pull requests' `rust-tests` decisions still chose. A live tree whose crates cannot be keyed, because a
+  manifest is unreadable, keeps every `rust-tests` key. In a partial clone (`--fetch`), the manifests the live trees lack are fetched
+  by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
+  unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
   change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (20,000).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
