@@ -1,7 +1,6 @@
 # Seat lanes (design note)
 
-Status: step 1 built (lanes on agents, behind a per-host switch); steps after it are design. Mission `fleet/factory/seat-lanes`. Nathan's decisions of
-2026-10-28 override the mission text where they differ; this note follows them.
+Status: step 1 built (lanes on agents, behind a per-host switch); steps after it are design.
 
 ## What a seat lane is
 
@@ -102,7 +101,7 @@ file that declares `capacity` at apply (unknown child), as for any new declarati
 refuses a config with `lanes` set (`deny_unknown_fields`), so set the key only on hosts that run a
 build with this change.
 
-## Later steps (from Nathan's decisions, not built in step 1)
+## Later steps (decided, not built in step 1)
 
 - **Bursts.** A heavy command asks for a burst; `st-test` asks for one sized to the checks it will
   run (covered checks skip, a docs-only run needs almost nothing). A burst raises the live scope
