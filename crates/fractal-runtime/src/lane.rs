@@ -176,26 +176,25 @@ fn digest(value: &str) -> String {
     format!("{:x}", sha2::Sha256::digest(value.as_bytes()))
 }
 
-/// What this process knows of one seat's slice. Its lock is held while the slice is capped for a
-/// launch and while it is ended, so an end never runs halfway through a launch's preparation.
+/// What this process knows of one seat's slice, from the first launch prepared in it until its
+/// end. Its lock is held while the slice is capped for a launch and while it is ended, so an end
+/// never runs halfway through a launch's preparation. Only a seat with a lane has one.
 #[derive(Default)]
 struct Slot {
     /// Launches prepared in the slice.
     launches: u64,
     /// The launch count an end was asked at: the end acts only while no launch came after it.
     end_at: Option<u64>,
+    /// The lane ended and its slot left the map; a launch that waited on its lock takes a new one.
+    removed: bool,
 }
 
-static SLOTS: std::sync::Mutex<BTreeMap<String, std::sync::Arc<std::sync::Mutex<Slot>>>> =
-    std::sync::Mutex::new(BTreeMap::new());
+type Slots = BTreeMap<String, std::sync::Arc<std::sync::Mutex<Slot>>>;
 
-fn slot(slice: &str) -> std::sync::Arc<std::sync::Mutex<Slot>> {
-    SLOTS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(slice.to_owned())
-        .or_default()
-        .clone()
+static SLOTS: std::sync::Mutex<Slots> = std::sync::Mutex::new(BTreeMap::new());
+
+fn slots() -> std::sync::MutexGuard<'static, Slots> {
+    SLOTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// A lane a launch starts in: the seat's capped slice.
@@ -242,52 +241,75 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
         return Ok(None);
     }
     let slice = seat_slice(runtime_id);
-    let slot = slot(&slice);
-    let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    // An end asked before this launch no longer applies to the slice.
-    slot.launches += 1;
-    slot.end_at = None;
-    let output = crate::isolate::systemctl()
-        .args(["--user", "set-property", "--runtime", &slice])
-        .args(capacity.slice_properties())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .with_context(|| format!("cap the lane {slice}"))?;
-    if !output.status.success() {
-        bail!(
-            "cap the lane {slice}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    loop {
+        let slot = slots().entry(slice.clone()).or_default().clone();
+        let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.removed {
+            continue;
+        }
+        // An end asked before this launch no longer applies to the slice.
+        slot.launches += 1;
+        slot.end_at = None;
+        let output = crate::isolate::systemctl()
+            .args(["--user", "set-property", "--runtime", &slice])
+            .args(capacity.slice_properties())
+            .stdin(std::process::Stdio::null())
+            .output()
+            .with_context(|| format!("cap the lane {slice}"))?;
+        if !output.status.success() {
+            bail!(
+                "cap the lane {slice}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        return Ok(Some(Lane { slice }));
     }
-    Ok(Some(Lane { slice }))
 }
 
-/// Ends the lane of `runtime_id`, when it has one: everything still running in its slice, the
-/// jobs the seat started included, then the slice's limits. In the background, since the units in
-/// it get their own stop timeouts. For a seat that stopped for good; a restart keeps its lane, and
-/// a launch prepared after this call cancels it, so a seat started again at once keeps its new lane.
+/// Ends the lane of `runtime_id`, when this process prepared one: everything still running in its
+/// slice, the jobs the seat started included, then the slice's limits. In the background, since the
+/// units in it get their own stop timeouts. For a seat that stopped for good; a restart keeps its
+/// lane, and a launch prepared after this call cancels it, so a seat started again at once keeps
+/// its new lane. A seat without a lane does nothing here.
 pub fn end(runtime_id: &str) {
-    if crate::isolation_mode() != crate::Isolation::Scope {
+    let slice = seat_slice(runtime_id);
+    if !request_end(&slice) {
         return;
     }
-    let slice = seat_slice(runtime_id);
-    request_end(&slice);
     crate::isolate::end_later(format!("lane:{slice}"), move || end_requested(&slice));
 }
 
-fn request_end(slice: &str) {
-    let slot = slot(slice);
+/// Marks the end of `slice`'s lane as asked. False when this process prepared no lane there: a
+/// seat without a lane has nothing to end.
+fn request_end(slice: &str) -> bool {
+    let Some(slot) = slots().get(slice).cloned() else {
+        return false;
+    };
     let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if slot.removed {
+        return false;
+    }
     slot.end_at = Some(slot.launches);
+    true
 }
 
-/// Ends `slice` if its last end request still stands: no launch was prepared after it.
+/// Ends `slice` if its last end request still stands: no launch was prepared after it. Its slot
+/// goes with it.
 fn end_requested(slice: &str) -> Result<()> {
-    let slot = slot(slice);
+    let Some(slot) = slots().get(slice).cloned() else {
+        return Ok(());
+    };
     let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.end_at.take() != Some(slot.launches) {
+    if slot.removed || slot.end_at.take() != Some(slot.launches) {
         return Ok(());
     }
+    stop_slice(slice)?;
+    slot.removed = true;
+    slots().remove(slice);
+    Ok(())
+}
+
+fn stop_slice(slice: &str) -> Result<()> {
     let loaded = crate::isolate::systemctl()
         .args(["--user", "show", "--property=LoadState", "--value", slice])
         .output()
@@ -322,6 +344,12 @@ pub(crate) fn request_end_for_test(runtime_id: &str) -> impl FnOnce() -> Result<
     let slice = seat_slice(runtime_id);
     request_end(&slice);
     move || end_requested(&slice)
+}
+
+/// Whether this process holds a slot for `runtime_id`'s lane.
+#[cfg(test)]
+pub(crate) fn prepared_for_test(runtime_id: &str) -> bool {
+    slots().contains_key(&seat_slice(runtime_id))
 }
 
 /// What a laned task's environment adds so its builds stay in the lane. The cargo shim and the
@@ -427,6 +455,15 @@ mod tests {
         }
         // The same on every build, so a restart (or an upgrade) finds its seat's slice again.
         assert_eq!(seat_slice("same"), "app-lanes-same_0967115f2813.slice");
+    }
+
+    #[test]
+    fn a_seat_without_a_lane_does_no_lane_work() {
+        let id = "fleet.example.unlaned";
+        assert_eq!(prepare(None, id).unwrap(), None);
+        end(id);
+        assert!(!prepared_for_test(id), "a seat without a lane holds no slot");
+        assert!(!request_end(&seat_slice(id)), "and has no end to queue");
     }
 
     #[test]

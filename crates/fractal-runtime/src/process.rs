@@ -1192,6 +1192,7 @@ mod tests {
         assert_eq!(fs::read_to_string(cgroup.join("memory.max")).unwrap().trim(), "max");
         unlaned.stop_if("work", Some(&generation.generation_id)).unwrap();
         wait_for_exit(&unlaned, "work");
+        assert!(!crate::lane::prepared_for_test("work"), "a seat without a lane holds no slot");
 
         let root = tempfile::tempdir().unwrap();
         let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
@@ -1262,6 +1263,7 @@ mod tests {
         wait_until("the lane's limits outlived its end", || {
             systemctl_show(&slice_name, "MemoryMax") == "infinity"
         });
+        wait_until("the lane's slot outlived its end", || !crate::lane::prepared_for_test(&id));
     }
 
     /// A child that asks for more memory than its lane holds is killed inside the lane, and only

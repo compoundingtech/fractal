@@ -521,7 +521,8 @@ pub trait RuntimeControl: Send + Sync + 'static {
     /// or test its harness started that outlived it.
     fn end_leftovers(&self, _runtime_id: &str, _terminal: bool) {}
     /// Ends, without waiting, the lane of a seat that stopped for good: the jobs it started in
-    /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane.
+    /// its slice, and the slice (docs/st3/seat-lanes.md). A restart keeps the lane, and a seat
+    /// without one has nothing to end.
     fn end_lane(&self, _runtime_id: &str) {}
 }
 
@@ -6978,14 +6979,16 @@ impl<R: RuntimeControl> Reconciler<R> {
             // A harness that ended before the stop, or a stop that could not finish, can leave
             // processes in the runtime's work scope. They end with it.
             self.runtime.end_leftovers(runtime_id, terminal);
-            // A seat stopped for good (an explicit stop, or no declaration left) ends its lane and
-            // the jobs in it. A stop for a restart of a live declaration keeps them.
             let desired = self.store.selected_desired_token(subject)?;
-            let explicit_stop = match &desired {
-                Some(token) => self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop"),
-                None => false,
+            let stop = match &desired {
+                Some(token) if self.store.claim_by_id(token)?.is_some_and(|c| c.body["kind"] == "stop") => {
+                    Some(token.clone())
+                }
+                _ => None,
             };
-            if desired.is_none() || explicit_stop {
+            // A seat stopped for good (an explicit stop, or no declaration left) ends its lane, if
+            // it has one, and the jobs in it. A stop for a restart of a live declaration keeps them.
+            if stop.is_some() || desired.is_none() {
                 self.runtime.end_lane(runtime_id);
             }
             let mut fields = BTreeMap::from([
@@ -7000,15 +7003,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             }
             // A confirmed explicit stop can fence a later move even while this host is offline.
             // Stops for a restart of a still-live declaration cannot release a placement fence.
-            let mut evidence = Vec::new();
-            if let Some(token) = self.store.selected_desired_token(subject)?
-                && self
-                    .store
-                    .claim_by_id(&token)?
-                    .is_some_and(|c| c.body["kind"] == "stop")
-            {
-                evidence.push(token);
-            }
+            let evidence = Vec::from_iter(stop);
             fields.insert("host".into(), Value::String(self.host.clone()));
             if self.store.latest_actual_value(subject)?.is_some_and(|actual| {
                 actual_field(&actual, "restarting_from").is_some_and(Value::is_string)

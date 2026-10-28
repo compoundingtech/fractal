@@ -26,7 +26,7 @@
     "detail": "Before a host turns lanes on, its admission guard must count only OOM kills outside lanes: oom_kill(user-UID.slice) minus oom_kill(app.slice/app-lanes.slice) (docs/st3/seat-lanes.md, The host guard). Operations has been asked."
   },
   "recovery": {
-    "status": "none",
-    "detail": "Remove `lanes` from config.toml (or set it to \"off\") and restart the daemon; laned seats run without a lane from their next start. A lane left from before (app-lanes-<seat>.slice) ends with `systemctl --user stop` and `revert` on it."
+    "status": "changed",
+    "detail": "Before downgrading a host to a build without lanes, remove `lanes` from its config.toml: an older daemon refuses a config that contains it (deny_unknown_fields) and does not start. To turn lanes off without a downgrade, set `lanes = \"off\"` (or remove it) and restart the daemon; laned seats run without a lane from their next start. A lane left from before (app-lanes-<seat>_<digest>.slice) ends with `systemctl --user stop` and `revert` on it."
   }
 }

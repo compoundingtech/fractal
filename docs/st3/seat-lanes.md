@@ -9,6 +9,11 @@ starts, builds and test runners included. It is opt-in. A seat whose agent, miss
 declares no `capacity` runs exactly as it does today, with today's build admission (the cargo shim,
 `builds.slice`, `build-admission`), and sees no change.
 
+A lane is a resource cap that seats cooperate with, not a security boundary. Every seat runs as the
+same user as its user manager, so a seat can change its slice's limits or start a process outside
+it. Lanes keep well-behaved seats from crowding each other out; they do not contain a seat that
+tries to escape.
+
 ```kdl
 agent "example/builder" {
   capacity cores=1 memory="3G"     // base lane: sized for the harness thinking, not for builds
@@ -113,8 +118,8 @@ The member record gains an optional `capacity` field, omitted when absent, so an
 stored record and revision do not change. An older member reading a laned record drops the field
 (the record has no `deny_unknown_fields`) and runs the seat without a lane. An older CLI refuses a
 file that declares `capacity` at apply (unknown child), as for any new declaration. An older daemon
-refuses a config with `lanes` set (`deny_unknown_fields`), so set the key only on hosts that run a
-build with this change.
+refuses a config with `lanes` set (`deny_unknown_fields`) and does not start, so set the key only on
+hosts that run a build with this change, and remove it before downgrading a host to an older build.
 
 ## Later steps (decided, not built in step 1)
 
