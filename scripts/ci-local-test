@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import time
 import tempfile
@@ -387,6 +388,41 @@ class CiLocal(unittest.TestCase):
         seds = Path(f'{self.log}.sed')
         self.assertLess(len(seds.read_text().splitlines()) if seds.exists() else 0, 10, 'stopping the lane reads /proc once, without a sed per process')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_a_stopped_run_stops_what_its_lane_starts_while_it_is_stopping(self):
+        # clippy (in the lane) starts a worker every 10 ms and records it, so workers start while the run reads /proc to stop it.
+        said = ('#!/usr/bin/env bash\n'
+                'if [ "$1" = clippy ]; then for i in $(seq 3000); do sleep 300 & echo $! >> "$CI_LOCAL_TEST_LOG.workers"; sleep 0.01; done; fi\n'
+                'if [ "$1" = tests ]; then for i in $(seq 100); do [ -s "$CI_LOCAL_TEST_LOG.workers" ] && break; sleep 0.05; done; fi\n')
+        (self.work / 'scripts/ci-linux').write_text(said)
+        env = {'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
+               'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
+        run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(lambda: run.poll() is None and run.kill())
+        workers = Path(f'{self.log}.workers')
+
+        def alive():
+            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG.
+            pids = [int(line) for line in workers.read_text().split()] if workers.exists() else []
+            def ours(pid):
+                try:
+                    return f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
+                except OSError:
+                    return False
+            return [pid for pid in pids if ours(pid)]
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in alive()])
+        for _ in range(200):
+            if len(alive()) >= 5:
+                break
+            time.sleep(0.05)
+        run.terminate()
+        run.wait(timeout=20)
+        for _ in range(100):
+            if not alive():
+                break
+            time.sleep(0.05)
+        self.assertEqual(alive(), [], 'a worker the lane started while the run stopped it outlived the run')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
         self.stage_exits = [0, 3, 5]

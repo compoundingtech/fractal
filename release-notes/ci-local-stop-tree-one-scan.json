@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "ci-local reads /proc once when a stopped run stops its lane, instead of once per process of the lane's tree with a sed per process on the host, so a stopped run on a loaded host exits in well under a second instead of waiting over 20 s",
+  "summary": "ci-local stops a stopped run's lane without a sed per process: it reads /proc in the shell, freezes each process of the lane's tree as it finds it, and reads again until no new one appears, so a stopped run on a loaded host exits in well under a second instead of over 20 s, and a worker a stage starts while it is being stopped is stopped too",
   "replay": {"status": "none", "detail": "A local CI script change only; no replay or recovery behavior changes."},
   "schema": {"status": "none", "detail": "No schema or persistent data changes."},
   "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},
