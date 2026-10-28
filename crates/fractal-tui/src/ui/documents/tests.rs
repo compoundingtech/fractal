@@ -176,6 +176,23 @@ fn a_page_read_again_draws_its_new_text() {
 }
 
 #[test]
+fn a_cached_page_points_its_link_text_at_its_own_addresses() {
+    // Two pages use the same link text for different documents. Going back to the first draws it
+    // from the cache, and its text still opens the first page's link, not the one drawn last.
+    let mut documents = Documents::default();
+    let (first, second) = (format!("doc/garden/north@{HASH_A}"), format!("doc/garden/south@{HASH_B}"));
+    documents.got(&first, Ok(content(&first, "See [the details](doc/garden/north-bed).", true)));
+    documents.got(&second, Ok(content(&second, "See [the details](doc/garden/south-bed).", true)));
+    let link = || fractal_conversation_ui::text::link_for("the details");
+    documents.page(&first, None, 80, NOW);
+    assert_eq!(link().as_deref(), Some("doc/garden/north-bed"));
+    documents.page(&second, None, 80, NOW);
+    assert_eq!(link().as_deref(), Some("doc/garden/south-bed"));
+    documents.page(&first, None, 80, NOW);
+    assert_eq!(link().as_deref(), Some("doc/garden/north-bed"), "drawn from the cache, with its own links");
+}
+
+#[test]
 fn n_and_p_choose_a_link_that_enter_opens() {
     let mut documents = Documents::default();
     let reference = format!("doc/garden/plan@{HASH_A}");

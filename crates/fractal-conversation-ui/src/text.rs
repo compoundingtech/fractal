@@ -245,6 +245,9 @@ thread_local! {
     /// The address behind each markdown link's text, so a client can open what it drew.
     static LINKS: std::cell::RefCell<std::collections::HashMap<String, String>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
+    /// The links remembered while `markdown_with_links` draws, so a caller that keeps the lines can
+    /// remember them again each time it shows them.
+    static RECORDING: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The address of a markdown link drawn with this text, once it has been drawn.
@@ -253,13 +256,35 @@ pub fn link_for(text: &str) -> Option<String> {
 }
 
 fn remember_link(text: &str, url: &str) {
+    let (text, url) = (text.trim().to_owned(), url.trim().to_owned());
+    RECORDING.with(|recording| {
+        if let Some(recording) = recording.borrow_mut().as_mut() {
+            recording.push((text.clone(), url.clone()));
+        }
+    });
     LINKS.with(|links| {
         let mut links = links.borrow_mut();
         if links.len() > 2048 {
             links.clear();
         }
-        links.insert(text.trim().to_owned(), url.trim().to_owned());
+        links.insert(text, url);
     });
+}
+
+/// Remember links drawn earlier (from `markdown_with_links`) again, as when they were drawn: a
+/// page shown from a cache points its link text where its own source does.
+pub fn remember_links(links: &[(String, String)]) {
+    for (text, url) in links {
+        remember_link(text, url);
+    }
+}
+
+/// `markdown`, with the links it drew (text and address), for a caller that caches the lines.
+pub fn markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme) -> (Vec<Line<'static>>, Vec<(String, String)>) {
+    let outer = RECORDING.with(|recording| recording.replace(Some(Vec::new())));
+    let lines = markdown(input, width, base, theme);
+    let links = RECORDING.with(|recording| recording.replace(outer)).unwrap_or_default();
+    (lines, links)
 }
 
 /// Inline markdown: **bold**, `code`, [text](url), and an image ![alt](url) as a line that opens
@@ -338,12 +363,14 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
             )));
             index += 1;
             // Code keeps its indentation: wrapping drops spaces that start a line, so each line's
-            // own indent (past the fence's) goes into its prefix.
+            // own indent (past the fence's) goes into its prefix. The prefix repeats on every row
+            // the line wraps to, so it takes at most half the width: the code always has room.
             let fence = line.len() - trimmed.len();
+            let deepest = (width.max(4) / 2).saturating_sub(2);
             while index < source.len() && !source[index].trim_start().starts_with("```") {
                 let code = source[index];
                 let spaces = code.len() - code.trim_start_matches(' ').len();
-                let indent = run(format!("  {}", " ".repeat(spaces.saturating_sub(fence))), base);
+                let indent = run(format!("  {}", " ".repeat(spaces.saturating_sub(fence).min(deepest))), base);
                 lines.extend(wrap(
                     &[run(&code[spaces..], Style::default().fg(theme.subtext1))],
                     width,
@@ -652,6 +679,23 @@ mod tests {
             text,
             vec!["```kdl", "  step \"plant\" {", "    document \"doc/a\"", "  }", "```", "• Run it:", "```sh", "  garden plant", "    --bed north", "```"]
         );
+    }
+
+    #[test]
+    fn deep_code_indentation_never_crowds_out_the_code() {
+        let theme = Theme::default();
+        // Deeper than the width: the indent stops at half of it, and every character of the code is still drawn.
+        let source = format!("```\n{}plant the north bed\n```", " ".repeat(30));
+        let text = markdown(&source, 20, Style::default(), &theme).iter().map(plain).collect::<Vec<_>>();
+        assert!(text.iter().all(|line| width(line) <= 20), "{text:?}");
+        assert!(text[1..text.len() - 1].iter().all(|line| line.starts_with("          ") && !line.starts_with("           ")), "{text:?}");
+        assert_eq!(text[1..text.len() - 1].iter().map(|line| line.trim()).collect::<Vec<_>>().join(" "), "plant the north bed");
+        // A hostile line (a huge indent and a huge word) stays bounded: rows are as many as the code needs, not more.
+        let source = format!("```\n{}{}\n```", " ".repeat(100_000), "x".repeat(10_000));
+        let lines = markdown(&source, 40, Style::default(), &theme);
+        let drawn: usize = lines.iter().map(|line| width(&plain(line))).sum();
+        assert!(lines.len() < 10_000 / 20 + 4, "{} rows", lines.len());
+        assert!(drawn < 2 * 40 * lines.len(), "{drawn} columns over {} rows", lines.len());
     }
 
     #[test]

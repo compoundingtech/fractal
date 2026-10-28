@@ -72,8 +72,8 @@ pub(crate) fn inside_word(before: &str, after: &str) -> bool {
     joined_before || joined_after
 }
 
-/// A page's Markdown as drawn at one width.
-type Rendered = Rc<Vec<Line<'static>>>;
+/// A page's Markdown as drawn at one width, and the links it drew (text and address).
+type Rendered = Rc<(Vec<Line<'static>>, Vec<(String, String)>)>;
 
 #[derive(Default)]
 pub(crate) struct Documents {
@@ -338,13 +338,16 @@ impl Documents {
                 if document.text.trim().is_empty() {
                     doc.line(Line::from(Span::styled("This document is empty.", theme::dim())));
                 } else {
-                    let lines = self
+                    let drawn = self
                         .rendered
                         .borrow_mut()
                         .entry((reference.to_owned(), width))
-                        .or_insert_with(|| Rc::new(text::markdown(&document.text, width, theme::text())))
+                        .or_insert_with(|| Rc::new(text::markdown_with_links(&document.text, width, theme::text())))
                         .clone();
-                    doc.lines(lines.iter().cloned());
+                    // A click resolves link text through the shared link table: point it at this
+                    // page's own addresses again, since another page may have drawn the same text.
+                    text::remember_links(&drawn.1);
+                    doc.lines(drawn.0.iter().cloned());
                 }
                 if !document.links.is_empty() {
                     doc.blank();
