@@ -241,9 +241,14 @@ fn with_bg(style: Style, fill: Option<Color>) -> Style {
     }
 }
 
-/// Each link drawn while `markdown_with_links` draws, in order: its address, and the underline
-/// colour its runs had before they were marked with their place here.
-type Recording = Vec<(String, Option<Color>)>;
+/// What `markdown_with_links` notes while it draws: each link or reference drawn, in order (its
+/// address, and the underline colour its runs had before they were marked with their place
+/// here), and the references written out in the text that it looks for.
+#[derive(Default)]
+struct Recording {
+    drawn: Vec<(String, Option<Color>)>,
+    references: Vec<String>,
+}
 
 thread_local! {
     /// The address behind each markdown link's text, so a client can open what it drew.
@@ -275,13 +280,79 @@ fn link_style(style: Style, url: &str) -> Style {
     RECORDING.with(|recording| {
         let mut recording = recording.borrow_mut();
         let Some(recording) = recording.as_mut() else { return style };
-        let place = recording.len();
-        if place >= 1 << 24 {
-            return style;
-        }
-        recording.push((url.trim().to_owned(), style.underline_color));
-        style.underline_color(Color::Rgb((place >> 16) as u8, (place >> 8) as u8, place as u8))
+        mark(recording, style, url.trim())
     })
+}
+
+fn mark(recording: &mut Recording, style: Style, address: &str) -> Style {
+    let place = recording.drawn.len();
+    if place >= 1 << 24 {
+        return style;
+    }
+    recording.drawn.push((address.to_owned(), style.underline_color));
+    style.underline_color(Color::Rgb((place >> 16) as u8, (place >> 8) as u8, place as u8))
+}
+
+/// While `markdown_with_links` records, split out each reference it looks for that is written
+/// out in these runs and mark it like a link, so a reference that wraps keeps its whole address
+/// on every row it reaches. Runs already marked (links) are left as they are.
+fn mark_references(runs: Vec<Run>) -> Vec<Run> {
+    RECORDING.with(|recording| {
+        let mut recording = recording.borrow_mut();
+        let Some(recording) = recording.as_mut().filter(|recording| !recording.references.is_empty()) else { return runs };
+        let mut marked = Vec::with_capacity(runs.len());
+        for run in runs {
+            if run.style.underline_color.is_some() {
+                marked.push(run);
+                continue;
+            }
+            let mut rest = run.text.as_str();
+            while let Some((start, reference)) = next_reference(rest, &recording.references) {
+                if start > 0 {
+                    marked.push(self::run(&rest[..start], run.style));
+                }
+                let reference = reference.to_owned();
+                let style = mark(recording, run.style, &reference);
+                marked.push(self::run(&rest[start..start + reference.len()], style));
+                rest = &rest[start + reference.len()..];
+            }
+            if !rest.is_empty() {
+                marked.push(self::run(rest, run.style));
+            }
+        }
+        marked
+    })
+}
+
+/// The first of `references` written out in `text` as a whole word, the longest where several
+/// start at the same place (a pinned reference over its name).
+fn next_reference<'a>(text: &str, references: &'a [String]) -> Option<(usize, &'a str)> {
+    let name = |c: char| c.is_ascii_alphanumeric() || "_~+-".contains(c);
+    let mut best: Option<(usize, &str)> = None;
+    for reference in references {
+        let mut from = 0;
+        while let Some(offset) = text[from..].find(reference.as_str()) {
+            let start = from + offset;
+            let end = start + reference.len();
+            from = start + 1;
+            let before = text[..start].chars().next_back();
+            let mut after = text[end..].chars();
+            let joined_before = before.is_some_and(|c| name(c) || matches!(c, '/' | '.' | '@'));
+            let joined_after = match after.next() {
+                Some(c) if name(c) => true,
+                Some('.' | '/') => after.next().is_some_and(name),
+                _ => false,
+            };
+            if joined_before || joined_after {
+                continue;
+            }
+            if best.is_none_or(|(at, found)| start < at || start == at && reference.len() > found.len()) {
+                best = Some((start, reference.as_str()));
+            }
+            break;
+        }
+    }
+    best
 }
 
 /// Where a link was drawn by `markdown_with_links`: a row, the columns it covers, its address.
@@ -294,18 +365,24 @@ pub struct DrawnLink {
 }
 
 /// `markdown`, with where each link was drawn, for a caller that keeps the lines and gives each
-/// link's cells their own address rather than looking the text up.
-pub fn markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
-    let outer = RECORDING.with(|recording| recording.replace(Some(Vec::new())));
+/// link's cells their own address rather than looking the text up. `references` are addresses
+/// written out in the text (a document's `doc/...` references): each place one is drawn, on every
+/// row it wraps to, comes back with its whole address too.
+pub fn markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme, references: &[String]) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
+    // Places are marked as underline colours; a caller's own underline colour could read as one.
+    if base.underline_color.is_some() {
+        return (markdown(input, width, base, theme), Vec::new());
+    }
+    let recording = Recording { drawn: Vec::new(), references: references.to_vec() };
+    let outer = RECORDING.with(|cell| cell.replace(Some(recording)));
     let mut lines = markdown(input, width, base, theme);
-    let recorded = RECORDING.with(|recording| recording.replace(outer)).unwrap_or_default();
+    let recorded = RECORDING.with(|cell| cell.replace(outer)).map(|recording| recording.drawn).unwrap_or_default();
     let mut drawn = Vec::new();
     for (index, line) in lines.iter_mut().enumerate() {
         let mut column = 0;
         for span in &mut line.spans {
             let span_width = span.width();
-            if span.style.add_modifier.contains(Modifier::UNDERLINED)
-                && let Some(Color::Rgb(high, middle, low)) = span.style.underline_color
+            if let Some(Color::Rgb(high, middle, low)) = span.style.underline_color
                 && let Some((url, underline)) = recorded.get(((high as usize) << 16) | ((middle as usize) << 8) | low as usize)
             {
                 span.style.underline_color = *underline;
@@ -378,7 +455,7 @@ pub fn inline(text: &str, base: Style, theme: &Theme) -> Vec<Run> {
         }
     }
     flush(&mut plain, &mut runs);
-    runs
+    mark_references(runs)
 }
 
 /// Block markdown, rendered the way pi renders an assistant reply: real headings, bullets
@@ -407,7 +484,7 @@ pub fn markdown(input: &str, width: usize, base: Style, theme: &Theme) -> Vec<Li
                 let spaces = code.len() - code.trim_start_matches(' ').len();
                 let indent = run(format!("  {}", " ".repeat(spaces.saturating_sub(fence).min(deepest))), base);
                 lines.extend(wrap(
-                    &[run(&code[spaces..], Style::default().fg(theme.subtext1))],
+                    &mark_references(vec![run(&code[spaces..], Style::default().fg(theme.subtext1))]),
                     width,
                     std::slice::from_ref(&indent),
                     std::slice::from_ref(&indent),
@@ -720,7 +797,7 @@ mod tests {
     fn drawn_links_keep_their_own_addresses_and_their_look() {
         let theme = crate::tests::theme();
         let input = "[the details](doc/a) and [the details](doc/b)\n\n![north bed](https://example.com/n.png)";
-        let (lines, links) = markdown_with_links(input, 80, Style::default(), &theme);
+        let (lines, links) = markdown_with_links(input, 80, Style::default(), &theme, &[]);
         assert_eq!(
             links,
             [
@@ -731,6 +808,43 @@ mod tests {
         );
         assert_eq!(lines, markdown(input, 80, Style::default(), &theme), "drawn exactly as without recording");
         assert!(lines.iter().flat_map(|line| &line.spans).all(|span| span.style.underline_color.is_none()));
+    }
+
+    #[test]
+    fn a_written_out_reference_keeps_its_whole_address_on_every_row_it_wraps_to() {
+        let theme = crate::tests::theme();
+        let pinned = format!("doc/garden/plan@{}", "c".repeat(64));
+        let references = vec!["doc/garden/plan".to_owned(), pinned.clone(), "doc/garden/plan-b".to_owned()];
+        let input = format!("Read {pinned} first.\n\n```\nopen {pinned}\n```\n\nNot doc/garden/planner, but doc/garden/plan-b.");
+        let (lines, links) = markdown_with_links(&input, 24, Style::default(), &theme, &references);
+        let rows = lines.iter().map(plain).collect::<Vec<_>>();
+        let pinned_rows = links.iter().filter(|link| link.url == pinned).collect::<Vec<_>>();
+        let drawn = |link: &&DrawnLink| rows[link.line].chars().skip(link.column).take(link.width).collect::<String>();
+        // In the text and in the code block: each time the reference wraps over several rows,
+        // and every row of it opens the whole pinned address.
+        let joined = pinned_rows.iter().map(drawn).collect::<String>();
+        assert_eq!(joined, format!("{pinned}{pinned}"), "{rows:?}");
+        assert!(pinned_rows.len() >= 4, "{rows:?}");
+        assert!(!links.iter().any(|link| link.url == "doc/garden/plan"), "never the name alone: {links:?}");
+        assert_eq!(links.iter().filter(|link| link.url == "doc/garden/plan-b").count(), 1, "planner is another word: {links:?}");
+        // Marking a reference splits its row into more spans; every cell looks the same.
+        let cells = |lines: &[Line<'static>]| {
+            lines
+                .iter()
+                .map(|line| (line.alignment, line.spans.iter().flat_map(|span| span.content.chars().map(move |c| (c, span.style))).collect::<Vec<_>>()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(cells(&lines), cells(&markdown(&input, 24, Style::default(), &theme)), "drawn exactly as without recording");
+    }
+
+    #[test]
+    fn a_callers_own_underline_colour_is_never_read_as_a_link() {
+        let theme = crate::tests::theme();
+        let base = Style::default().add_modifier(Modifier::UNDERLINED).underline_color(Color::Rgb(0, 0, 0));
+        let input = "plain [link](doc/a) and doc/b";
+        let (lines, links) = markdown_with_links(input, 80, base, &theme, &["doc/b".to_owned()]);
+        assert!(links.is_empty(), "{links:?}");
+        assert_eq!(lines, markdown(input, 80, base, &theme));
     }
 
     #[test]

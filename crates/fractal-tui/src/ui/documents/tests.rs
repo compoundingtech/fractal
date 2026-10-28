@@ -225,6 +225,21 @@ fn each_link_opens_its_own_address_however_the_page_is_drawn() {
 }
 
 #[test]
+fn a_wrapped_pinned_reference_opens_its_pinned_version_from_every_row() {
+    // A doc/ reference written out with its hash is wider than the pane: every row it wraps to
+    // opens that version, never the latest one the name alone would open.
+    let mut documents = Documents::default();
+    let reference = format!("doc/garden/notes@{HASH_A}");
+    let pinned = format!("doc/garden/plan@{HASH_B}");
+    documents.got(&reference, Ok(content(&reference, &format!("The plan as it was: {pinned}."), true)));
+    let shown = documents.page(&reference, None, 30, NOW);
+    let targets = link_targets(&shown);
+    assert!(targets.len() >= 3, "{:?}", plain(&shown));
+    assert!(targets.iter().all(|(_, url)| *url == pinned), "{targets:?}");
+    assert_eq!(targets.iter().map(|(under, _)| under.as_str()).collect::<String>(), pinned);
+}
+
+#[test]
 fn a_page_with_thousands_of_links_keeps_every_target() {
     // More links than the shared text-to-address table holds before it starts again.
     let mut documents = Documents::default();

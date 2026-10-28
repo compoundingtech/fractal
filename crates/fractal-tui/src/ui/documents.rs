@@ -342,10 +342,14 @@ impl Documents {
                         .rendered
                         .borrow_mut()
                         .entry((reference.to_owned(), width))
-                        .or_insert_with(|| Rc::new(text::markdown_with_links(&document.text, width, theme::text())))
+                        .or_insert_with(|| {
+                            let references = document.links.iter().map(|link| link.reference.clone()).collect::<Vec<_>>();
+                            Rc::new(text::markdown_with_links(&document.text, width, theme::text(), &references))
+                        })
                         .clone();
-                    // Each link's cells open its own address, wherever the page is drawn from:
-                    // two links with the same text on this page or another stay apart.
+                    // Each link's cells, and each written-out doc/ reference's on every row it wraps
+                    // to, open its own whole address, wherever the page is drawn from: two links
+                    // with the same text stay apart, and a wrapped hash is never cut short.
                     let first = doc.lines.len();
                     doc.lines(drawn.0.iter().cloned());
                     for link in &drawn.1 {
