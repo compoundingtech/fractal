@@ -2493,7 +2493,9 @@ impl Ui {
     fn document_subjects(&self, mission: &str) -> Vec<(String, Option<String>)> {
         let mut subjects = vec![(mission.to_owned(), None)];
         if let Some(mission) = self.world.missions.items().iter().find(|candidate| candidate.id == mission) {
-            subjects.extend(mission.steps.iter().filter(|step| step.id.starts_with("step-run/")).map(|step| (step.id.clone(), Some(step.name.clone()))));
+            subjects.extend(
+                mission.steps.iter().filter(|step| step.id.starts_with("step-run/")).take(documents::STEPS).map(|step| (step.id.clone(), Some(step.name.clone()))),
+            );
         }
         subjects
     }

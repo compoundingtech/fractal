@@ -175,21 +175,67 @@ fn a_page_read_again_draws_its_new_text() {
     assert!(lines.contains(&"Second draft.".to_owned()) && !lines.contains(&"First draft.".to_owned()), "{lines:?}");
 }
 
+/// Each link target in a page's text (above its Links section): the text under it and the
+/// address it opens, top to bottom.
+fn link_targets(doc: &Doc) -> Vec<(String, String)> {
+    let lines = plain(doc);
+    let body = lines.iter().position(|line| line.starts_with("Links ")).unwrap_or(lines.len());
+    doc.targets
+        .iter()
+        .filter_map(|target| match &target.hit {
+            Hit::Link(url) if target.line < body => {
+                let under = lines[target.line].chars().skip(target.column as usize).take(target.width as usize).collect::<String>();
+                Some((under, url.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
-fn a_cached_page_points_its_link_text_at_its_own_addresses() {
-    // Two pages use the same link text for different documents. Going back to the first draws it
-    // from the cache, and its text still opens the first page's link, not the one drawn last.
+fn each_link_opens_its_own_address_however_the_page_is_drawn() {
+    // The same text for different documents: twice on one page, in a table whose cells wrap side
+    // by side, and on another page drawn in between. The cached page keeps every target.
     let mut documents = Documents::default();
     let (first, second) = (format!("doc/garden/north@{HASH_A}"), format!("doc/garden/south@{HASH_B}"));
-    documents.got(&first, Ok(content(&first, "See [the details](doc/garden/north-bed).", true)));
+    let text = concat!(
+        "See [the details](doc/garden/north-bed).\n\n",
+        "Then [the details](doc/garden/east-bed).\n\n",
+        "| Bed | Notes |\n|---|---|\n",
+        "| [the long north bed by the fence](doc/garden/fence) | [the details](doc/garden/west-bed) |\n",
+    );
+    documents.got(&first, Ok(content(&first, text, true)));
     documents.got(&second, Ok(content(&second, "See [the details](doc/garden/south-bed).", true)));
-    let link = || fractal_conversation_ui::text::link_for("the details");
-    documents.page(&first, None, 80, NOW);
-    assert_eq!(link().as_deref(), Some("doc/garden/north-bed"));
-    documents.page(&second, None, 80, NOW);
-    assert_eq!(link().as_deref(), Some("doc/garden/south-bed"));
-    documents.page(&first, None, 80, NOW);
-    assert_eq!(link().as_deref(), Some("doc/garden/north-bed"), "drawn from the cache, with its own links");
+    let targets = |doc: &Doc| link_targets(doc).into_iter().map(|(_, url)| url).collect::<Vec<_>>();
+    let shown = documents.page(&first, None, 30, NOW);
+    let mut urls = targets(&shown);
+    urls.dedup();
+    assert_eq!(
+        urls,
+        ["doc/garden/north-bed", "doc/garden/east-bed", "doc/garden/fence", "doc/garden/west-bed", "doc/garden/fence", "doc/garden/west-bed"],
+        "the table's first cell wraps beside the second: {:?}",
+        plain(&shown)
+    );
+    for (under, url) in link_targets(&shown) {
+        let words = if url == "doc/garden/fence" { "the long north bed by the fence" } else { "the details" };
+        assert!(!under.trim().is_empty() && words.contains(under.trim()), "{under:?} opens {url}");
+    }
+    assert_eq!(targets(&documents.page(&second, None, 30, NOW)), ["doc/garden/south-bed"]);
+    assert_eq!(link_targets(&documents.page(&first, None, 30, NOW)), link_targets(&shown), "drawn from the cache, with its own targets");
+}
+
+#[test]
+fn a_page_with_thousands_of_links_keeps_every_target() {
+    // More links than the shared text-to-address table holds before it starts again.
+    let mut documents = Documents::default();
+    let reference = format!("doc/garden/index@{HASH_A}");
+    let text = (0..2100).map(|bed| format!("- [bed {bed}](doc/garden/bed-{bed})\n")).collect::<String>();
+    documents.got(&reference, Ok(content(&reference, &text, true)));
+    let targets = link_targets(&documents.page(&reference, None, 80, NOW));
+    assert_eq!(targets.len(), 2100);
+    for (bed, (under, url)) in targets.iter().enumerate() {
+        assert_eq!((under.as_str(), url.as_str()), (format!("bed {bed}").as_str(), format!("doc/garden/bed-{bed}").as_str()));
+    }
 }
 
 #[test]
@@ -256,6 +302,18 @@ fn the_list_pages_under_a_prefix_and_keeps_loading_empty_and_failed_apart() {
     failed.listed(None, Err(Unavailable::RemoteUnavailable));
     let lines = plain(&failed.list(None, 80, NOW));
     assert!(lines.contains(&"The host did not answer, so the documents cannot be listed now.".to_owned()), "{lines:?}");
+}
+
+#[test]
+fn every_mission_on_screen_is_asked_for_its_documents() {
+    // The first mission's 40 steps do not use up the second mission's turn.
+    let mut documents = Documents::default();
+    let mut subjects = vec!["mission/example/orchard/plan".to_owned()];
+    subjects.extend((0..STEPS).map(|step| format!("step-run/0001/bed-{step}")));
+    subjects.push("mission/example/orchard/harvest".to_owned());
+    let wants = documents.wanted(&[], &[], &subjects);
+    assert_eq!(wants.len(), STEPS + 2);
+    assert_eq!(wants.last(), Some(&Want::References("mission/example/orchard/harvest".into())));
 }
 
 #[test]

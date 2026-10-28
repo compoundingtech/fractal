@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 /// A document page or the list asks again this long after it could not be read: a document not
 /// synced yet shows once it arrives, without a key.
 const RETRY: Duration = Duration::from_secs(15);
-/// At most this many steps of a mission are asked which documents they name.
-const STEPS: usize = 40;
+/// At most this many steps of each mission are asked which documents they name.
+pub(crate) const STEPS: usize = 40;
 /// A page of the documents list.
 pub(crate) const PAGE: usize = 100;
 
@@ -73,7 +73,7 @@ pub(crate) fn inside_word(before: &str, after: &str) -> bool {
 }
 
 /// A page's Markdown as drawn at one width, and the links it drew (text and address).
-type Rendered = Rc<(Vec<Line<'static>>, Vec<(String, String)>)>;
+type Rendered = Rc<(Vec<Line<'static>>, Vec<text::DrawnLink>)>;
 
 #[derive(Default)]
 pub(crate) struct Documents {
@@ -149,7 +149,7 @@ impl Documents {
                 _ => {}
             }
         }
-        for subject in subjects.iter().take(STEPS + 1) {
+        for subject in subjects {
             let key = format!("refs:{subject}");
             if !self.references.contains_key(subject) && !self.reading.contains(&key) {
                 self.reading.insert(key);
@@ -344,10 +344,18 @@ impl Documents {
                         .entry((reference.to_owned(), width))
                         .or_insert_with(|| Rc::new(text::markdown_with_links(&document.text, width, theme::text())))
                         .clone();
-                    // A click resolves link text through the shared link table: point it at this
-                    // page's own addresses again, since another page may have drawn the same text.
-                    text::remember_links(&drawn.1);
+                    // Each link's cells open its own address, wherever the page is drawn from:
+                    // two links with the same text on this page or another stay apart.
+                    let first = doc.lines.len();
                     doc.lines(drawn.0.iter().cloned());
+                    for link in &drawn.1 {
+                        doc.targets.push(Target {
+                            line: first + link.line,
+                            column: u16::try_from(link.column).unwrap_or(u16::MAX),
+                            width: u16::try_from(link.width).unwrap_or(u16::MAX),
+                            hit: Hit::Link(link.url.clone()),
+                        });
+                    }
                 }
                 if !document.links.is_empty() {
                     doc.blank();

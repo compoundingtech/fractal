@@ -15,8 +15,8 @@ pub fn markdown(input: &str, width: usize, base: Style) -> Vec<Line<'static>> {
     fractal_conversation_ui::text::markdown(input, width, base, &super::theme::conversation())
 }
 
-pub use fractal_conversation_ui::text::remember_links;
+pub use fractal_conversation_ui::text::DrawnLink;
 
-pub fn markdown_with_links(input: &str, width: usize, base: Style) -> (Vec<Line<'static>>, Vec<(String, String)>) {
+pub fn markdown_with_links(input: &str, width: usize, base: Style) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
     fractal_conversation_ui::text::markdown_with_links(input, width, base, &super::theme::conversation())
 }

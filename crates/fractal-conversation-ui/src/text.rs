@@ -245,9 +245,9 @@ thread_local! {
     /// The address behind each markdown link's text, so a client can open what it drew.
     static LINKS: std::cell::RefCell<std::collections::HashMap<String, String>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
-    /// The links remembered while `markdown_with_links` draws, so a caller that keeps the lines can
-    /// remember them again each time it shows them.
-    static RECORDING: std::cell::RefCell<Option<Vec<(String, String)>>> = const { std::cell::RefCell::new(None) };
+    /// The address of each link drawn while `markdown_with_links` draws, in order, with the
+    /// underline colour its runs had before they were marked with their place here.
+    static RECORDING: std::cell::RefCell<Option<Vec<(String, Option<Color>)>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The address of a markdown link drawn with this text, once it has been drawn.
@@ -256,35 +256,65 @@ pub fn link_for(text: &str) -> Option<String> {
 }
 
 fn remember_link(text: &str, url: &str) {
-    let (text, url) = (text.trim().to_owned(), url.trim().to_owned());
-    RECORDING.with(|recording| {
-        if let Some(recording) = recording.borrow_mut().as_mut() {
-            recording.push((text.clone(), url.clone()));
-        }
-    });
     LINKS.with(|links| {
         let mut links = links.borrow_mut();
         if links.len() > 2048 {
             links.clear();
         }
-        links.insert(text, url);
+        links.insert(text.trim().to_owned(), url.trim().to_owned());
     });
 }
 
-/// Remember links drawn earlier (from `markdown_with_links`) again, as when they were drawn: a
-/// page shown from a cache points its link text where its own source does.
-pub fn remember_links(links: &[(String, String)]) {
-    for (text, url) in links {
-        remember_link(text, url);
-    }
+/// A link's runs: while `markdown_with_links` records, they carry the link's place in the
+/// recording as their underline colour, so wrapping and tables cannot lose which link a cell
+/// belongs to. Two links with the same text stay two links.
+fn link_style(style: Style, url: &str) -> Style {
+    RECORDING.with(|recording| {
+        let mut recording = recording.borrow_mut();
+        let Some(recording) = recording.as_mut() else { return style };
+        let place = recording.len();
+        if place >= 1 << 24 {
+            return style;
+        }
+        recording.push((url.trim().to_owned(), style.underline_color));
+        style.underline_color(Color::Rgb((place >> 16) as u8, (place >> 8) as u8, place as u8))
+    })
 }
 
-/// `markdown`, with the links it drew (text and address), for a caller that caches the lines.
-pub fn markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme) -> (Vec<Line<'static>>, Vec<(String, String)>) {
+/// Where a link was drawn by `markdown_with_links`: a row, the columns it covers, its address.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DrawnLink {
+    pub line: usize,
+    pub column: usize,
+    pub width: usize,
+    pub url: String,
+}
+
+/// `markdown`, with where each link was drawn, for a caller that keeps the lines and gives each
+/// link's cells their own address rather than looking the text up.
+pub fn markdown_with_links(input: &str, width: usize, base: Style, theme: &Theme) -> (Vec<Line<'static>>, Vec<DrawnLink>) {
     let outer = RECORDING.with(|recording| recording.replace(Some(Vec::new())));
-    let lines = markdown(input, width, base, theme);
-    let links = RECORDING.with(|recording| recording.replace(outer)).unwrap_or_default();
-    (lines, links)
+    let mut lines = markdown(input, width, base, theme);
+    let recorded = RECORDING.with(|recording| recording.replace(outer)).unwrap_or_default();
+    let mut drawn = Vec::new();
+    for (index, line) in lines.iter_mut().enumerate() {
+        let mut column = 0;
+        for span in &mut line.spans {
+            let span_width = span.width();
+            if span.style.add_modifier.contains(Modifier::UNDERLINED)
+                && let Some(Color::Rgb(high, middle, low)) = span.style.underline_color
+                && let Some((url, underline)) = recorded.get(((high as usize) << 16) | ((middle as usize) << 8) | low as usize)
+            {
+                span.style.underline_color = *underline;
+                match drawn.last_mut() {
+                    Some(DrawnLink { line, column: start, width, url: last }) if *line == index && *start + *width == column && last == url => *width += span_width,
+                    _ => drawn.push(DrawnLink { line: index, column, width: span_width, url: url.clone() }),
+                }
+            }
+            column += span_width;
+        }
+    }
+    (lines, drawn)
 }
 
 /// Inline markdown: **bold**, `code`, [text](url), and an image ![alt](url) as a line that opens
@@ -318,10 +348,11 @@ pub fn inline(text: &str, base: Style, theme: &Theme) -> Vec<Run> {
             flush(&mut plain, &mut runs);
             let alt = after[..close].trim();
             let label = format!("▣ {}", if alt.is_empty() { "image" } else { alt });
-            remember_link(&label, &after[close + 2..close + 2 + end]);
+            let url = &after[close + 2..close + 2 + end];
+            remember_link(&label, url);
             runs.push(run(
                 label,
-                base.fg(theme.blue).add_modifier(Modifier::UNDERLINED),
+                link_style(base.fg(theme.blue).add_modifier(Modifier::UNDERLINED), url),
             ));
             runs.push(run(" · image link", base.add_modifier(Modifier::DIM)));
             rest = &after[close + 2 + end + 1..];
@@ -330,10 +361,11 @@ pub fn inline(text: &str, base: Style, theme: &Theme) -> Vec<Run> {
             && let Some(end) = after[close + 2..].find(')')
         {
             flush(&mut plain, &mut runs);
-            remember_link(&after[..close], &after[close + 2..close + 2 + end]);
+            let url = &after[close + 2..close + 2 + end];
+            remember_link(&after[..close], url);
             runs.push(run(
                 &after[..close],
-                base.fg(theme.blue).add_modifier(Modifier::UNDERLINED),
+                link_style(base.fg(theme.blue).add_modifier(Modifier::UNDERLINED), url),
             ));
             rest = &after[close + 2 + end + 1..];
         } else {
@@ -679,6 +711,23 @@ mod tests {
             text,
             vec!["```kdl", "  step \"plant\" {", "    document \"doc/a\"", "  }", "```", "• Run it:", "```sh", "  garden plant", "    --bed north", "```"]
         );
+    }
+
+    #[test]
+    fn drawn_links_keep_their_own_addresses_and_their_look() {
+        let theme = crate::tests::theme();
+        let input = "[the details](doc/a) and [the details](doc/b)\n\n![north bed](https://example.com/n.png)";
+        let (lines, links) = markdown_with_links(input, 80, Style::default(), &theme);
+        assert_eq!(
+            links,
+            [
+                DrawnLink { line: 0, column: 0, width: 11, url: "doc/a".into() },
+                DrawnLink { line: 0, column: 16, width: 11, url: "doc/b".into() },
+                DrawnLink { line: 2, column: 0, width: 11, url: "https://example.com/n.png".into() },
+            ]
+        );
+        assert_eq!(lines, markdown(input, 80, Style::default(), &theme), "drawn exactly as without recording");
+        assert!(lines.iter().flat_map(|line| &line.spans).all(|span| span.style.underline_color.is_none()));
     }
 
     #[test]
