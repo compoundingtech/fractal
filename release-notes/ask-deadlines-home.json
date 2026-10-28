@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The home on the web, the TUI and iOS shows each open ask's deadline and the default that applies if the person does not answer",
+  "replay": {"status": "none", "detail": "No graph replay. The attention projection's row fingerprint moves to public-row.v3, so the first start with this build rebuilds the attention rows from the existing claims."},
+  "schema": {"status": "changed", "detail": "Additive: the client Attention row gains deadline_at and default_answer ({id, label}), and one local meta key records the fleet default deadline (person_ask_default_deadline_ms). No claim change; storage version is unchanged."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "An older client ignores the new Attention fields and shows the ask without its deadline."},
+  "downtime": {"status": "none", "detail": "No downtime; the attention rows rebuild after open."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert; an older build rebuilds its own attention rows on its next start."}
+}
