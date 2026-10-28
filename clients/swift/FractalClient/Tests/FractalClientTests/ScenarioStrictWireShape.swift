@@ -6,6 +6,7 @@ import Foundation
 /// No wire field/enum allowlist is duplicated from the committed client contract.
 struct ScenarioStrictWireShape {
     private let definitions: [String: JSONValue]
+    private let clock = ScenarioClock()
 
     init(schema: Data) throws {
         let root = try JSONDecoder().decode(JSONValue.self, from: schema)
@@ -110,6 +111,24 @@ struct ScenarioStrictWireShape {
             let types: [JSONValue]
             if case .array(let alternatives) = type { types = alternatives } else { types = [type] }
             guard types.contains(where: { matches(value, type: $0) }) else { throw Failure(pointer: pointer, reason: "Wrong wire type") }
+        }
+        if case .string(let codec)? = rules["x-st-codec"], value != .null {
+            switch (codec, value) {
+            case ("timestamp", .string(let timestamp)):
+                let milliseconds = try clock.parse(timestamp, pointer: pointer)
+                guard (-62_167_219_200_000...253_402_300_799_999).contains(milliseconds) else {
+                    throw Failure(pointer: pointer, reason: "Timestamp outside kit range")
+                }
+            case ("epoch-ms", .number(let number)):
+                guard number >= 0, number <= 253_402_300_799_999 else {
+                    throw Failure(pointer: pointer, reason: "Epoch milliseconds outside kit range")
+                }
+            case ("duration-ms", .number(let number)), ("duration-s", .number(let number)):
+                guard number >= 0, number <= 9_007_199_254_740_991 else {
+                    throw Failure(pointer: pointer, reason: "Duration outside safe integer range")
+                }
+            default: break // Redacted strings retain their ordinary wire representation.
+            }
         }
         for union in ["anyOf", "oneOf"] {
             if case .array(let branches)? = rules[union] {

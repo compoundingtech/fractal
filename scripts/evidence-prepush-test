@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The pre-push hook and its installer, through real `git push`es to a bare remote, with a stub st-test."""
+"""The pre-push hook and its installer, through real `git push`es to a bare remote, with a stub fractal-test."""
 import json
 import os
 from pathlib import Path
@@ -133,12 +133,49 @@ class Hook(unittest.TestCase):
                               env=CLEAN).returncode == 0
 
     def untouched(self, done, ref=None):
-        """The push went, nothing was asked of st-test, and the hook said nothing."""
+        """The push went, nothing was asked of fractal-test, and the hook said nothing."""
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(self.calls(), [])
         self.assertNotIn('evidence:', done.stderr)
         if ref:
             self.assertTrue(self.remote_has(ref))
+
+    def base_runners(self, runners):
+        git(self.work, 'checkout', '-q', 'main')
+        for name in ('fractal-test', 'st-test'):
+            (self.work / 'scripts' / name).unlink(missing_ok=True)
+        for name, source in runners.items():
+            (self.work / 'scripts' / name).write_text(source)
+        git(self.work, 'add', '-A')
+        git(self.work, 'commit', '-q', '-m', 'base runners')
+        git(self.work, '-c', 'core.hooksPath=/dev/null', 'push', '-q', 'origin', 'main')
+        git(self.work, 'checkout', '-q', 'feature')
+
+    def test_a_st_test_only_base_still_checks_coverage(self):
+        done = self.push(STUB_STATUS='0')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual([c['argv'][0] for c in self.calls()], ['--status'])
+
+    def test_both_base_names_copy_st_test_not_the_python_shim(self):
+        self.base_runners({'st-test': STUB, 'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
+        done = self.push(STUB_STATUS='0')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn('POISON', done.stderr)
+        self.assertEqual([c['argv'][0] for c in self.calls()], ['--status'])
+
+    def test_a_base_without_either_runner_does_no_work(self):
+        self.base_runners({})
+        self.untouched(self.push())
+
+    def test_a_base_with_only_the_human_runner_does_no_work(self):
+        self.base_runners({'fractal-test': STUB})
+        self.untouched(self.push())
+
+    def test_a_st_test_only_base_still_refuses_an_uncovered_agent_push(self):
+        done = self.push(ST_AGENT='agent/some/seat', STUB_STATUS='3')
+        self.assertNotEqual(done.returncode, 0, done.stderr)
+        self.assertIn('scripts/fractal-test --push origin', done.stderr)
+        self.assertEqual([c['argv'][0] for c in self.calls()], ['--status'])
 
     def test_a_covered_tree_is_pushed_silently_without_running_anything(self):
         done = self.push(STUB_STATUS='0')
@@ -175,7 +212,7 @@ class Hook(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 30)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('did not finish', done.stderr)
-        self.assertIn({'terminated': True}, self.entries())  # TERM first, so a real st-test removes its worktree
+        self.assertIn({'terminated': True}, self.entries())  # TERM first, so a real fractal-test removes its worktree
         self.assertTrue(self.remote_has('refs/heads/feature'))
 
     def test_a_status_that_hangs_does_not_hold_the_push(self):
@@ -487,6 +524,23 @@ class Hook(unittest.TestCase):
         self.install('--uninstall')
         self.assertFalse(hook.exists())
 
+    def test_the_installer_keeps_evidence_tags_out_of_fetch_tags(self):
+        # Johannes's agents hung on `git fetch --tags` pulling every refs/tags/evidence/* record: after the installer, it brings none.
+        origin = Path(self.tmp.name) / 'origin.git'
+        note = git(origin, 'commit-tree', '-p', 'main', '-m', 'note', 'main^{tree}')
+        git(origin, 'tag', 'evidence/' + 'a' * 40 + '/r1', note)
+        git(origin, 'tag', 'v1', 'main')
+        tags = lambda: set(git(self.work, 'tag', '-l').split())
+        self.install()  # twice: the refspec is set once
+        self.assertEqual(git(self.work, 'config', '--get-all', 'remote.origin.fetch').split().count('^refs/tags/evidence/*'), 1)
+        git(self.work, 'fetch', '-q', '--tags', 'origin')
+        self.assertEqual(tags(), {'v1'})
+        # A fetch that names them still gets them (st-test and the verifier fetch one tree's records by name).
+        git(self.work, 'fetch', '-q', 'origin', '+refs/tags/evidence/*:refs/tags/evidence/*')
+        self.assertIn('evidence/' + 'a' * 40 + '/r1', tags())
+        self.install('--uninstall')
+        self.assertNotIn('^refs/tags/evidence/*', git(self.work, 'config', '--get-all', 'remote.origin.fetch').split())
+
     def test_the_installer_leaves_a_configured_hooks_directory_alone(self):
         (self.work / '.git/hooks/pre-push').unlink()
         git(self.work, 'config', 'core.hooksPath', str(Path(self.tmp.name) / 'elsewhere'))
@@ -506,13 +560,13 @@ class Hook(unittest.TestCase):
     def test_the_hook_that_runs_is_the_bases_never_the_pushed_trees(self):
         poison = self.work / 'scripts/evidence-prepush'
         poison.write_text('#!/usr/bin/env python3\nimport sys\nprint("POISON ran", file=sys.stderr)\nsys.exit(7)\n')
-        (self.work / 'scripts/st-test').write_text('#!/usr/bin/env python3\nimport sys\nprint("POISON st-test", file=sys.stderr)\nsys.exit(7)\n')
+        (self.work / 'scripts/fractal-test').write_text('#!/usr/bin/env python3\nimport sys\nprint("POISON fractal-test", file=sys.stderr)\nsys.exit(7)\n')
         git(self.work, 'add', '.')
         git(self.work, 'commit', '-q', '-m', 'a branch that tampers with the hook and the runner')
         done = self.push(STUB_STATUS='0')
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertNotIn('POISON', done.stderr)
-        self.assertEqual([c['argv'][0] for c in self.calls()], ['--status'])  # the base's st-test stub ran, not the branch's
+        self.assertEqual([c['argv'][0] for c in self.calls()], ['--status'])  # the base's fractal-test stub ran, not the branch's
 
     def test_an_agent_waits_a_bounded_time_then_signing_continues_in_the_background(self):
         started = time.monotonic()
@@ -527,6 +581,14 @@ class Hook(unittest.TestCase):
             time.sleep(0.2)
         self.assertIn({'done': True}, self.entries())  # and it finished by itself afterwards
         self.assertTrue(list((self.home / '.local/state/st3/evidence-prepush').glob('*.log')))
+
+    def test_the_status_questions_time_counts_against_an_agents_wait(self):
+        started = time.monotonic()
+        done = self.push(STUB_STATUS='3', STUB_STATUS_SLEEP='6', STUB_SLEEP='60', ST_EVIDENCE_AGENT_LIMIT='8')  # a script
+        self.assertLess(time.monotonic() - started, 12)  # about 8 s in all, not 6 + 8
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('still signing in the background', done.stderr)
+        self.assertTrue(self.remote_has('refs/heads/feature'))
 
     def receipts(self):
         path = self.home / '.local/state/st3/evidence-prepush/receipts.jsonl'
@@ -594,7 +656,7 @@ class Hook(unittest.TestCase):
                 self.assertNotEqual(done.returncode, 0)
                 self.assertFalse(self.remote_has('refs/heads/feature'))
                 self.assertIn(f'refused: this tree ({tree[:12]}) is not covered for: linux-gate, mail-redelivery-canaries', done.stderr)
-                self.assertIn('    scripts/st-test --push origin\n', done.stderr)
+                self.assertIn('    scripts/fractal-test --push origin\n', done.stderr)
                 self.assertIn('fractal-web              CI runs it', done.stderr)  # the status is shown as it is
                 self.assertEqual({k: v for k, v in self.receipts()[-1].items() if k != 'time'},
                                  {'tree': tree, 'branch': 'feature', 'agent': 'agent/some/seat', 'outcome': 'refused',
@@ -613,6 +675,13 @@ class Hook(unittest.TestCase):
         self.assertEqual({k: v for k, v in self.receipts()[-1].items() if k != 'time'},
                          {'tree': tree, 'branch': 'feature', 'agent': 'agent/some/seat', 'outcome': 'refused', 'uncovered': ['genie-freshness']})
         self.assertEqual({c['argv'][0] for c in self.calls()}, {'--status'})  # nothing is signed for an agent
+
+    def test_an_agents_push_waits_for_a_status_that_takes_over_a_minute(self):
+        # On a loaded build host the question takes about two minutes: under the old 60 s default every agent's push was refused.
+        done = self.push(STUB_STATUS='0', STUB_STATUS_SLEEP='65', ST_AGENT='agent/some/seat')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(self.remote_has('refs/heads/feature'))
+        self.assertEqual(self.receipts()[-1]['outcome'], 'covered')
 
     def test_an_agents_push_is_refused_when_the_status_cannot_be_read(self):
         for name, env in (('error', {'STUB_STATUS': '7'}), ('timeout', {'STUB_STATUS_SLEEP': '3', 'ST_EVIDENCE_STATUS_TIMEOUT': '1'})):

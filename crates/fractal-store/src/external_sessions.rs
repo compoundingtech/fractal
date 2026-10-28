@@ -148,9 +148,27 @@ pub fn compare_timeline_positions(
     right: (&str, u64, u8, &str),
     order: TimelineOrder,
 ) -> std::cmp::Ordering {
+    prepared_timeline_position(left, order).cmp(&prepared_timeline_position(right, order))
+}
+
+fn timeline_instant(timestamp: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|instant| instant.with_timezone(&Utc))
+}
+
+type PreparedTimelinePosition<'a> = (Option<DateTime<Utc>>, u64, u8, &'a str);
+type ChronologicalEntryKey = (Option<DateTime<Utc>>, u64, u8, String);
+
+fn prepared_timeline_position<'a>(
+    position: (&str, u64, u8, &'a str),
+    order: TimelineOrder,
+) -> PreparedTimelinePosition<'a> {
     match order {
-        TimelineOrder::Sequence => (left.1, left.2, left.3).cmp(&(right.1, right.2, right.3)),
-        TimelineOrder::TimestampSequence => left.cmp(&right),
+        TimelineOrder::Sequence => (None, position.1, position.2, position.3),
+        TimelineOrder::TimestampSequence => {
+            (timeline_instant(position.0), position.1, position.2, position.3)
+        }
     }
 }
 
@@ -188,36 +206,30 @@ pub fn collect_timeline_slice<'a>(
     limit: usize,
     clone_output: impl Fn(&Value) -> Value,
 ) -> TimelineSlice {
-    let is_before = |item: &&Value| {
-        before.is_none_or(|before| {
-            compare_timeline_positions(
-                native_timeline_position(item),
-                (&before.timestamp, before.sequence, before.rank, &before.id),
-                order,
-            )
-            .is_lt()
-        })
+    // Prepare the cursor once and each candidate once, not on every merge comparison.
+    let before = before.map(|key| {
+        prepared_timeline_position(
+            (&key.timestamp, key.sequence, key.rank, &key.id),
+            order,
+        )
+    });
+    let prepare = |item: &'a Value| {
+        (item, prepared_timeline_position(native_timeline_position(item), order))
     };
-    let mut committed = committed.filter(is_before).peekable();
-    let mut transient = transient.filter(is_before).peekable();
+    let is_before = |(_, position): &(&Value, _)| {
+        before.as_ref().is_none_or(|before| position < before)
+    };
+    let mut committed = committed.map(prepare).filter(is_before).peekable();
+    let mut transient = transient.map(prepare).filter(is_before).peekable();
     let mut items = Vec::new();
     while items.len() < limit {
         let item = match (committed.peek(), transient.peek()) {
-            (Some(item), Some(tail))
-                if compare_timeline_positions(
-                    native_timeline_position(item),
-                    native_timeline_position(tail),
-                    order,
-                )
-                .is_lt() =>
-            {
-                transient.next()
-            }
+            (Some((_, position)), Some((_, tail))) if position < tail => transient.next(),
             (Some(_), _) => committed.next(),
             (None, Some(_)) => transient.next(),
             (None, None) => break,
         };
-        if let Some(item) = item {
+        if let Some((item, _)) = item {
             items.push(clone_output(item));
         }
     }
@@ -380,7 +392,7 @@ pub struct LineTimelineFold {
     consumed: u64,
     observed_len: u64,
     lines: VecDeque<FoldedLine>,
-    entries: BTreeMap<(String, u64, u8, String), (usize, usize)>,
+    entries: BTreeMap<ChronologicalEntryKey, (usize, usize)>,
     sequence_entries: BTreeMap<(u64, u8, String), (usize, usize)>,
     emitting_lines: BTreeSet<usize>,
     next_line_number: usize,
@@ -534,7 +546,7 @@ impl LineTimelineFold {
             TimelineOrder::TimestampSequence => {
                 let upper = before.map(|key| {
                     (
-                        key.timestamp.clone(),
+                        timeline_instant(&key.timestamp),
                         key.sequence,
                         key.rank,
                         key.id.clone(),
@@ -542,7 +554,7 @@ impl LineTimelineFold {
                 });
                 let committed = self
                     .entries
-                    .range::<(String, u64, u8, String), _>((
+                    .range::<ChronologicalEntryKey, _>((
                         Unbounded,
                         upper.as_ref().map_or(Unbounded, Excluded),
                     ))
@@ -609,7 +621,7 @@ impl LineTimelineFold {
             self.sequence_entries
                 .remove(&(key.sequence, key.rank, key.id.clone()));
             self.entries
-                .remove(&(key.timestamp, key.sequence, key.rank, key.id));
+                .remove(&(timeline_instant(&key.timestamp), key.sequence, key.rank, key.id));
         }
     }
 
@@ -763,7 +775,7 @@ impl LineTimelineFold {
                 self.sequence_entries
                     .remove(&(key.sequence, key.rank, key.id.clone()));
                 self.entries
-                    .remove(&(key.timestamp, key.sequence, key.rank, key.id));
+                    .remove(&(timeline_instant(&key.timestamp), key.sequence, key.rank, key.id));
             }
             line.normalize(session.driver, sequence, &last_timestamp, line.number)?;
             if line.items.is_empty() {
@@ -780,7 +792,7 @@ impl LineTimelineFold {
                     (line.number, item_index),
                 );
                 self.entries.insert(
-                    (key.timestamp, key.sequence, key.rank, key.id),
+                    (timeline_instant(&key.timestamp), key.sequence, key.rank, key.id),
                     (line.number, item_index),
                 );
             }
@@ -2490,6 +2502,90 @@ pub use crate::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, ass
 #[allow(unused_imports)]
 pub use crate::external_sessions::shared_tests_seats::path_executable;
 use super::*;
+
+    #[test]
+    fn chronology_compares_numeric_instants_then_source_sequence_and_id() {
+        // Equal instants and sequences retain native/graph rank before the stable ID.
+        let mut positions = [
+            ("2026-10-04T21:40:19.000000200Z", 7, 0, "native/z"),
+            ("2026-10-04T16:40:19.0000002-05:00", 7, 1, "graph/a"),
+            ("2026-10-04T23:40:19.000000100+02:00", 999, 0, "native/early"),
+            ("2026-10-04T21:40:19Z", 5000, 1, "graph/zero"),
+            ("2026-10-04T21:40:19.000000200Z", 6, 0, "native/tie"),
+        ];
+        positions.sort_by(|left, right| {
+            compare_timeline_positions(*left, *right, TimelineOrder::TimestampSequence)
+        });
+        assert_eq!(
+            positions.map(|position| position.3),
+            ["graph/zero", "native/early", "native/tie", "native/z", "graph/a"],
+        );
+        let native = ("2026-10-04T21:40:19Z", 7, 0, "z");
+        let graph = ("2026-10-04T23:40:19.000+02:00", 7, 1, "a");
+        assert!(compare_timeline_positions(native, graph, TimelineOrder::TimestampSequence).is_lt());
+        assert!(compare_timeline_positions(native, graph, TimelineOrder::Sequence).is_lt());
+        let same_id = (graph.0, graph.1, graph.2, native.3);
+        assert!(compare_timeline_positions(native, same_id, TimelineOrder::TimestampSequence).is_lt());
+        let native_earlier_id = (native.0, native.1, native.2, "a");
+        assert!(compare_timeline_positions(
+            native_earlier_id, native, TimelineOrder::TimestampSequence,
+        ).is_lt());
+        assert!(compare_timeline_positions(
+            ("", 9999, 0, "missing"),
+            native,
+            TimelineOrder::TimestampSequence,
+        ).is_lt());
+    }
+
+    #[test]
+    fn numeric_chronology_slice_keeps_source_identity_and_append_cursor_boundary() {
+        use std::io::Write as _;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chronology.jsonl");
+        let record = |id: &str, stamp: &str| {
+            format!("{}\n", json!({
+                "type": "response_item", "timestamp": stamp,
+                "payload": {
+                    "type": "message", "role": "assistant", "id": id,
+                    "content": [{"type": "output_text", "text": id}],
+                },
+            }))
+        };
+        fs::write(&path, [
+            record("late", "2026-10-04T21:40:19.000000200Z"),
+            record("early", "2026-10-04T23:40:19.000000100+02:00"),
+            record("oldest", "2026-10-04T21:40:19Z"),
+            record("equal-late", "2026-10-04T16:40:19.0000002-05:00"),
+        ].concat()).unwrap();
+        let session = transcript_session(ExternalDriver::Codex, &path);
+        let mut fold = LineTimelineFold::default();
+        let original = fold.read(&session).unwrap();
+        // Each Codex record emits a message marker and a content entry.
+        let first = fold.slice(&session, TimelineOrder::TimestampSequence, None, 4).unwrap();
+        assert_eq!(texts(&first.items), ["equal-late", "late"]);
+        assert!(first.has_more);
+        let before = timeline_key(first.items.last().unwrap(), 0);
+        let older = fold.slice(
+            &session, TimelineOrder::TimestampSequence, Some(&before), 4,
+        ).unwrap();
+        assert_eq!(texts(&older.items), ["early", "oldest"]);
+        assert!(!older.has_more);
+        for item in first.items.iter().chain(&older.items) {
+            let source = original.iter().find(|source| source["id"] == item["id"]).unwrap();
+            assert_eq!(item, source, "ordering must retain the original source identity and counters");
+        }
+
+        fs::OpenOptions::new().append(true).open(&path).unwrap()
+            .write_all(record("newest", "2026-10-04T21:40:19.000000300Z").as_bytes()).unwrap();
+        let after_append = fold.slice(
+            &session, TimelineOrder::TimestampSequence, Some(&before), 4,
+        ).unwrap();
+        assert_eq!(after_append.generation, first.generation);
+        assert_eq!(after_append.items, older.items, "appends do not move a frozen page boundary");
+        let newest = fold.slice(&session, TimelineOrder::TimestampSequence, None, 4).unwrap();
+        assert_eq!(texts(&newest.items), ["newest", "equal-late"]);
+    }
 
     fn assert_omp_message_usage_once(content: Value) {
         for driver in [ExternalDriver::Omp, ExternalDriver::Pi] {

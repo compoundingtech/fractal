@@ -1,6 +1,6 @@
 // moves to fractal/clients/typescript
 /**
- * Renderer contract: UI-kit-free, JSON-serializable, so stui (Rust/ratatui), iOS (Swift/RN)
+ * Renderer contract: UI-kit-free, JSON-serializable, so the Fractal terminal UI (Rust/ratatui), iOS (Swift/RN)
  * and wf (React) implement the same manifests and the same resolution algorithm, each binding
  * its own views. A manifest says *what* a renderer claims; a platform binding says *how* it
  * draws. Resolution is a pure function of (manifests, envelope header, representation, host);

@@ -271,6 +271,126 @@ final class ScenariosTests: XCTestCase {
         }
     }
 
+    func testStrictAgentPresentationNowAcceptsComposedFields() throws {
+        let data = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/roster.json"))
+        var root = try object(JSONDecoder().decode(JSONValue.self, from: data))
+        var state = try object(root.required("state"))
+        var agents = try array(state.required("agents"))
+        var agent = try object(agents[0])
+        agent["presentation"] = .object([
+            "state": .string("working"), "group": .string("working"), "because": .null,
+            "now": .object([
+                "step": .string("step-run/x"), "mission": .string("mission/x"),
+                "path": .string("a"), "label": .string("x › a"),
+                "since": .string("2030-01-01T12:00:00.000Z"),
+            ]),
+            "next": .array([]), "queued": .number(0),
+        ])
+        agents[0] = .object(agent)
+        state["agents"] = .array(agents)
+        root["state"] = .object(state)
+        XCTAssertNoThrow(try validate(decode(ScenarioSlice.self, .object(root))))
+    }
+
+    func testStrictCodecUpperBounds() throws {
+        try assertStrictMutationRejected(slice: "sync") { root in
+            var timeline = try array(root.required("timeline"))
+            timeline.append(.object([
+                "_tag": .string("notice"), "at_ms": .number(0), "store": .number(1),
+                "peers": .array([.object([
+                    "host_id": .string("host/x"), "peer_only_envelopes": .number(0),
+                    "local_only_envelopes": .number(0),
+                    "estimated_catch_up_seconds": .number(9_007_199_254_740_992),
+                ])]),
+            ]))
+            root["timeline"] = .array(timeline)
+        }
+        try assertStrictMutationRejected(slice: "details") { root in
+            var state = try object(root.required("state"))
+            var work = try array(state.required("work"))
+            var item = try object(work[0])
+            item["claim_expires_at_unix_ms"] = .number(253_402_300_800_000)
+            work[0] = .object(item)
+            state["work"] = .array(work)
+            root["state"] = .object(state)
+        }
+    }
+
+    func testStrictTimestampRejectsLeapSecond() throws {
+        try assertStrictMutationRejected(slice: "roster") { root in
+            var state = try object(root.required("state"))
+            var agents = try array(state.required("agents"))
+            var agent = try object(agents[0])
+            agent["updated_at"] = .string("2016-12-31T23:59:60Z")
+            agents[0] = .object(agent)
+            state["agents"] = .array(agents)
+            root["state"] = .object(state)
+        }
+    }
+
+    func testYearZeroUsesFloorDivisionAndRejectsOffsetBeforeKitRange() throws {
+        XCTAssertEqual(try ScenarioClock().parse("0000-01-01T00:00:00Z", pointer: ""), -62_167_219_200_000)
+        XCTAssertEqual(
+            try ScenarioReader.rebase(.string("0000-01-01T00:00:00Z"),
+                times: [.init(pointer: "", codec: .timestamp)],
+                anchor: "0000-03-01T00:00:00Z", nowMilliseconds: 0),
+            .string("1969-11-02T00:00:00.000Z")
+        )
+        try assertStrictMutationRejected(slice: "roster") { root in
+            var state = try object(root.required("state"))
+            var agents = try array(state.required("agents"))
+            var agent = try object(agents[0])
+            agent["updated_at"] = .string("0000-01-01T00:00:00+00:01")
+            agents[0] = .object(agent)
+            state["agents"] = .array(agents)
+            root["state"] = .object(state)
+        }
+    }
+
+    func testTimestampRejectsTrailingNewline() throws {
+        let timestamp = "2030-01-01T12:00:00Z\n"
+        XCTAssertThrowsError(try ScenarioReader.rebase(.string(timestamp),
+            times: [.init(pointer: "", codec: .timestamp)],
+            anchor: "2030-01-01T12:00:00Z", nowMilliseconds: 0))
+        try assertStrictMutationRejected(slice: "roster") { root in
+            var state = try object(root.required("state"))
+            var agents = try array(state.required("agents"))
+            var agent = try object(agents[0])
+            agent["updated_at"] = .string(timestamp)
+            agents[0] = .object(agent)
+            state["agents"] = .array(agents)
+            root["state"] = .object(state)
+        }
+    }
+
+    func testStrictCodecBoundaryValuesAreAccepted() throws {
+        let syncData = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/sync.json"))
+        var sync = try object(JSONDecoder().decode(JSONValue.self, from: syncData))
+        sync["timeline"] = .array([.object([
+            "_tag": .string("notice"), "at_ms": .number(0), "store": .number(1),
+            "peers": .array([.object([
+                "host_id": .string("host/x"), "peer_only_envelopes": .number(0),
+                "local_only_envelopes": .number(0),
+                "estimated_catch_up_seconds": .number(9_007_199_254_740_991),
+                "last_exchange_at": .string("0000-01-01T00:00:00.000Z"),
+            ])]),
+        ])])
+        XCTAssertNoThrow(try validate(decode(ScenarioSlice.self, .object(sync))))
+
+        let data = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/details.json"))
+        var root = try object(JSONDecoder().decode(JSONValue.self, from: data))
+        var state = try object(root.required("state"))
+        var work = try array(state.required("work"))
+        var item = try object(work[0])
+        item["updated_at"] = .string("9999-12-31T23:59:59.999Z")
+        item["claim_expires_at_unix_ms"] = .number(253_402_300_799_999)
+        item["execution_elapsed_ms"] = .number(9_007_199_254_740_991)
+        work[0] = .object(item)
+        state["work"] = .array(work)
+        root["state"] = .object(state)
+        XCTAssertNoThrow(try validate(decode(ScenarioSlice.self, .object(root))))
+    }
+
     private func assertStrictMutationRejected(slice: String, mutate: (inout [String: JSONValue]) throws -> Void) throws {
         let data = try Data(contentsOf: fixtures.appendingPathComponent("fleet-mid-refactor/\(slice).json"))
         var root = try object(JSONDecoder().decode(JSONValue.self, from: data))

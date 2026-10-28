@@ -22,6 +22,72 @@ DER = b'invented signing certificate'
 CERT = hashlib.sha1(DER).hexdigest().upper()
 
 
+class Environment(unittest.TestCase):
+    def load(self, environment):
+        installer = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ, environment, clear=True):
+            spec.loader.exec_module(installer)
+        return installer
+
+    def test_preferred_names_legacy_fallback_and_explicit_empty_values(self):
+        fields = {
+            'MACOS_SIGNING_IDENTITY': ('CERTIFICATE', 'preferred identity', 'legacy identity'),
+            'MACOS_SIGNING_TEAM': ('TEAM', 'PREFERRED', 'LEGACY'),
+            'MACOS_APP_PATH': ('APP', '/preferred/app', '/legacy/app'),
+            'MACOS_BIN_DIR': ('BIN_DIR', '/preferred/bin', '/legacy/bin'),
+            'MACOS_BUNDLE_ID': ('IDENTIFIER', 'com.example.preferred', 'com.example.legacy'),
+            'INSTANCE': ('INSTANCE', 'preferred', 'legacy'),
+        }
+        legacy = {'ST_' + name: old for name, (_, _, old) in fields.items()}
+        preferred = {'FRACTAL_' + name: new for name, (_, new, _) in fields.items()}
+        empty = {'FRACTAL_' + name: '' for name in fields}
+        for mode, environment in [('preferred', legacy | preferred), ('legacy', legacy),
+                                  ('empty', legacy | empty), ('unset', {})]:
+            with self.subTest(mode=mode):
+                installer = self.load(environment)
+                for attribute, new, old in fields.values():
+                    expected = new if mode == 'preferred' else old if mode == 'legacy' else None
+                    if attribute == 'IDENTIFIER' and expected is None:
+                        expected = 'com.compoundingtech.smalltalk'
+                    self.assertEqual(getattr(installer, attribute), expected)
+
+    def test_install_home_prefers_fractal_and_keeps_legacy_and_cli_support(self):
+        cases = [
+            ({'ST_MACOS_INSTALL_HOME': '/legacy/home'}, [], '/legacy/home'),
+            ({'ST_MACOS_INSTALL_HOME': '/legacy/home',
+              'FRACTAL_MACOS_INSTALL_HOME': '/preferred/home'}, [], '/preferred/home'),
+            ({'ST_MACOS_INSTALL_HOME': '/legacy/home',
+              'FRACTAL_MACOS_INSTALL_HOME': ''}, [], '.'),
+            ({'FRACTAL_MACOS_INSTALL_HOME': '/preferred/home'},
+             ['--home', '/cli/home'], '/cli/home'),
+        ]
+        for environment, arguments, expected in cases:
+            with self.subTest(environment=environment, arguments=arguments):
+                installer = self.load(environment)
+                with patch.dict(os.environ, environment, clear=True), \
+                        patch.object(sys, 'argv', ['install-macos'] + arguments), \
+                        patch.object(installer, 'state_root', side_effect=RuntimeError('home selected')) as state:
+                    with self.assertRaisesRegex(RuntimeError, '^home selected$'):
+                        installer.main()
+                state.assert_called_once_with(Path(expected).absolute())
+
+    def test_instance_keeps_existing_bundle_and_service_identities(self):
+        for prefix in ['FRACTAL_', 'ST_']:
+            with self.subTest(prefix=prefix):
+                installer = self.load({prefix + 'INSTANCE': 'try'})
+                self.assertEqual(installer.IDENTIFIER, 'com.compoundingtech.smalltalk.instance.try')
+                self.assertEqual(installer.SERVICES, ['com.compoundingtech.st3.instance.try',
+                                                    'com.compoundingtech.st3.instance.try.replication'])
+
+
+    def test_both_instance_names_reject_invalid_values(self):
+        for prefix in ['FRACTAL_', 'ST_']:
+            for value in ['Try', 'a b', '../x', '-a', 'a--b', 'x' * 25]:
+                with self.subTest(prefix=prefix, value=value):
+                    with self.assertRaisesRegex(SystemExit, 'invalid instance name'):
+                        self.load({prefix + 'INSTANCE': value})
+
+
 class Installer(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

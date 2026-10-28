@@ -602,47 +602,87 @@ export const PhoneFocusNoHover: StoryObj<{ scheme: Scheme }> = {
 }
 export const PhoneFocusNoHoverLight: StoryObj<{ scheme: Scheme }> = { ...PhoneFocusNoHover, name: 'Phone · native RM1 focus never opens hover UI · light', args: { scheme: 'light' } }
 
+/**
+ * Each subagent cause the projection can carry, with the exact sentence the shared Details dialog paints. Reported rows
+ * (an explicit empty list from Claude) count their children; an OpenCode session is not reported by its harness, a
+ * running Codex session on an older daemon is not reported by that daemon, and a starting OMP session whose first
+ * report has not arrived is not reported yet.
+ */
+const causeRows = [
+  { row: { ...base, ref: 'agent/example-cause-reported', title: 'Claude session', harness: 'claude', subagentCount: 0, subagentObservation: { _tag: 'Reported' } }, details: '0 collapsed children' },
+  { row: { ...base, ref: 'agent/example-cause-harness', title: 'OpenCode session', harness: 'opencode', subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } }, details: 'Not reported by this harness' },
+  { row: { ...base, ref: 'agent/example-cause-daemon', title: 'Codex on an older daemon', harness: 'codex', subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } }, details: 'Not reported by this daemon version' },
+  { row: { ...base, ref: 'agent/example-cause-pending', title: 'OMP awaiting its first report', harness: 'omp', status: 'pending', statusLabel: 'Pending', subagentObservation: { _tag: 'Unavailable' } }, details: 'Not reported yet' },
+] as const satisfies readonly { readonly row: Row; readonly details: string }[]
+/** Opens the row's Reported details from its actions menu and returns the focused dialog. */
+const openReportedDetails = async (canvasElement: HTMLElement, title: string) => {
+  await userEvent.click(within(canvasElement).getByRole('button', { name: `Actions for ${title}` }))
+  await userEvent.click(await within(document.body).findByRole('menuitem', { name: 'Reported agent details' }))
+  const dialog = await within(document.body).findByRole('dialog', { name: `Reported details for ${title}` })
+  await waitFor(() => expect(dialog).toHaveFocus())
+  return dialog
+}
+const closeReportedDetails = async () => {
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(within(document.body).queryByRole('dialog')).toBeNull())
+}
+
 export const ReportedDetails: Story = {
   name: 'Live row · only reported status in Details',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A live row with unreported status exercises the shared Details dialog; a display-only row with the same props must expose no actions.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'A live row with unreported status exercises the shared Details dialog; a display-only row with the same props must expose no actions. Four live rows carry each subagent cause (reported zero, not reported by the harness, not reported by a running agent\'s older daemon, not reported yet while an observing agent starts), and Details paints its exact sentence beside Subagents.' } },
   args: { row: base },
   render: () => <main {...stylex.props(styles.root)}><ThemePortal><section aria-label="Live sidebar" {...stylex.props(styles.column)}>
     <MilestoneAgentRow row={{ ...base, title: 'Session without status', status: 'unobserved', statusLabel: 'Unobserved' }} reportedStatusOnly now={storyNow} />
     <div data-display-only-check><MilestoneAgentRow row={{ ...base, title: 'Observed subagent' }} reportedStatusOnly displayOnly now={storyNow} /></div>
+    {causeRows.map(({ row }) => <MilestoneAgentRow key={row.ref} row={row} reportedStatusOnly now={storyNow} />)}
   </section></ThemePortal></main>,
   play: async ({ canvasElement }) => {
     const passive = canvasElement.querySelector('[data-display-only-check]')!
     await expect(passive.querySelector('button, [data-agent-menu], [aria-haspopup]')).toBeNull()
-    const canvas = within(canvasElement)
-    await userEvent.click(canvas.getByRole('button', { name: 'Actions for Session without status' }))
-    await userEvent.click(await within(document.body).findByRole('menuitem', { name: 'Reported agent details' }))
-    const dialog = await within(document.body).findByRole('dialog', { name: 'Reported details for Session without status' })
+    const dialog = await openReportedDetails(canvasElement, 'Session without status')
     await expect(within(dialog).getByText('Name', { exact: true })).toBeVisible()
     await expect(within(dialog).getByText('Session without status', { exact: true })).toBeVisible()
     await expect(within(dialog).queryByText('Status', { exact: true })).toBeNull()
     await expect(dialog).not.toHaveTextContent('Unobserved')
-    await waitFor(() => expect(dialog).toHaveFocus())
-    await userEvent.keyboard('{Escape}')
-    await waitFor(() => expect(within(document.body).queryByRole('dialog')).toBeNull())
+    await closeReportedDetails()
+    // Reported zero and not-reported rows paint no count on the row; only the pending row keeps its "?".
+    for (const { row, details } of causeRows) {
+      const painted = [...canvasElement.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(element => element.querySelector('[data-row-column="title"]')?.textContent === row.title)!
+      await expect(painted.querySelector('[data-subagent-count]')?.getAttribute('data-subagent-count') ?? null).toBe(row.subagentObservation._tag === 'Unavailable' ? 'unknown' : null)
+      const causeDialog = await openReportedDetails(canvasElement, row.title)
+      const label = within(causeDialog).getByText('Subagents', { exact: true })
+      await expect(label.tagName).toBe('DT')
+      await expect(label.nextElementSibling!.textContent).toBe(details)
+      await closeReportedDetails()
+    }
   },
 }
 
-/** Count fixtures: plural, singular, zero (no chip), unreported, and long titles that must truncate before the count. */
+/**
+ * Count fixtures: plural, singular, zero (no chip), unreported, and long titles that must truncate before the count.
+ * Claude, Codex and OMP report their subagent lists, so a reported count (an explicit empty list is zero) is `Reported`;
+ * an observing agent still starting, before its first report, is `Unavailable` ("?"). `NotReported` rows paint no count
+ * at all: an OpenCode session (its harness never reports subagents), a running Codex session whose older daemon omits
+ * the field, and a child row, whose wire shape carries no nested report.
+ */
 const countRow = (key: string, title: string, subagentCount: number | undefined, extra: Partial<Row> = {}): Row => ({
   ...base, ref: `agent/example-count-${key}`, id: `count-${key}`, title, status: 'working', statusLabel: 'Working', host: 'build-3', subagentCount, subagentObservation: { _tag: subagentCount === undefined ? 'Unavailable' : 'Reported' },
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 }, ...extra,
 })
 const countRows = [
-  countRow('plural', 'Align the metric track across every row', 3, { needsMe: true }),
-  countRow('singular', 'Fix tabs', 1),
-  countRow('zero', 'Ship the sidebar count', 0),
-  countRow('unknown', 'OMP agent awaiting its first subagent report', undefined),
-  countRow('many', 'Coordinate the long release train across every package', 14, { unread: 2 }),
+  countRow('plural', 'Align the metric track across every row', 3, { harness: 'claude', needsMe: true }),
+  countRow('singular', 'Fix tabs', 1, { harness: 'codex' }),
+  countRow('zero', 'Ship the sidebar count', 0, { harness: 'claude' }),
+  countRow('unknown', 'OMP agent awaiting its first subagent report', undefined, { harness: 'omp', status: 'pending', statusLabel: 'Pending' }),
+  countRow('many', 'Coordinate the long release train across every package', 14, { harness: 'omp', unread: 2 }),
+  countRow('harness', 'OpenCode session', undefined, { harness: 'opencode', subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } }),
+  countRow('daemon', 'Codex on an older daemon', undefined, { harness: 'codex', subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } }),
 ] as const satisfies readonly Row[]
-const countChild = countRow('child', 'Reported child with its own children', 2, { parentRef: countRows[0].ref })
+const countChild = countRow('child', 'Child of the plural row', undefined, { harness: 'claude', parentRef: countRows[0].ref, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } })
 const expectedCount: Readonly<Record<string, string | null>> = {
   [countRows[0].title]: '3 subagents', [countRows[1].title]: '1 subagent', [countRows[2].title]: null,
-  [countRows[3].title]: '? subagents', [countRows[4].title]: '14 subagents', [countChild.title]: null,
+  [countRows[3].title]: '? subagents', [countRows[4].title]: '14 subagents', [countRows[5].title]: null,
+  [countRows[6].title]: null, [countChild.title]: null,
 }
 const longCountTitles: readonly string[] = [countRows[0].title, countRows[3].title, countRows[4].title]
 /** The desktop sidebar at its 240px minimum and 320px, and the 320px phone Agents sheet. */
@@ -651,7 +691,11 @@ const countHosts = [
   { key: 'desktop-320', width: 320, narrow: false },
   { key: 'phone-320', width: 320, narrow: true },
 ] as const
-/** A 240px tree includes depth 8 and continues to depth 12 so main's content-sized trailing slot exercises every count mode. */
+/**
+ * Layout stress only: a 240px tree includes depth 8 and continues to depth 12 so main's content-sized trailing slot
+ * exercises every count mode. Live child rows never carry nested counts (their wire shape has no report); these
+ * fixtures only drive the count's geometry at narrow name columns.
+ */
 const deepCounts = [3, 1, 14, undefined, 3, 1, 14, undefined, 3, 1, 14, undefined, 3] as const
 const deepRow = (depth: number): Row => countRow(`deep-${depth}`, `Depth ${depth} · coordinate the long release train`, deepCounts[depth], {
   ...(depth === 0 ? {} : { parentRef: `agent/example-count-deep-${depth - 1}` }),
@@ -694,7 +738,7 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
       const row = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(element => element.querySelector('[data-row-column="title"]')?.textContent === title)!
       await expect(Math.abs(row.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
       const chip = row.querySelector<HTMLElement>('[data-subagent-count]')
-      // Zero and display-only rows carry no count at all.
+      // Zero, not-reported (OpenCode, older daemon) and display-only rows carry no count at all, never a "?".
       if (expected === null) { await expect(chip).toBeNull(); continue }
       const tag = chip!.querySelector<HTMLElement>('[data-count-text]')!
       await expect(tag.textContent).toBe(expected)
@@ -807,7 +851,7 @@ const subagentCountPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = asy
 }
 
 const unreportedName = 'Unreported subagents'
-const unreportedReason = 'The number of subagents isn’t reported.'
+const unreportedReason = 'Not reported yet'
 /**
  * The count's kit tooltip says `text` on pointer hover and on keyboard focus, portals inside the themed `root` and paints
  * its inverted surface (light on a dark root), and replaces the row's hover card instead of stacking on it.
@@ -836,14 +880,14 @@ const expectExplained = async (trigger: HTMLElement, root: HTMLElement, text: st
 
 export const SubagentCount: StoryObj<{ scheme: Scheme }> = {
   name: 'Subagent count · after the title · 240/320 desktop and phone',
-  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported and display-only counts with long titles verify count copy, placement, title truncation and one-line fit at 240px and 320px desktop and phone widths. Tight name columns use a bare count, while desktop 320px retains the word; the full label remains available to assistive tech. The unreported count carries an accessible description and kit tooltip on hover and keyboard focus. A 240px tree includes depth 8 and continues to depth 12 to verify bare and hidden count modes without covering trailing metadata.' } },
+  parameters: { scenario: { _tag: 'contract-fixture', reason: 'Fixed plural, singular, zero, unreported, not-reported and display-only counts with long titles verify count copy, placement, title truncation and one-line fit at 240px and 320px desktop and phone widths. Claude, Codex and OMP rows report counts (an explicit empty list is zero, no chip); a starting OMP row awaiting its first report shows "?"; an OpenCode row, a running Codex row on an older daemon and a child row (not reported by its harness) paint no count. Tight name columns use a bare count, while desktop 320px retains the word; the full label remains available to assistive tech. The unreported count carries an accessible description and kit tooltip on hover and keyboard focus. A 240px layout-stress tree includes depth 8 and continues to depth 12 to verify bare and hidden count modes without covering trailing metadata; its nested counts drive geometry only, since live child rows carry no nested report.' } },
   args: { scheme: 'dark' }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
   render: ({ scheme }) => <SubagentCountMatrix scheme={scheme} />,
   play: subagentCountPlay,
 }
 export const SubagentCountLight: StoryObj<{ scheme: Scheme }> = { ...SubagentCount, name: 'Subagent count · after the title · 240/320 desktop and phone · light', args: { scheme: 'light' } }
 
-const countPressItems: readonly AgentItem[] = [toItem(countRow('press', 'Review the subagent switching flow', 2), 0), toItem(countRows[3], 0)]
+const countPressItems: readonly AgentItem[] = [toItem(countRow('press', 'Review the subagent switching flow', 2, { harness: 'codex' }), 0), toItem(countRows[3], 0)]
 function SubagentCountPressTree({ width }: { readonly width: 240 | 320 }) {
   const [selected, setSelected] = React.useState<string>()
   const [pressed, setPressed] = React.useState<readonly string[]>([])

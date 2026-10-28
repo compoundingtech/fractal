@@ -11,6 +11,7 @@ pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
+pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
@@ -26,7 +27,7 @@ pub const SCHEMA_NAME: &str = "st3.v1";
 
 /// Local SQLite compatibility is separate from the replicated claim vocabulary.
 pub use fractal_storage_version::STORAGE_VERSION;
-pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hbb80b2826a11 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
+pub const LOCAL_STORAGE_SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h98d3e9599416 owner=fractal_schema TODO=chunk-or-reference-variable-columns */ r#"## Local checkpoint capture storage
 
 SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
@@ -53,10 +54,10 @@ Claim-to-envelope relevance seeks batch membership through `replica_envelopes_ba
 | `batches` | Backfills, canonical writer/sequence changes, identity/rowid changes and deletions for claims associated with a relevant envelope. Hash and batch-time bookkeeping alone is not captured. |
 | `replica_records` | Backfills and captured identity, position, admission-state, claim-reference or replacement-reference changes in a relevant envelope. A newer duplicate naming a captured below-cut claim is also fenced on INSERT, UPDATE and DELETE: canonical `MIN(position)` reads every copy, not only the sealed envelope prefix. |
 | `replica_envelopes` | Relevant identity, accepted-time or rowid changes and deletions. Any successful below-cut INSERT conservatively invalidates, including explicit rowid backfill and identical REPLACE relocating an old identity beyond the frontier. Receipt state, relay, validation errors and received-time bookkeeping alone is not captured. |
-| `desired`, `mission_definitions`, `mission_revisions`, `documents` | INSERT referencing a captured below-cut claim, and UPDATE whose NEW reference is such a claim (or that moves its scan rowid). A row names a claim to protect it, and protection only keeps claims, so a row that stops naming a captured claim (DELETE, REPLACE or UPDATE onto a later claim, as when a watch or a seat's desired state ends) leaves the staged protection a superset and the capture valid. Captured projection rebuilds stay fenced by their inserts. |
+| `desired`, `mission_definitions`, `mission_revisions`, `documents` | INSERT/DELETE referencing a captured below-cut claim, and UPDATE moving either OLD or NEW reference to/from such a claim (or moving its scan rowid). Unchanged references and references confined to above-cut claims are ignored. Captured projection rebuilds and direct desired deletion remain fenced. |
 | Repair references | `record.repaired` receipt changes referencing a captured replacement or a record in a relevant envelope; `repair.applied` receipt changes referencing captured predecessor claims; record replacement references into captured below-cut claims. Repairs only concerning newer history are ignored. |
 | `checkpoint_claims`, `checkpoint_envelopes` | Below-cut tombstone INSERT/DELETE and captured metadata, identity, accepted-time or rowid changes; both sides of a cut crossing are checked. The checkpoint-label field alone is not captured. |
-| Identity collisions on INSERT | BEFORE INSERT compares the colliding existing row's capture-relevant content, covering REPLACE with recursive triggers disabled, including removal of captured tombstones or core rows. Projection tables have none: a replaced row only stops protecting, and the new row runs its AFTER INSERT fence. Identical ignored duplicates do not invalidate. Successful relevant inserts still run their AFTER fence. |
+| Identity collisions on INSERT | BEFORE INSERT compares the colliding existing row's capture-relevant content, covering REPLACE with recursive triggers disabled, including removal of captured protection or tombstones. Identical ignored duplicates do not invalidate. Successful relevant inserts still run their AFTER fence. |
 
 Capture does not read envelope signatures/holds, projection-health rows, peer/cursor state, blob bytes, operation caches, or checkpoint status as metadata, so mutations confined to those tables need no capture fence. Blob-backed document bindings and operation identity in claim bodies/tombstones are covered by their captured tables. Any future captured source must extend the trigger audit before pages may read it. Accepted-time parsing remains a prerequisite owned by #2106, not a separate compatibility change here.
 
@@ -465,19 +466,25 @@ impl Registry {
 
     pub fn markdown(&self) -> String {
         let mut output = format!(
-            "# st3 schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
+            "# Fractal schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
             self.name,
             STORAGE_VERSION,
             storage_digest()
         );
         output.push_str("## Subject families\n\n| Family | Pattern | Client writable | Description |\n|---|---|---:|---|\n");
         for spec in self.subjects.values() {
+            // Registry descriptions are hashed compatibility data; branding belongs in this view.
+            let description = match spec.description.as_str() {
+                "An st3 daemon." => "A Fractal daemon.",
+                "A Small Talk message." => "A Fractal message.",
+                description => description,
+            };
             output.push_str(&format!(
                 "| `{}` | `{}` | {} | {} |\n",
                 spec.family,
                 spec.pattern,
                 if spec.client_writable { "yes" } else { "no" },
-                markdown_cell(&spec.description)
+                markdown_cell(description)
             ));
         }
         output.push_str("\nCustom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE.NAME`.\n\n");
@@ -707,6 +714,7 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
@@ -781,6 +789,12 @@ impl Registry {
                 validate_value(kind, name, value, field)?;
                 self.validate_reference(kind, name, value, field)?;
             }
+        }
+        if kind == "uri.reference"
+            && let Some(uri) = facts.get("uri").and_then(Value::as_str)
+            && private_notes::claims(uri)
+        {
+            private_notes::PrivateNotesUri::parse(uri)?;
         }
         Ok(spec)
     }
@@ -1202,6 +1216,14 @@ fn build_registry() -> Registry {
 fn resource_specs() -> BTreeMap<String, ResourceSpec> {
     let mut resources = BTreeMap::new();
     resources.insert("arrangement".into(), resource("arrangement", "A person-owned per-register arrangement.", &[("owner", FieldSpec { immutable: true, ..required_reference_to(&["person"]) }), ("body", object())]));
+    resources.insert(
+        "uri.reference".into(),
+        resource(
+            "uri.reference",
+            "An external resource addressed by an opaque absolute URI.",
+            &[("uri", immutable_string())],
+        ),
+    );
     resources.insert(
         "vcs.repository".into(),
         resource(
@@ -4698,6 +4720,7 @@ mod tests {
 
     #[test]
 
+
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {
@@ -5021,6 +5044,19 @@ mod tests {
             include_str!("../../../docs/st3/schema.md"),
             registry().markdown()
         );
+    }
+
+    #[test]
+    fn markdown_brands_subjects_without_changing_registry_descriptions() {
+        let registry = registry();
+        assert_eq!(registry.subjects["daemon"].description, "An st3 daemon.");
+        assert_eq!(registry.subjects["message"].description, "A Small Talk message.");
+        let markdown = registry.markdown();
+        assert!(markdown.starts_with("# Fractal schema registry\n"));
+        assert!(markdown.contains("A Fractal daemon."));
+        assert!(markdown.contains("A Fractal message."));
+        assert!(!markdown.contains("An st3 daemon."));
+        assert!(!markdown.contains("A Small Talk message."));
     }
 
     #[test]

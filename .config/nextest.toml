@@ -100,7 +100,7 @@ filter = '''
   ))
   or
   (binary_id(=fractal::integration) and (
-    test(=client_only::daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member)
+    test(=client_only::daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member)
     or test(=convergence::a_seed_runs_the_same_every_time)
     or test(=convergence::seed_1_converges)
     or test(=convergence::seed_2_converges)

@@ -228,6 +228,7 @@ pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
     pub store: Arc<Store>,
+    pub private_notes: Arc<crate::private_notes::Authority>,
     pub notify: Arc<Notify>,
     pub event_notify: watch::Sender<u64>,
     pub node: String,
@@ -436,6 +437,9 @@ impl ApiError {
             | "retirement-upgrade-required"
             | "custody-pending"
             | "stale-subject"
+            | "stale-fence"
+            | "idempotency-conflict"
+            | "private-notes-carrier-conflict"
             | "owned-set-refused"
             | "set-managed-subject"
             | "missing-subject-token"
@@ -449,10 +453,12 @@ impl ApiError {
             | "glass-limit" => StatusCode::CONFLICT,
             "launch-review-not-authorized"
             | "wrong-message-recipient"
+            | "forbidden"
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
@@ -744,11 +750,13 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
         .route("/v1/doctor", get(operations::doctor))
         .route("/v1/repair", get(operations::operational_repair_plan))
         .route("/v1/repair/apply", post(operations::apply_operational_repair))
+        .route("/v1/repair/apply-attributed", post(operations::apply_attributed_operational_repair))
         .route("/v1/backup", get(operations::backup_export))
         .route("/v1/replication/status", get(replication::replication_status))
         .route("/v1/replication/records", get(replication::replication_records))
@@ -1882,6 +1890,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "runtime-list-ended"
         | "remote-unavailable"
         | "terminal-unavailable"
+        | "private-notes-unreachable"
+        | "private-notes-carrier-conflict"
+        | "private-notes-indeterminate"
         | "inventory-unavailable"
         | "conversation-content-invalidated"
         | "transcript-unavailable"
@@ -3111,6 +3122,16 @@ pub const AUTHORITY_INDETERMINATE_REASON: &str =
 /// Live presentation of already folded cards: freshness, delivery presence, subagents, and the
 /// agent presentation that reads them (docs/clients/ui-contract.md, Agent).
 pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> anyhow::Result<()> {
+    overlay_agent_resources_at(store, items, at, client_now_ms(), None)
+}
+
+fn overlay_agent_resources_at(
+    store: &Store,
+    items: &mut [Value],
+    at: &str,
+    now: u128,
+    subagents: Option<Vec<crate::store::SubagentView>>,
+) -> anyhow::Result<()> {
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         for item in items.iter_mut() {
@@ -3129,7 +3150,7 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
             let report_age_ms = harness
                 .as_ref()
                 .map(|harness| {
-                    u64::try_from(client_now_ms().saturating_sub(harness.observed_at_unix_ms))
+                    u64::try_from(now.saturating_sub(harness.observed_at_unix_ms))
                         .unwrap_or(u64::MAX)
                 });
             let observation = match report_age_ms {
@@ -3147,8 +3168,8 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                     item["state"] = json!("waiting");
                 }
             }
-            overlay_declaration_restart(item, client_now_ms());
-            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), client_now_ms() as u64);
+            overlay_declaration_restart(item, now);
+            overlay_down(item, launch_since, report_age_ms, reported.as_deref(), now as u64);
             overlay_delivery_presence(item, &local_host);
             // The presentation reads the facts settled just above, so it is settled with them. A
             // row it cannot read goes without one; it never fails the read for every client.
@@ -3159,7 +3180,11 @@ pub fn overlay_agent_resources(store: &Store, items: &mut [Value], at: &str) -> 
                 Err(error) => eprintln!("st3: WARN agent {} has no presentation: {error}", item["id"]),
             }
         }
-        overlay_subagents(store, items)?;
+        if let Some(subagents) = subagents {
+            overlay_subagent_rows(items, subagents);
+        } else {
+            overlay_subagents(store, items)?;
+        }
         Ok(())
     })
 }
@@ -3263,8 +3288,8 @@ fn client_suspension(suspension: &crate::suspension::Suspension) -> Value {
     })
 }
 
-/// Each seat's running subagents: open, with a lease that runs past this read. A lease runs out
-/// without a claim, so this is read per request rather than cached with the agents.
+/// Each observing seat's running subagents: open, with a lease that runs past this read. A lease
+/// runs out without a claim, so this is read per request rather than cached with the agents.
 fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -3279,6 +3304,11 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
             store.running_subagents(now)
         }
     })?;
+    overlay_subagent_rows(items, subagents);
+    Ok(())
+}
+
+fn overlay_subagent_rows(items: &mut [Value], subagents: Vec<crate::store::SubagentView>) {
     let mut running = BTreeMap::<String, Vec<Value>>::new();
     for subagent in subagents {
         running
@@ -3297,11 +3327,16 @@ fn overlay_subagents(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
             }));
     }
     for item in items {
+        if !item["driver"]
+            .as_str()
+            .is_some_and(fractal_drivers::subagents::driver_observes_subagents)
+        {
+            continue;
+        }
         let id = item.get("id").and_then(Value::as_str).unwrap_or_default();
         let subagents = running.remove(id).unwrap_or_default();
         item["subagents"] = Value::Array(subagents);
     }
-    Ok(())
 }
 
 /// Delivery presence is independent of harness readiness: a local native seat waiting on a human
@@ -3497,7 +3532,7 @@ fn client_agent_cards_presented(
     let mut card_reads = store.agent_card_reads(&agent_subjects, snapshot_index, &actual_claims)?;
     // Cards without a harness need only their actual claim's acceptance time, not its body.
     // Keep the existing per-claim fallback if the bulk metadata read cannot be completed.
-    let actual_claim_times = store.claim_acceptance_times(
+    let actual_claim_times = store.kept_claim_acceptance_times(
         &status
             .subjects
             .iter()
@@ -3507,6 +3542,15 @@ fn client_agent_cards_presented(
             })
             .collect::<Vec<_>>(),
     );
+    let declared_resources = status
+        .subjects
+        .iter()
+        .filter_map(|subject| {
+            let references = crate::graph::declared_resources(subject.desired.as_ref()?);
+            (!references.is_empty()).then(|| (subject.subject.clone(), references))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let resource_uris = store.declared_resource_uris(declared_resources.values().flatten())?;
     let mut agents = status
         .subjects
         .into_iter()
@@ -3751,6 +3795,7 @@ fn client_agent_cards_presented(
                 "owner_run_id": subject.owner_run,
                 "driver": driver,
                 "harness_state": harness_state.as_deref().map(|state| if state == "needs-login" { "unauthenticated" } else { state }),
+                "background_jobs": subject.harness.as_ref().and_then(|harness| harness.background_jobs),
                 "end_reason": end_reason,
                 "harness_error_state": (harness_state.as_deref() == Some("needs-login")).then_some("needs-login"),
                 "since": subject.harness.as_ref().map(|harness| client_timestamp(harness.since_unix_ms)),
@@ -3780,6 +3825,10 @@ fn client_agent_cards_presented(
                     "agent_id": relationship.agent,
                     "reason": relationship.reason
                 })).collect::<Vec<_>>(),
+                "resources": client_declared_resources(
+                    declared_resources.get(&subject.subject).map_or(&[][..], Vec::as_slice),
+                    &resource_uris,
+                ),
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
@@ -3820,6 +3869,36 @@ fn client_agent_cards_presented(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(agents.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Read-only edges with an explicit authored kind and URI resolution state.
+/// Subject edges do not require a URI locator; missing URI locators are omitted, not null.
+pub fn client_declared_resources(
+    references: &[crate::model::DeclaredResourceReference],
+    uris: &BTreeMap<String, String>,
+) -> Vec<Value> {
+    references
+        .iter()
+        .map(|reference| {
+            let mut value = json!({
+                "name": reference.name,
+                "subject": reference.subject,
+                "kind": reference.kind,
+                "resolution": match reference.kind {
+                    crate::model::ResourceReferenceKind::Subject => "not-applicable",
+                    crate::model::ResourceReferenceKind::Uri if uris.contains_key(&reference.subject) => "resolved",
+                    crate::model::ResourceReferenceKind::Uri => "unresolved",
+                },
+                "reason": reference.reason,
+            });
+            if reference.kind == crate::model::ResourceReferenceKind::Uri
+                && let Some(uri) = uris.get(&reference.subject)
+            {
+                value["uri"] = json!(uri);
+            }
+            value
+        })
+        .collect()
 }
 
 fn desired_harness_driver(desired: &Value) -> Option<String> {
@@ -5399,21 +5478,56 @@ const AGENT_ROSTER_ASSEMBLY_ROUNDS: usize = 3;
 /// roster meanwhile, with its own cut and publication time; if it cannot be assembled, the
 /// refresh fails and is tried again on the next request.
 pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> {
+    let generation = store.agents_publication_build()?;
+    let Some(CapturedPresentedAgents { source, subagents, now }) =
+        refresh_agent_roster_source(store, history)? else { return Ok(()); };
+    let valid_until = source.valid_until_ms.map_or(now.saturating_add(1000),
+        |deadline| deadline.min(now.saturating_add(1000)));
+    let mut rows = (*source.rows).clone();
+    overlay_agent_resources_at(store, &mut rows, &client_timestamp(u128::from(now)),
+        u128::from(now), Some(subagents))?;
+    store.publish_presented_agents(generation, source, now, Some(valid_until), rows)
+}
+
+struct CapturedPresentedAgents {
+    source: crate::store::evidence::AgentsPublicationSource,
+    subagents: Vec<crate::store::SubagentView>,
+    now: u64,
+}
+
+fn capture_presented_agents(store: &Store, index: u64) -> anyhow::Result<CapturedPresentedAgents> {
+    let now = client_now_ms().min(u128::from(u64::MAX)) as u64;
+    Ok(CapturedPresentedAgents {
+        source: store.agents_publication_source(index)?,
+        subagents: store.running_subagents(now)?,
+        now,
+    })
+}
+
+fn refresh_agent_roster_source(
+    store: &Store, history: bool,
+) -> anyhow::Result<Option<CapturedPresentedAgents>> {
     store.begin_agent_roster_fault_retries(history);
-    if store.read_snapshot(|index| store.agent_roster_current(index, history))? {
-        return Ok(());
-    }
+    let (current, captured) = store.read_snapshot(|index| {
+        let current = store.agent_roster_current(index, history)?;
+        let captured = if current && !history { Some(capture_presented_agents(store, index)?) } else { None };
+        Ok((current, captured))
+    })?;
+    if current { return Ok(captured); }
     let complete = |store: &Store| store.read_snapshot(|index| {
         if let Some(reason) =
             store.agent_roster_unbounded_because(index, history, AGENT_ROSTER_WARM_CHUNK)?
         {
-            return Ok(Some(reason));
+            return Ok((Some(reason), None));
         }
-        client_agent_resources_cached(store, history, index).map(|_| None)
+        client_agent_resources_cached(store, history, index)?;
+        let captured = if history { None } else { Some(capture_presented_agents(store, index)?) };
+        Ok((None, captured))
     });
     for _ in 0..AGENT_ROSTER_ASSEMBLY_ROUNDS {
-        let Some(reason) = complete(store)? else {
-            return Ok(());
+        let (reason, captured) = complete(store)?;
+        let Some(reason) = reason else {
+            return Ok(captured);
         };
         store.note_agent_roster_chunked(&reason);
         let order = store.read_snapshot(|index| {
@@ -5428,8 +5542,9 @@ pub fn refresh_agent_roster(store: &Store, history: bool) -> anyhow::Result<()> 
             })?;
         }
     }
-    if complete(store)?.is_none() {
-        return Ok(());
+    let (reason, captured) = complete(store)?;
+    if reason.is_none() {
+        return Ok(captured);
     }
     anyhow::bail!("the agents roster kept changing in ways no short fold can follow; keeping the previous one")
 }
@@ -5876,6 +5991,7 @@ pub fn remote_read_error(host: &str, error: anyhow::Error) -> ApiError {
             | "stale-fence"
             | "validation-failed"
             | "forbidden"
+            | "peer-too-old"
             | "idempotency-conflict"
     ) {
         return remote_unavailable(host);
@@ -6085,72 +6201,8 @@ pub fn start_agent_roster(state: &AppState) {
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
-            let mut admission = store.admit_agent_resources("refresher").await;
             let first = std::mem::take(&mut head);
-            if !first {
-                record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
-            }
-            let reader = store.clone();
-            let mut warm_attributes = None;
-            if first {
-                // Warm without admission: nothing is published, and no reader folds.
-                drop(admission);
-                let reader = store.clone();
-                let submitted = crate::otel::export_enabled().then(Instant::now);
-                match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
-                    roster_worker(true, submitted, None, || {
-                        let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
-                        (result, crate::otel::take_roster_attributes())
-                    })
-                })).await {
-                    Ok((result, attributes)) => {
-                        warm_attributes = attributes;
-                        if let Err(error) = result {
-                            eprintln!("st3: agents roster warm-up failed: {error:#}");
-                        }
-                    }
-                    Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
-                }
-                admission = store.admit_agent_resources("refresher").await;
-            }
-            let submitted = crate::otel::export_enabled().then(Instant::now);
-            let refreshed = tokio::task::spawn_blocking(move || roster_worker(true, submitted, warm_attributes, || {
-                let _admission = admission;
-                _admission.enter_worker();
-                // The first fold publishes only what windows and first pages show; the rest
-                // follows at once.
-                crate::task_cpu::performance_blocking("published_list.agents", || if first {
-                    reader.answer_agent_roster_requests(|| {
-                        reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
-                    })
-                } else {
-                    // Nothing published to start from: every card folds again from the log.
-                    let before = reader
-                        .published_agent_roster(u64::MAX, false)
-                        .map(|(cut, _, _)| cut);
-                    let cold = before.is_none();
-                    let folded = Instant::now();
-                    let refreshed = reader.answer_agent_roster_requests(|| {
-                        refresh_agent_roster(&reader, false)?;
-                        if reader.take_agent_roster_history_request() {
-                            refresh_agent_roster(&reader, true)?;
-                        }
-                        Ok(())
-                    });
-                    if let (Some(before), Some((cut, _, at))) =
-                        (before, reader.published_agent_roster(u64::MAX, false))
-                    {
-                        record_publish_latency(&reader, "agents", before, cut, at);
-                    }
-                    record_roster_stage(if cold {
-                        request_latency::RosterStage::RefreshCold
-                    } else {
-                        request_latency::RosterStage::Refresh
-                    }, folded.elapsed());
-                    refreshed
-                })
-            }))
-            .await;
+            let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => eprintln!("st3: agents roster refresh failed: {error:#}"),
@@ -6168,9 +6220,101 @@ pub fn start_agent_roster(state: &AppState) {
                 () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
                 () = store.fresh_agent_roster_wanted() => {}
             }
-            wake.notified().await;
+            // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
+            // paced by the existing refresh pause, never a timer per subscriber.
+            if store.agent_roster_refresh_failed() {
+                wake.notified().await;
+            }
+            wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// One owner iteration, including both queues that can outlive its readers.
+async fn refresh_agent_roster_admitted(
+    store: Arc<Store>,
+    first: bool,
+) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
+    let mut admission = store.admit_agent_resources("refresher").await;
+    if !first {
+        if !store.agents_publication_demand() {
+            return Ok(Ok(()));
+        }
+        record_roster_stage(request_latency::RosterStage::RefreshAdmission, admission.waited());
+    }
+    let reader = Arc::clone(&store);
+    let mut warm_attributes = None;
+    if first {
+        // Warm without admission: nothing is published, and no reader folds.
+        drop(admission);
+        let reader = Arc::clone(&store);
+        let submitted = crate::otel::export_enabled().then(Instant::now);
+        match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
+            roster_worker(true, submitted, None, || {
+                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                (result, crate::otel::take_roster_attributes())
+            })
+        })).await {
+            Ok((result, attributes)) => {
+                warm_attributes = attributes;
+                if let Err(error) = result {
+                    eprintln!("st3: agents roster warm-up failed: {error:#}");
+                }
+            }
+            Err(error) => eprintln!("st3: agents roster warm-up stopped: {error}"),
+        }
+        admission = store.admit_agent_resources("refresher").await;
+    }
+    let submitted = crate::otel::export_enabled().then(Instant::now);
+    tokio::task::spawn_blocking(move || {
+        // The blocking pool is another queue: losing demand there must also avoid a fold.
+        if !first && !reader.agents_publication_demand() {
+            return Ok(());
+        }
+        roster_worker(true, submitted, warm_attributes, || {
+            let _admission = admission;
+            _admission.enter_worker();
+            // Startup publishes a bounded head; complete presentation follows on demand.
+            crate::task_cpu::performance_blocking("published_list.agents", || if first {
+                reader.answer_agent_roster_requests(|| {
+                    // Queue the complete follow-on before publishing the head: a projection
+                    // reset after that publication must be able to cancel this old demand.
+                    reader.fractal.request_roster_refresh();
+                    reader.read_snapshot(|index| client_agent_roster_head(&reader, index))
+                })
+            } else {
+                let before = reader.published_agent_roster(u64::MAX, false).map(|(cut, _, _)| cut);
+                let cold = before.is_none();
+                let folded = Instant::now();
+                let refreshed = reader.answer_agent_roster_requests(|| {
+                    refresh_agent_roster(&reader, false)?;
+                    if reader.take_agent_roster_history_request() {
+                        refresh_agent_roster(&reader, true)?;
+                    }
+                    Ok(())
+                });
+                if let (Some(before), Some((cut, _, at))) =
+                    (before, reader.published_agent_roster(u64::MAX, false))
+                {
+                    record_publish_latency(&reader, "agents", before, cut, at);
+                }
+                record_roster_stage(if cold {
+                    request_latency::RosterStage::RefreshCold
+                } else {
+                    request_latency::RosterStage::Refresh
+                }, folded.elapsed());
+                refreshed
+            })
+        })
+    }).await
+}
+
+async fn wait_for_agent_roster_demand(store: &Store, wake: &tokio::sync::Notify) {
+    // Notifications may have been queued while readers were present. Recheck demand
+    // after consuming them rather than doing one last presentation fold on an idle node.
+    while !store.agents_publication_demand() {
+        wake.notified().await;
+    }
 }
 
 /// The local daemon binds a Unix peer to the harness identity inherited by that peer or one of
@@ -6779,6 +6923,12 @@ pub async fn guard_bound_request(
         )));
     }
     let path = request.uri().path();
+    if path == "/v1/repair/apply" {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            "bound harnesses must use the attributed repair apply route",
+        )));
+    }
     // A forwarded client read carries a person's authority between fleet members. Only the
     // replication worker, which runs in no harness, hands one over.
     if path.starts_with(crate::peer::CLIENT_READ_FORWARD_PATH) {
@@ -6816,6 +6966,7 @@ pub async fn guard_bound_request(
         "/v1/custom/reply",
         "/v1/diagnostic",
         "/v1/rules/",
+        "/v1/repair",
     ]
     .iter()
     .any(|prefix| path.starts_with(prefix))
@@ -6827,6 +6978,14 @@ pub async fn guard_bound_request(
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
+        if parts.uri.path() == "/v1/repair/apply-attributed"
+            && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
+        {
+            return Err(ApiError::bad(St3Error::new(
+                "foreign-agent-actor",
+                format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
+            )));
+        }
         for key in ["actor", "requester"] {
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
@@ -8077,6 +8236,12 @@ fn doctor_report_with_operation_drift(
         }),
     }
     checks.push(first_readiness_scheduler_check(&state.store, &state.node));
+    if state.fleet_id.is_some() {
+        checks.push(crate::replication_worker_build::check(
+            &state.state_dir,
+            fractal_drivers::version::build_commit(),
+        ));
+    }
     match state.store.idempotency_conflicts(5) {
         Ok((0, _)) => checks.push(DoctorCheck {
             name: "idempotency-keys".into(),
@@ -8468,6 +8633,30 @@ async fn refuse_while_leaving(
     next.run(request).await
 }
 
+/// Mission-only routes may publish the shared targets synthesized from their URI edges,
+/// but never an explicitly authored immediate declaration (even one with the same ID).
+fn mission_only_subjects(intent: &crate::model::NormalizedIntent) -> bool {
+    if intent.subjects.is_empty() {
+        return true;
+    }
+    let mission_roots = intent.normalized["declarations"].as_array().is_some_and(|nodes| {
+        nodes.iter().all(|node| node["name"] == "mission")
+    });
+    mission_roots && intent.subjects.values().all(|subject| {
+        subject.kind == "resource"
+            && subject.subject.starts_with("resource/uri/")
+            && subject.owner_run.is_none()
+            && subject.owner_generation.is_none()
+            && subject.owner_step.is_none()
+            && intent.missions.values().any(|mission| {
+                mission.resources.iter().any(|edge| {
+                    edge.kind == crate::model::ResourceReferenceKind::Uri
+                        && edge.subject == subject.subject
+                })
+            })
+    })
+}
+
 fn launch_candidate_mission<'a>(
     intent: &'a crate::model::NormalizedIntent,
     expected: &str,
@@ -8482,7 +8671,7 @@ fn launch_candidate_mission<'a>(
     };
     let published_closure = crate::mission::mission_closure_ids(mission);
     let published = intent.missions.keys().cloned().collect::<BTreeSet<_>>();
-    if !intent.subjects.is_empty() || published != published_closure {
+    if !mission_only_subjects(intent) || published != published_closure {
         return Err(St3Error::new(
             "wrong-launch-mission",
             format!(
@@ -10019,7 +10208,9 @@ fn scope_eval_desired_subjects(
     let mut shared = Vec::new();
     for (subject, desired) in &mut intent.subjects {
         let Some(current) = selected.get(subject.as_str()) else {
-            desired.owner_run = Some(owner_run.to_owned());
+            if crate::graph::declared_uri(&desired.desired).is_none() {
+                desired.owner_run = Some(owner_run.to_owned());
+            }
             continue;
         };
         if *current == desired {

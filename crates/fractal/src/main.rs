@@ -525,7 +525,9 @@ enum DemoCommand {
         /// The demo file.
         file: PathBuf,
         /// Erase an instance a demo did not make: its graph, its interface cache and its
-        /// config. Without it, a demo plays only in a new instance or one a demo made.
+        /// config. Without it, a demo plays only in a new instance or one a demo made. The
+        /// instance then keeps a .st-demo mark, and every later play erases it without asking:
+        /// keep it for demos only.
         #[arg(long)]
         reset: bool,
     },
@@ -2230,6 +2232,9 @@ struct SubjectShowArgs {
     /// Print the current managed agent declaration as canonical KDL v2.
     #[arg(long)]
     kdl: bool,
+    /// Show the agents and missions that name this resource.
+    #[arg(long, conflicts_with = "kdl")]
+    references: bool,
     /// Include literal environment values in the KDL output.
     #[arg(long, requires = "kdl")]
     show_env_values: bool,
@@ -2278,6 +2283,9 @@ struct RecorderReportArgs {
 enum RepairCommand {
     /// Compute the exact read-only repair plan and approval token.
     DryRun {
+        /// Compatibility actor for guarded callers; this GET does not require an actor.
+        #[arg(long = "as")]
+        ignored_actor: Option<String>,
         /// Restrict repair items to these exact subjects (repeatable).
         #[arg(long = "subject")]
         subjects: Vec<String>,
@@ -2286,7 +2294,13 @@ enum RepairCommand {
         classes: Vec<String>,
     },
     /// Apply exactly the plan identified by a dry-run token.
-    Apply { token: String },
+    Apply {
+        token: String,
+        /// Caller identity. Agents must explicitly name their literal agent identity.
+        /// The daemon verifies the authenticated harness binding and records the caller.
+        #[arg(long = "as")]
+        actor: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4366,6 +4380,9 @@ struct MessageStatusArgs {
     /// Whether a send or reply that fractal did not confirm landed, by the key its error printed.
     #[arg(long, conflicts_with = "reference")]
     idempotency_key: Option<String>,
+    /// Compatibility actor for guarded callers; this GET does not require an actor.
+    #[arg(long = "as")]
+    ignored_actor: Option<String>,
 }
 
 #[derive(Args)]
@@ -5703,6 +5720,21 @@ fn guard_mutating_cli_actor(
     let Some(own) = own.filter(|own| own.starts_with("agent/")) else {
         return Ok(());
     };
+    // Bind explicit repair actors locally as well as at the daemon's authenticated
+    // harness boundary; possession of a repair token is not a caller identity.
+    let repair_actor = match command {
+        Command::Repair { command: RepairCommand::Apply { actor, .. } } => {
+            Some(actor.as_deref().ok_or_else(|| anyhow::anyhow!(
+                "an agent repair apply needs explicit --as {own}"
+            ))?)
+        }
+        Command::Repair { command: RepairCommand::DryRun { ignored_actor, .. } } => ignored_actor.as_deref(),
+        Command::Conversations { command: MessageCommand::Status(args) } => args.ignored_actor.as_deref(),
+        _ => None,
+    };
+    if let Some(actor) = repair_actor {
+        anyhow::ensure!(actor == own, "actor flag must equal ST_AGENT literally ({own})");
+    }
     let actor = match command {
         Command::Apply(args) => Some(args.actor.as_str()),
         Command::Missions { command } => match command {
@@ -6023,16 +6055,16 @@ fn run_skill(args: SkillArgs) -> Result<()> {
 fn run_claude_channel(command: ClaudeChannelCommand) -> Result<()> {
     match command {
         ClaudeChannelCommand::Install { no_policy } => {
-            fractal_drivers::claude_channel::install_st3(no_policy).map(|_| ())
+            fractal_drivers::claude_channel::install_fractal(no_policy).map(|_| ())
         }
-        ClaudeChannelCommand::Status => fractal_drivers::claude_channel::status_st3(),
+        ClaudeChannelCommand::Status => fractal_drivers::claude_channel::status_fractal(),
         ClaudeChannelCommand::Uninstall { keep_policy } => {
-            fractal_drivers::claude_channel::uninstall_st3(keep_policy)
+            fractal_drivers::claude_channel::uninstall_fractal(keep_policy)
         }
         ClaudeChannelCommand::InstallPolicy => {
-            fractal_drivers::claude_channel::install_st3_policy().map(|_| ())
+            fractal_drivers::claude_channel::install_fractal_policy().map(|_| ())
         }
-        ClaudeChannelCommand::UninstallPolicy => fractal_drivers::claude_channel::uninstall_st3_policy(),
+        ClaudeChannelCommand::UninstallPolicy => fractal_drivers::claude_channel::uninstall_fractal_policy(),
     }
 }
 
@@ -6485,6 +6517,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
         native_session_home: std::env::var_os("HOME").map(PathBuf::from),
         planner_default: config.planner.clone(),
         assistant_receipts: Default::default(),
+        private_notes: Arc::new(fractal_daemon::private_notes::Authority {
+            catalogs: config.private_notes_catalogs.clone(),
+        }),
     };
     fractal_daemon::api::configure_claude_ownership_observation(&config.state_dir,
         config.claude_primary_ownership_observe == Some(true));
@@ -9920,6 +9955,23 @@ fn render_usage_report(report: &Value, hours: u64, only: Option<UsageBy>) -> Str
                 if harnesses.is_empty() { "none" } else { &harnesses },
             );
         }
+        let kept = names("keep");
+        if !kept.is_empty() {
+            let _ = writeln!(
+                output,
+                "KEPT  seats this node never stops at the weekly limit ([limits] keep) · {kept}"
+            );
+            let retired = names("keep_retired");
+            if !retired.is_empty() {
+                let count = report["limits_policy"]["keep_retired"]
+                    .as_array()
+                    .map_or(0, Vec::len);
+                let _ = writeln!(
+                    output,
+                    "KEPT  {count} of those seats are no longer declared and keep nothing; remove them from keep when convenient · {retired}"
+                );
+            }
+        }
     }
     // A harness bound to a declared account reports that account's name beside the provider's
     // label, so usage reads against the accounts a person declared.
@@ -10204,7 +10256,7 @@ fn timeline_entries_text(session_id: &str, items: &[ClientTimelineEntry]) -> Str
 
 fn unseen_timeline_entries(
     entries: &[ClientTimelineEntry],
-    seen: &mut BTreeMap<String, (u32, u64)>,
+    seen: &mut BTreeMap<String, (u64, u64)>,
 ) -> Vec<ClientTimelineEntry> {
     let mut changed = Vec::new();
     for entry in entries {
@@ -10275,6 +10327,27 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
             print_value(&result, json_output)
         }
         SubjectCommand::Show(args) => {
+            if args.references {
+                let references: Vec<Value> = client
+                    .get(&format!("/v1/resource-references/{}", args.subject))
+                    .await?;
+                if json_output {
+                    println!("{}", serde_json::to_string_pretty(&references)?);
+                } else {
+                    for reference in references {
+                        print!(
+                            "{} · {}",
+                            reference["owner"].as_str().unwrap_or_default(),
+                            reference["name"].as_str().unwrap_or_default(),
+                        );
+                        if let Some(reason) = reference["reason"].as_str() {
+                            print!(" · {reason}");
+                        }
+                        println!();
+                    }
+                }
+                return Ok(());
+            }
             if args.subject.starts_with("custom/") && !args.kdl
                 && let Ok(result) = client
                     .get::<Value>(&format!(
@@ -10301,7 +10374,20 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                 if !args.show_env_values {
                     fractal_daemon::graph::redact_agent_env_values(&mut desired);
                 }
-                print!("{}", fractal_daemon::graph::render_agent_desired_kdl(&desired)?);
+                let mut uris = BTreeMap::new();
+                for reference in fractal_daemon::graph::declared_resources(&desired) {
+                    let status = status_for(client, &reference.subject).await?;
+                    if let Some(uri) = status
+                        .subjects
+                        .iter()
+                        .find(|subject| subject.subject == reference.subject)
+                        .and_then(|subject| subject.desired.as_ref())
+                        .and_then(fractal_daemon::graph::declared_uri)
+                    {
+                        uris.insert(reference.subject, uri.to_owned());
+                    }
+                }
+                print!("{}", fractal_daemon::graph::render_agent_desired_kdl(&desired, &uris)?);
                 Ok(())
             } else {
                 run_inspect(
@@ -10957,9 +11043,22 @@ fn validate_repair_plan_filters(
     Ok(())
 }
 
+fn repair_apply_path(actor: Option<&str>) -> &'static str {
+    if actor.is_some() { "/v1/repair/apply-attributed" } else { "/v1/repair/apply" }
+}
+
+fn repair_apply_guidance(token: &str, own: Option<&str>) -> String {
+    let token = presentation::shell_argument(token);
+    match own.filter(|own| own.starts_with("agent/") && own.len() > "agent/".len()) {
+        Some(own) => format!("fractal repair apply --as {} {token}", presentation::shell_argument(own)),
+        None => format!("fractal repair apply {token}"),
+    }
+}
+
 async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) -> Result<()> {
     match command {
-        RepairCommand::DryRun { subjects, classes } => {
+        RepairCommand::DryRun { subjects, classes, ignored_actor } => {
+            notice_ignored_read_actor(ignored_actor.as_deref());
             let path = repair_plan_path(&subjects, &classes)?;
             let plan: OperationalRepairPlan = client.get(&path).await?;
             validate_repair_plan_filters(&plan, &subjects, &classes)?;
@@ -10987,12 +11086,14 @@ async fn run_repair(client: &Client, command: RepairCommand, json_output: bool) 
                         println!("  evidence\t{}", serde_json::to_string(&item.details)?);
                     }
                 }
-                println!("Apply this exact plan with: fractal repair apply {}", plan.token);
+                let own = fractal_drivers::contracts::env("ST_AGENT");
+                println!("Apply this exact plan with: {}", repair_apply_guidance(&plan.token, own.as_deref()));
             }
         }
-        RepairCommand::Apply { token } => {
+        RepairCommand::Apply { token, actor } => {
+            let path = repair_apply_path(actor.as_deref());
             let result: OperationalRepairResult = client
-                .post("/v1/repair/apply", &OperationalRepairApplyRequest { token })
+                .post(path, &OperationalRepairApplyRequest { token, actor })
                 .await?;
             if json_output {
                 print_value(&result, true)?;
@@ -12229,46 +12330,6 @@ fn parse_agent_start_identity(identity: &str) -> Result<String, String> {
     Ok(identity.strip_prefix("agent/").unwrap_or(identity).into())
 }
 
-fn declaration_node(value: &Value) -> Result<KdlNode> {
-    let mut node = KdlNode::new(value["name"].as_str().context("declaration has no name")?);
-    if let Some(arguments) = value["arguments"].as_array() {
-        for argument in arguments {
-            node.entries_mut()
-                .push(KdlEntry::new(declaration_value(argument)?));
-        }
-    }
-    if let Some(properties) = value["properties"].as_object() {
-        for (name, value) in properties {
-            node.entries_mut()
-                .push(KdlEntry::new_prop(name.as_str(), declaration_value(value)?));
-        }
-    }
-    if let Some(children) = value["children"].as_array() {
-        let mut body = KdlDocument::new();
-        for child in children {
-            body.nodes_mut().push(declaration_node(child)?);
-        }
-        node.set_children(body);
-    }
-    Ok(node)
-}
-
-fn declaration_value(value: &Value) -> Result<kdl::KdlValue> {
-    Ok(match value {
-        Value::String(value) => kdl::KdlValue::String(value.clone()),
-        Value::Bool(value) => kdl::KdlValue::Bool(*value),
-        Value::Null => kdl::KdlValue::Null,
-        Value::Number(value) => {
-            if let Some(integer) = value.as_i64() {
-                kdl::KdlValue::Integer(integer.into())
-            } else {
-                kdl::KdlValue::Float(value.as_f64().context("invalid declaration number")?)
-            }
-        }
-        _ => anyhow::bail!("invalid declaration value: {value}"),
-    })
-}
-
 fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
     if let Some(current) = body
         .nodes_mut()
@@ -12284,9 +12345,10 @@ fn replace_declaration_child(body: &mut KdlDocument, node: KdlNode) {
 fn agent_start_document(
     args: &AgentStartArgs,
     existing: Option<&fractal_daemon::model::DesiredSubject>,
+    uris: &BTreeMap<String, String>,
 ) -> Result<String> {
     let mut agent = match existing {
-        Some(existing) => declaration_node(&existing.desired)?,
+        Some(existing) => fractal_daemon::graph::render_agent_node(&existing.desired, uris)?,
         None => kdl_node("agent", [args.identity.as_str()]),
     };
     let mut body = agent.children_mut().take().unwrap_or_default();
@@ -16007,13 +16069,13 @@ fn pi_family_message_frame(
     json!({
         "type": "message",
         "deliverAs": "steer",
-        "content": fractal_drivers::ding::with_tag_notices(fractal_drivers::ding::st3_notification_with_metadata(
+        "content": fractal_drivers::ding::with_tag_notices(fractal_drivers::ding::fractal_notification_with_metadata(
             &message.subject,
             &message.from,
             &message.to,
             message.title.as_deref(),
             body,
-            &fractal_drivers::ding::st3_body_sha256(body),
+            &fractal_drivers::ding::fractal_body_sha256(body),
             fractal_drivers::ding::NotificationMetadata {
                 attachments,
                 assistant: message.assistant_metadata().as_ref(),
@@ -16469,18 +16531,42 @@ impl PiFamilyReports {
         // It stays pending and goes again with the next report. A session is reported only once
         // its transcript exists, because only then can a resume find it: pi writes nothing until
         // its first turn.
-        let resumable = |native: &str| {
-            std::env::var_os(fractal_drivers::driver_paths::SESSION_DIR_ENV).is_none_or(|dir| {
-                fractal_daemon::native_resume::pi_family_transcript(
-                    &PathBuf::from(dir).join("provider-sessions"),
-                    native,
-                )
-                .is_some()
-            })
-        };
-        if let Some((native, path)) = self.native_session.clone()
-            && resumable(&native)
-        {
+        if let Some((native, path)) = self.native_session.clone() {
+            let path = match path {
+                Some(path) => {
+                    // A reported external path is authoritative: never substitute a managed
+                    // transcript with the same ID when this exact file fails verification.
+                    let Some(path) = fractal_daemon::native_resume::pi_family_reported_transcript(
+                        Path::new(&path),
+                        &native,
+                    ) else {
+                        return Ok(());
+                    };
+                    Some(path)
+                }
+                None => {
+                    let recovered = (driver == "omp").then(|| {
+                        fractal_daemon::omp_process_transcript(
+                            subject,
+                            incarnation,
+                            &native,
+                            std::env::var("ST3_ACCOUNT").ok().as_deref(),
+                        )
+                    }).flatten();
+                    if recovered.is_none()
+                        && std::env::var_os(fractal_drivers::driver_paths::SESSION_DIR_ENV)
+                            .is_some_and(|dir| {
+                                fractal_daemon::native_resume::pi_family_transcript(
+                                    &PathBuf::from(dir).join("provider-sessions"),
+                                    &native,
+                                ).is_none()
+                            })
+                    {
+                        return Ok(());
+                    }
+                    recovered
+                }
+            };
             let reported: Result<ClaimRecord> = client
                 .post(
                     "/v1/agents/native-session",
@@ -18128,11 +18214,11 @@ fn native_queued_message(
 ) -> fractal_drivers::message::Message {
     let mut tags = vec![
         format!("st3-message:{}", view.subject),
-        format!("{}{}", fractal_drivers::ding::ST3_TO_TAG, view.to),
+        format!("{}{}", fractal_drivers::ding::FRACTAL_TO_TAG, view.to),
         format!(
             "{}{}",
-            fractal_drivers::ding::ST3_SHA256_TAG,
-            fractal_drivers::ding::st3_body_sha256(&body)
+            fractal_drivers::ding::FRACTAL_SHA256_TAG,
+            fractal_drivers::ding::fractal_body_sha256(&body)
         ),
     ];
     tags.extend(
@@ -18434,11 +18520,11 @@ async fn forward_projected_messages_reporting(
                     };
                     let mut tags = message.tags.clone();
                     tags.push(format!("{TAG_PREFIX}{}", message.subject));
-                    tags.push(format!("{}{}", fractal_drivers::ding::ST3_TO_TAG, message.to));
+                    tags.push(format!("{}{}", fractal_drivers::ding::FRACTAL_TO_TAG, message.to));
                     tags.push(format!(
                         "{}{}",
-                        fractal_drivers::ding::ST3_SHA256_TAG,
-                        fractal_drivers::ding::st3_body_sha256(&content)
+                        fractal_drivers::ding::FRACTAL_SHA256_TAG,
+                        fractal_drivers::ding::fractal_body_sha256(&content)
                     ));
                     let filename = fractal_drivers::message::send_to_inbox(
                         inbox,

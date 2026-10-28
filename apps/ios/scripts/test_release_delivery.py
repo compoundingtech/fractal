@@ -40,7 +40,9 @@ with (root / "commands.jsonl").open("a") as log:
                           "developer_dir": os.environ.get("DEVELOPER_DIR"),
                           "deploy_approval": os.environ.get("AGENT_ACTION_APPROVAL"),
                           "native_env": {key: os.environ.get(key) for key in (
-                              "APP_VARIANT", "ST3_FABRIC_PROOF", "ST3_FABRIC_OFFLINE_DEBUG")}}) + "\n")
+                              "APP_VARIANT", "FRACTAL_FABRIC", "ST3_FABRIC",
+                              "FRACTAL_FABRIC_PROOF", "ST3_FABRIC_PROOF",
+                              "FRACTAL_FABRIC_OFFLINE_DEBUG", "ST3_FABRIC_OFFLINE_DEBUG")}}) + "\n")
 
 if name == "gate-slot":
     command = args[args.index("--") + 1:]
@@ -933,17 +935,22 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.commands("xcodebuild")), 3)
 
     def test_inherited_native_environment_is_pinned_to_daily_release_values(self):
-        self.env.update(ST3_FABRIC_PROOF="1", ST3_FABRIC_OFFLINE_DEBUG="1", APP_VARIANT="dev")
+        self.env.update(FRACTAL_FABRIC="1", ST3_FABRIC="1",
+                        FRACTAL_FABRIC_PROOF="1", ST3_FABRIC_PROOF="1",
+                        FRACTAL_FABRIC_OFFLINE_DEBUG="1", ST3_FABRIC_OFFLINE_DEBUG="1",
+                        APP_VARIANT="dev")
         self.reconcile()
         native = [entry["native_env"] for entry in self.commands()
                   if entry["command"] in ("pnpm", "pod", "xcodebuild")]
         self.assertTrue(native)
         for observed in native:
-            self.assertEqual(observed, {"APP_VARIANT": "daily", "ST3_FABRIC_PROOF": "0",
-                                        "ST3_FABRIC_OFFLINE_DEBUG": "0"})
+            self.assertEqual(observed, {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "0", "ST3_FABRIC": "0",
+                                        "FRACTAL_FABRIC_PROOF": "0", "ST3_FABRIC_PROOF": "0",
+                                        "FRACTAL_FABRIC_OFFLINE_DEBUG": "0", "ST3_FABRIC_OFFLINE_DEBUG": "0"})
         # The inherited values are not build inputs, so dropping them neither
         # rebuilds nor reinstalls.
-        for key in ("ST3_FABRIC_PROOF", "ST3_FABRIC_OFFLINE_DEBUG", "APP_VARIANT"):
+        for key in ("FRACTAL_FABRIC", "ST3_FABRIC", "FRACTAL_FABRIC_PROOF", "ST3_FABRIC_PROOF",
+                    "FRACTAL_FABRIC_OFFLINE_DEBUG", "ST3_FABRIC_OFFLINE_DEBUG", "APP_VARIANT"):
             del self.env[key]
         self.reconcile()
         self.assertEqual(self.outcomes()[-1], "unchanged")

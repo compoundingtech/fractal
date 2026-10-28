@@ -26,22 +26,19 @@ const CREATED_AT: &str = "2026-09-29T08:00:00.000Z";
 const SCREEN: &[u8] = b"the worker's screen";
 
 pub(crate) fn state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("attach-node").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "attach-node".into(),
-        state_dir: root.join("daemon"),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("bin/pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("attach-node").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "attach-node".into(),
+    state_dir: root.join("daemon"),
+    pty_root: root.join("pty"),
+    pty_binary: root.join("bin/pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 /// The reconciler's observation of the running terminal.

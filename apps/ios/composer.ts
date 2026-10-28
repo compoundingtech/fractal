@@ -2,10 +2,10 @@
 // refused, and how the text comes back. Plain functions, so they are tested without the app.
 import { INLINE_MAX_BYTES, utf8Bytes } from '@fractal/views';
 
-/** How a send that did not go ended: `unconfirmed` means st may have taken it. */
+/** How a send that did not go ended: `unconfirmed` means Fractal may have taken it. */
 export type SendFailure = { reason: string; unconfirmed: boolean };
 
-/** The longest message in UTF-8 bytes this st advertises, or undefined when it says nothing (an older st). */
+/** The longest message in UTF-8 bytes this Fractal version advertises, or undefined when it says nothing (an older Fractal). */
 export function messageLimit(caps: { limits?: { max_message_bytes?: number } } | null | undefined): number | undefined {
   const limit = caps?.limits?.max_message_bytes;
   return typeof limit === 'number' && limit > 0 ? limit : undefined;
@@ -26,8 +26,8 @@ function size(bytes: number): string {
 }
 
 /**
- * The draft's size against the limit st advertises, counted in UTF-8 bytes as st counts them. With no
- * advertised limit nothing is blocked here (st answers for itself and the text is kept). The count
+ * The draft's size against the limit Fractal advertises, counted in UTF-8 bytes as Fractal counts them. With no
+ * advertised limit nothing is blocked here (Fractal answers for itself and the text is kept). The count
  * appears once the message is long, so the limit is known before Send is pressed.
  */
 export function draftSize(text: string, limit: number | undefined): DraftSize {
@@ -51,10 +51,10 @@ export function restoreDraft(current: string, failed: string): string {
   return `${failed}\n\n${current}`;
 }
 
-/** Why a send was refused, in words for the person; st's own sentence where it already says it. */
+/** Why a send was refused, in words for the person; Fractal's own sentence where it already says it. */
 export function sendReason(reason: string, unconfirmed: boolean): string {
   if (unconfirmed) return `${reason}. It may have been sent: look in the conversation first. Sending again will not send it twice.`;
-  // An st that predates long messages refuses with advice the phone cannot follow.
+  // A Fractal version that predates long messages refuses with advice the phone cannot follow.
   if (/cannot exceed 4 ?KiB|post a document first/i.test(reason)) return 'This Fractal version only takes messages up to 4 KiB. Shorten the message, or update Fractal. Your text is kept.';
   return `${reason}. Your text is kept.`;
 }

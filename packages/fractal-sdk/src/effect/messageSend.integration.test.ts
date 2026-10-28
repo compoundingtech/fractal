@@ -5,7 +5,7 @@ import type { ActionOf, CollectionSocket, ErrorEnvelope, Snapshot } from '@fract
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { ActionRefused, ActionTransportFailure, St3, St3Live } from './mod.ts'
+import { ActionRefused, ActionTransportFailure, Fractal, FractalLive } from './mod.ts'
 
 const snapshot = (index: number): Snapshot => ({
   id: `snapshot/${index}`,
@@ -118,11 +118,11 @@ const withGateway = <TError>(test: (baseUrl: string) => Effect.Effect<void, TErr
 
 const withSdk = <TError>(
   baseUrl: string,
-  test: (sdk: St3['Service']) => Effect.Effect<void, TError>,
+  test: (sdk: Fractal['Service']) => Effect.Effect<void, TError>,
 ) =>
   Effect.gen(function* () {
-    yield* test(yield* St3)
-  }).pipe(Effect.provide(St3Live({ baseUrl, maxFollows: 2, socket })))
+    yield* test(yield* Fractal)
+  }).pipe(Effect.provide(FractalLive({ baseUrl, maxFollows: 2, socket })))
 
 describe('message.send HTTP transport', () => {
   it.live(

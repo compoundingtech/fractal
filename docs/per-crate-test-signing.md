@@ -1,6 +1,6 @@
 # Per-crate signing for the Rust tests (design, step 1)
 
-Goal: a warm `scripts/st-test` and the pull-request gate re-run only the crates a change can affect. Today one `linux-gate`
+Goal: a warm `scripts/fractal-test` and the pull-request gate re-run only the crates a change can affect. Today one `linux-gate`
 signature covers all ~8,700 tests for one input key (`source_inputs`, docs/st3/gate-evidence.md "inputs"), and `crates` is one declared
 path, so any Rust change re-runs everything. This note defines one key and one signature per workspace crate. It changes nothing
 by itself.
@@ -23,7 +23,7 @@ by itself.
    tests run on one `--workspace` build, so a feature one member turns on changes a shared dependency's build for all; found in
    skip-ci-sigs-2's read), the `[patch]` paths, `.cargo`, `flake.lock`, the toolchain pin
    (`rust-toolchain` if present, else `flake.nix` and `nix/`), `.config/nextest.toml`, `.config/daily-only.filterset`, and the test-stage
-   scripts: `scripts/ci-local`, `ci-linux`, `ci-nextest`, `ci-nextest-targets`, `ci-nextest-flaky`, `st3_test_process.py`, plus the
+   scripts: `scripts/ci-local`, `ci-linux`, `ci-nextest`, `ci-nextest-targets`, `ci-nextest-flaky`, `fractal_test_process.py`, plus the
    new per-crate runner. Not the whole of `scripts`: that is the largest source of unrelated churn.
 3. **Per-crate extras** from a reviewed file, `.st/rust-test-inputs.json`: `{"global": [...], "crates": {"<crate>": {"extra": [paths]}}}`.
    Extras are what the crate's tests read outside the closure: fixtures, `docs/st2/invariants.md`, `evals`, `slo`, `plugins`,
@@ -53,7 +53,7 @@ The wrapped command is pinned by the policy like every other (`nix develop -c ba
 passed as `--input crate=C`. A crate with no tests signs `tests_run=0`; a note with `tests_run=0` covers a crate only if the tree has
 no test in it (checked by the verifier from the nextest list of the same run), so "ran nothing" is never a pass.
 
-## 3. st-test
+## 3. fractal-test
 
 1. Compute `key(C)` for every member from HEAD's tree (one `ls-tree` per crate; milliseconds).
 2. Ask the verifier which keys already have a passing note (local notes and `refs/notes/evidence-input/rust-tests/<key>` from the
@@ -68,7 +68,7 @@ no test in it (checked by the verifier from the nextest list of the same run), s
    parallelism and pays startup N times)? I recommend the derived result: the host key already signs what its own run measured.
 5. Push the notes (`--push`) as today. Failing crates are signed as failures and do not poison other crates.
 
-Interplay with the other `st-test` changes: skip-ci-sigs-2's defaults (full suite; isolation-vm and canaries to daily) change `LOCAL`
+Interplay with the other `fractal-test` changes: skip-ci-sigs-2's defaults (full suite; isolation-vm and canaries to daily) change `LOCAL`
 and the default set; this adds a `rust-tests` entry beside `linux-gate`, which stays for clippy, fleet-compat and the canaries until section 4.
 The worktree pool (#3697) and "skip checks whose tree already has a passing signature" compose: the per-crate missing set is the finer form
 of the same skip.
@@ -106,7 +106,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
 
 1. This note (PR 1, docs only).
 2. `scripts/rust-test-keys` (closure, global, extras, fail-closed default, per-crate policy tests, `.st/rust-test-inputs.json` all `"."`) plus the
-   `st-test` change: compute keys, run the missing set, sign per crate, push. Behaviour-neutral in CI.
+   `fractal-test` change: compute keys, run the missing set, sign per crate, push. Behaviour-neutral in CI.
 3. Verifier + policy (`rust-tests` check, `--crates` projection, batched prefix fetch) + gate (test stage skip, pull_request only, shadow
    first, then enforced). Needs skip-ci-sigs-2 (trust) and skip-ci-lead-2 (gate).
 4. Shrink the extras crate by crate with traces; optional per-crate clippy and run-only-the-missing-crates in the shards.
@@ -117,7 +117,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
   `scripts/rust-test-inputs-scan` (the textual first pass of the extras: `--write` produced the committed file, a policy test fails when a
   crate's scan names a path its entry does not cover). `.st/rust-test-inputs.json` starts from that scan; the daily trace of section 5
   is what lets a crate's extras shrink or grow after review. Test file: `scripts/rust-test-keys-test`.
-- `scripts/st-test --check rust-tests` (in the default suite since step 5a, after `linux-gate`; see section 10): computes the keys,
+- `scripts/fractal-test --check rust-tests` (in the default suite since step 5a, after `linux-gate`; see section 10): computes the keys,
   fetches the per-crate index refs in one fetch, asks the verifier (`evidence-verify --crate-key CRATE=KEY`) for each crate, runs ONE
   `scripts/ci-local tests` for the missing crates (`CI_TEST_PACKAGES`, `CI_TEST_JUNIT`; the workspace build, so features unify as in CI), and
   signs each crate with `scripts/evidence-wrap --check rust-tests` over `scripts/ci-rust-test-result`, which reads that crate's part of the
@@ -128,7 +128,7 @@ and a stale pass is reused. Four controls, in order of when they bite:
   `refs/tags/evidence/input/<check>/<key>/<record>` and pushes them with `--push`. Until now only CI's signer made those. Whether an agent
   seat's identity may create them on the remote is a repository rule that has not been confirmed (as for `refs/tags/evidence/*`).
 - Not in this step: the skip-policy entry, the lane definition and the gate job (step 3, with skip-ci-sigs-2 and skip-ci-lead-2). Until
-  the policy names the check at the base, `st-test` judges coverage by signature, crate and key alone (a local convenience), and the notes
+  the policy names the check at the base, `fractal-test` judges coverage by signature, crate and key alone (a local convenience), and the notes
   carry no lane digest, so step 3's notes are signed again.
 
 ## 8. As built in step 3 (policy, lane, verifier)
@@ -149,11 +149,11 @@ and a stale pass is reused. Four controls, in order of when they bite:
 - A note counts for a crate only when its run ran at least one test (`tests_run` > 0) once a policy judges it: a run whose selection matched
   nothing (nextest exit 4, or a filter that no longer names the crate) signs `tests_run=0` and passes, and that must not stand for a crate.
   A crate that really has no test is listed under `no_tests` in `.st/rust-test-inputs.json` at the accepted base (reviewed; a tree cannot list
-  its own crate, and a list that is not an array of names is a verifier `error`, never an empty allowance). `st-test` names the crates that
+  its own crate, and a list that is not an array of names is a verifier `error`, never an empty allowance). `fractal-test` names the crates that
   ran no test so the list can be reviewed. The same rule applies to `--crate-key` when `--policy-from` is given; without a policy a note
   counts by signature, crate and key alone, as before.
 - The verifier keys a tree only with the accepted base's `rust-test-keys` and `.st/rust-test-inputs.json`: a base without them is an `error`
-  (`--members` refuses; the gate reports it unavailable), never the tree's own copy. `st-test` falls back to the tree's own tool only while
+  (`--members` refuses; the gate reports it unavailable), never the tree's own copy. `fractal-test` falls back to the tree's own tool only while
   the base's policy does not name `rust-tests` (the change that introduces them is judged by itself); once it does, a base without them is a
   refusal there too.
 - The gate job itself (skip the test stage on `evidence-gate-rust-tests`, pull_request only) is skip-ci-lead-2's part of step 3.
@@ -190,7 +190,7 @@ stage scripts). So about half the merges re-run a handful of crates and one in s
 
 The first full run on main's tree signed 52 crates in 671 s (07:52:51Z to 08:04:02Z), as long as the tests (nextest 941.6 s): each
 signature was a serial `evidence-wrap` of 11.8 s (the dev shell's `nix eval` 2.6 s, the signer 1.4 s, the verifier's check of the new
-record 6.8 s) plus its own push. `st-test` now evaluates the digest once, signs the first crate alone (the signer creates its scratch
+record 6.8 s) plus its own push. `fractal-test` now evaluates the digest once, signs the first crate alone (the signer creates its scratch
 repository when it is missing) and the rest `ST_TEST_SIGN_JOBS` (default 8) at a time, and pushes every record's four refs in one push.
 Each record's content and signature are as before. Fifty-two signatures from a saved report took 74.7 s on this host, before the push.
 The four workspace crates that ran no test in that run (demo-resolver-wasm, fractal-build-stamp, fractal-github-issue-component,
@@ -203,23 +203,23 @@ environment scrub, which would otherwise remove them.
 ## 10. Step 5a: rust-tests in the default suite, signed from linux-gate's own run
 
 While the per-crate gate is in shadow, `linux-gate` still runs the tests stage. Running the tests a second time for `rust-tests` would double the
-test time of every push, so when both are selected (the default) `st-test` asks linux-gate's run for nextest's JUnit report (`CI_TEST_JUNIT`, an
+test time of every push, so when both are selected (the default) `fractal-test` asks linux-gate's run for nextest's JUnit report (`CI_TEST_JUNIT`, an
 absolute path in its scratch: the same `--workspace` build and the whole selection, `conversation_model` included) and `rust-tests` then signs the
 crates that have no passing note for their key from that report, running nothing. Each such record says `filterset=workspace` and carries the
 sha256 of linux-gate's command as `run_command_sha256`, so it is told apart from a filtered run. When linux-gate did not run (a lane edit) or left no
 whole report, `rust-tests` runs the crates it lacks itself, as before. When the enforce step has landed (linux-gate's test jobs skip on
 `evidence-gate-rust-tests`), linux-gate's local command shrinks to clippy and fleet-compat and `rust-tests` is the only run of the tests.
 
-## 11. Seeding main's tree: `st-test --seed`
+## 11. Seeding main's tree: `fractal-test --seed`
 
 A merge that moves a crate's key, or the lane's definition (anything under `scripts/` or `.st`), leaves main's tree with crates that have no note, so
-the gate asks for them again on the next pull request. `scripts/st-test --seed [REF]` is the entry point a merge-queue signer runs after such a merge,
+the gate asks for them again on the next pull request. `scripts/fractal-test --seed [REF]` is the entry point a merge-queue signer runs after such a merge,
 from any checkout and whatever HEAD is: it signs the per-crate `rust-tests` notes of REF's tree (default: the base, `origin/main`, fetched first)
 for the crates that lack one, runs only those crates, and pushes the notes (to `origin` unless `--push` says otherwise). It takes no other check; it
 exits 0 when every crate is covered or signed, and `--crate NAME` narrows it. Measured: a full seeding of 52 crates is about 12 minutes on this host
 (prep 158 s, nextest 480 s, signing 53 s); after a merge that touched 2 crates it runs only those 2.
 
-For a separate publisher, `scripts/st-test --seed [REF] --out DIR` exports `<record>.pack` and `<record>.json` for every selected
+For a separate publisher, `scripts/fractal-test --seed [REF] --out DIR` exports `<record>.pack` and `<record>.json` for every selected
 crate, including crates already covered locally, and does not implicitly push to `origin`. The same `--out DIR` works with
 `--check rust-tests` and with the full suite (including linux-gate's aggregate and per-crate records from its shared nextest report).
 The output directory is resolved against the caller's working directory, not the clean worktree; nested relative directories work.
@@ -233,11 +233,11 @@ and verification belong to the publisher. Failures still export failure records 
 Two warm full runs on hetz2 took 935 s and 1116 s against the 12-minute budget, with 123 to 270 s outside every check row. Where it went, and what
 changed:
 
-- **Asking the verifier about 52 crates.** `st-test` ran `evidence-verify --crate-key` once per crate: 52 processes, each loading all of the tree's
+- **Asking the verifier about 52 crates.** `fractal-test` ran `evidence-verify --crate-key` once per crate: 52 processes, each loading all of the tree's
   52 records (2 880 `load` calls, two git runs each). The same 52 crates in one `evidence-verify --members` run, with each record read once per
   process (`load` is cached: a record is content-addressed) and the members checked 8 at a time, give the identical answer. Measured on one input
   (tree e9fd13c5b808, policy at main): per-crate processes 110.0 s, `--members` before the cache 105.9 s, with the cache 32.8 s, with the cache and
-  the members side by side 8.6 s. `st-test` now asks once (`--members`, falling back to the per-crate loop only when the verifier cannot answer).
+  the members side by side 8.6 s. `fractal-test` now asks once (`--members`, falling back to the per-crate loop only when the verifier cannot answer).
   The CI gate's `--members` call gets the same speed-up.
 - **The row's time.** The `rust-tests` row used to show only the tests (0 s when signed from linux-gate's report). It now shows all of its time, with
   `[keys, verify, tests, sign, push]` in the detail, and a `setup` row shows the fetch, the clean tree and the megarepo members before any check.
@@ -251,13 +251,13 @@ changed:
 `evidence-wrap` verifies each new record before it pushes it, by asking the verifier about the check on the record's tree. For a per-crate check
 that asked for the tree's newest `rust-tests` record whatever its crate, so one crate's failed record on the tree made every record signed after it
 come back "did not verify locally" (50 of 52 crates on hetz2 at feefaa9c95 when a mailbox test failed). A record that signs a `crate` and a
-`source_inputs` key is now verified with `--crate-key CRATE=KEY`: as that crate's, the same rule the gate and `st-test` use. Nothing about the record
+`source_inputs` key is now verified with `--crate-key CRATE=KEY`: as that crate's, the same rule the gate and `fractal-test` use. Nothing about the record
 or the verifier's rules changes.
 
 
 ## 14. CI signs per-crate notes (2026-10-25)
 
-Until now only a local `scripts/st-test` push signed per-crate `rust-tests` notes, so a pull request whose crates were unchanged found a note
+Until now only a local `scripts/fractal-test` push signed per-crate `rust-tests` notes, so a pull request whose crates were unchanged found a note
 only when someone had run it. CI now signs them too, with its own `fleet/ci` key, from the test shards' own nextest run. The policy entry
 stays in shadow (`enforce` false): this only produces notes.
 
@@ -275,18 +275,18 @@ stays in shadow (`enforce` false): this only produces notes.
 - **Per crate.** The reports are joined into one, so a crate split across shards is judged once, from all of them. A crate is signed only when
   every one of its test cases passed on the first try: a failure, an error, or a test that passed only on a retry (flaky) gives it no note,
   and so does a failure or flaky test of that crate in an earlier attempt's report of the same run. `scripts/ci-rust-test-result` still
-  counts flaky as passed (its output is the recorded command's), but `scripts/st-test` holds its local per-crate signing to the same rule: a
+  counts flaky as passed (its output is the recorded command's), but `scripts/fractal-test` holds its local per-crate signing to the same rule: a
   crate with a test that passed only on a retry is left unsigned (exit 4, "left for CI"), so CI runs it. linux-gate's whole-tree note still
   signs, as the gate counts a retried pass, and records those tests as the input `flaky_tests` (`BINARY TEST` lines from
   `scripts/ci-nextest-flaky` under `CI_TEST_FLAKY`; `none` when there are none). A crate that ran no test is signed only when the
   base lists it under `no_tests`, the rule the verifier applies to every note. A crate that does not qualify gets no record at all.
-- **The same record as st-test's.** The key is computed by the same code path as `scripts/st-test`'s `crate_keys` (the base's
+- **The same record as fractal-test's.** The key is computed by the same code path as `scripts/fractal-test`'s `crate_keys` (the base's
   `scripts/rust-test-keys` over the tested tree, with the base's inputs file and the base's verifier projection; a test compares both on a
   fixture and on this repository's tree). Each record is `evidence-wrap --aggregate` with the command `python3 scripts/ci-rust-test-result`,
   the digest of that command's output over the crate's part of the joined report, and the inputs `crate`, `source_inputs`, `tests_run`,
   `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset=workspace`, `run_command_sha256` (the tests stage command and the
   shard partitions) and the shards' dev shell digest as `toolchain_sha256`, plus the run's id, attempt, event, partitions and shard jobs.
-  `evidence-verify --members` accepts it as it accepts st-test's (fleet level: the wrapper rule, no lane).
+  `evidence-verify --members` accepts it as it accepts fractal-test's (fleet level: the wrapper rule, no lane).
 - **Published like the other CI notes.** `evidence-publish --checks rust-tests` files each record under the tree's tag and note and the
   input-keyed index refs (`refs/notes/evidence-input/rust-tests/<key>/<record>`, `refs/tags/evidence/input/rust-tests/<key>/<record>`) and
   pushes them. A signature that fails is reported in the job summary and the others are still published.

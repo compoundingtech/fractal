@@ -449,29 +449,131 @@ fn scenarios_reference_patterns_use_ecmascript_whitespace() {
     assert!(roster.decode().is_err(), "propertyNames must reject JS whitespace U+FEFF");
 }
 
-#[test]
-fn scenarios_model_width_limit_fails_with_typed_error_without_truncating() {
-    let mut slice = scenarios::load_slice(fixtures().join("empty/sync.json")).unwrap();
-    slice.state["capabilities"]["capabilities"] = serde_json::json!([
-        {"id": "read", "version": 4_294_967_296_u64, "state": "granted"}
-    ]);
-    // The kit accepts this safe integer, but the existing production model stores u32.
-    // Keep that API unchanged here: surface its typed decode error, never truncate.
-    let error = slice.decode().expect_err("a wider-than-model version must fail closed");
-    assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
-    assert_eq!(slice.state["capabilities"]["capabilities"][0]["version"], 4_294_967_296_u64);
-    let screen = client_fixture("terminal-screen.json")["value"].clone();
-    let mut terminal = scenarios::load_slice(fixtures().join("empty/terminal.json")).unwrap();
-    terminal.timeline = vec![serde_json::json!({"_tag": "screen", "at_ms": 0, "screen": screen})];
-    terminal.decode().expect("the ordinary terminal fixture must decode");
-    terminal.timeline[0]["screen"]["cursor"]["row"] = (-1).into();
-    let error = terminal.decode().expect_err("schema-valid negative cursor cannot fit usize");
-    assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
-    terminal.timeline[0]["screen"]["cursor"]["row"] = 0.into();
-    for exit_code in [-2_147_483_649_i64, 2_147_483_648_i64] {
-        terminal.timeline[0]["screen"]["facts"]["process"]["exit_code"] = exit_code.into();
-        let error = terminal.decode().expect_err("schema-valid exit code cannot fit i32");
-        assert!(error.downcast_ref::<serde_json::Error>().is_some(), "{error:#}");
-        assert_eq!(terminal.timeline[0]["screen"]["facts"]["process"]["exit_code"], exit_code);
+const SAFE_INTEGER_MAX: i64 = 9_007_199_254_740_991;
+
+fn integer_boundaries(minimum: i64) -> Vec<i64> {
+    let mut values = vec![minimum, SAFE_INTEGER_MAX, 4_294_967_295, 4_294_967_296];
+    if minimum < 0 {
+        values.extend([-2_147_483_649, -2_147_483_648, -1, 0, 2_147_483_647, 2_147_483_648]);
     }
+    values
+}
+
+fn assert_scenario_integer_round_trip(slice: &scenarios::Slice, root: &str, field: &str, minimum: i64) {
+    let pointer = format!("{root}{field}");
+    for mode in [DecodeMode::Strict, DecodeMode::Tolerant] {
+        for number in integer_boundaries(minimum) {
+            let mut input = serde_json::to_value(slice).unwrap();
+            *input.pointer_mut(&pointer).expect("numeric fixture field") = number.into();
+            let mut candidate: scenarios::Slice = serde_json::from_value(input).unwrap();
+            candidate.decode = mode;
+            let decoded = candidate.decode().unwrap_or_else(|error| panic!("{pointer}={number} in {mode:?}: {error:#}"));
+            let value = &decoded.iter().find(|value| value.pointer == root).expect("decoded model root").value;
+            let encoded = match value {
+                WireValue::Resource(value) => serde_json::to_value(value).unwrap(),
+                WireValue::TimelineEntry(value) => serde_json::to_value(value).unwrap(),
+                WireValue::TerminalScreen(value) => serde_json::to_value(value).unwrap(),
+                WireValue::Capabilities(value) => serde_json::to_value(value).unwrap(),
+                other => panic!("unexpected numeric model: {other:?}"),
+            };
+            assert_eq!(encoded.pointer(field), Some(&Value::from(number)), "{pointer} in {mode:?}");
+            assert_eq!(serde_json::to_value(&candidate).unwrap().pointer(&pointer), Some(&Value::from(number)));
+        }
+        for number in [minimum - 1, SAFE_INTEGER_MAX + 1] {
+            let mut input = serde_json::to_value(slice).unwrap();
+            *input.pointer_mut(&pointer).unwrap() = number.into();
+            let mut candidate: scenarios::Slice = serde_json::from_value(input).unwrap();
+            candidate.decode = mode;
+            assert!(candidate.decode().is_err(), "{pointer}={number} must violate schema bounds in {mode:?}");
+        }
+    }
+}
+
+#[test]
+fn scenarios_model_integer_boundaries_round_trip_without_truncating() {
+    let mut sync = scenarios::load_slice(fixtures().join("empty/sync.json")).unwrap();
+    sync.state["capabilities"] = client_fixture("capabilities.json")["value"].clone();
+    assert_scenario_integer_round_trip(&sync, "/state/capabilities", "/capabilities/0/version", 0);
+
+    let mut terminal = scenarios::load_slice(fixtures().join("empty/terminal.json")).unwrap();
+    let mut screen = client_fixture("terminal-screen.json")["value"].clone();
+    screen["facts"]["process"]["exit_code"] = 0.into();
+    terminal.timeline = vec![serde_json::json!({"_tag": "screen", "at_ms": 0, "screen": screen})];
+    for field in ["/cursor/row", "/cursor/column", "/facts/process/exit_code"] {
+        assert_scenario_integer_round_trip(&terminal, "/timeline/0/screen", field, -SAFE_INTEGER_MAX);
+    }
+    for field in ["/modes/kitty_keyboard", "/relay/fence_conflicts"] {
+        assert_scenario_integer_round_trip(&terminal, "/timeline/0/screen", field, 0);
+    }
+
+    let mut conversation = scenarios::load_slice(fixtures().join("fleet-mid-refactor/conversation.json")).unwrap();
+    conversation.timeline.clear();
+    assert_scenario_integer_round_trip(&conversation, "/state/threads/0/items/0", "/revision", 1);
+}
+
+#[test]
+fn scenarios_resource_integer_boundaries_round_trip_without_truncating() {
+    let resources = client_fixture("resources.json");
+    let resource = |kind: &str| {
+        resources.as_array().unwrap().iter().find(|value| value["kind"] == kind).unwrap().clone()
+    };
+    let mut details = scenarios::load_slice(fixtures().join("fleet-mid-refactor/details.json")).unwrap();
+    details.timeline.clear();
+    let mut mission = client_fixture("person-ask-mission.json");
+    mission["run_details"][0]["steps"][0]["loop_round"] = 0.into();
+    mission["run_details"][0]["steps"][0]["loop_max_rounds"] = 0.into();
+    details.state["missions"] = serde_json::json!([mission]);
+    details.state["work"] = serde_json::json!([resource("work")]);
+    details.state["launches"] = serde_json::json!([resource("launch")]);
+    for field in [
+        "/run_details/0/steps/0/attempt",
+        "/run_details/0/steps/0/loop_round",
+        "/run_details/0/steps/0/loop_max_rounds",
+        "/run_details/0/steps/0/wake/attempts",
+    ] {
+        assert_scenario_integer_round_trip(&details, "/state/missions/0", field, 0);
+    }
+    assert_scenario_integer_round_trip(&details, "/state/work/0", "/attempt", 0);
+    assert_scenario_integer_round_trip(&details, "/state/launches/0", "/visualization/nodes/0/timeout_ms", -SAFE_INTEGER_MAX);
+
+    // The committed launch supplies the surrounding resource; preview is optional
+    // and absent in that fixture, so populate only its schema-required fields.
+    details.state["launches"][0]["preview"] = serde_json::json!({
+        "goal": details.state["launches"][0]["request"],
+        "steps": [], "agents": [], "gates": {"human": 0, "automated": 0},
+        "diagnostics_count": 0, "request_excerpt": ""
+    });
+    assert_scenario_integer_round_trip(&details, "/state/launches/0", "/preview/diagnostics_count", -SAFE_INTEGER_MAX);
+    details.state["resources"] = serde_json::json!([resource("lane")]);
+    assert_scenario_integer_round_trip(&details, "/state/resources/0", "/entries/0/position", 1);
+}
+
+fn assert_model_integer_round_trip<T>(input: &Value, field: &str, minimum: i64)
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    for number in integer_boundaries(minimum) {
+        let mut candidate = input.clone();
+        // Optional fields need not be present in the committed fixture.
+        candidate.as_object_mut().unwrap().insert(field.to_owned(), number.into());
+        let decoded: T = serde_json::from_value(candidate).unwrap();
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert_eq!(encoded[field], number, "{field} must survive serde decode and encode");
+    }
+}
+
+#[test]
+fn action_fence_and_agent_queue_integer_boundaries_round_trip() {
+    // These response/action models are not scenario wire roots.
+    let action = client_fixture("terminal-create.json");
+    assert_model_integer_round_trip::<fractal_client::Fence>(&action["fence"], "attempt", 0);
+
+    let mission = client_fixture("person-ask-mission.json");
+    let run = &mission["run_details"][0];
+    let queue_run = serde_json::json!({
+        "mission_run_id": run["id"], "position": 1,
+        "state": "ready", "run_state": run["status"], "joined_at": run["state_since"],
+        "claimed_work_ids": [], "ready_work_ids": [], "waiting_work_ids": []
+    });
+    assert_model_integer_round_trip::<fractal_client::AgentQueueRun>(&queue_run, "position", 1);
 }

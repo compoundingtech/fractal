@@ -40,7 +40,7 @@ async fn authored_omp_resume_publishes_binding_from_an_empty_managed_directory()
         .find(|candidate| candidate.is_file())
         .expect("the OMP admission stand-in needs Node on the fixture PATH");
     let admission_host = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/st3-boot-canaries/stub-pi-family.mjs");
+        .join("../../scripts/fractal-boot-canaries/stub-pi-family.mjs");
     // The fake provider uses the actual spawned channel, not a direct API binding request.
     // Its admission mode loads the actual adapter against the loopback model fixture.
     std::fs::write(&provider, format!(r#"#!{bash}
@@ -103,22 +103,19 @@ agent "garden/worker" {{
         })
         .unwrap();
     let socket = root.path().join("api.sock");
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "resume-link-test".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "resume-link-test".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let listener_socket = socket.clone();
     let state_socket = root.path().join("state.sock");
     let bound_store = state.store.clone();
