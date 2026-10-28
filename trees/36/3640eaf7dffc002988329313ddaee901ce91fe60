@@ -3,3 +3,5 @@ record 8020296cc12af299e3963d98a5d1588e69a7cd13 linux-gate 1 host/spindle 2026-1
 record 85f0fe57519e1e0ff9c0b2e908f5362dec5772ba genie-freshness 0 host/spindle 2026-10-28T03:40:55Z
 gc 2026-10-28T03:42:40+00:00 04175f0c34c1496726c0e87b6e35c40ab11899b7bdd57ca193f9153abfc2c9d8
 record 85f0fe57519e1e0ff9c0b2e908f5362dec5772ba genie-freshness 0 host/spindle 2026-10-28T03:40:55Z
+record d6df5e265cf3fecd53f6d49e75dc2c58ae9621f1 typescript-client 0 host/spindle 2026-10-28T03:44:28Z
+record e3f27f331190213d2bc59d31fe6748912a1c591c ci-script-tests 0 host/spindle 2026-10-28T03:43:19Z
