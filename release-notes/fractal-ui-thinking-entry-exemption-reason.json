@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correct Thinking Entry's scenario exemption reason: transcript-families contains settled visible reasoning, but the kit's tail-only mounted window cannot isolate that early row, collapsed prose exposes no slice markers, and the catalog has no in-progress reasoning entry. Existing story renders, interaction assertions and exact exemption list remain unchanged.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Storybook exemption explanation only; ThinkingEntry, existing stories and public component contracts are unchanged." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual steps." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

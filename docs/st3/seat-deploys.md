@@ -361,5 +361,5 @@ stable executable, and the service PATH puts its directory first; `pty` still co
 configured package. A systemd restart trigger or a build reference in the launchd plist makes
 Home Manager restart the daemon when the package changes despite its stable executable path.
 
-`scripts/st3-graceful-messaging-eval/run` proves this end to end for each harness; see
-[the eval](../../evals/st3/graceful-messaging/README.md).
+`scripts/fractal-graceful-messaging-eval/run` proves this end to end for each harness; see
+[the eval](../../evals/fractal/graceful-messaging/README.md).

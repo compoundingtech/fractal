@@ -183,6 +183,39 @@ class StTest(unittest.TestCase):
             self.assertGreater((directory / f'{summary["record"]}.pack').stat().st_size, 0)
         return summaries
 
+    def fetches_with_lock_errors(self, errors):
+        """fetch_base in the clone, where the first fetches fail with these stderr texts and the next one fetches."""
+        real_git, calls = st_test.git, []
+        def git(*args, **kwargs):
+            if args[0] == 'fetch':
+                calls.append(args)
+                if len(calls) <= len(errors):
+                    return subprocess.CompletedProcess(['git', *args], 1, b'', errors[len(calls) - 1].encode())
+            return real_git(*args, **kwargs)
+        cwd = os.getcwd()
+        os.chdir(self.work)
+        try:
+            with mock.patch.object(st_test, 'git', side_effect=git), mock.patch.object(st_test.time, 'sleep'), \
+                    mock.patch.dict(os.environ, dict(GIT_ENV, HOME=str(self.home)), clear=True), contextlib.redirect_stderr(io.StringIO()) as err:
+                try:
+                    result = st_test.fetch_base('origin/main')
+                except st_test.Failure as error:
+                    result = f'failure: {error}'
+        finally:
+            os.chdir(cwd)
+        return result, len(calls), err.getvalue()
+
+    def test_a_fetch_another_fetch_raced_is_tried_again_and_any_other_fetch_error_fails_at_once(self):
+        lock = "error: cannot lock ref 'refs/remotes/origin/main': is at 1111 but expected 2222"
+        tip = git(self.work, 'rev-parse', 'origin/main')
+        result, calls, err = self.fetches_with_lock_errors([lock, lock])
+        self.assertEqual((result, calls), (tip, 3))  # two lost races, then the fetch: the run goes on
+        self.assertIn('another fetch moved origin/main at the same moment; fetching again (2 of 3)', err)
+        result, calls, _ = self.fetches_with_lock_errors([lock, lock, lock])
+        self.assertEqual((calls, result), (3, 'failure: git fetch failed: ' + lock))  # three is the limit
+        result, calls, _ = self.fetches_with_lock_errors(['fatal: unable to access the remote'])
+        self.assertEqual((calls, result), (1, 'failure: git fetch failed: fatal: unable to access the remote'))
+
     def test_a_runs_checks_carry_an_admission_run_of_the_accepted_form_a_new_one_per_run_replacing_the_callers(self):
         seen = Path(self.tmp.name) / 'admission-run'
         self.assertEqual(self.run_st_test(command=['sh', '-c', f'printf "%s\\n" "$ADMISSION_RUN" >> {seen}'], extra_env={'ADMISSION_RUN': 'stale@1'})[0], 0)

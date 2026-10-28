@@ -406,6 +406,7 @@ Hosts must bound the lane so it owns scrolling; following and ordinary history a
 Work-log detail uses the same `toolOutput` extraction as tool previews: strings and native content arrays preserve their text parts in order; empty and non-text results have no detail. `Transcript/NativeToolOutput` covers the expanded row, and `pnpm test:work-log` covers strings, arrays, empty output and ignored non-text parts.
 The shared Markdown boundary keeps exactly one streaming caret on the final paragraph line, or immediately after another terminal block. Tool output uses the exported `HighlightedSource` boundary. Failure banners optionally expose a host-owned **Open output** action without clearing or reflowing history.
 Failed-command reason lines select the final top-level named exception from a traceback (including names such as `subprocess.TimeoutExpired`), then a recorded exit code, then the readable-output fallback. Traceback frames and indented Python source are never presented as reasons; full diagnostics remain in tool output. `test:work-log` covers timeout and chained JSON errors, truncated traces, exit codes and unchanged path redaction.
+`WorkLogCall.kind` is host-classified through `facts.kindFor(name, item)`: `read`, `run`, `edit`, `search`, `subagent`, `web`, `decision`, `todo`, `wait`, `message`, `schedule`, `terminal-input`, `skill` or `unknown`. Settled rows take their glyph from the kind; only `run` renders its label as a command and only `edit` carries changed paths; `run` and `message` keep their recorded command source for the raw disclosure. Calls also keep their recorded evidence (`toolName`, `callId`, `input`, `output`, `view`, `metadata`, `mediaType`, `skipped`); skipped calls never count as commands. `Transcript.renderToolDetail(item, call)` lets the host render semantic detail for one recorded call from its source item and projected call. It stands in for the summary line only: the raw input/output disclosure and the **Open** action stay beside it, so semantic cards never hide recorded evidence; returning `undefined` keeps the kit summary.
 
 ### Thread header
 
@@ -426,7 +427,7 @@ Narrow transcripts keep the textual Running/elapsed status but omit the decorati
 
 ### Portable sync seam
 
-`src/assistant-ui/st3-views/sync-status.ts` defines the decoded observation contract with no Effect import: `SyncStatus`, `SyncStage`, `StaleReason` and `SyncFailureCause`; timestamps are epoch milliseconds supplied by the host. `sync-line.ts` exports `syncLine(input): SyncLineValue | undefined` — the shared status vocabulary — and `observeSyncStatus(previous, status, now)`, the client transition clock. `SyncLine.tsx` exports `<SyncLine>`, requiring explicit `now`/`observedAt` numbers and never reading a clock. Hosts decode their own transport into the plain union.
+`src/assistant-ui/sync-presentation/sync-status.ts` defines the decoded observation contract with no Effect import: `SyncStatus`, `SyncStage`, `StaleReason` and `SyncFailureCause`; timestamps are epoch milliseconds supplied by the host. `sync-line.ts` exports `syncLine(input): SyncLineValue | undefined` — the shared status vocabulary — and `observeSyncStatus(previous, status, now)`, the client transition clock. `SyncLine.tsx` exports `<SyncLine>`, requiring explicit `now`/`observedAt` numbers and never reading a clock. Hosts decode their own transport into the plain union.
 
 `Stale.reason` is explicit: an observation without a reason binds `{ _tag: 'Unknown' }`, shown immediately as **Waiting for an update** with its observed age, or **Last updated** with a known last-live age, never an invented cause. Only known `Resync`/`Reconnecting` reasons receive their 400 ms/2 s delay. `Failed.cause` is `{ _tag: 'Server'; code; message } | { _tag: 'Local'; kind; detail?: { cap?: number; message?: string } } | { _tag: 'Unknown' }`. Local and server subscription-limit failures share one plain vocabulary; a missing cap is never invented and a reported cap of zero is displayed. Usage surfaces are HTTP reads and never present subscription-slot failures. Retry appears only for retryable causes; Details shows the decoded cause facts.
 
@@ -486,6 +487,20 @@ The `Geometry` story is a non-interacting fixture for the reusable composer and 
 The exported legacy Folio, Relay and Orbit palettes also avoid green: `good` is the direction's 80% ink foreground; `added` is a non-green wash whose luminance difference from the panel is within 20% of the direction's removed wash. Run `pnpm --filter @fractal/ui test:palettes` to check all six direction/scheme combinations without a browser. The public names and palette-selection API are unchanged.
 
 The shared diff tint assertion identifies a token through its causal effect on both the row wash and gutter, letting the browser resolve CSS layers, specificity and conditional rules. It restores exact inline styles and verifies computed paint restoration after each probe. Every dark/light tint story also rejects the original neutral pre-tint paint and an equal-blue wash backed by an unrelated variable, then verifies the restored positive result.
+
+### Composer send
+
+`EmbraceComposer` renders the send surface from host facts and reports intent through callbacks. It makes no network calls and holds no keys; upload, retry, session and transport stay with the host.
+
+- `recipient` (`{ ref, label, sessionId?, sessionChanged? }`) shows "To <label>" in the footer. Its accessible name starts with that visible text, and the ref and session are exposed to assistive technology and in the tooltip. With `recipients` and `onRecipientChange`, the readout opens a single-select "Recipient" menu. Picking the current recipient reports nothing. An @mention only inserts a token and never changes the recipient. `sessionChanged` shows a note and announces it once through an always-mounted polite status region.
+- `reply` (`{ messageId, sender, subject?, excerpt? }`) with `onClearReply`, and `subject` with `onSubjectChange`, are controlled. Clearing the reply keeps the text and images. Enter in the subject moves to the message field and never sends.
+- `images` (`ComposerImage[]`, each `Ready`, `Uploading` or `Failed`) with `onRemoveImage` and `onRetryImage` render the image tray. Paste and the "Attach image" picker share one intake. It screens files against `imagePolicy`, the limits the attachments adapter declares, and announces each refusal with those limits, then calls the runtime attachment adapter. Without `imagePolicy` the kit uses `composerImagePolicy` (four PNG, JPEG, GIF or WebP images, 10 MiB each). The picker and paste appear only when the runtime has an attachments adapter. Send waits while an image is uploading or failed; images alone may be sent.
+- `availability` (`Ready`, `Offline`, `MissingGrant`, `Revoked` or `Unavailable`) holds send and shows one recovery action (Reconnect, Check access or Set up again; none for Unavailable). The draft stays editable, and recovery never sends by itself.
+- Enter never sends during IME composition.
+
+`Transcript` and `EmbraceThread` render `Sending…` and `Sent` under user prompts. A `Failed` send state may carry `code` and `retryable`; Retry appears only for retryable failures, and only while `sendAvailability` is absent or `Ready`. The `Composer send` stories play the host for each case.
+
+Composer-send stories declare `contract-fixture` ownership and a sorted co-located exemption list: their upload, recipient and recovery transitions are controlled host fixtures, not scenario-world observations.
 
 ## Clean-room note
 

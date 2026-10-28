@@ -16633,7 +16633,7 @@ mission "example/zero-run" state="ready" {
         );
     }
 
-    /// Per-PR contract for the Codex `import` boot canary (scripts/st3-boot-canaries/run,
+    /// Per-PR contract for the Codex `import` boot canary (scripts/fractal-boot-canaries/run,
     /// `prepare_codex_import` and `prove_codex_import`), in its topology: discovery reaches the
     /// saved session through a `~/.codex` symlink to the originating home, and a second, stale
     /// home holds a copy of the same native ID (the canary launches the daemon with
@@ -20585,6 +20585,13 @@ mission "example/zero-run" state="ready" {
         // A transcript st3 binds but cannot read is named, so the failure can be reported.
         {
             use std::os::unix::fs::PermissionsExt as _;
+            // This rollout is not named after its thread, so binding finds it through discovery,
+            // which keeps each file's header for the length and time it last read. The reads above
+            // can all come from discovery's two-second cache, filled before the 230 turns landed;
+            // when that cache runs out just after the chmod, the header is read again, fails, and
+            // the transcript is not bound at all. Read it now, as it is, so st3 has bound it.
+            crate::external_sessions::discover_fresh(state.native_session_home.as_deref(), true)
+                .unwrap();
             std::fs::set_permissions(&transcript, std::fs::Permissions::from_mode(0o000)).unwrap();
             // Root reads anything; the check needs a file this user really cannot read.
             if std::fs::read(&transcript).is_err() {

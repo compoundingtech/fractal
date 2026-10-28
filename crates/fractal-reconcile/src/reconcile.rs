@@ -1202,7 +1202,7 @@ pub struct Reconciler<R = NativeRuntime> {
     person: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     mission_declaration_parses: std::sync::atomic::AtomicUsize,
-    file_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    file_watchers: Arc<Mutex<HashMap<String, FileWatch>>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     resource_provider: Arc<dyn ResourceProvider>,
@@ -1255,6 +1255,38 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Publish during a unit test after the work feed was observed, before wake selection.
     #[cfg(any(test, feature = "test-support"))]
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
+}
+
+struct FileWatch {
+    // Keep the subscription alive, including across replacements of the target file.
+    _watcher: notify::RecommendedWatcher,
+    target: PathBuf,
+    directory: PathBuf,
+    referent: Option<PathBuf>,
+}
+
+impl FileWatch {
+    fn relevant(event: &notify::Event, target: &Path, directory: &Path, referent: Option<&Path>) -> bool {
+        // Overflow/rescan means paths may have been lost; every subscription must reread.
+        event.need_rescan()
+            || (matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_)
+            ) && (event.paths.is_empty()
+                || event.paths.iter().any(|path| {
+                    path == target
+                        || referent == Some(path.as_path())
+                        || ((path == directory
+                            || referent.and_then(Path::parent) == Some(path.as_path()))
+                            && matches!(
+                                event.kind,
+                                notify::EventKind::Remove(_)
+                                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                            ))
+                })))
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -17906,16 +17938,50 @@ impl<R: RuntimeControl> Reconciler<R> {
             .file_watchers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if watchers.contains_key(subject) {
+        let target = std::path::absolute(path)?;
+        // Watching the file itself attaches to its inode and misses later replacements.
+        // Descend from a missing target's nearest existing parent on each observation.
+        let directory = target
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .find(|candidate| candidate.is_dir())
+            .context("file watch has no existing parent directory")?;
+        let next_component = target
+            .strip_prefix(directory)?
+            .components()
+            .next()
+            .context("file watch has no target component")?;
+        // Backends report canonical directories (notably /private/tmp on macOS).
+        // Keep the lexical target as identity, but compare events in their namespace.
+        let directory = directory.canonicalize()?;
+        let relevant = directory.join(next_component);
+        // A file symlink can point outside the lexical parent. Observe its referent's
+        // parent too, so both writes and inode replacements preserve file-gate behavior.
+        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        if watchers.get(subject).is_some_and(|watch| {
+            watch.target == target
+                && watch.directory == directory
+                && watch.referent == referent
+        }) {
             return Ok(());
         }
+        let watched_directory = directory.clone();
+        let watched_referent = referent.clone();
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
         let watched_subject = subject.to_owned();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok() {
+                let Ok(event) = event else { return };
+                // Reads (including this observer's own reads) must never self-wake.
+                if FileWatch::relevant(
+                    &event,
+                    &relevant,
+                    &watched_directory,
+                    watched_referent.as_deref(),
+                ) {
                     observations
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -17926,12 +17992,23 @@ impl<R: RuntimeControl> Reconciler<R> {
                     notify.notify_one();
                 }
             })?;
-        let watched = path
-            .ancestors()
-            .find(|candidate| candidate.exists())
-            .unwrap_or(path);
-        watcher.watch(watched, notify::RecursiveMode::NonRecursive)?;
-        watchers.insert(subject.into(), watcher);
+        watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        if let Some(parent) = referent.as_ref().and_then(|path| path.parent())
+            && parent != directory
+        {
+            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        }
+        watchers.insert(subject.into(), FileWatch {
+            _watcher: watcher,
+            target,
+            directory,
+            referent,
+        });
+        // A refreshed subscription may now refer to a different file at the same stamp.
+        self.file_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(subject);
         Ok(())
     }
 
@@ -24912,6 +24989,270 @@ agent "import/omp/fixture" {{
             argv.first().map(Path::new),
             Some(std::env::current_exe().unwrap().as_path())
         );
+    }
+
+    #[test]
+    fn file_gate_watchers_rescan_after_lost_or_unscoped_mutations() {
+        let target = Path::new("/watched/gate");
+        let directory = target.parent().unwrap();
+        let rescan = notify::Event::new(notify::EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan);
+        assert!(FileWatch::relevant(&rescan, target, directory, None));
+        for kind in [
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+        ] {
+            assert!(FileWatch::relevant(&notify::Event::new(kind), target, directory, None));
+        }
+        let read = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
+        assert!(!FileWatch::relevant(&read, target, directory, None));
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_ignore_reads_and_unrelated_mutations() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            store,
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        // Publishing the initial file.observed claim signals a graph change. Consume
+        // that known wake before asserting that subsequent reads stay quiet.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the initial observation must publish its graph-change wake");
+        for _ in 0..3 {
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "ready");
+            reconciler.ensure_file_observation(&subject).unwrap();
+        }
+        let unrelated = root.path().join("unrelated.txt");
+        std::fs::write(&unrelated, "not a gate").unwrap();
+        std::fs::write(&unrelated, "still not a gate").unwrap();
+        std::fs::remove_file(&unrelated).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "reading the gate and mutating siblings must not wake reconciliation"
+        );
+
+        std::fs::write(&path, "changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_missing_parents_and_file_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("outer/inner/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
+            std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                    .await
+                    .is_err(),
+                "unrelated ancestor mutations must not wake reconciliation"
+            );
+            std::fs::create_dir(&parent).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("the next missing parent must wake reconciliation");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_ok()
+            {}
+        }
+
+        std::fs::write(&path, "created").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("creating the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, "replacement").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "staging a replacement beside the target must stay quiet"
+        );
+        std::fs::rename(&replacement, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("replacing the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "replacement"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::write(&path, "replacement changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the replacement's subsequent mutations must remain watched");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_refresh_when_the_target_path_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.txt");
+        let second = root.path().join("second.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch("file/node:gate", &first).unwrap();
+        reconciler.ensure_file_watch("file/node:gate", &second).unwrap();
+        std::fs::write(&first, "old target changed").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "the old target must no longer wake reconciliation"
+        );
+        std::fs::write(&second, "new target changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the new target must wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_resolve_symlinked_parent_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let path = alias.join("missing/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        std::fs::write(actual.join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::create_dir(actual.join("missing")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("canonical ancestor creation must wake an aliased file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(actual.join("missing/gate.txt"), "ready").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the file under an aliased parent must remain watched");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_symlink_referent_writes_and_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let referents = tempfile::tempdir().unwrap();
+        let first = referents.path().join("first.txt");
+        let second = referents.path().join("second.txt");
+        let path = root.path().join("gate.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        std::os::unix::fs::symlink(&first, &path).unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+
+        for content in ["written", "replaced"] {
+            if content == "written" {
+                std::fs::write(&first, content).unwrap();
+            } else {
+                let replacement = referents.path().join("replacement");
+                std::fs::write(&replacement, content).unwrap();
+                std::fs::rename(&replacement, &first).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("referent writes and replacements must wake the file gate");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert_eq!(
+                reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+                content
+            );
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await.is_ok()
+            {}
+        }
+
+        let replacement_link = root.path().join("replacement-link");
+        std::os::unix::fs::symlink(&second, &replacement_link).unwrap();
+        std::fs::rename(&replacement_link, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("retargeting the symlink must wake the file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "second"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(&first, "old referent").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::write(&second, "new referent").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the newly resolved referent must remain watched");
     }
 
     #[test]
