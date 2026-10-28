@@ -89,7 +89,6 @@ class Classify(unittest.TestCase):
     # moving its glob fails here instead of silently dropping the class (the crate split caught this).
     ZERO_MATCH_ALLOWED = {
         "clients/**/generated/**",
-        "crates/smallclaims/src/**/migrat*",
         "crates/smallclaims/src/**/replay*",
         "crates/fractal-api-core/src/api/client_web*",
         "crates/fractal-secrets/src/sekrets.rs",
@@ -101,6 +100,8 @@ class Classify(unittest.TestCase):
         if listed.returncode != 0:
             self.skipTest("not a git checkout")
         files = [f for f in listed.stdout.split("\n") if f]
+        if "crates/fractal-store/src/store.rs" not in files:
+            self.skipTest("a sparse tree (the ci-script-tests lane) does not hold the sources the globs name; run this on a full checkout")
         rules = json.loads((root / ".st/risky-classes.json").read_text())
         globs = set()
         for rule in rules["classes"]:

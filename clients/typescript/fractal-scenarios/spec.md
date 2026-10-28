@@ -185,6 +185,12 @@ Agent rows include `subagents` (empty when none are running) only for observing 
 Each entry gets increasing `sequence`, `revision` 1 unless revised, and a timestamp from the
 time model. A streaming entry is emitted as revisions with `final: false` until its last revision.
 
+Native harness turn headers keep non-`message/` body `message_id` values, including
+normalized provider UUIDs (`native/scenario-...`). Like the daemon, they omit `from`/`to`;
+their user/assistant roles distinguish the person from the agent. Only real graph mail
+uses `message/` IDs and carries sender/recipient fields. Timeline entry IDs remain
+`timeline-entry/...` in either case.
+
 ### Slices
 
 A slice holds the state at `now` (offset 0) and a timeline of events after `now` (offset > 0).
@@ -204,6 +210,20 @@ after it (see [Store versions](#store-versions)).
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
 | `sync` | `capabilities` envelope, the [sync script](#sync-matrix) and the `expected` sync status per surface | see [Replay dispatch](#replay-dispatch) |
+
+Synthetic details missions include `run_details`, derived from the same work inventory at
+the baseline and after every details change. Each run's progress, step states and claimants
+match its work rows; the cast maps each `work/...` ID to its `step-run/...` identity.
+This is the cast `work` ↔ `stepRun` mapping: Work keeps `work`; run details use `stepRun`.
+Synthetic missions also include `presentation`, using the daemon's mission/step word
+precedence, display ordering, roster ownership and queue facts, open human gates, action
+offers and progress. Its step IDs are the same `stepRun` IDs as `run_details`, and its
+done count is the number of completed steps, not a client fallback.
+Work-only changes also publish the affected mission's joined run details. Recorded slices
+remain unmodified captures.
+`crates/fractal-ui-model/tests/scenarios.rs` proves synthetic presentations match the real
+daemon presentation function at the baseline and each committed details change, using
+the corresponding roster queues and open human gates rather than a second expected model.
 
 Creation events carry the complete thread or terminal record, including pagination or runtime,
 cast and screens metadata. Resources are genuinely absent before creation, rather than hidden
@@ -516,7 +536,7 @@ cleanup, use the scratch environment; curl disables configuration loading with f
 
 The implementation composes three existing patterns, not a pre-existing recorder API:
 `crates/fractal/tests/terminal_binding.rs` supplies scratch ownership and teardown scaffolding;
-`crates/fractal/tests/no_st2_seat.rs` and `scripts/st3-no-st2-eval/{run,claude}` supply native
+`crates/fractal/tests/no_st2_seat.rs` and `scripts/fractal-no-st2-eval/{run,claude}` supply native
 Claude transcripts and real driver hooks; `terminal_actions_survive_unrelated_writes_but_reject_changed_screens`
 in `crates/fractal-daemon/src/api/client_v0.rs` supplies the real PTY/projector and terminal attach pattern.
 `terminal_binding` alone produces neither native transcripts nor styled screens.

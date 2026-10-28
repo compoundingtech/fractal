@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -1713,6 +1714,22 @@ class MembersLogView(unittest.TestCase):
         self.log({self.keys['base']: [base]})
         view = self.view({'base': base, 'top': top})
         self.assertEqual((view['log'], view['log_missing'], view['log_unlogged']), ('unlogged_pass', 0, 1), view)
+        self.assertEqual((view['log_unlogged_crates'], view['log_unlogged_observed_at']), (f'top={top[:12]}', None), view)
+
+    def test_an_unlogged_pass_names_its_first_members_and_the_oldest_of_their_observed_at(self):
+        base, top = self.record('base'), self.record('top')
+        self.log({})
+        times = {'base': '2026-10-25T20:30:00Z', 'top': '2026-10-25T20:28:02Z'}
+        view = evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                {crate: (self.keys[crate], {'base': base, 'top': top}[crate], times[crate])
+                                                 for crate in self.keys}, now=NOW + timedelta(seconds=30))
+        self.assertEqual((view['log'], view['log_unlogged'], view['log_unlogged_crates'], view['log_unlogged_observed_at']),
+                         ('unlogged_pass', 2, f'base={base[:12]}+top={top[:12]}', '2026-10-25T20:28:02Z'), view)
+        with mock.patch.object(evidence_verify, 'UNLOGGED_SHOWN', 1):
+            view = evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                    {crate: (self.keys[crate], {'base': base, 'top': top}[crate]) for crate in self.keys},
+                                                    now=NOW + timedelta(seconds=30))
+        self.assertEqual((view['log_unlogged_crates'], view['log_unlogged_observed_at']), (f'base={base[:12]}+1_more', None), view)
 
     def test_a_record_the_log_lists_under_a_members_key_that_is_not_here_is_missing_with_or_without_a_choice(self):
         base, top = self.record('base'), self.record('top')

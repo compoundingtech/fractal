@@ -1,6 +1,6 @@
-# Running st with omp
+# Running Fractal with omp
 
-An omp seat is an ordinary st agent. Declare its workspace, harness, model, and effort in KDL:
+An omp seat is an ordinary Fractal agent. Declare its workspace, harness, model, and effort in KDL:
 
 ```kdl
 version 2
@@ -13,14 +13,14 @@ agent "worker" {
 }
 ```
 
-Before the first launch of an installed omp build, st measures its delivery contract in a disposable
+Before the first launch of an installed omp build, Fractal measures its delivery contract in a disposable
 session and refuses to launch a build that fails ([harness admission](seat-deploys.md#harness-admission-at-the-next-launch)).
-st supplies the channel extension, session directory, and boot prompt. The launcher runs under `bun`, which must be available in the daemon's
+Fractal supplies the channel extension, session directory, and boot prompt. The launcher runs under `bun`, which must be available in the daemon's
 login-shell environment. The seat uses the provider login of the user running the daemon. Confirm
 the selected model in the session transcript; omp may resolve an unavailable model name to another
 one.
 
-The session JSONL is stored in st's driver state for the seat. The `model_change` entry and each
+The session JSONL is stored in Fractal's driver state for the seat. The `model_change` entry and each
 assistant turn identify the selected provider and model. omp's Python `eval` tool has a filtered
 environment; run st commands from its shell tool so `ST_AGENT`, `ST3_BIN`, and `ST3_ENDPOINT` are
 available.
@@ -101,7 +101,7 @@ The command requires no daemon, producer/probe child or model credentials. It re
 reason, time and exact producer/extension identity in a separate `*.override.json` record;
 failed measurements remain intact, and the driver identifies the active exception.
 An executable, interpreter, manifest, lockfile or extension replacement needs a new
-exception. The exception persists across st updates with the same producer and extension.
+exception. The exception persists across Fractal updates with the same producer and extension.
 
 To restore normal admission at the next launch:
 
@@ -137,7 +137,7 @@ then an end outcome. Progress is at most once per ten seconds; a busy heartbeat 
 once per minute. A proven idle or unreadable context clears cached waits and stops
 reporting, and a late turn-end after the end emits nothing. Human asks and approvals
 keep a foreground run busy. IDs are bounded to 256 UTF-8 bytes and names to 128 bytes.
-st ends a subagent that has not reported for five minutes; see
+Fractal ends a subagent that has not reported for five minutes; see
 [subagents](subagents.md) for the roster and lifecycle contract.
 
 ## Authored resume, transcripts and delivery
@@ -321,7 +321,7 @@ there is no bridge; it never chooses a transcript or session itself.
 OMP 18.4.10 needs a temporary, token-free recovery bridge for an open `ask` picker:
 `arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge`
 ([migration registry](https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf)).
-When the selected transcript has an unresolved last ask, st admits the exact installed OMP build
+When the selected transcript has an unresolved last ask, Fractal admits the exact installed OMP build
 and the same shipped extension selected by interactive launch before running a bounded RPC heal
 pass with closed stdin. Admission may run isolated extension probes; an unchanged exact identity
 reuses its measured result. Interactive launch repeats admission before its own fork, then receives
@@ -329,7 +329,7 @@ reuses its measured result. Interactive launch repeats admission before its own 
 fleet launcher can still prepend explicit `-e` extensions. The heal clears `PTY_SESSION`,
 `PTY_ROOT`, `PTY_SESSION_DIR`, and inherited
 `ST3_*`, `ST2_*`, and `ST_*` environment variables (except the launcher's required `ST_AGENT`
-identity) so those extensions cannot reach the seat's PTY or st channel. The bridge's transcript
+identity) so those extensions cannot reach the seat's PTY or Fractal channel. The bridge's transcript
 read logs I/O failures, fails open, decodes bytes lossily, and skips malformed JSONL lines while
 continuing to inspect later valid entries. Read, heal, retry, or diagnostic failures do not stop
 native continuation; an unadmitted OMP build still prevents launch through the driver's gate.

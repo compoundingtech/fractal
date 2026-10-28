@@ -71,20 +71,26 @@ const joinResult = ({
 }: {
   readonly call: ToolCallItem | undefined
   readonly entry: ToolResultEntry
-}): ToolCallItem =>
-  call !== undefined
-    ? { ...call, status: entry.body.status, result: resultOf(entry) }
+}): ToolCallItem => {
+  const result = resultOf(entry)
+  const skipped = result.metadata?.__synthetic === true && result.metadata.source === 'interrupt_skipped'
+  const status = skipped ? 'success' : entry.body.status
+  const settled = skipped ? { ...result, isError: false } : result
+  return call !== undefined
+    ? { ...call, status, result: settled, ...(skipped ? { skipped: true } : {}) }
     : {
         _tag: 'ToolCall',
         id: entry.id,
         callId: entry.body.call_id,
         name: 'tool result',
         input: undefined,
-        status: entry.body.status,
-        result: resultOf(entry),
+        status,
+        result: settled,
+        ...(skipped ? { skipped: true } : {}),
         callSeen: false,
         at: entryTimestamp(entry),
       }
+}
 
 /**
  * Fractal's native-transcript reader (`external_sessions.rs` `push_message`) emits a `message` entry

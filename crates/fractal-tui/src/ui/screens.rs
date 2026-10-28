@@ -3447,7 +3447,7 @@ mod tree_tests {
 
     #[test]
     fn attention_identity_labels_named_st_are_not_product_names() {
-        let mut world = crate::ui::demo::world();
+        let mut world = crate::ui::demo::test_world();
         let Load::Ready(items) = &mut world.attention else {
             panic!("the demo world has attention items");
         };
@@ -3467,7 +3467,7 @@ mod tree_tests {
 
     #[test]
     fn launch_assignee_labels_named_st_are_not_product_names() {
-        let mut world = crate::ui::demo::world();
+        let mut world = crate::ui::demo::test_world();
         let Load::Ready(items) = &mut world.attention else {
             panic!("the demo world has attention items");
         };
@@ -3494,7 +3494,7 @@ mod tree_tests {
 
     #[test]
     fn mission_copy_is_fractal_only_at_the_rendering_boundary() {
-        let mut world = crate::ui::demo::world();
+        let mut world = crate::ui::demo::test_world();
         let Load::Ready(missions) = &mut world.missions else {
             panic!("the demo world has missions");
         };
@@ -3517,11 +3517,44 @@ mod tree_tests {
     }
 
     #[test]
+    fn identity_labels_in_mission_steps_show_fallback_ids_only_once() {
+        for (owner_id, label) in [
+            ("person/ada", "person/ada"),
+            ("agent/example/unnamed", "agent/example/unnamed"),
+            ("agent/example/maintainer", "Maintainer"),
+        ] {
+            let mut world = crate::ui::demo::world();
+            let Load::Ready(missions) = &mut world.missions else {
+                panic!("the demo world has missions");
+            };
+            let mission = missions.iter_mut().find(|mission| !mission.steps.is_empty()).unwrap();
+            mission.steps.truncate(1);
+            let step = &mut mission.steps[0];
+            step.owner = Some(label.into());
+            step.owner_id = Some(owner_id.into());
+            step.owner_is_system = false;
+            let expected = if label == owner_id {
+                owner_id.to_owned()
+            } else {
+                format!("{label} · {owner_id}")
+            };
+            assert_eq!(step.owner_identity().as_deref(), Some(expected.as_str()));
+            let id = mission.id.clone();
+            for width in [80, 120] {
+                let shown = mission_detail(&world, Some(&id), width, "", None, &Default::default())
+                    .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
+                assert!(shown.contains(&expected), "{shown}");
+                assert_eq!(shown.matches(owner_id).count(), 1, "{shown}");
+            }
+        }
+    }
+
+    #[test]
     fn only_standing_seats_have_a_dim_anchor_in_both_agent_views() {
         use fractal_client::AgentLifecycle::{Bounded, Owner, Standing, Unknown};
 
         for lifecycle in [Some(Standing), Some(Owner), Some(Bounded), Some(Unknown), None] {
-            let mut world = super::super::demo::world();
+            let mut world = super::super::demo::test_world();
             let mut agent = world.agents.items()[0].clone();
             agent.lifecycle = lifecycle;
             agent.state = AgentState::Idle;
@@ -3554,7 +3587,7 @@ mod tree_tests {
 
     #[test]
     fn a_narrow_agent_row_truncates_its_name_before_its_standing_marker() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let mut agent = world.agents.items()[0].clone();
         agent.lifecycle = Some(fractal_client::AgentLifecycle::Standing);
         agent.name = "Atlas Builder 界界界".into();
@@ -3597,7 +3630,7 @@ mod tree_tests {
 
     #[test]
     fn a_working_step_says_when_its_idle_holder_was_nudged() {
-        let mut world = crate::ui::demo::world();
+        let mut world = crate::ui::demo::test_world();
         let Load::Ready(missions) = &mut world.missions else {
             panic!("the demo world has missions");
         };
@@ -3691,7 +3724,7 @@ mod tree_tests {
 
     #[test]
     fn an_agents_subagents_hang_beneath_its_row_and_are_never_selectable() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         for listing in [agents_list(&world, "⠋", 60), agents_tree(&world, "⠋", 60)] {
             let builder = listing
                 .ids
@@ -3729,7 +3762,7 @@ mod tree_tests {
 
     #[test]
     fn a_tree_has_one_line_per_folder_and_leaf_in_path_order() {
-        let listing = agents_tree(&super::super::demo::world(), "⠋", 40);
+        let listing = agents_tree(&super::super::demo::test_world(), "⠋", 40);
         let kinds = listing
             .items
             .iter()
@@ -3766,7 +3799,7 @@ mod mission_golden {
     // STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui mission_golden
     #[test]
     fn mission_stories_golden() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let mut actual = String::new();
         for mission in world.missions.items() {
             for width in [40, 80, 120] {

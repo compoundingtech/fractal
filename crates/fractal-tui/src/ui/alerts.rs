@@ -1446,7 +1446,7 @@ mod tests {
     }
 
     fn world_with(case: &Case) -> World {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         if let Load::Ready(agents) = &mut world.agents
             && let Some(agent) = agents.iter_mut().find(|agent| agent.id == SEAT)
         {
@@ -1871,7 +1871,7 @@ mod tests {
             about: String::new(),
             subjects: vec![],
         };
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         world.attention = Load::Ready(vec![update]);
         let ui = Ui::new(world);
         assert!(ui.alert_band(SEAT, 80, 20, Place::Band).is_empty());
@@ -1886,7 +1886,7 @@ mod tests {
     }
 
     fn with_alerts(items: Vec<Attention>) -> Ui {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         world.attention = Load::Ready(items);
         Ui::new(world)
     }
