@@ -125,7 +125,7 @@ describe('bounded perceived UX', () => {
     expect(h.snapshot().spans.at(-1)?.attributes['wf.sync.reconnect_ms']).toBe(40)
     h.ux.dispose()
   })
-  it('times an answered alert to the paint that no longer shows it, against st\'s 2 s alert_landed budget', () => {
+  it('times an answered alert to the paint that no longer shows it, against Fractal\'s 2 s alert_landed budget', () => {
     const h = harness()
     h.time(100)
     const fast = h.ux.beginAlertAnswer()

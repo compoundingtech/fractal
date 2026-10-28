@@ -6,8 +6,8 @@ import { alertsHeading, homeRows, homeSections, keepClosed, openAlerts, personAn
 
 const now = Date.parse('2026-10-14T12:00:00Z');
 const actor = 'person/demo/session/example-phone';
-// What st presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
-// derives nothing, so these rows carry it as st serves them.
+// What Fractal presents for each kind (docs/clients/ui-contract.md, Attention row): Home reads it and
+// derives nothing, so these rows carry it as Fractal serves them.
 const presented = (attention_kind, extra) => {
   const card = {
     'human-gate': { tier: 'stopped', kind: extra.review_mode === 'feedback' ? 'feedback' : 'review' },
@@ -193,4 +193,20 @@ test('the native app permits the device light and dark appearance', () => {
   const config = JSON.parse(readFileSync(new URL('./app.json', import.meta.url), 'utf8'));
   assert.equal(config.expo.userInterfaceStyle, 'automatic');
   assert.equal(config.expo.ios.infoPlist.UIViewControllerBasedStatusBarAppearance, true, 'native stacks own status-bar appearance without an RN screens assertion');
+});
+
+test('Now draws its background, text and native chrome from the live system appearance', () => {
+  const systemScreen = namedFunction(uiSource, 'SystemScreen');
+  assert.equal(calls(systemScreen, 'useSystemColors').length, 1, 'the background re-renders with the appearance');
+  assert.equal(calls(namedFunction(uiSource, 'useSystemColors'), 'useScheme').length, 1);
+  assert.equal(calls(namedFunction(uiSource, 'useTextAppearance'), 'useScheme').length, 1, 'every T reads the appearance itself');
+  assert.equal(calls(namedFunction(uiSource, 'useScheme'), 'useColorScheme').length, 1);
+  const appSource = source('./App.tsx');
+  const stack = namedFunction(appSource, 'TabStack');
+  assert.equal(calls(stack, 'useScheme').length, 1, 'native header options follow the appearance');
+  for (const name of ['NowRoot', 'Attention']) {
+    const screen = elements(stack, 'Stack.Screen').find(element => prop(element, 'name')?.text === name);
+    assert.match(prop(screen, 'options').expression.getText(), /^\{ \.\.\.systemOptions,/, name);
+  }
+  assert.equal(calls(namedFunction(appSource, 'Main'), 'useScheme').length, 1, 'the navigation theme and tab tint follow the appearance');
 });

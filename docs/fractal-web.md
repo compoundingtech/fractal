@@ -60,6 +60,20 @@ leaves `resolveImage` at its default `Defer`. The kit renders no remote image be
 or after this callback; it never fetches the URL on the app's behalf.
 `onOpenResource` remains reserved for workspace references.
 
+Sent and received image attachments use a separate consent boundary: **Show image**
+reads the attachment through `AttachmentPort.chunk`, retaining the native message
+carrier so the gateway authorizes the viewer. No upload preview URL is reused.
+Retained panes share one cache per data-source/viewer identity, holding at most
+24 entries and 40 MiB of image bytes in total. Images are limited to 10 MiB;
+object URLs are revoked on eviction and when the final pane releases the cache.
+A pending read whose entry was evicted or disposed cannot publish a late object URL.
+Loading, unauthorized and failed reads keep the file card; failures offer **Retry**.
+Loaded thumbnails open in the kit's image viewer. Existing mailbox attachment
+metadata supplies sizes; native content that carries only an attachment ID keeps
+**Size unavailable** without changing the wire contract.
+Only PNG, JPEG, GIF and WebP attachments with a `blob/<sha256>` ID offer image
+reads. Unsupported types and references stay plain non-retryable file cards.
+
 Run the regression proofs with:
 
 ```sh
@@ -131,18 +145,18 @@ Authorization and capability refusals retain their distinct explanations.
 ## Local daemon web app
 
 The daemon serves the web app by default at `http://127.0.0.1:7410`.
-Disable it with `fractal up --web-listen off`. `--web-dist /path/to/dist/web`
+Disable it with `st up --web-listen off`. `--web-dist /path/to/dist/web`
 overrides the default installed assets at `../share/fractal-web` relative to the
 daemon executable: an installation with `bin/fractal` uses `share/fractal-web/`.
 The assets stay separate from the daemon binary so a UI change does not require
 recompiling or relinking Rust.
 
 Missing assets or a missing configured concrete `person` degrade web availability
-without taking down the daemon's API listeners. `fractal doctor` reports the web
+without taking down the daemon's API listeners. `st doctor` reports the web
 finding and the configuration or installation to repair. An occupied listener port
 is still a startup error; use another loopback port or `--web-listen off`.
 
-Run `fractal web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
+Run `st web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
 The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
 the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
 to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
@@ -174,7 +188,7 @@ person; the daemon does not start it. The example uses loopback port `7411`, sep
 from the daemon's local browser port `7410`. `tailscale serve` publishes this
 publisher over HTTPS on the tailnet. The server injects one paired
 bearer into every admitted request, so admission is the whole authorization. With a full-control
-pairing, any script running in the app holds that person's full st authority. A request must
+pairing, any script running in the app holds that person's full Fractal authority. A request must
 carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for tailnet users. Any
 browser `Origin` must be exactly the published origin, and upgrades and unsafe methods must
 carry one. An Origin-less read is refused when the browser's `Sec-Fetch-Site` says another site sent it. Never publish it with Funnel, which carries no tailnet identity. Anything else that
@@ -267,7 +281,7 @@ their scope or provenance; monetary amounts keep their intrinsic width.
 The kit's E3 policy hides empty and unavailable resource bodies; unavailable categories
 are named once in its compact “Not reported for this session: …” summary. A collapsed
 “Why? Sections not reported” disclosure groups the reasons beneath it on desktop and phone.
-User-hidden categories are omitted. Known zero traced or observed st subagent counts
+User-hidden categories are omitted. Known zero traced or observed Fractal subagent counts
 remain visible evidence, distinct from an unknown count.
 The Subagents heading uses the reported traced-session total for both zero and
 positive counts, never the capped retained list length; unknown totals have no badge.
@@ -360,13 +374,20 @@ React would otherwise walk every retained fiber looking for consumers.
 Reading position is independent of that three-pane DOM cache. `WorkspaceBody` owns one
 memory-only kit `ViewportStore` for its surface lifetime, above the keyed panes, and each
 transcript uses its stable agent conversation ref as `viewportKey`. A detached reading line
-survives switching away and back, even after its pane is evicted and remounted. Memory is
+survives switching away and back, even after its pane is evicted and remounted. The line is
+saved by source row identity as well as offset: a remount after earlier history or a turn split
+loaded above it restores the same row, and a work summary whose turn id changed is found through
+a tool call or thought it still owns. A row missing from partial or waiting history stays pending
+until it mounts; once complete source history no longer contains it, the saved top applies. Memory is
 limited to the 32 most recently visited conversations still in the current agent roster;
 layout-phase pruning drops departed agents and older visits after viewport cleanup saves.
 Returning to a dropped key opens at the end. Remounting
 the whole surface (including a reload) discards the store and opens at the live end.
 The existing `lastSendId` command still re-attaches on a new own send; no clock tick drives
-running-turn motion. The composition integration test exercises A → B → A, eviction through
+running-turn motion. Returning to the end from history (that command or **New messages ↓**)
+eases over the standard motion duration and re-reads the live end each frame; wheel, touch,
+navigation keys or a reader scroll stop it where it is, and reduced motion returns at once.
+The composition integration test exercises A → B → A, eviction through
 C and D, a fresh surface, roster departure, and the 32-conversation bound, using the real
 kit controller with deterministic jsdom sizing.
 The surface imports viewport ownership from the lightweight scroll module rather than the
@@ -515,7 +536,7 @@ alert strip against a real daemon without touching your own st. `up` makes a thr
 (`webproof`, under its own HOME in `/var/tmp/st-webproof`) with person/avery, a program seat
 agent/example/atlas and a paired full-control device whose bearer it keeps in a mode-0600 file.
 `run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
-headless Chromium, checks with st that each step finished with that answer, and prints the
+headless Chromium, checks with Fractal that each step finished with that answer, and prints the
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
 header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
 

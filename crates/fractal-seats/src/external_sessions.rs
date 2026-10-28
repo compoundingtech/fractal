@@ -660,7 +660,7 @@ fn claude_session_of_driver_process(
 
 /// The kernel start time of `pid` in clock ticks since boot, as `/proc/<pid>/stat` reports it.
 #[cfg(target_os = "linux")]
-fn linux_process_start_ticks(pid: u32) -> Option<String> {
+pub(crate) fn linux_process_start_ticks(pid: u32) -> Option<String> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let end_name = stat.rfind(") ")?;
     stat[end_name + 2..]
@@ -670,7 +670,7 @@ fn linux_process_start_ticks(pid: u32) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn linux_process_started_at_ms(pid: u32) -> Option<u128> {
+pub(crate) fn linux_process_started_at_ms(pid: u32) -> Option<u128> {
     let ticks = linux_process_start_ticks(pid)?.parse::<u128>().ok()?;
     let boot_seconds = fs::read_to_string("/proc/stat")
         .ok()?
@@ -689,7 +689,7 @@ fn linux_process_started_at_ms(pid: u32) -> Option<u128> {
 /// launches its provider from a worker thread; a kernel without those lists falls back to a scan
 /// of every process's parent.
 #[cfg(target_os = "linux")]
-fn linux_child_processes(pid: u32) -> BTreeSet<u32> {
+pub(crate) fn linux_child_processes(pid: u32) -> BTreeSet<u32> {
     let mut children = BTreeSet::new();
     let mut listed = false;
     if let Ok(tasks) = fs::read_dir(format!("/proc/{pid}/task")) {
@@ -731,6 +731,103 @@ fn linux_child_processes(pid: u32) -> BTreeSet<u32> {
         }
     }
     children
+}
+
+/// Recover an exact external OMP transcript for an older hook reporting only its native ID.
+/// The incarnation must still identify this subject's live runtime, its driver and a direct
+/// provider, all in the expected account. Launch intent alone is never current-session proof.
+#[cfg(target_os = "linux")]
+pub fn omp_process_transcript(
+    subject: &str,
+    incarnation: &str,
+    current_native_id: &str,
+    account: Option<&str>,
+) -> Option<PathBuf> {
+    fn arguments(pid: u32) -> Option<Vec<String>> {
+        fs::read(format!("/proc/{pid}/cmdline")).ok()?
+            .split(|byte| *byte == 0)
+            .filter(|value| !value.is_empty())
+            .map(|value| String::from_utf8(value.to_vec()).ok())
+            .collect()
+    }
+    fn account_matches(pid: u32, expected: Option<&str>) -> bool {
+        let Ok(environment) = fs::read(format!("/proc/{pid}/environ")) else {
+            return false;
+        };
+        let account = environment.split(|byte| *byte == 0)
+            .find_map(|value| value.strip_prefix(b"ST3_ACCOUNT="))
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .filter(|value| !value.is_empty());
+        account == expected
+    }
+    fn own_driver(argv: &[String], subject: &str) -> bool {
+        let options = argv.iter().position(|value| value == "--").map_or(argv, |end| &argv[..end]);
+        options.windows(2).any(|pair| pair[0] == "driver" && pair[1] == "omp")
+            && (options.windows(2).any(|pair| pair[0] == "--subject" && pair[1] == subject)
+                || options.iter().any(|value| value.strip_prefix("--subject=") == Some(subject)))
+    }
+    let (pid, started_at) = incarnation.split_once(':')?;
+    let pid = pid.parse::<u32>().ok()?;
+    let expected_start = DateTime::parse_from_rfc3339(started_at).ok()?.timestamp_millis();
+    let expected_start = u128::try_from(expected_start).ok()?;
+    let runtime_start = linux_process_start_ticks(pid)?;
+    if linux_process_started_at_ms(pid)?.abs_diff(expected_start) > 2_000 {
+        return None;
+    }
+    let runtime_argv = arguments(pid)?;
+    let drivers = if own_driver(&runtime_argv, subject) {
+        BTreeSet::from([pid])
+    } else {
+        if Path::new(runtime_argv.first()?).file_name()?.to_str()? != "pty"
+            || runtime_argv.get(1).map(String::as_str) != Some("__daemon")
+        {
+            return None;
+        }
+        linux_child_processes(pid)
+    };
+    let mut found = None;
+    for driver in drivers {
+        let Some(driver_start) = linux_process_start_ticks(driver) else { continue; };
+        let Some(driver_argv) = arguments(driver) else { continue; };
+        if !own_driver(&driver_argv, subject) || !account_matches(driver, account) {
+            continue;
+        }
+        for provider in linux_child_processes(driver) {
+            let Some(provider_start) = linux_process_start_ticks(provider) else { continue; };
+            let Some(provider_argv) = arguments(provider) else { continue; };
+            if !account_matches(provider, account) {
+                continue;
+            }
+            let Some(path) = crate::native_resume::omp_resume_path(&provider_argv)
+                .and_then(|path| crate::native_resume::pi_family_reported_transcript(&path, current_native_id))
+            else {
+                continue;
+            };
+            if linux_process_start_ticks(provider).as_deref() != Some(&provider_start)
+                || linux_process_start_ticks(driver).as_deref() != Some(&driver_start)
+                || linux_process_start_ticks(pid).as_deref() != Some(&runtime_start)
+                || !linux_child_processes(driver).contains(&provider)
+                || (driver != pid && !linux_child_processes(pid).contains(&driver))
+            {
+                return None;
+            }
+            if found.replace(path).is_some() {
+                return None;
+            }
+        }
+    }
+    found
+}
+
+/// Old-hook process recovery has no safe process-lineage implementation on other platforms.
+#[cfg(not(target_os = "linux"))]
+pub fn omp_process_transcript(
+    _subject: &str,
+    _incarnation: &str,
+    _current_native_id: &str,
+    _account: Option<&str>,
+) -> Option<PathBuf> {
+    None
 }
 
 /// Read only the exact pi-family transcript durably named by a native binding or import claim.
@@ -2667,6 +2764,70 @@ mod tests {
     use fractal_store::external_sessions::shared_tests_seats::{CLAUDE_WINDOW_FILLER, assert_unique_ids, chat_texts, claude_line, codex_record, texts, transcript_session, unfurled_timeline};
     #[cfg(target_os = "linux")]
     use fractal_store::external_sessions::shared_tests_seats::path_executable;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn omp_old_hook_recovery_requires_exact_live_lineage_account_and_header() {
+        struct Runtime {
+            driver: std::process::Child,
+        }
+        impl Drop for Runtime {
+            fn drop(&mut self) {
+                for child in linux_child_processes(self.driver.id()) {
+                    for grandchild in linux_child_processes(child) {
+                        unsafe { libc::kill(grandchild as i32, libc::SIGKILL); }
+                    }
+                    unsafe { libc::kill(child as i32, libc::SIGKILL); }
+                }
+                let _ = self.driver.kill();
+                let _ = self.driver.wait();
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join("external.jsonl");
+        fs::write(&transcript, "{\"type\":\"session\",\"id\":\"one\"}\n").unwrap();
+        let provider_script = root.path().join("provider.sh");
+        fs::write(&provider_script, "sleep 30\n:\n").unwrap();
+        let bash = path_executable("bash");
+        let runtime = Runtime {
+            driver: std::process::Command::new(&bash)
+                .args([
+                    "-c",
+                    r#"exec -a omp "$1" "$3" --resume "$2" & wait"#,
+                    "driver",
+                    bash.to_str().unwrap(),
+                    transcript.to_str().unwrap(),
+                    provider_script.to_str().unwrap(),
+                    "driver", "omp", "--subject", "agent/seat",
+                ])
+                .env("ST3_ACCOUNT", "test-account")
+                .spawn()
+                .unwrap(),
+        };
+        let started = linux_process_started_at_ms(runtime.driver.id()).unwrap();
+        let stamp = DateTime::<Utc>::from_timestamp_millis(i64::try_from(started).unwrap())
+            .unwrap().to_rfc3339();
+        let incarnation = format!("{}:{stamp}", runtime.driver.id());
+        let expected = Some(fs::canonicalize(&transcript).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if omp_process_transcript("agent/seat", &incarnation, "one", Some("test-account")) == expected {
+                break;
+            }
+            assert!(Instant::now() < deadline, "provider did not become observable");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(omp_process_transcript("agent/other", &incarnation, "one", Some("test-account")), None);
+        assert_eq!(omp_process_transcript("agent/seat", &incarnation, "one", None), None);
+        assert_eq!(omp_process_transcript("agent/seat", &incarnation, "one", Some("other-account")), None);
+        assert_eq!(omp_process_transcript("agent/seat", &incarnation, "other", Some("test-account")), None);
+        let stale = format!("{}:2000-01-01T00:00:00Z", runtime.driver.id());
+        assert_eq!(omp_process_transcript("agent/seat", &stale, "one", Some("test-account")), None);
+        fs::write(&transcript, "{\"type\":\"session\",\"id\":\"other\"}\n").unwrap();
+        assert_eq!(omp_process_transcript("agent/seat", &incarnation, "one", Some("test-account")), None);
+        fs::remove_file(&transcript).unwrap();
+        assert_eq!(omp_process_transcript("agent/seat", &incarnation, "one", Some("test-account")), None);
+    }
 
     #[test]
     fn timeline_send_identity_codex_includes_native_thread_at_timeline_boundary() {
@@ -5051,7 +5212,9 @@ mod tests {
         let timed =
             timeline_slice(&session, TimelineOrder::TimestampSequence, None, usize::MAX).unwrap();
         assert_ne!(sequence.items, timed.items);
-        assert_eq!(timed.items[0]["timestamp"], stamps[0]);
+        // Numeric chronology selects 10:00Z, not the lexically larger 10:30+02:00.
+        // Preserve the exact source spelling rather than normalizing the output.
+        assert_eq!(timed.items[0]["timestamp"], stamps[2]);
     }
 
     #[test]

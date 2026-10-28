@@ -3,8 +3,8 @@ import { ago } from './presentation';
 import { missionSteps } from './presentation';
 import { theme } from './theme';
 
-// The Missions list, drawn the way stui draws it (crates/fractal-tui/src/ui/screens.rs missions_list):
-// one word per mission naming who has to move, in fixtures/clients/words.json order. st serves the
+// The Missions list, drawn the way the Fractal terminal UI draws it (crates/fractal-tui/src/ui/screens.rs missions_list):
+// one word per mission naming who has to move, in fixtures/clients/words.json order. Fractal serves the
 // word, each step and who must act on the mission row (Mission.presentation,
 // docs/clients/ui-contract.md, Mission); the phone keeps no derivation of its own.
 export const WORDS = ['decision', 'stalled', 'unstaffed', 'unclaimed', 'queued', 'working', 'watching', 'held', 'idle', 'done', 'failed', 'cancelled', 'not_started', 'unknown'] as const;
@@ -35,21 +35,21 @@ export function wordStyle(word: Word, spinner = '⠿'): { glyph: string; color: 
 
 export const MISSION_LEGEND: ReadonlyArray<Word> = ['decision', 'stalled', 'unstaffed', 'queued', 'watching', 'working', 'idle', 'done'];
 
-/** The word st serves for a mission. A daemon too old to serve one, or a word this phone does not
+/** The word Fractal serves for a mission. A daemon too old to serve one, or a word this phone does not
  *  know, reads unknown rather than a guess. */
 export function missionWord(mission: Pick<Mission, 'presentation'>): Word {
   const word: string | undefined = mission.presentation?.word;
   return word !== undefined && (WORDS as ReadonlyArray<string>).includes(word) ? word as Word : 'unknown';
 }
 
-/** What a list calls a mission: its word, or, when st serves none (an older st, or one that has
- *  not read its agents yet), its raw state and that st does not say. */
+/** What a list calls a mission: its word, or, when Fractal serves none (an older Fractal, or one that has
+ *  not read its agents yet), its raw state and that Fractal does not say. */
 export function missionLabel(mission: Pick<Mission, 'presentation' | 'state'>): string {
   const word = missionWord(mission);
   return word === 'unknown' && mission.state ? `${mission.state} · Fractal does not say` : wordName(word);
 }
 
-/** Who st says holds a step or must act: "you" for the reader. */
+/** Who Fractal says holds a step or must act: "you" for the reader. */
 export function actorName(actor: PresentationActor | undefined, reader?: string): string | undefined {
   switch (actor?.kind) {
     case 'person': return actor.person === reader ? 'you' : actor.label ?? actor.person;
@@ -59,8 +59,8 @@ export function actorName(actor: PresentationActor | undefined, reader?: string)
   }
 }
 
-const labelWords: Record<string, string> = { tui: 'TUI', ios: 'iOS', st3: 'ST', omp: 'OMP', api: 'API', pty: 'PTY' };
-/** `scope · Title`, as stui titles a mission. */
+const labelWords: Record<string, string> = { tui: 'TUI', ios: 'iOS', st3: 'ST', fractal: 'Fractal', omp: 'OMP', api: 'API', pty: 'PTY' };
+/** `scope · Title`, as the Fractal terminal UI titles a mission. */
 export function missionTitle(mission: Pick<Mission, 'id' | 'title'>): string {
   const path = mission.id.replace(/^mission\//, '');
   const slash = path.lastIndexOf('/');
@@ -89,7 +89,7 @@ export function missionRows(missions: Mission[], showSystem: boolean, now = Date
       progress: mission.presentation?.last_progress?.split(/\s+/).filter(Boolean).join(' ') || undefined,
     };
   });
-  // A failure ages out of the list after its day, as in stui (Nathan, 2026-10-02); showing the
+  // A failure ages out of the list after its day, as in the Fractal terminal UI (Nathan, 2026-10-02); showing the
   // hidden missions brings it back.
   const hide = (row: MissionRow) => row.system || failedBeforeToday(row, now);
   const rows = all.filter(row => showSystem || !hide(row)).sort((a, b) => WORDS.indexOf(a.word) - WORDS.indexOf(b.word) || a.title.toLowerCase().localeCompare(b.title.toLowerCase()));
@@ -128,7 +128,7 @@ const stepStyles: Record<MissionStepPresentation['word'], StepStyle> = {
   pending: { glyph: '▱', color: theme.surface2, word: 'later', rank: 5 },
 };
 
-/** A step's word as st serves it, drawn as stui draws it in a mission's pipeline. A step st
+/** A step's word as Fractal serves it, drawn as the Fractal terminal UI draws it in a mission's pipeline. A step Fractal
  *  serves no word for reads unknown. */
 export function stepStyle(word: string | undefined, spinner = '⠿'): StepStyle {
   const style = stepStyles[word as MissionStepPresentation['word']];

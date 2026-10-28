@@ -145,6 +145,27 @@ else:
 del packages["@fixture/uncovered"]
 print("passed: workspace dependency fixture runs kit lanes; uncovered dependencies fail the scope guard")
 
+# The real workspace's tab metadata hook is bundled by NarrowLayout stories, not its browser fixture or tests.
+assert detector_contract["kit_paths"](["apps/fractal-web/src/web/useTabMetadata.ts"])
+assert not detector_contract["kit_paths"]([
+    "apps/fractal-web/src/web/useTabMetadata.browser.tsx",
+    "apps/fractal-web/src/web/useTabMetadata.integration.test.tsx",
+])
+print("passed: workspace tab metadata selects kit lanes; its browser fixture and tests do not")
+# Keep the raw terminal's bundled dependencies in kit scope without selecting its unit tests.
+raw_terminal_kit_inputs = (
+    "apps/fractal-web/src/terminal/RawTerminal.tsx",
+    "apps/fractal-web/src/terminal/actionTerminalInput.ts",
+    "apps/fractal-web/src/terminal/ghosttyVt.ts",
+    "apps/fractal-web/src/terminal/rawTerminalInput.ts",
+    "apps/fractal-web/src/terminal/rawTerminalState.ts",
+    "apps/fractal-web/src/terminal/terminalMetrics.stylex.ts",
+    "apps/fractal-web/src/terminal/terminalTyping.ts",
+)
+assert detector_contract["kit_paths"](raw_terminal_kit_inputs) == list(raw_terminal_kit_inputs)
+assert not detector_contract["kit_paths"](["apps/fractal-web/src/terminal/rawTerminalInput.unit.test.ts"])
+print("passed: raw terminal runtime dependencies select kit lanes, unit tests do not")
+
 
 with tempfile.TemporaryDirectory() as scratch:
     repo = Path(scratch)
@@ -300,7 +321,7 @@ assert "BASE_REF: ${{ github.event.merge_group.base_ref || 'refs/heads/main' }}"
 assert "KIT_INPUTS: ${{ needs.fractal-web-changes.outputs.kit-inputs }}" in execution
 assert "KIT_PLAY_SET: ${{ github.event_name == 'pull_request' && 'commit' || 'all' }}" in execution, "PRs run the per-commit set"
 assert "KIT_PLAY_A11Y: ${{ github.event_name == 'pull_request' && 'off' || 'on' }}" in execution, "merge groups keep axe"
-assert "KIT_PLAY_MAX_SECONDS: ${{ github.event_name == 'pull_request' && '100' || '' }}" in execution, "the per-commit budget"
+assert "KIT_PLAY_WALL_GUARD_SECONDS: ${{ github.event_name == 'pull_request' && '268' || '' }}" in execution, "the per-commit wall hang guard"
 assert "APP_TEST_SET: ${{ github.event_name == 'pull_request' && 'related' || 'all' }}" in execution, "PRs run the related app tests, merge groups all"
 assert "github.event.pull_request.draft == false" in changes and "(success())" in changes and "actions/checkout" not in changes, "ready PR detection runs on embedded source"
 assert "needs: [fractal-web-changes, genie-freshness, evidence-gate-fractal-web]" in execution
@@ -561,8 +582,16 @@ roster_story = ["apps/fractal-web/src/web/LiveRoster.tsx", "packages/fractal-sdk
 assert detector_kit_paths(roster_story) == roster_story, "the roster decode story bundles the roster and the SDK decode, so they select kit plays"
 composer_story = ["apps/fractal-web/src/web/ComposerImages.stories.tsx", "apps/fractal-web/src/web/composerSend.ts"]
 assert detector_kit_paths(composer_story) == composer_story, "the composer image integration story and live adapter select kit plays"
-workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
+native_transcript_story = ["apps/fractal-web/src/web/NativeTranscript.stories.tsx", "apps/fractal-web/src/web/ConversationPane.tsx"]
+assert detector_kit_paths(native_transcript_story) == native_transcript_story, "the native transcript story and production pane select kit plays"
+transcript_story = ["apps/fractal-web/src/web/TranscriptImages.stories.tsx", "apps/fractal-web/src/web/transcriptImages.ts"]
+assert detector_kit_paths(transcript_story) == transcript_story, "the transcript image integration story and production image cache select kit plays"
+app_story = ["apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx", "apps/fractal-web/src/web/ConversationPane.stories.tsx", "apps/fractal-web/src/fixtures/appStoryStates.ts", "apps/fractal-web/src/data/feedSync.ts"]
+assert detector_kit_paths(app_story) == app_story, "the production app suites and their state fixtures select kit plays"
+workspace_closure = ["apps/fractal-web/src/web/LiveAgentWorkspace.tsx", "apps/fractal-web/src/web/subagentThreadFocus.ts", "apps/fractal-web/src/telemetry/inputPaint.ts", "apps/fractal-web/.changelog/2026-10-18-example.ts", "clients/typescript/fractal-views/time.ts"]
 assert detector_kit_paths(workspace_closure) == workspace_closure, "the narrow-layout story renders the real workspace, so its closure selects kit plays"
+embed_closure = ["apps/fractal-web/src/embed/Embed.stories.tsx", "apps/fractal-web/src/embed/Embed.tsx", "apps/fractal-web/src/embed/captures/provenance.json", "apps/fractal-web/src/state/storageAdapter.ts"]
+assert detector_kit_paths(embed_closure) == embed_closure, "the product embed story and its nested fixtures select kit plays"
 assert not detector_kit_paths(["apps/fractal-web/src/alerts/AlertsPopover.tsx"]), "other app-only changes still skip kit plays"
 with tempfile.TemporaryDirectory() as scratch:
     def graph(*ids):
@@ -573,8 +602,9 @@ with tempfile.TemporaryDirectory() as scratch:
                     "/virtual:/@storybook/builder-vite/vite-app.js", "./../../apps/fractal-web/src/changelog/ChangelogView.tsx",
                     "./../../apps/fractal-web/src/telemetry/inputPaint.ts",
                     "./../../apps/fractal-web/src/web/ComposerImages.stories.tsx",
+                    "./../../apps/fractal-web/src/web/NativeTranscript.stories.tsx",
                     "./../../docs/st3/client-v0/schemas/client-v0.schema.json")
-    assert covered.returncode == 0 and "6 repository files, 0 outside" in covered.stdout, covered
+    assert covered.returncode == 0 and "7 repository files, 0 outside" in covered.stdout, covered
     outside = graph("./src/Composer.stories.tsx", "./../../apps/fractal-web/src/alerts/AlertsPopover.tsx")
     assert outside.returncode == 1 and "apps/fractal-web/src/alerts/AlertsPopover.tsx" in outside.stderr, outside
     for ids in ((), ("./../../node_modules/react/index.js",), ("/virtual:/x",)):

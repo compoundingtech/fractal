@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Session } from '@fractal/client'
+import { Agent as AgentSchema, decodeUnknownSync } from '@fractal/client/schema'
 import { ANCHOR_MS, agent, buildWorld, foldSlice, genericVariants, terminalRecord, terminalRun, wireValues, type RawResource, type Slice, type SyncEvent, type TerminalRecord, type WorldDefinition } from '../src/index.ts'
 import { drawCast } from '../src/kit/cast.ts'
 import { rngFromSeed } from '../src/kit/rng.ts'
@@ -50,6 +51,20 @@ const emptyDefinition: WorldDefinition = {
 }
 
 describe('foundation contracts', () => {
+  it.each([
+    ['claude', true],
+    ['codex', true],
+    ['omp', true],
+    ['pi', false],
+    ['opencode', false],
+  ])('matches the daemon subagents field rule for %s', (driver, observesSubagents) => {
+    const ctx = context()
+    const row = agent(ctx, { ...ctx.cast.agents[0]!, driver }, { state: 'running', sinceMs: 0 }).agent
+    expect(Object.hasOwn(row, 'subagents')).toBe(observesSubagents)
+    if (observesSubagents) expect(row.subagents).toEqual([])
+    expect(() => decodeUnknownSync(AgentSchema, 'strict')(row)).not.toThrow()
+  })
+
   it('introduces and removes full conversation and terminal records after offset zero', async () => {
     const original = base()
     const conversation = original.slices.conversation.state.threads[0]!

@@ -225,6 +225,25 @@ pub fn steps(
         .max()
         .unwrap_or(8)
         .clamp(8, inner / 3);
+    // The owner column never cuts a name. Agent ids sit beside names when every row's whole
+    // identity fits beside its age; a narrower pane shows names alone on every row.
+    let age_width = mission
+        .steps
+        .iter()
+        .map(|step| text::width(&step.age))
+        .max()
+        .unwrap_or(0);
+    let room = inner.saturating_sub(4 + name_width + 1 + 11 + 1 + age_width);
+    let identities = mission
+        .steps
+        .iter()
+        .all(|step| owner_width(step, true) <= room);
+    let owner_column = mission
+        .steps
+        .iter()
+        .map(|step| owner_width(step, identities))
+        .max()
+        .unwrap_or(0);
     steps.blank();
     for step in &mission.steps {
         let (glyph, color, word) = step_style(step.state, spinner, palette, glyphs);
@@ -236,6 +255,12 @@ pub fn steps(
             width: inner as u16,
             hit: Intent::ToggleStep(key),
         });
+        let owner = match step.human_owner() {
+            Some(_) if identities => step.owner_identity().unwrap_or_default(),
+            Some(name) => name.to_owned(),
+            None => NOBODY.into(),
+        };
+        let owner_padding = owner_column.saturating_sub(text::width(&owner));
         steps.line(Line::from(vec![
             span(
                 if open {
@@ -256,11 +281,7 @@ pub fn steps(
             ),
             span(format!("{:<11}", word), fg(color)),
             span(
-                // A long owner is cut so its age never runs into it.
-                format!(
-                    "{:<18}",
-                    text::truncate(step.owner.as_deref().unwrap_or("nobody"), 17)
-                ),
+                format!("{owner}{:owner_padding$} ", ""),
                 if step.owner.is_some() {
                     palette.soft()
                 } else {
@@ -341,6 +362,19 @@ pub fn steps(
     steps
 }
 
+const NOBODY: &str = "nobody";
+
+/// How wide a step's owner reads, with or without its agent id.
+fn owner_width(step: &fractal_ui_model::missions::Step, identity: bool) -> usize {
+    match (step.human_owner(), &step.owner_id) {
+        (Some(name), Some(id)) if identity && name != id => {
+            text::width(name) + text::width(" · ") + text::width(id)
+        }
+        (Some(name), _) => text::width(name),
+        (None, _) => text::width(NOBODY),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,6 +414,138 @@ mod tests {
         assert_eq!(
             step_style(StepState::Working, "*", &palette, &Glyphs::default()),
             ("*", Color::Magenta, "working")
+        );
+    }
+
+    fn step(
+        name: &str,
+        state: StepState,
+        owner: &str,
+        owner_id: Option<&str>,
+    ) -> fractal_ui_model::missions::Step {
+        fractal_ui_model::missions::Step {
+            id: format!("step-run/example/{name}"),
+            seat: owner_id.map(str::to_owned),
+            name: name.into(),
+            state,
+            owner: Some(owner.into()),
+            owner_id: owner_id.map(str::to_owned),
+            owner_is_system: false,
+            note: None,
+            after: vec![],
+            age: "4m".into(),
+            goals: vec![],
+            constraints: vec![],
+            gates: vec![],
+            attempt: 1,
+            blockers: vec![],
+        }
+    }
+
+    /// The step rows of a mission held by an agent and by Fractal, as drawn `inner` wide.
+    fn owner_rows(inner: usize) -> Vec<String> {
+        named_owner_rows(inner, "Maintainer")
+    }
+
+    fn named_owner_rows(inner: usize, owner: &str) -> Vec<String> {
+        let mission = Mission {
+            id: "mission/example/release".into(),
+            title: "Release".into(),
+            word: fractal_ui_model::missions::Word::Decision,
+            age: "4m".into(),
+            host: String::new(),
+            goals: vec![],
+            steps: vec![
+                step(
+                    "review",
+                    StepState::Working,
+                    owner,
+                    Some("agent/example/maintainer"),
+                ),
+                step("watch", StepState::Working, "Fractal", None),
+            ],
+            step_metadata: Default::default(),
+            agents: vec![],
+            decision: None,
+            worktree: None,
+            parent: None,
+            system: false,
+            kdl: None,
+            outcome: None,
+            updated_at: String::new(),
+            state: String::new(),
+        };
+        let doc = steps(
+            &mission,
+            inner,
+            "*",
+            &Default::default(),
+            &Palette::default(),
+            &Glyphs::default(),
+            &Theme::default(),
+        );
+        doc.targets
+            .iter()
+            .map(|target| {
+                doc.lines[target.line]
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_narrow_pane_shows_whole_owner_names_without_agent_ids() {
+        let rows = owner_rows(48);
+        assert!(rows[0].contains(" Maintainer "), "{rows:#?}");
+        assert!(rows[1].contains(" Fractal "), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains("agent/") && !row.contains('…')),
+            "{rows:#?}"
+        );
+        // The owner column is padded to its widest name, so every age starts in one column.
+        assert!(
+            rows.iter()
+                .all(|row| row.ends_with(" 4m") && text::width(row) <= 48),
+            "{rows:#?}"
+        );
+        assert_eq!(text::width(&rows[0]), text::width(&rows[1]), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_wide_pane_keeps_each_agent_owners_id() {
+        let rows = owner_rows(100);
+        assert!(
+            rows[0].contains(" Maintainer · agent/example/maintainer 4m"),
+            "{rows:#?}"
+        );
+        assert!(rows[1].contains(" Fractal "), "{rows:#?}");
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains('…') && row.ends_with(" 4m")),
+            "{rows:#?}"
+        );
+        assert_eq!(text::width(&rows[0]), text::width(&rows[1]), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_wide_character_owner_fits_exactly_at_the_identity_boundary() {
+        let wide = named_owner_rows(100, "維");
+        let boundary = text::width(&wide[0]);
+        let rows = named_owner_rows(boundary, "維");
+        assert!(
+            rows[0].contains(" 維 · agent/example/maintainer 4m"),
+            "{rows:#?}"
+        );
+        assert_eq!(text::width(&rows[0]), boundary, "{rows:#?}");
+        assert_eq!(text::width(&rows[1]), boundary, "{rows:#?}");
+        let narrow = named_owner_rows(boundary - 1, "維");
+        assert!(
+            narrow.iter().all(|row| !row.contains("agent/")),
+            "{narrow:#?}"
         );
     }
 }

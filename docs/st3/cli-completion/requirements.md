@@ -1,31 +1,31 @@
-# st shell completion requirements
+# Fractal shell completion requirements
 
 ## Context
 
-- The st command surface is described in [../README.md](../README.md) and
+- The Fractal command surface is described in [../README.md](../README.md) and
   [CLI reference](../../site/reference/cli.md).
 - The implementation contract is [spec.md](./spec.md). Decisions:
   [.decisions/0001-runtime-completion.md](./.decisions/0001-runtime-completion.md).
 
 ## Assumptions
 
-- **A01 Local daemon:** Entity candidates come from the st daemon on this host through its trusted
+- **A01 Local daemon:** Entity candidates come from the Fractal daemon on this host through its trusted
   local Unix socket. The daemon answers a list request in tens of milliseconds.
 - **A02 Supported shells:** People use zsh, fish, or bash.
 
 ## Acceptable Tradeoffs
 
 - **T01 Unstable completion engine:** The completion engine is a feature that its upstream marks
-  unstable. st pins its exact version and accepts the upgrade work.
+  unstable. Fractal pins its exact version and accepts the upgrade work.
 - **T02 Bash has no descriptions:** Bash shows candidate values only. zsh and fish show values with
   descriptions.
-- **T03 One process per TAB:** Every TAB starts the st executable once.
+- **T03 One process per TAB:** Every TAB starts the Fractal executable once.
 
 ## Requirements
 
 ### Must offer the real choices
 
-- **R01 Live entity candidates:** An argument that names an st entity of a kind the client API
+- **R01 Live entity candidates:** An argument that names a Fractal entity of a kind the client API
   lists (for example terminal, agent, mission, mission run, work step, attention item, message,
   lane, fleet host, launch, device, subscription, session, person) completes to every current
   entity of that kind.
@@ -57,8 +57,8 @@
   not answer, keeps its previous meaning. Bare-word attach must resolve and consult within the
   existing 1 s budget or fail fast; a full subject preserves offline attachment.
 
-### Must install with st
+### Must install with Fractal
 
-- **R11 Installed stubs:** An installed st package ships zsh, fish, and bash completion that call
+- **R11 Installed stubs:** An installed Fractal package ships zsh, fish, and bash completion that call
   back into the PATH-resolved `st` executable.
 - **R12 Printable stub:** `st completions <shell>` prints the same PATH-based stub for manual installation.

@@ -199,18 +199,36 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(at, sorted(at))
         self.assertGreaterEqual(at[1] - at[0], 1)  # the first wait lasted its second
 
+    def dead_pid(self):
+        child = subprocess.Popen(['true'])
+        child.wait()
+        return child.pid
+
     def test_only_the_latest_ten_runs_keep_their_logs(self):
         home_logs = self.home / '.cache/ci-local-logs'
+        dead = self.dead_pid()
         for n in range(12):
-            old = home_logs / f'run-2020010{n % 10}T00000{n // 10}Z-{n}'
+            old = home_logs / f'run-2020010{n % 10}T00000{n // 10}Z-{dead}'
             old.mkdir(parents=True)
             os.utime(old, (1_000_000 + n, 1_000_000 + n))
         done, _ = self.run_local('tests')
         self.assertEqual(done.returncode, 0, done.stderr)
         kept = sorted(path.name for path in home_logs.glob('run-*'))
         self.assertEqual(len(kept), 10)
-        self.assertNotIn('run-20200100T000000Z-0', kept)  # the oldest went
+        self.assertNotIn(f'run-20200100T000000Z-{dead}', kept)  # the oldest went
         self.assertTrue(any(not name.startswith('run-2020') for name in kept))  # this run's
+
+    def test_a_run_still_going_keeps_its_logs_however_many_runs_started_after_it(self):
+        # A run waiting hours for build slots on a busy host is older than ten later runs and still writes its exit codes.
+        home_logs = self.home / '.cache/ci-local-logs'
+        live, dead = home_logs / f'run-20200100T000000Z-{os.getpid()}', home_logs / f'run-20200100T000001Z-{self.dead_pid()}'
+        for n, path in enumerate([live, dead] + [home_logs / f'run-2020020{n}T000000Z-{self.dead_pid()}' for n in range(10)]):
+            path.mkdir(parents=True)
+            os.utime(path, (1_000_000 + n, 1_000_000 + n))
+        done, _ = self.run_local('tests')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(live.is_dir())
+        self.assertFalse(dead.exists())
 
     def test_the_tmpdir_is_in_ram_when_dev_shm_has_room_and_on_disk_otherwise(self):
         if not (os.path.isdir('/dev/shm') and os.access('/dev/shm', os.W_OK)):

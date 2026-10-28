@@ -225,10 +225,10 @@ for path in ("main-upkeep.yml",):
     assert ";job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in generated, (path, "non-merge Linux work keeps the second class")
     assert "github.run-id=" in generated, (path, "avoid nondeterministic runner pickup")
     assert ";job.priority=10" not in generated, path
-for path in ("public-repo.yml", "release-daily.yml", "release-smalltalk.yml", "macos.yml"):
+for path in ("public-repo.yml", "release-daily.yml", "release-fractal.yml", "macos.yml"):
     generated = (ROOT / ".github/workflows" / path).read_text()
     assert all("namespace-features:" not in line for line in generated.splitlines() if line.lstrip().startswith(("runs-on:", "runner:"))), (path, "profile routing must use inline controls")
-release = (ROOT / ".github/workflows/release-smalltalk.yml").read_text()
+release = (ROOT / ".github/workflows/release-fractal.yml").read_text()
 assert "github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1" in release
 assert 'runner: macos-15' in release and 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}' in release
 assert 'namespace-profile-macos' not in release, 'native Mac releases must not depend on saturated Namespace'

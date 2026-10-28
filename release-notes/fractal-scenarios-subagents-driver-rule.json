@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Match daemon agent rows by omitting subagents for scenario drivers that do not observe them",
+  "replay": {"status": "none", "detail": "Scenario agent factories include subagents only for claude, codex and omp, matching the daemon; no deployed runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change; both agent row shapes use the existing optional client-v0 subagents field."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change."},
+  "compatibility": {"status": "none", "detail": "Scenario rows for non-observing drivers omit subagents instead of reporting an empty list. Existing fixtures use observing drivers and remain unchanged; no deployed protocol change."},
+  "downtime": {"status": "none", "detail": "No service interruption introduced."},
+  "manual": {"status": "none", "detail": "No deployed installation action required; this change affects scenario factories and their consumers only."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}
