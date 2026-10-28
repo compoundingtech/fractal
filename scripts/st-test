@@ -1517,12 +1517,13 @@ class Limit:
     With `begins_at` (bytes the check prints once it really starts, CI_LOCAL_STARTED) the running time counts only from that output on
     (`output` is given every chunk the check prints): what comes before it is waiting, admission for its dev shell included, which no
     queue log records (2026-10-27: a linux-gate spent its whole 7200 s before ci-local started and was stopped with its tests passing). Until
-    then only `silence` bounds it: that many seconds without any output stops it (`silent` is then True). `pre_start` is the waiting time."""
+    then `silence` seconds without any output stop it (`silent` is then True), and so does waiting longer than `queue_limit` in all (`waited_out`):
+    a wedged admission prints every 60 s and is never silent. `pre_start` is the waiting time."""
 
     def __init__(self, seconds, queue_log=None, queue_limit=QUEUE_LIMIT, begins_at=None, silence=None):
         self.seconds, self.queue_log, self.queue_limit = seconds, queue_log, queue_limit
         self.started = self.heard = time.monotonic()
-        self.begins_at, self.tail, self.pre_start, self.silent = begins_at, b'', 0.0, False
+        self.begins_at, self.tail, self.pre_start, self.silent, self.waited_out = begins_at, b'', 0.0, False, False
         self.silence = SILENCE_LIMIT if silence is None else silence
 
     def output(self, chunk):
@@ -1540,10 +1541,11 @@ class Limit:
 
     def remaining(self):
         """Seconds left before the check is over its limit (0 or less once it is): running time or waiting time, whichever ends first."""
-        if self.begins_at:  # not started yet: only silence ends it
-            left = self.silence - (time.monotonic() - self.heard)
-            self.silent = left <= 0
-            return left
+        if self.begins_at:  # not started yet: silence ends it, and so does a wait past queue_limit
+            now = time.monotonic()
+            quiet, waiting = self.silence - (now - self.heard), self.queue_limit - (now - self.started)
+            self.silent, self.waited_out = quiet <= 0, waiting <= 0 < quiet
+            return min(quiet, waiting)
         queued = self.queued()
         ran = time.monotonic() - self.started - queued
         return min(self.seconds - ran, self.queue_limit - queued)
@@ -1581,6 +1583,7 @@ def queue_note(limit):
     """What the summary row adds about the check's waits before it started and for build slots, or ''."""
     queued, waited = round(limit.queued()), round(limit.waiting())
     notes = ([f'stopped after {limit.silence:g}s without output before ci-local started'] if limit.silent else []) + \
+            ([f'stopped after waiting {limit.queue_limit:g}s (--queue-limit) before ci-local started'] if limit.waited_out else []) + \
             ([f'waited {waited}s before ci-local started (admission, dev shell)'] if waited else []) + \
             ([f'waited {queued}s for build slots'] if queued else [])
     return f'; {", ".join(notes)} (not counted against --time-limit)' if notes else ''

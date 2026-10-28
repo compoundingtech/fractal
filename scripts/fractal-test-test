@@ -633,6 +633,18 @@ class StTest(unittest.TestCase):
         self.assertRegex(out, r'demo +timed out .*stopped after 1s without output before ci-local started')
         self.assertLess(time.monotonic() - started, 25)
 
+    def test_a_ci_local_check_that_waits_past_its_queue_limit_before_it_starts_is_stopped_even_while_it_prints(self):
+        self.commit('b.txt', 'two')
+        chatty = 'while true; do echo still waiting for admission; sleep 0.2; done'  # never silent, never starts
+        started = time.monotonic()
+        with mock.patch.object(st_test, 'SILENCE_LIMIT', 600):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', '--queue-limit', '1',
+                                              command=['sh', '-c', chatty, 'scripts/ci-local'])
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'demo +timed out .*stopped after waiting 1s \(--queue-limit\) before ci-local started')
+        self.assertNotIn('without output', out)
+        self.assertLess(time.monotonic() - started, 25)
+
     def test_ci_local_still_prints_the_line_its_time_limit_starts_at_after_its_load_gate(self):
         source = (ROOT / 'scripts/ci-local').read_text()
         marker = 'echo "' + st_test.CI_LOCAL_STARTED.decode()
