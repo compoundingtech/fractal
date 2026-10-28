@@ -1254,7 +1254,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   kind: "unsubscribe";
 } & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; collection?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; trace?: never; until_ms?: never; }));
 
-export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; code?: never; header?: never; message?: never; older_cursor?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; upserts?: never; value?: never; }) | (AgentsChanges & { chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; message?: never; older_cursor?: never; replace?: never; retryable?: never; session_id?: never; value?: never; }) | ({
+export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; code?: never; header?: never; message?: never; older_cursor?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | (AgentsChanges & { chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; message?: never; older_cursor?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
   collection: CollectionName;
   has_more: boolean;
   id: string;
@@ -1262,6 +1262,7 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
   kind: "snapshot";
   order: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
 } & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; upserts?: never; value?: never; }) | ({
   collection: CollectionName;
   has_more: boolean;
@@ -1270,6 +1271,7 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
   order: Array<Id>;
   removes: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
   upserts: Array<Resource>;
 } & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; value?: never; }) | ({
   collection: "terminal";
@@ -1277,7 +1279,7 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
   kind: "screen";
   snapshot: Snapshot;
   value: TerminalScreen;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; has_more?: never; header?: never; items?: never; message?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; upserts?: never; }) | ({
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; has_more?: never; header?: never; items?: never; message?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; }) | ({
   collection: "conversation";
   has_more?: boolean;
   header?: ConversationHeader;
@@ -1287,21 +1289,21 @@ export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; c
   older_cursor?: string;
   replace: boolean;
   session_id: Id;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; message?: never; order?: never; publication?: never; removes?: never; retryable?: never; snapshot?: never; upserts?: never; value?: never; }) | ({
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; message?: never; order?: never; publication?: never; removes?: never; retryable?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
   code?: ErrorCode;
   collection?: string;
   id: string;
   kind: "resync";
   message?: string;
   retryable?: boolean;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; upserts?: never; value?: never; }) | ({
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }) | ({
   code?: ErrorCode;
   collection?: string;
   id?: string;
   kind: "error";
   message: string;
   retryable?: boolean;
-} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; upserts?: never; value?: never; }));
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; has_more?: never; header?: never; items?: never; older_cursor?: never; order?: never; publication?: never; removes?: never; replace?: never; session_id?: never; snapshot?: never; sync?: never; upserts?: never; value?: never; }));
 
 export type CollectionName = 
   "missions"
@@ -2872,6 +2874,11 @@ export type StatusTransition = {
 };
 
 export type StepRunId = string;
+
+export type StreamSync = {
+  peers?: Array<SyncPeer>;
+  state: ("level" | "catching-up" | "diverged" | string);
+};
 
 export type StructuredDiff = {
   changes: Array<{

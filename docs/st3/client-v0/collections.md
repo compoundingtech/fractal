@@ -232,6 +232,11 @@ chunk fields. Apply it atomically only when its epoch and base revision match th
 last complete roster. Revision jumps are valid. Metadata-only changes still
 advance the publication.
 
+Frame consumers ignore unknown extension keys, including on revisioned frames.
+Required fields and values, the reserved snapshot/delta grammar, and the epoch,
+base-revision and contiguous-chunk integrity fences still apply. Producer schema
+validation remains stricter than transport decoding.
+
 Reconnect or resubscribe always starts a full snapshot; there is no replay log.
 Discard incomplete staging on disconnect, replacement, epoch change or newer
 revision. A newer chunk zero can start a new sequence. A gap, duplicate,
@@ -384,6 +389,32 @@ The same capability says attention rows carry `presentation`: the Now group and 
 [the UI contract](../../clients/ui-contract.md#attention-row)). The attention refresher computes
 it; every attention route copies it from the published list, and a row the list has not
 published yet has none until it does.
+
+## Sync on the stream
+
+A window frame of the `attention` collection may carry `sync` (`StreamSync`): this host's
+replication, taken when the frame was built. It is `{state: "level"}` while this host is current,
+or `{state: "catching-up" | "diverged", peers}` naming the peers it lacks envelopes from or
+projects a different graph than, with the same `SyncPeer` a page's `sync` carries. Unlike a page's
+`SyncNotice`, which is absent while level, it says `level` explicitly: on the stream an absent
+`sync` means unknown, as from a daemon that does not send it, never level.
+
+A daemon that sends it puts it on every `snapshot` frame of the collection, and on a `changes`
+frame only when it changed since the subscription's previous frame: its state, or which peers
+(by `host_id`) are named, including the change back to `level`. A peer's counts moving is not a
+change. A client that missed a changes frame learns the current value from the next snapshot,
+which every resubscribe gets. A client on a daemon that sends none keeps reading a page's `sync`
+(`GET /v1/client/attention?limit=1`).
+
+A state this client does not know, or a shape the schema forbids (`level` with peers, or another
+state without them), reads as unknown, never level, and the frame is kept: the Rust client reads
+such a `sync` as none, and the TypeScript transport parses frames without validating them, so a
+reader there must apply the same rule (only `level` without peers is level; only `catching-up` or
+`diverged` with peers is behind; anything else is unknown). Decoding a frame with the generated
+TypeScript schema is stricter: it rejects a forbidden shape as it rejects any malformed field,
+and a state it does not know decodes as unknown. A daemon sends neither. Older clients ignore the
+field: the generated Rust and Swift decoders read frames by named field (fixtures:
+`fixtures/clients/stream-sync/frames.json`).
 
 ## Screen inventories
 

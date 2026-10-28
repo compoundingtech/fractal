@@ -15,7 +15,7 @@ fn the_judge_accepts_a_good_play_and_rejects_each_bad_one() {
         eprintln!("skipped: needs bash and jq");
         return;
     }
-    let eval = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../evals/st3/onboarding-play");
+    let eval = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../../evals/fractal/onboarding-play");
     let output = Command::new("bash")
         .arg(eval.join("self-test.sh"))
         .output()

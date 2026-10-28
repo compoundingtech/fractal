@@ -115,6 +115,27 @@ fn collection_publication_grammar_cannot_leak_into_legacy_events() {
 }
 
 #[test]
+fn collection_frames_ignore_unknown_extension_keys() {
+    for (name, publication) in [
+        ("agents-publication-chunk.json", true),
+        ("agents-publication-changes.json", true),
+        ("agents-publication-chunk.json", false),
+    ] {
+        let mut frame: serde_json::Value = serde_json::from_slice(&fixture(name)).unwrap();
+        if !publication {
+            for key in ["publication", "chunk_index", "chunk_count"] {
+                frame.as_object_mut().unwrap().remove(key);
+            }
+        }
+        frame["future_extension"] = serde_json::json!({"value": true});
+        let event: CollectionEvent = serde_json::from_value(frame).unwrap();
+        assert!(matches!((publication, event),
+            (true, CollectionEvent::AgentsSnapshotChunk { .. } | CollectionEvent::AgentsChanges { .. })
+            | (false, CollectionEvent::Snapshot { .. })));
+    }
+}
+
+#[test]
 fn terminal_conversation_and_legacy_changes_keep_collection_names() {
     let envelope: serde_json::Value = serde_json::from_slice(&fixture("terminal-screen.json")).unwrap();
     let screen: CollectionEvent = serde_json::from_value(serde_json::json!({

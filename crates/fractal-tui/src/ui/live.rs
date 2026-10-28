@@ -962,13 +962,11 @@ pub fn run(context: Context) -> Result<()> {
                 feed::Update::Degraded(reason) => {
                     ui.quality.live(false);
                     // st answered; only its live stream is being replaced. Not offline, and
-                    // nothing on screen is cleared.
+                    // nothing on screen is cleared. Not flashed either: it reconnects by itself,
+                    // the bar says connecting meanwhile, and clicking it says why.
                     extras.live = false;
                     extras.offline = None;
                     extras.offline_since = None;
-                    ui.flash(format!(
-                        "Live stream lost ({reason}); Fractal answers, reconnecting"
-                    ));
                     extras.degraded = Some(reason);
                     attached = None;
                     changed = true;
