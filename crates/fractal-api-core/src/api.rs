@@ -3534,7 +3534,7 @@ fn client_agent_cards_presented(
     let mut card_reads = store.agent_card_reads(&agent_subjects, snapshot_index, &actual_claims)?;
     // Cards without a harness need only their actual claim's acceptance time, not its body.
     // Keep the existing per-claim fallback if the bulk metadata read cannot be completed.
-    let actual_claim_times = store.claim_acceptance_times(
+    let actual_claim_times = store.kept_claim_acceptance_times(
         &status
             .subjects
             .iter()
