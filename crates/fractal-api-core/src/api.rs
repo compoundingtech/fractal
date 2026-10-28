@@ -158,6 +158,8 @@ mod deploy;
 
 #[cfg(test)]
 mod legacy_handler_guard_tests;
+#[cfg(test)]
+mod slow_request_line_tests;
 // Route families: each file holds the handlers of one group of routes; the router below names
 // them as family::handler.
 mod agents;
@@ -1028,6 +1030,7 @@ async fn response_envelope_unbounded(
         .get::<crate::profile::Caller>()
         .map(|caller| caller.0.clone())
         .unwrap_or_else(|| "(tcp)".into());
+    let caller_pid = request.extensions().get::<LocalPeer>().map(|peer| peer.pid);
     let request_method = request.method().clone();
     let client_class = crate::otel_client_class::ClientClass::from_header(
         request
@@ -1353,7 +1356,7 @@ async fn response_envelope_unbounded(
     };
     let metrics = response.extensions_mut().remove::<response_body::Metrics>();
     let status = response.status();
-    record_request_latency(
+    let elapsed = record_request_latency(
         &request_method,
         &request_route,
         &request_path,
@@ -1365,6 +1368,15 @@ async fn response_envelope_unbounded(
             remote: served_remote.load(std::sync::atomic::Ordering::Relaxed),
         },
     );
+    if elapsed >= Duration::from_secs(1) {
+        // Request latency is an operational sample, not a graph change. Publishing a
+        // claim here causes replication and reconciliation on every node, including
+        // during the contention that made the request slow in the first place.
+        eprintln!(
+            "{}",
+            slow_request_line(&request_path, elapsed, &caller, caller_pid, status)
+        );
+    }
     finish_request_trace(otel, status);
     if let Some(profile) = profile {
         if let Some(metrics) = metrics {
@@ -1666,7 +1678,7 @@ fn record_request_latency(
     caller: &str,
     started: Instant,
     served: Served,
-) {
+) -> Duration {
     let elapsed = started.elapsed();
     crate::performance::record_request(route, Some(caller), elapsed);
     // The key and the target lookup allocate and scan; do them before taking the lock. A long
@@ -1684,13 +1696,25 @@ fn record_request_latency(
         meter.record(method, route, path, query, elapsed);
         meter.time(Instant::now(), timed, elapsed);
     }
-    if elapsed < Duration::from_secs(1) {
-        return;
-    }
-    // Request latency is an operational sample, not a graph change. Publishing a
-    // claim here causes replication and reconciliation on every node, including
-    // during the contention that made the request slow in the first place.
-    eprintln!("st3: slow request {path} took {} ms", elapsed.as_millis());
+    elapsed
+}
+
+/// The journal line for a request that took a second or more. It names the caller, the local
+/// process's first command words and pid (TCP callers show as `(tcp)`), and the status, so a
+/// periodic caller of an expensive route can be found with one search.
+fn slow_request_line(
+    path: &str,
+    elapsed: Duration,
+    caller: &str,
+    caller_pid: Option<u32>,
+    status: StatusCode,
+) -> String {
+    let pid = caller_pid.map_or_else(|| "-".to_owned(), |pid| pid.to_string());
+    format!(
+        "st3: slow request {path} took {} ms status={} caller={caller:?} pid={pid}",
+        elapsed.as_millis(),
+        status.as_u16(),
+    )
 }
 
 pub use crate::model::new_request_id;
