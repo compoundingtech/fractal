@@ -992,6 +992,13 @@ caught panics reopen the connection after a one-minute cooldown. Worker error lo
 limited to one per minute. The detached thread is not a Tokio blocking task, so runtime
 shutdown does not wait for a long backfill.
 
+`TRUNCATE` takes its turn in the writer queue, and the `WAL checkpoint` log line's report gives
+that wait as `writer_wait_ms`. When the wait reaches 100 ms, the same wait that makes the
+attempt abnormal, the report also gives `blocked_by`: the longest writer hold that ended while
+the checkpoint waited. It is named as the `writer-hold` row names a holder (`holder`, `client`,
+`at`), with its `kind`, `held_ms` and `holds`, the number of holds that ended during the wait.
+Otherwise `blocked_by` is null.
+
 `st doctor` reports open, idle and active reader counts, peak open readers, total connections
 opened since startup, the configured cache target, and summed current reader targets without
 requiring SQLite MEMSTATUS. These are targets, not measured allocations: SQLite schema,
