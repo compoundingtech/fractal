@@ -1,8 +1,0 @@
-{
-  "version": 1,
-  "main_days": 3,
-  "branch_days": 14,
-  "grace_hours": 24,
-  "soft_records": 3000,
-  "cap_records": 20000
-}
