@@ -3,13 +3,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Effect, Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
-import { checkCoverage, defaultSchemaPath, runCoverage } from '../../scripts/check-st-coverage.ts'
+import { checkCoverage, defaultSchemaPath, runCoverage } from '../../scripts/check-fractal-coverage.ts'
 
 const JsonObject = Schema.Record(Schema.String, Schema.Unknown)
 const object = Schema.decodeUnknownSync(JsonObject)
 
 const withSchema = async (text: string, check: (path: string) => Promise<void>) => {
-  const dir = mkdtempSync(join(tmpdir(), 'fractal-st-coverage-'))
+  const dir = mkdtempSync(join(tmpdir(), 'fractal-coverage-'))
   const path = join(dir, 'schema.json')
   try {
     writeFileSync(path, text)

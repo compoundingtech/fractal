@@ -232,7 +232,7 @@ fn recording_pty(root: &Path) -> PathBuf {
 /// Run `st terminals attach` against `endpoint` with no terminal on stdin. This host's PTY root
 /// is `ROOT/state/st3/pty`, as `ConfiguredRegistry` writes it.
 async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let mut command = fractal_daemon::test_support::command(binary);
     // An operator command: the harness running the suite must not lend its seat identity, and
     // its own PTY session must not trip the nested-attach guard.
@@ -260,7 +260,7 @@ async fn attach(root: &Path, endpoint: &str) -> (Output, u32) {
 /// `ROOT/run/st3.sock` and its PTY root `ROOT/state/st3/pty`. Returns the output, the CLI's pid,
 /// and how long it ran.
 async fn configured_attach(root: &Path, daemon_wait: &str) -> (Output, u32, Duration) {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let mut command = fractal_daemon::test_support::command(binary);
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
@@ -582,7 +582,7 @@ async fn waiting_on_a_daemon_that_does_not_answer_says_so() {
     let daemon = SilentDaemon::unix(&socket);
     // No PTY session of the subject runs on this host, so only the daemon can attach it.
     ConfiguredRegistry::new(root.path());
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let mut child = fractal_daemon::test_support::command(binary).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
@@ -731,7 +731,7 @@ fn fabric_tunnel(
 ) -> std::thread::JoinHandle<Option<u32>> {
     let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
     listener.set_nonblocking(true).unwrap();
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let pty_root = owner_pty_root.to_path_buf();
     // The owner's daemon serves its terminal socket in this process, as `st up` does in its own.
     let terminal_socket = socket.with_file_name("owner-terminals.sock");
@@ -805,7 +805,7 @@ fn forward(tunnel: std::os::unix::net::UnixStream, service: std::os::unix::net::
 
 /// Run `st terminals attach` as a person against `endpoint`, with this test's config and state.
 async fn remote_attach(root: &Path, endpoint: &str) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let mut command = fractal_daemon::test_support::command(binary);
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
@@ -964,7 +964,7 @@ async fn expose_fabric_points_fabric_at_the_daemons_terminal_socket() {
     let root = tempfile::tempdir().unwrap();
     remote_terminal(root.path(), &incarnation(CREATED_AT));
     fabric_shim(root.path(), None);
-    let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("XDG_CONFIG_HOME", root.path().join("config"))

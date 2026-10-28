@@ -218,11 +218,10 @@ const GITHUB_REQUEST_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_secs(60)
 };
 
-/// Where the daemon reaches GitHub's API: `https://api.github.com`, or `ST3_GITHUB_API_URL` when
+/// Where the daemon reaches GitHub's API: `https://api.github.com`, or `FRACTAL_GITHUB_API_URL` when
 /// the daemon's environment names another, such as a test's.
 pub fn github_api_base() -> String {
-    std::env::var("ST3_GITHUB_API_URL")
-        .ok()
+    fractal_drivers::contracts::env("ST3_GITHUB_API_URL")
         .map(|base| base.trim().trim_end_matches('/').to_owned())
         .filter(|base| !base.is_empty())
         .unwrap_or_else(|| "https://api.github.com".to_owned())
