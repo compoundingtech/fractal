@@ -1,3 +1,4 @@
 record 88544bc2755427803d6e815c0749f31faa5a04b5 genie-freshness 0 host/anvil 2026-10-28T15:00:30Z
 record e6141e8166ef62b1bf9358b23ce7162377d4197e ci-script-tests 0 host/anvil 2026-10-28T15:03:58Z
 record 4170804523824d123892d8bcdd0d8e5f1e61fedf linux-gate 0 host/anvil 2026-10-28T15:18:22Z
+record 9e7bcd27cc684e49d07c21f3f2eb28be2f07fd02 rust-tests 0 host/anvil 2026-10-28T15:18:44Z
