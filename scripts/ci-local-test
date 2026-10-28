@@ -446,12 +446,21 @@ class CiLocal(unittest.TestCase):
                     listed = True
                     break
         self.assertTrue(listed, 'the test did not catch the stopped run reading /proc')
+        for _ in range(500):
+            if state(run.pid) == 'T':
+                break
+            time.sleep(0.01)
+        self.assertEqual(state(run.pid), 'T', 'the stopped run is frozen while its /proc listing is open')
+        # Frozen with that listing open, the run has not yet stopped clippy (it stops a process only after listing /proc).
+        self.assertNotIn(state(clippy), (None, 'Z'), 'the run was frozen before it stopped clippy')
         Path(f'{self.log}.go').touch()
-        # The stage starts its worker now, unless the stop has already frozen it.
+        # Now clippy starts its worker, after the listing, unless the stop has already frozen clippy: only freezing does that.
         for _ in range(500):
             if alive() or state(clippy) == 'T':
                 break
             time.sleep(0.01)
+        late, frozen = alive(), state(clippy) == 'T'
+        self.assertTrue(late or frozen, 'clippy neither started its worker nor was frozen by the stop')
         os.kill(run.pid, signal.SIGCONT)
         run.wait(timeout=20)
         for _ in range(100):
