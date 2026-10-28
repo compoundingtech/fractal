@@ -55,6 +55,8 @@ mod prepared_envelope_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
+mod known_writers_tests;
+#[cfg(test)]
 mod sealed_view_cache_tests;
 #[cfg(test)]
 mod repair_operation_tests;
