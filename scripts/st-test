@@ -534,8 +534,14 @@ def governed(argv, name):
     (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
     stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
-    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""
+    evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
+
+    A caller that already runs under a cap (BUILDS_SLICE_ACTIVE, as the cargo shim and the test runner read it) runs the check in
+    place: a seat with a lane (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
+        return argv
+    if os.environ.get('BUILDS_SLICE_ACTIVE'):
+        print(f'fractal-test: {name} runs in the caller\'s own cap (BUILDS_SLICE_ACTIVE: a seat lane or builds.slice)', file=sys.stderr)
         return argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's

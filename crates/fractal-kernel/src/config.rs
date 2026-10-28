@@ -14,6 +14,14 @@ use crate::model::PlannerSpec;
 pub mod changes;
 mod client;
 
+/// The per-host switch for seat lanes.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Lanes {
+    On,
+    Off,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -31,6 +39,10 @@ pub struct Config {
     /// How seats rank against the daemon for CPU and IO. Absent means `background`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seat_priority: Option<fractal_runtime::SeatPriority>,
+    /// `on` caps each seat that declares `capacity` in its lane (docs/st3/seat-lanes.md). Absent
+    /// means `off`: such a seat starts without one. Seats without a declaration never change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
     pub fleet_id: Option<String>,
@@ -508,6 +520,7 @@ impl Default for Config {
             claude_primary_ownership: None,
             claude_primary_ownership_observe: None,
             seat_priority: None,
+            lanes: None,
             person: None,
             fleet_id: None,
             shared_secret_file: None,
@@ -545,6 +558,10 @@ impl Config {
 
     pub fn active_seat_priority(&self) -> fractal_runtime::SeatPriority {
         self.seat_priority.unwrap_or_default()
+    }
+
+    pub fn lanes_enforced(&self) -> bool {
+        self.lanes == Some(Lanes::On)
     }
 
     /// Service installation writes a new config once, never upgrading a legacy missing mode.

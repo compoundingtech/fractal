@@ -142,6 +142,7 @@ pub async fn run(args: SetupArgs) -> Result<PreparedSetup> {
         Config {
             access_mode: Some(fractal_drivers::access::AccessMode::Auto),
             seat_priority: None,
+            lanes: None,
             ..Config::default()
         }
     };

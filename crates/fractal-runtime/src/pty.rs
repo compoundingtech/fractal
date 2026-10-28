@@ -356,6 +356,10 @@ impl PtyRuntime {
         guard: Option<&dyn Fn() -> Result<()>>,
         producer_entered: &mut bool,
     ) -> Result<()> {
+        // The lane is the scope's, never the harness's environment.
+        let mut env = env.clone();
+        let capacity = crate::lane::Capacity::take(&mut env);
+        let env = &env;
         let _spawn_lock = self.acquire_spawn_lock(id)?;
         let fence = self.spawn_state_path(id, "pending");
         let prior_pending = fence.try_exists()?;
@@ -541,6 +545,7 @@ impl PtyRuntime {
                 program.as_os_str(),
                 &argument_refs,
                 launcher_environment.as_ref(),
+                capacity,
             );
             if launcher_environment.is_none() {
                 command.envs(&terminal_env);

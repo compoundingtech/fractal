@@ -177,8 +177,16 @@ impl ExecRuntime {
             .iter()
             .map(OsString::as_os_str)
             .collect::<Vec<_>>();
-        let mut command =
-            crate::isolate::wrap_in(&unit, program.as_os_str(), &argument_refs, Some(env));
+        // The lane is the scope's, never the task's environment.
+        let mut env = env.clone();
+        let capacity = crate::lane::Capacity::take(&mut env);
+        let mut command = crate::isolate::wrap_in(
+            &unit,
+            program.as_os_str(),
+            &argument_refs,
+            Some(&env),
+            capacity,
+        );
         command
             .current_dir(cwd)
             .stdin(Stdio::null())
@@ -1048,6 +1056,183 @@ mod tests {
         }
         unsafe { libc::kill(pid as i32, libc::SIGKILL) };
         panic!("background process {pid} outlived its exec");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_file(root: &Path, name: &str) -> String {
+        for _ in 0..3000 {
+            if let Ok(text) = fs::read_to_string(root.join(name))
+                && text.ends_with('\n')
+            {
+                return text.trim().to_owned();
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the exec never wrote {name}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cgroup_of(pid: u32) -> PathBuf {
+        let text = fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
+        let path = text.lines().find_map(|line| line.strip_prefix("0::")).unwrap();
+        Path::new("/sys/fs/cgroup").join(path.trim_start_matches('/'))
+    }
+
+    /// The cgroup of the scope `generation` runs in, once `systemd-run` has moved it there.
+    #[cfg(target_os = "linux")]
+    fn scope_cgroup(generation: &ExecGeneration) -> PathBuf {
+        let unit = generation.scope_unit.as_deref().unwrap();
+        for _ in 0..500 {
+            let cgroup = cgroup_of(generation.pid);
+            if cgroup.ends_with(unit) {
+                return cgroup;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the exec never entered its scope {unit}");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cpu_usage(cgroup: &Path) -> Duration {
+        let stat = fs::read_to_string(cgroup.join("cpu.stat")).unwrap();
+        let usec = stat
+            .lines()
+            .find_map(|line| line.strip_prefix("usage_usec "))
+            .unwrap();
+        Duration::from_micros(usec.trim().parse().unwrap())
+    }
+
+    /// Held by a test while it relies on the host's lane switch, which is process-wide.
+    #[cfg(target_os = "linux")]
+    static LANE_SWITCH: Mutex<()> = Mutex::new(());
+
+    /// Starts `launch` in a lane of one core and 256 MiB; returns the runtime, its generation and
+    /// the lane's cgroup.
+    #[cfg(target_os = "linux")]
+    fn spawn_laned(root: &Path, launch: &str) -> (ExecRuntime, ExecGeneration, PathBuf) {
+        let lane = crate::lane::Capacity { cores: 1, memory: 256 << 20 };
+        let mut environment = scope_environment();
+        environment.insert(crate::lane::CAPACITY_ENV.into(), lane.to_string());
+        let runtime = ExecRuntime::new(root.join("exec"), root.join("logs"));
+        let _switch = LANE_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::lane::set_enforced(true);
+        let generation = runtime.spawn("work", &crate::Launch::Shell(launch.into()), root, &environment);
+        crate::lane::set_enforced(false);
+        let generation = generation.unwrap();
+        let cgroup = scope_cgroup(&generation);
+        (runtime, generation, cgroup)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stop_and_assert_the_lane_is_removed(runtime: &ExecRuntime, generation: &ExecGeneration, cgroup: &Path) {
+        runtime.stop_if("work", Some(&generation.generation_id)).unwrap();
+        wait_for_exit(runtime, "work");
+        for _ in 0..250 {
+            if !cgroup.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("the lane {} outlived its stopped task", cgroup.display());
+    }
+
+    /// A seat lane (docs/st3/seat-lanes.md) holds the task and everything it starts, a child that
+    /// left its session included: they share its cores, the task never sees the lane's launch
+    /// key, its builds are told to stay in place, and stopping the task removes the lane. A host
+    /// with lanes off starts the same declaration without one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_lane_caps_the_task_and_every_child_and_stopping_removes_it() {
+        if crate::isolation_mode() != crate::Isolation::Scope {
+            eprintln!("skipped: no systemd user scopes");
+            return;
+        }
+        // Off (the default): the declaration is ignored and the task starts as it does today.
+        let off = tempfile::tempdir().unwrap();
+        let unlaned = ExecRuntime::new(off.path().join("exec"), off.path().join("logs"));
+        let _kill_unlaned = KillOnDrop(unlaned.clone());
+        let mut environment = scope_environment();
+        environment.insert(
+            crate::lane::CAPACITY_ENV.into(),
+            crate::lane::Capacity { cores: 1, memory: 256 << 20 }.to_string(),
+        );
+        let switch = LANE_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = unlaned
+            .spawn("work", &crate::Launch::Shell("exec sleep 600".into()), off.path(), &environment)
+            .unwrap();
+        drop(switch);
+        let cgroup = scope_cgroup(&generation);
+        assert_eq!(fs::read_to_string(cgroup.join("memory.max")).unwrap().trim(), "max");
+        // No quota: the file is "max" or, when no sibling asked for the cpu controller, absent.
+        let quota = fs::read_to_string(cgroup.join("cpu.max")).unwrap_or_else(|_| "max 100000".into());
+        assert_eq!(quota.trim(), "max 100000");
+        unlaned.stop_if("work", Some(&generation.generation_id)).unwrap();
+        wait_for_exit(&unlaned, "work");
+
+        let root = tempfile::tempdir().unwrap();
+        let (runtime, generation, cgroup) = spawn_laned(
+            root.path(),
+            "echo \"${BUILDS_SLICE_ACTIVE:-unset} ${FRACTAL_SEAT_CAPACITY:-unset}\" > lane.env; \
+             (setsid sh -c 'echo $$ > orphan.pid; exec sleep 600' &); \
+             echo spin > spin.start; \
+             for n in 1 2; do timeout 1 sh -c 'while :; do :; done' & done; wait; \
+             echo done > spin.done; exec sleep 600",
+        );
+        let _kill = KillOnDrop(runtime.clone());
+        assert!(cgroup.parent().unwrap().ends_with("app.slice/app-lanes.slice"), "{}", cgroup.display());
+        assert_eq!(fs::read_to_string(cgroup.join("cpu.max")).unwrap().trim(), "100000 100000");
+        assert_eq!(fs::read_to_string(cgroup.join("memory.max")).unwrap().trim(), (256u64 << 20).to_string());
+        assert_eq!(fs::read_to_string(cgroup.join("memory.swap.max")).unwrap().trim(), (64u64 << 20).to_string());
+
+        assert_eq!(wait_for_file(root.path(), "lane.env"), "1 unset");
+        let orphan = read_orphan(root.path());
+        assert_eq!(cgroup_of(orphan), cgroup, "a child that left its session is still in the lane");
+
+        // Two spinning children share one core.
+        wait_for_file(root.path(), "spin.start");
+        let (started, used) = (std::time::Instant::now(), cpu_usage(&cgroup));
+        wait_for_file(root.path(), "spin.done");
+        let (elapsed, used) = (started.elapsed(), cpu_usage(&cgroup) - used);
+        assert!(
+            used.as_secs_f64() <= elapsed.as_secs_f64() * 1.25,
+            "two spinners used {used:?} of CPU in {elapsed:?} under a one-core lane"
+        );
+
+        stop_and_assert_the_lane_is_removed(&runtime, &generation, &cgroup);
+        assert_gone_soon(orphan);
+    }
+
+    /// A child that asks for more memory than its lane holds is killed inside the lane, and only
+    /// that child ends: the task that started it keeps running.
+    ///
+    /// Ignored by default: it makes an OOM kill on purpose, which a host guard that counts every
+    /// OOM kill in the user slice reads as a fault. Run it where the guard subtracts
+    /// `app-lanes.slice` (docs/st3/seat-lanes.md).
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "kills a process on purpose; run where the host guard subtracts app-lanes.slice"]
+    fn a_child_over_its_lane_memory_is_killed_and_the_task_keeps_running() {
+        assert_eq!(crate::isolation_mode(), crate::Isolation::Scope, "needs systemd user scopes");
+        let root = tempfile::tempdir().unwrap();
+        // 384 MiB against a lane of 256 MiB and 64 MiB of swap.
+        let (runtime, generation, cgroup) = spawn_laned(
+            root.path(),
+            "setsid sh -c 'head -c 402653184 /dev/zero | tail -c 402653184 > /dev/null; echo $? > hog.status'; \
+             echo alive > after.hog; exec sleep 600",
+        );
+        let _kill = KillOnDrop(runtime.clone());
+        assert_eq!(wait_for_file(root.path(), "hog.status"), "137");
+        assert_eq!(wait_for_file(root.path(), "after.hog"), "alive");
+        let events = fs::read_to_string(cgroup.join("memory.events")).unwrap();
+        let kills: u64 = events
+            .lines()
+            .find_map(|line| line.strip_prefix("oom_kill "))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(kills >= 1, "{events}");
+        assert!(matches!(runtime.observe("work").unwrap(), Some(ExecObservation::Running(_))));
+        stop_and_assert_the_lane_is_removed(&runtime, &generation, &cgroup);
     }
 
     /// Kills the test's exec when dropped, so a failing test leaves nothing behind.

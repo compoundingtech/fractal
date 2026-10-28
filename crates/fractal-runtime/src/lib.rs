@@ -13,6 +13,7 @@
 
 mod environment;
 mod isolate;
+mod lane;
 mod priority;
 mod peer_process;
 mod process;
@@ -36,6 +37,10 @@ pub use priority::{
     BACKGROUND_IO_LEVEL, BACKGROUND_NICE, LIVE_WEIGHT, PRIORITY_ENV, SeatPriority, ServerPlacement,
     protect_server, protect_servers, report as priority_report, server_unit,
     set_configured as set_configured_seat_priority, work_prefix,
+};
+pub use lane::{
+    CAPACITY_ENV, CAPACITY_ENV_ALIASES, Capacity, LANES_SLICE, enforced as lanes_enforced,
+    parse_memory as parse_lane_memory, set_enforced as set_lanes_enforced,
 };
 pub use peer_process::PeerProcessIdentity;
 pub use process::{

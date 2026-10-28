@@ -577,6 +577,18 @@ pub fn member_environment(
     Ok(environment)
 }
 
+/// Hands a seat's lane to its spawn. Only a `capacity` declaration selects one; a value in the
+/// seat's own `env` does not.
+fn set_lane(environment: &mut BTreeMap<String, String>, capacity: Option<fractal_runtime::Capacity>) {
+    environment.remove(fractal_runtime::CAPACITY_ENV);
+    for alias in fractal_runtime::CAPACITY_ENV_ALIASES {
+        environment.remove(alias);
+    }
+    if let Some(capacity) = capacity {
+        environment.insert(fractal_runtime::CAPACITY_ENV.into(), capacity.to_string());
+    }
+}
+
 /// Puts the recorder directory first on a member's PATH, after the declaration and the st3
 /// executable directory are applied, so no authored PATH can place a program before it.
 fn record_member_commands(
@@ -905,8 +917,9 @@ impl NativeRuntime {
         backend_entered: &mut bool,
     ) -> Result<()> {
         let executable = launch_executable()?;
-        let environment =
+        let mut environment =
             member_environment(&member.environment, &executable, self.recorder.as_deref())?;
+        set_lane(&mut environment, member.capacity);
         let mut launch = fractal_runtime::Launch::from(&member.launch);
         match &mut launch {
             fractal_runtime::Launch::Shell(source) => {
@@ -1498,6 +1511,13 @@ impl<R: RuntimeControl> Reconciler<R> {
         fractal_runtime::set_configured_seat_priority(priority);
         self.runtime_environment
             .insert(fractal_runtime::PRIORITY_ENV.into(), priority.as_str().into());
+        self
+    }
+
+    /// Whether this host caps a seat that declares `capacity` in its lane (`lanes` in the
+    /// install config). Applies to launches after this call.
+    pub fn with_lanes(self, enforced: bool) -> Self {
+        fractal_runtime::set_lanes_enforced(enforced);
         self
     }
 
@@ -11818,6 +11838,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("loop-metric".into()),
             terminal_size: None,
+            capacity: None,
         };
         self.perform_start(
             &DesiredSubject {
@@ -17167,6 +17188,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("mechanical-gate".into()),
             terminal_size: None,
+            capacity: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -17716,6 +17738,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             shutdown_timeout_ms: 5_000,
             driver: Some("llm-gate".into()),
             terminal_size: None,
+            capacity: None,
         };
         let desired = DesiredSubject {
             accountable: None,
@@ -19501,6 +19524,21 @@ pub mod tests {
             assert_eq!(declared[PRIORITY_ENV], value);
             assert_eq!(declared["FRACTAL_SEAT_PRIORITY"], value);
         }
+    }
+
+    #[test]
+    fn only_a_capacity_declaration_selects_a_lane() {
+        use fractal_runtime::{CAPACITY_ENV, Capacity};
+        let authored = |key: &str| BTreeMap::from([(key.to_string(), "cores=64,memory=68719476736".to_string())]);
+        for key in [CAPACITY_ENV, "ST_SEAT_CAPACITY", "ST3_SEAT_CAPACITY"] {
+            let mut environment = authored(key);
+            super::set_lane(&mut environment, None);
+            assert!(environment.is_empty(), "{key} selected a lane without a declaration");
+        }
+        let declared = Capacity { cores: 2, memory: 4 << 30 };
+        let mut environment = authored("ST_SEAT_CAPACITY");
+        super::set_lane(&mut environment, Some(declared));
+        assert_eq!(environment, BTreeMap::from([(CAPACITY_ENV.to_string(), declared.to_string())]));
     }
 
     #[test]

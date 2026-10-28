@@ -58,6 +58,8 @@ Use these documents for implementation details:
 - [Live-path priority](priority.md) explains how the daemon and each PTY server outrank the builds
   and tests their harnesses run, on Linux and macOS, and what needs root. It also explains how
   stopping a seat ends every process the seat started, and what a host without systemd misses.
+- [Seat lanes](seat-lanes.md) explains how a seat that declares `capacity` runs with its builds in a
+  CPU and memory cap of its own, behind a per-host switch, and what a host guard must not count.
 - [Subagents](subagents.md) explains how Fractal records the subagents a seat's harness runs as claims
   on the seat, with a lease, and ends them when their harness, session or seat goes away.
 - [Harness questions](harness-questions.md) explains how Fractal records the questions a seat's harness
