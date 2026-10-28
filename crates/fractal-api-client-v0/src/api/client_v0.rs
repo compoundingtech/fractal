@@ -16662,7 +16662,7 @@ mission "example/zero-run" state="ready" {
         );
     }
 
-    /// Per-PR contract for the Codex `import` boot canary (scripts/st3-boot-canaries/run,
+    /// Per-PR contract for the Codex `import` boot canary (scripts/fractal-boot-canaries/run,
     /// `prepare_codex_import` and `prove_codex_import`), in its topology: discovery reaches the
     /// saved session through a `~/.codex` symlink to the originating home, and a second, stale
     /// home holds a copy of the same native ID (the canary launches the daemon with

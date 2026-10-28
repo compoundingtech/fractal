@@ -119,12 +119,13 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
 `--plan-out` writes the inputs beside the plan. Applying it deletes exactly the refs it names. Its inputs:
 
 - **live trees**: the tree of every branch tip committed within `branch_days` of `as_of` (`--fetch` reads every
-  `refs/heads/*` into `refs/evidence-gc/tips/*`; open pull request heads and merge-queue tips are branches, so no pull
-  request API is asked), plus `--head`/`--heads-from`; and the trees of main's first-parent commits within `main_days`
-  of `as_of`, main's tip always.
+  `refs/heads/*` into `refs/evidence-gc/tips/*`; merge-queue tips are branches), plus `--head`/`--heads-from`; the tree
+  of every open pull request head (`--open-heads-from FILE`, one commit a line; with `--fetch` each is fetched by id, so
+  a fork's head works too) whatever its age; and the trees of main's first-parent commits within `main_days` of
+  `as_of`, main's tip always.
 - **live keys**: the input key each live tree projects to, for every check whose policy declares inputs.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
-  change: `main_days` (3), `branch_days` (30), `grace_hours` (24), `soft_records` (3,000), `cap_records` (5,000).
+  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (20,000).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
 
 **Whole trees.** A tree's records are deleted together or not at all, and a live tree's never; an input key's index
@@ -146,34 +147,40 @@ live set alone is over `cap_records`, nothing live is deleted, the set is printe
 first run in an empty repository took 463 s (most of it fetching every record and 40 days of main's trees); a second
 run in the same repository took 68 s, 56 s of it projecting 2,350 input keys.
 
-**The lock window.** A tag ruleset on `refs/tags/evidence/**` (no deletion, no update) refuses GC's own deletions too,
-so `--lock-config FILE` names three commands, run without a shell: `unlock`, `relock` and `check` (exit 0 only while the
-protection is on). `scripts/evidence-gc-lock.example.json` has them for the ruleset through `gh api`; moving the
-credential to a sekrets profile is a change of that file alone. The order: migrations and note deletions first
-(nothing protects notes), then `check` (found off: relock, delete no tag, exit 4), a listing of the remote's evidence
-tags, `unlock`, the tag deletions, `relock` in a `finally` that also runs on SIGTERM, SIGINT and SIGHUP (retried three
-times), `check` again, and a second listing. A tag that disappeared or moved without being in the plan, or a protection
-that is not on at the end, is an alarm (exit 4). One line on stderr records it:
-`evidence-gc-lock v1 unlocked_at=... relocked_at=... window_s=... tags_deleted=N unexplained=N final=on`.
-`--relock-only` runs `relock` and `check` alone.
+**Measured 2026-10-26**, after sampling went to one in one: 22,885 refs, 11,469 records. The live set was 7,797 records:
+6,452 on 196 main trees within 3 days (12,904 refs), 241 on the trees of 193 open pull requests, and 92 on 183 other
+branch tips within 14 days. That is over the old cap of 5,000, so every daily run exited 3; `cap_records` is 20,000,
+about 2.5 times that live set. The plan leaves 15,541 refs.
+
+**On the remote.** A dead group goes whole or not at all. First go the names whose record keeps another name in its
+own group: a note beside its tag, a migrated or duplicate first-layout name. No record leaves any group, so no verdict
+changes whatever fails next. Then each group's remaining names go in one `git push --atomic`, several whole groups to a
+push and at most 500 refs, a bigger group alone. Groups with a tag and groups without one never share a push. A push
+the remote's protection refuses (GitHub's `GH013: Repository rule violations`) keeps its groups whole and is reported
+as `kept_by_protection`, not as a failure. Any other refusal is a failure (exit 1). Either way the local refs follow
+exactly what the remote deleted, and a ref already gone from the remote is forgotten, not pushed. The evidence-tags
+ruleset refuses moving a tag but not deleting one, so GC deletes with its host's own git login and needs no window.
+(Until 2026-10-26 it refused deletion as well, and GC turned the whole ruleset off around its deletions with an
+administrator's login. Nathan's call: cheap and fast first. Nothing guards yet against someone who deletes a newer
+failure to let an older pass decide; the signed evidence log reports a record that disappears without GC's line.)
 
 **Where it runs.** `scripts/evidence-gc.timer` (daily, 03:40 UTC) starts `scripts/evidence-gc.service`, a systemd
 user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.config/systemd/user/`, and
 `scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
 `~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
-cannot change what deletes), runs it with `--fetch --apply` and the lock config in `~/.config/evidence-gc/lock.json`
-when present, keeps 30 days of summaries and plans, and stores each summary as a new version of the Fractal document
-`doc/fleet/factory/evidence-gc/runs`. The unit's `ExecStopPost` runs `--relock-only` after every stop, so even a run
-killed inside its window leaves the protection on. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
+cannot change what deletes). It reads the open pull requests' heads from the GitHub API without a login (if that
+fails, nothing runs), runs GC with `--fetch --apply --open-heads-from`, keeps 30 days of summaries and plans, and
+stores each summary as a new version of the Fractal document `doc/fleet/factory/evidence-gc/runs`. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
 and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
 writes GC's lines and publishes the log before anything is deleted; if that fails, nothing is deleted.
 
 **Before deleting.** `--before-delete JSON_ARGV` (with `--plan-out`) runs a command, without a shell and with the plan
 file's path as its last argument, after the plan is written and before any deletion or migration. If it exits non-zero
-or cannot run, `--apply` changes nothing (`refused`, exit 1) and the lock window is never opened.
+or cannot run, `--apply` changes nothing (`refused`, exit 1).
 
-**Safety.** It fails closed: if a commit named by `--head` cannot be turned into a tree, no branch tip is known at
-all, or the `--before-delete` command fails, `--apply` deletes nothing. A failed remote push leaves the local refs alone. A second run finds nothing to do.
+**Safety.** It fails closed: if a commit named by `--head` or `--open-heads-from` cannot be turned into a tree, no
+branch tip is known at all, or the `--before-delete` command fails, `--apply` deletes nothing. The local refs follow the
+remote, so a second run finds nothing to do.
 Refs outside the evidence namespaces and refs that are not well-formed records are never touched. The first layout
 (`refs/notes/evidence/<record>`) is read from the note: in a live tree it is migrated to
 `refs/notes/evidence/<tree>/<record>` (the new name is created before the old one is removed), in a dead tree it goes
@@ -184,8 +191,8 @@ with the tree. Take a bundle first when running it by hand:
 
 No ruleset can protect `refs/notes/*` (GitHub refuses the target pattern), so anyone with write access can delete a
 newer failing record and let an older pass decide again, and git keeps no trace of the deletion. The records are
-therefore moving to `refs/tags/evidence/<tree>/<record>` under a tag ruleset (no deletion, no update) that GC turns off
-only around its own deletions; the ruleset is an extra, and the protection that does not depend on GitHub is a signed log
+therefore moving to `refs/tags/evidence/<tree>/<record>` under a tag ruleset (no update, no force push; deletion is open,
+for GC); the ruleset is an extra, and the protection that does not depend on GitHub is a signed log
 of every record kept on a host we hold (`doc/fleet/factory/skip-ci-plan`, "Portable evidence"). Until then the exposure is bounded: nothing rejects, a pull request skip is
 undone by the merge queue's full run, and one run in five is sampled. The order, each step its own pull request:
 
@@ -203,8 +210,8 @@ undone by the merge queue's full run, and one run in five is sampled. The order,
 3. The verifier and the gate read tags first and notes as the legacy layout (done); then the producers write each
    record as a tag and a note (done, see "Tags, written and read first" above). Writing notes stops once no gate that
    still runs reads notes only.
-4. GC as a pure plan of whole trees (done), GC's lock window and its timer (done), then the tag ruleset, and the
-   signed log.
+4. GC as a pure plan of whole trees and its timer (done), the tag ruleset (done; deletion opened for GC 2026-10-26,
+   which replaced GC's lock window), and the signed log.
 
 ### The evidence log (in progress)
 
@@ -257,6 +264,11 @@ to its answer, and changes nothing else. `log` is the first of:
   here, because it was deleted or not fetched;
 - `unlogged_pass`: the chosen record is a pass the log does not list;
 - `ok`.
+
+For a per-crate check (`rust-tests`) the view is read for every member at once. `unlogged_pass` then means some member's chosen record
+is not listed, and the line's `record` and `observed_at` (its oldest member's) do not name it. The view adds `log_unlogged`, the number
+of such members; `log_unlogged_crates`, the first five as `crate=record` (12 hex, joined by `+`, then `+N_more`); and
+`log_unlogged_observed_at`, the oldest observed time among them, which is the one log lag would have to explain.
 
 A failure counts whether or not the log lists it, as the verdict already does. Once the base pins the key, the gate
 fetches the one log ref (one commit deep) and prints the view on its decision line. Enforcing it, so that skipping
@@ -979,7 +991,7 @@ the head, so a retry behaves the same; the gate prints `decision=run` with a rea
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
 `docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
-on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/st3`),
+on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
 `claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
 `docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
@@ -1109,6 +1121,10 @@ would run them.
 **`shard_inputs`** names a sharded job's inputs: `count` (1 to 16) and `results`.
 - `results` must read `0=success,1=success,...` for every shard.
 - `pull_request_count`, when given, is the only count a note from a `pull_request` run may carry.
+- `index`, when given, names the input only one shard's own note carries (fractal-web: `kit_shard`). Such a note is a part of a run, not
+  its verdict. When the latest record is chosen, a passing part is passed over, and a failing part still decides (`check_failed`). Passing
+  parts alone are `no_record`. The merge queue signs every shard's note beside the whole run's, under the same tree and input key, and
+  the newest of them was often a shard's: refused as `missing_input`, it hid the whole run's note from pull requests that shared the key.
 
 The fractal-web note's per-shard results come from the matrix's single result, which GitHub reports as success only when every shard
 succeeded. On pull requests the matrix has one shard. `ci-evidence-signing-test` holds every shard count in the workflow to the
@@ -1161,10 +1177,11 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
 
 - 24 hours of fresh published log: no line in the window says `log=stale`, `absent`, `unsigned` or `-` (the base did not pin the
   key yet), and the first line with a log value after the last `-` (`log_window_start`) is at least 24 hours old;
-- at least 30 lines with `outcome=satisfied` and `log=ok`;
+- at least 30 lines with `outcome=satisfied` and `log=ok`, except for a check with a lowered trigger (below);
 - no `log=missing`;
 - no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
-  created, or after it;
+  created, or after it. For an aggregate, the time is `log_unlogged_observed_at`, the oldest of its unlogged members, when the line has
+  it, and its `observed_at` when it does not;
 - no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
@@ -1174,6 +1191,17 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   (`linux-test-build`, `linux-tests` and its shards; not the `linux-gate` verdict, which reads it in a step only): its real result
   is `failure` when one of them failed or was cancelled, and that red is hidden. While no job skips on it, it is not ready.
 
+**Lowered trigger for `rust-tests`** (Nathan via Factory, 2026-10-26, mission fleet/factory/no-whole-tree). The 30-line count is replaced by
+**5 agreeing** lines and **0 disagreeing** ones. Only lines whose note was signed at the `host` level count (`trust_level=host`: our
+seats' `st-test`); CI's `fleet` per-crate notes stay observe-only until the trusted-report hardening.
+- An agreeing line is satisfied, has `log=ok`, and its real result (the jobs the per-crate skip would skip) was success.
+- A disagreeing line is satisfied, and its real result was failure. The report lists those runs as `disagreeing`.
+
+Every other condition holds as written above, among them the 24-hour log window, no unexplained `unlogged_pass` and no hidden red at
+any level. The flip `--propose` makes for it also narrows the `wrapper` kind's `trust_levels` to `host`, `agent` and `queue`.
+Pull requests skip on host or agent notes, so another owner's agents skip on their own signed notes exactly as ours do. Queue notes
+apply to `merge_group` runs only, which are never skipped. No CI (`fleet`) note is trusted.
+
 A check can also carry preconditions on its own policy entry at origin/main, whatever its decision lines say. `linux-gate` has one:
 its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`
 notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
@@ -1181,7 +1209,7 @@ notes (each note then names the base it was measured against, not whatever a loc
 It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
 and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read (it pages the pull request runs newest first back to the window start, without GitHub's `created=` filter, which answers an empty listing for about one request in four; a page that is empty or short of what the listing's total says it holds is asked again up to four times, then the run counts as unreadable, not as zero lines; so does a window of more than the listing's 1,000 runs). Enforced checks are reported too. `presign` counts, per account that started the runs, the distinct pull request heads in the window: `presigned` (some check had a host or agent note), `ci_note` (only an earlier CI run's note), `no_note`, and `presigned_share`.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
-temporary worktree of origin/main it sets `"enforce": true` and adds `"events": ["pull_request"]` and `"sample_one_in": 5` where absent,
+temporary worktree of origin/main it sets `"enforce": true` and `"sample_one_in": 1` (no run sampled; it replaces any other value), adds `"events": ["pull_request"]` where absent,
 moves the check to its own row of the table above, adds it to the two `enforced` test lists, adds a release note, pushes the branch and
 opens a pull request whose body carries the trigger. An edit it cannot make mechanically stops that proposal before anything is pushed;
 `--dry-run` prints the diff instead. The pull request is reviewed and queued like any other.
@@ -1611,7 +1639,7 @@ no longer used by default and can be deleted.
 --slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
 cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
 build. It holds no heavy-slot ticket for the whole check (`cargo --stage-slot`): the tests run under the test guardian
-(`scripts/st3_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
+(`scripts/fractal_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
 when the stage is its ancestor, so the guardian's cargo commands queued for the one heavy slot their own stage held until the stage limit
 killed it (2026-10-23, on a build host: a canaries stage killed at 2400 s having built nothing). Only what starts `evidence-wrap` changes; the command it
 records and signs does not. A host without a user systemd bus runs the check as before and says so on stderr; `ST_EVIDENCE_GOVERN=off` does the

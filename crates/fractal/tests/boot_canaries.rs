@@ -2,7 +2,7 @@
 //!
 //! Each case runs a real st3 daemon with real `pty` seats of one harness (Claude, Codex, pi, omp or
 //! OpenCode) whose provider is a token-free stand-in speaking that harness's wire contract
-//! (`scripts/st3-boot-canaries`, no login, no model). Every seat must reach a claimed step, with its
+//! (`scripts/fractal-boot-canaries`, no login, no model). Every seat must reach a claimed step, with its
 //! current incarnation, and read an st message within the time bound, and none may park in the
 //! crash-loop guard. The scenarios are the launches that broke in production:
 //!
@@ -34,7 +34,7 @@ fn cleanup_fixture() {
     let mode = std::env::var("ST3_CLEANUP_FIXTURE_MODE").unwrap();
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut fixture = Command::new("python3")
-        .arg(repo.join("scripts/st3-test-process-test"))
+        .arg(repo.join("scripts/fractal-test-process-test"))
         .arg("--boot-fixture")
         .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(&evidence)
@@ -65,7 +65,7 @@ fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg(repo.join("scripts/st3-test-process-test"))
+        .arg(repo.join("scripts/fractal-test-process-test"))
         .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(std::env::current_exe().unwrap())
         .output()
@@ -86,7 +86,7 @@ fn interrupted_tests_keep_logs_and_pending_observations() {
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg(repo.join("scripts/st3-test-evidence-test"))
+        .arg(repo.join("scripts/fractal-test-evidence-test"))
         .output()
         .unwrap();
     assert!(
@@ -102,7 +102,7 @@ fn event_waits_find_transient_states_and_fail_at_once_when_waiting_cannot_help()
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg(repo.join("scripts/st3-events-test"))
+        .arg(repo.join("scripts/fractal-events-test"))
         .output()
         .unwrap();
     assert!(
@@ -167,9 +167,9 @@ fn canary(harness: &str, scenario: &str) {
             "python3",
         ])
         .arg(repo.join(if scenario == "when-idle" {
-            "scripts/st3-rollout-binding-canary/run"
+            "scripts/fractal-rollout-binding-canary/run"
         } else {
-            "scripts/st3-boot-canaries/run"
+            "scripts/fractal-boot-canaries/run"
         }))
         .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
         .arg(&evidence)
@@ -242,7 +242,7 @@ fn the_canary_never_names_its_root_after_st2() {
     let repo = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
-        .arg(repo.join("scripts/st3-boot-canaries/run"))
+        .arg(repo.join("scripts/fractal-boot-canaries/run"))
         .arg("--self-test")
         .output();
     let Ok(output) = output else {

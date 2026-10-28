@@ -484,7 +484,7 @@ crash-loop hold. The Agent API uses this effective label; clearing it restores `
 The label must be non-empty. Like declaring an agent in free mode, a person or an agent may rename
 any agent. A bound harness must act as itself, and rename preserves the original declaring actor.
 
-[`examples/st3/agents`](../examples/st3/agents) has an agent file for each harness.
+[`examples/fractal/agents`](../examples/fractal/agents) has an agent file for each harness.
 
 Ordinary messages are `silent` or `wake` (the default for every sender and agent). Silent mail stays unread without waking; each real wake offers at most eight, with older mail available on demand. There is no per-agent wake policy or inferred question type. See [silent messages](st3/silent-messages.md).
 
