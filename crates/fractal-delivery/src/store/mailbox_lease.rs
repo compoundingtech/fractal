@@ -404,6 +404,8 @@ impl MailboxLeaseStore for Store {
         // Captures without a request retain their existing finite wall bound, except on a
         // pinned snapshot: nothing waits for admission there, so the work clock bounds it.
         let duration = std::time::Duration::from_millis(25);
+        // A forced expiry zeroes `duration`, the work clock's allowance below, so it also ends a
+        // pinned capture whose wall bound is the backstop.
         #[cfg(any(test, feature = "test-support"))]
         let duration = CARD_FAULT_DEADLINES.with(|remaining| {
             let count = remaining.get();

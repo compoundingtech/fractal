@@ -110,6 +110,21 @@ mod tests {
     }
 
     #[test]
+    fn fault_capture_on_a_pinned_snapshot_without_request_still_meets_a_forced_deadline() {
+        let store = fixture();
+        let subjects = vec!["agent/eval.worker".into()];
+        let cut = store.index().unwrap();
+        // The roster tests force degradation with this hook; on a pinned snapshot it must
+        // expire the work clock, since the wall bound there is the backstop.
+        Store::expire_next_card_fault_read_for_test();
+        let started = std::time::Instant::now();
+        let error = store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)).unwrap_err();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert!(started.elapsed() < CARD_FAULT_PINNED_WALL_BACKSTOP, "the forced deadline must not wait for the backstop");
+        assert_eq!(store.index().unwrap(), cut);
+    }
+
+    #[test]
     fn fault_capture_real_sql_overrun_still_refuses_with_live_parent() {
         let store = fixture();
         let subjects = vec!["agent/eval.worker".into()];
