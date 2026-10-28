@@ -1,4 +1,4 @@
-# st3 scenarios specification
+# Fractal scenarios specification
 
 This document specifies `@fractal/scenarios`: one package that holds the scenario kit
 (seeded factories, slices, worlds, replay, React and Storybook bindings) and the world catalog.
@@ -494,7 +494,7 @@ revision chains remain synthetic where native ingestion only emits revision 1/fi
 recordings/<name>.script.json        fake-harness script generated from the world's cast
         │
         ▼
-st3 scenario recorder (Rust test binary, run on demand)
+Fractal scenario recorder (Rust test binary, run on demand)
   ├─ starts a scratch daemon in a fresh temporary state directory
   ├─ declares the cast's agents with a scripted fake harness
   ├─ the harness writes native transcript turns and executes commands in a real PTY

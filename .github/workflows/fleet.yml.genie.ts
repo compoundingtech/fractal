@@ -169,6 +169,15 @@ const bareCondition = (condition: unknown) => {
   return bare
 }
 const gateSkip = (gate: string) => `needs.evidence-gate-${gate}.outputs.skip == 'true'`
+// A signed-only pull request (scripts/ci-evidence-gate, refusal: ours, pre-signed) whose check has no valid signature: the heavy
+// work does not run, and the check fails with what to do instead.
+const gateRefuse = (gate: string) => `needs.evidence-gate-${gate}.outputs.refuse == 'true'`
+const refusedStep = (gate: string) => ({
+  name: 'evidence refused: sign it with scripts/st-test --all --push origin',
+  if: gateRefuse(gate),
+  env: { REFUSAL: `\${{ needs.evidence-gate-${gate}.outputs.refusal }}` },
+  run: 'echo "::error::$REFUSAL"; echo "$REFUSAL" >> "$GITHUB_STEP_SUMMARY"; exit 1',
+})
 const gateRecord = (gate: string) => `\${{ needs.evidence-gate-${gate}.outputs.record }}`
 // The test jobs also skip when every workspace crate has a note for its own key (rust-tests, per crate: docs/per-crate-test-signing.md);
 // clippy and fleet compatibility are not per crate, so only linux-gate's own note covers them. While the rust-tests policy entry is
@@ -212,9 +221,10 @@ const wireEvidenceSkips = (jobs: Record<string, any>) => {
         : step,
     ),
   })
+  // Every Linux stage is linux-gate's: a refusal of that gate (an unsigned signed-only pull request) runs none of them.
   const jobLevel = (job: any, rule: { gates: string[]; skip: string }) => {
     const predicate = String(job.if).trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')
-    return { ...withGates(job, rule.gates), if: `\${{ (${predicate}) && !(${rule.skip}) }}` }
+    return { ...withGates(job, rule.gates), if: `\${{ (${predicate}) && !(${rule.skip}) && !(${gateRefuse('linux-gate')}) }}` }
   }
   return Object.fromEntries(
     Object.entries(jobs).map(([id, job]) => {
@@ -231,7 +241,7 @@ const wireEvidenceSkips = (jobs: Record<string, any>) => {
 // The checkout is never skipped (the job's own cache-coverage report reads the repository), and a gate job
 // that failed, was skipped or never started has no output, so the steps run exactly as before.
 const skipIfCovered = (check: string, steps: readonly any[]) => {
-  const covered = `needs.evidence-gate-${check}.outputs.skip != 'true'`
+  const covered = `needs.evidence-gate-${check}.outputs.skip != 'true' && needs.evidence-gate-${check}.outputs.refuse != 'true'`
   return [
     ...steps.map((step) =>
       String(step.uses ?? '').startsWith('actions/checkout')
@@ -246,6 +256,7 @@ const skipIfCovered = (check: string, steps: readonly any[]) => {
       env: { RECORD: `\${{ needs.evidence-gate-${check}.outputs.record }}` },
       run: 'echo "covered by trusted evidence note $RECORD" >> "$GITHUB_STEP_SUMMARY"',
     },
+    refusedStep(check),
   ]
 }
 
@@ -275,7 +286,9 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
   // The decision the check jobs act on comes from the marker step below, not from the gate step: skip=true can
   // exist only if the marker already ran, so the observer, which keys on the marker, can never miss a skip.
   // `line` is the gate's decision line, for evidence-presign-notice only; nothing decides a skip from it.
-  outputs: { skip: '${{ steps.taken.outputs.skip }}', record: '${{ steps.taken.outputs.record }}', line: '${{ steps.gate.outputs.line }}' },
+  // `refuse` likewise comes only from its marker step: an unsigned signed-only pull request, refused instead of run.
+  outputs: { skip: '${{ steps.taken.outputs.skip }}', record: '${{ steps.taken.outputs.record }}', line: '${{ steps.gate.outputs.line }}',
+    refuse: '${{ steps.refused.outputs.refuse }}', refusal: '${{ steps.refused.outputs.refusal }}' },
   steps: [
     { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
     {
@@ -318,6 +331,14 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
       env: { RECORD: '${{ steps.gate.outputs.record }}' },
       // The outputs are the LAST thing this step writes: if anything before them fails, there is no skip.
       run: `echo evidence skip taken && printf 'skip=true\\nrecord=%s\\n' "$RECORD" >> "$GITHUB_OUTPUT"`,
+    },
+    // Fixed name: the check is refused, not run (an unsigned signed-only pull request). Its outputs, too, are the last thing written.
+    {
+      name: 'evidence refused: not signed',
+      id: 'refused',
+      if: "steps.gate.outputs.refuse == 'true' && steps.gate.outputs.skip != 'true'",
+      env: { REFUSAL: '${{ steps.gate.outputs.refusal }}' },
+      run: `echo "$REFUSAL" && printf 'refuse=true\\nrefusal=%s\\n' "$REFUSAL" >> "$GITHUB_OUTPUT"`,
     },
   ],
 }]))
@@ -632,6 +653,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
       steps: [
+        refusedStep('linux-gate'),
         {
           name: 'Require every Linux stage to pass',
           // The stages only: pick-runner is skipped whenever ci1 is off.
