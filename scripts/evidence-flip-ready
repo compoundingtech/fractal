@@ -11,8 +11,12 @@ whether the flip trigger holds (docs/st3/gate-evidence.md, "When a check is read
   - at least 30 lines with outcome=satisfied and log=ok (rust-tests, LOWERED: at least 5 agreeing host-signed lines, satisfied,
     log=ok and real result success, and none whose real result was failure);
   - no line with log=missing;
-  - no unexplained log=unlogged_pass: one is explained when the record was observed at most 240 s before the run was
-    created (log latency: two 2-minute pulls), or after it;
+  - no unexplained log=unlogged_pass: one is explained when the published log (refs/evidence-log/main, read from origin)
+    lists the record in its newest head at most 240 s after the run was created (log latency: two 2-minute pulls), or when
+    the record was observed after the run was created. The run's creation is the clock, not the record's observed_at: CI
+    publishes its records at the end of its run, minutes after it observed them, and a gate can read the head one pull late.
+    Without a readable published log (or for an aggregate that names only some of its unlogged members) the record's
+    observed_at is the clock instead: observed at most 240 s before the run was created. `None`, like `-`, names no time;
   - no hidden red: no satisfied line beside the check's own real job (the job named exactly the check, same attempt)
     that concluded `failure`. A real job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red
     is hidden only when a member the skip would skip failed or was cancelled; a red from a member that always runs
@@ -59,6 +63,9 @@ MIN_SATISFIED_LOG_OK = 30
 # merge_group runs only, which are never skipped. No fleet (CI) note is trusted.
 LOWERED = {'rust-tests': {'agreeing': 5, 'levels': ('host',), 'trust': ('host', 'agent', 'queue')}}
 LATENCY_S = 240  # two pulls of the log timer (every 2 minutes)
+LOG_REF = 'refs/evidence-log/main'
+LOG_STAMP = re.compile(r'(?:^| )as_of=(\S+)')
+NO_TIME = (None, '-', 'None')  # a gate prints None for a field it has no value for
 NOT_FRESH = ('stale', 'absent', 'unsigned', '-')  # '-': the base did not pin the log key, so the window has not started
 WORKFLOW = '.github/workflows/fleet.yml'
 JOB = re.compile(r'^  ([A-Za-z0-9_-]+):\n((?:    .*\n|\n)*)', re.M)
@@ -291,20 +298,82 @@ def predates(root, base, reason, check, runner):
         return False
 
 
-def evaluate(rows, enforce, now, lowered=None):
-    """The trigger for one check, from its rows (window and lookback); `lowered` is its LOWERED entry, if any."""
+class PublishedLog:
+    """The published evidence log over the window: its heads, fetched from origin (shallow, since the window began) into a bare
+    repository under the cache, so the checkout gains nothing. `head_at(moment)` is the newest head whose as_of is at most `moment`;
+    `lists(head, record)` whether that head lists the record (a full id or a 12-hex prefix)."""
+
+    def __init__(self, root, cache, since, runner=default_runner):
+        self.runner, self.repo = runner, str(Path(cache) / 'log.git')
+        url = runner(['git', '-C', str(root), 'remote', 'get-url', 'origin'])
+        if url.returncode != 0:
+            raise Unreadable('origin has no URL')
+        if not os.path.isdir(os.path.join(self.repo, 'objects')):
+            runner(['git', 'init', '-q', '--bare', self.repo])
+        fetched = runner(['git', '-C', self.repo, 'fetch', '-q', '--no-tags', f'--shallow-since={iso(since - datetime.timedelta(hours=1))}',
+                          url.stdout.decode().strip(), f'+{LOG_REF}:{LOG_REF}'])
+        if fetched.returncode != 0:
+            raise Unreadable(f'the published log: {fetched.stderr.decode(errors="replace").strip()[-160:]}')
+        listed = runner(['git', '-C', self.repo, 'log', '--format=%H %s', LOG_REF])
+        self.heads = []
+        for line in listed.stdout.decode(errors='replace').splitlines():
+            head, _, subject = line.partition(' ')
+            stamp = LOG_STAMP.search(subject)
+            moment = parse_time(stamp.group(1)) if stamp else None
+            if moment:
+                self.heads.append((moment, head))
+        self.heads.sort()
+        if not self.heads:
+            raise Unreadable('the published log has no head with a time')
+
+    def head_at(self, moment):
+        before = [head for when, head in self.heads if when <= moment]
+        return before[-1] if before else None
+
+    def lists(self, head, record):
+        return self.runner(['git', '-C', self.repo, 'grep', '-q', '-F', '-e', f'record {record}', head]).returncode == 0
+
+
+def unlogged_records(fields):
+    """The records an unlogged_pass line says are unlogged: an aggregate's members (12-hex prefixes from log_unlogged_crates), else
+    the line's own record; None when they cannot all be named (an aggregate's `+N_more`, or no record)."""
+    crates = fields.get('log_unlogged_crates')
+    if crates not in NO_TIME:
+        items = crates.split('+')
+        if any(item.endswith('_more') for item in items):
+            return None
+        records = [item.partition('=')[2] for item in items]
+        return records if all(re.fullmatch(r'[0-9a-f]{12,64}', record) for record in records) else None
+    record = fields.get('record')
+    return [record] if record and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', record) else None
+
+
+def explained(row, log):
+    """Whether an unlogged_pass line is explained by the log's latency (see the module's docstring)."""
+    fields = row['fields']
+    # An aggregate's line names the oldest observed_at of its unlogged members; its own observed_at is its oldest member's.
+    unlogged_at = fields.get('log_unlogged_observed_at')
+    observed = parse_time(unlogged_at if unlogged_at not in NO_TIME else fields.get('observed_at'))
+    if observed is not None and observed >= row['created_at']:
+        return True  # observed after the run was created: no pull could have listed it yet
+    records = unlogged_records(fields)
+    if log is not None and records:
+        head = log.head_at(row['created_at'] + datetime.timedelta(seconds=LATENCY_S))
+        return head is not None and all(log.lists(head, record) for record in records)
+    return observed is not None and (row['created_at'] - observed).total_seconds() <= LATENCY_S
+
+
+def evaluate(rows, enforce, now, lowered=None, published=None):
+    """The trigger for one check, from its rows (window and lookback); `lowered` is its LOWERED entry, if any; `published` the
+    PublishedLog, or None when it could not be read."""
     start = now - datetime.timedelta(seconds=WINDOW_S)
     rows = sorted((row for row in rows if row['created_at']), key=lambda row: row['created_at'])
     window = [row for row in rows if start <= row['created_at'] <= now]
     log = [row['fields'].get('log', '-') for row in window]  # a gate older than the log view prints no log field
     unexplained = 0
     for row, value in zip(window, log):
-        if value == 'unlogged_pass':
-            # An aggregate's line names the oldest observed_at of its unlogged members; its own observed_at is its oldest member's.
-            unlogged_at = row['fields'].get('log_unlogged_observed_at')
-            observed = parse_time(unlogged_at if unlogged_at not in (None, '-') else row['fields'].get('observed_at'))
-            if observed is None or (row['created_at'] - observed).total_seconds() > LATENCY_S:
-                unexplained += 1
+        if value == 'unlogged_pass' and not explained(row, published):
+            unexplained += 1
     red = [row for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']
     # A single job's failure is hidden by its skip; an aggregate's only when a member the skip would skip went red.
     # A red from a run that a newer push replaced (superseded) is neither: it is reported on its own.
@@ -605,8 +674,13 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
     except (Unreadable, RuntimeError, ValueError) as error:
         print(f'could not read GitHub or origin/main: {error}', file=sys.stderr)
         return 2
-    report = {'as_of': iso(now), 'window_s': WINDOW_S, 'checks': {
-        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now, LOWERED.get(check)), check, entry,
+    try:
+        log, log_problem = PublishedLog(root, args.cache, since, runner), None
+    except (Unreadable, OSError) as error:  # an unlogged pass is then judged by its record's observed_at, as before
+        log, log_problem = None, str(error)
+    report = {'as_of': iso(now), 'window_s': WINDOW_S, 'log_clock': 'published log' if log else f'observed_at ({log_problem})', 'checks': {
+        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now, LOWERED.get(check), log),
+                             check, entry,
                              members.get(check))
         for check, entry in policy.items()}, 'presign': presign_rates(rows, now)}
     print(json.dumps(report, indent=2))
