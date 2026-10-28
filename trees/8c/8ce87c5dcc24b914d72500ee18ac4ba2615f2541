@@ -49,3 +49,11 @@ record eaebcf5bf9218cedd0a15f950c08490a9e089202 rust-tests 0 fleet/ci 2026-10-28
 record eb202923099b358cf85c15ae78dd9cd62f3732a5 rust-tests 0 fleet/ci 2026-10-28T06:50:48Z
 record f86277e1f73e64be673dcb975e923ab76ae78e93 rust-tests 0 fleet/ci 2026-10-28T06:51:24Z
 record f8fac993ed88276e2aaa05bfc5ca678bc4d9fb32 rust-tests 0 fleet/ci 2026-10-28T06:50:53Z
+record 43644baa27d8d5d6a0ae10a0105f2ecc43024071 linux-tests 0 fleet/ci 2026-10-28T06:47:24Z
+record 44fbbbd844c6436c8d1312b1b1452da667f0d6ff linux-tests-shard-2 0 fleet/ci 2026-10-28T06:47:52Z
+record 477a2bdd2eff978a496a2c8617c891d626b7d671 linux-clippy 0 fleet/ci 2026-10-28T06:40:56Z
+record 84aedcbf8ed0b81f2e143889f60143e2518bd50a ci-script-tests 0 fleet/ci 2026-10-28T06:52:01Z
+record adf3813fa8d8287a9406dfda56f606816ac599bc linux-tests-shard-3 0 fleet/ci 2026-10-28T06:47:52Z
+record bcddff2173917764931ff8340495d72af23855c2 linux-tests-shard-4 0 fleet/ci 2026-10-28T06:48:46Z
+record e15d2ea098e33ce1b1cd09c7c35a10b6d891be6c linux-fleet-compat 0 fleet/ci 2026-10-28T06:40:36Z
+record e78920a554ba6737c41d2b8804c6aedacffeeaa5 linux-gate 0 fleet/ci 2026-10-28T06:59:14Z
