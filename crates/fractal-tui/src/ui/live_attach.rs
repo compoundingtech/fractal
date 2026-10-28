@@ -281,7 +281,7 @@ mod tests {
     }
 
     fn selected(agent: &str) -> (State, Ui, mpsc::UnboundedSender<Command>, mpsc::UnboundedReceiver<Command>) {
-        let mut ui = Ui::new(crate::ui::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::test_world());
         ui.live = true;
         ui.open_in_glass(Pane::Terminal(agent.into()), Open::Here);
         ui.terminal = Some(view(agent));
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn fallback_screen_failure_stays_failed_and_ctrl_r_starts_exactly_one_attempt() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let existing = crate::ui::demo::world().agents.items()[0].id.clone();
+        let existing = crate::ui::demo::test_world().agents.items()[0].id.clone();
         let (mut state, mut ui, tx, mut rx) = selected(&existing);
         let generation = state.generation;
         state.apply_fetched(&mut ui, Fetched::NativeFailed {

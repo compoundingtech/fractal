@@ -258,6 +258,11 @@ to its answer, and changes nothing else. `log` is the first of:
 - `unlogged_pass`: the chosen record is a pass the log does not list;
 - `ok`.
 
+For a per-crate check (`rust-tests`) the view is read for every member at once. `unlogged_pass` then means some member's chosen record
+is not listed, and the line's `record` and `observed_at` (its oldest member's) do not name it. The view adds `log_unlogged`, the number
+of such members; `log_unlogged_crates`, the first five as `crate=record` (12 hex, joined by `+`, then `+N_more`); and
+`log_unlogged_observed_at`, the oldest observed time among them, which is the one log lag would have to explain.
+
 A failure counts whether or not the log lists it, as the verdict already does. Once the base pins the key, the gate
 fetches the one log ref (one commit deep) and prints the view on its decision line. Enforcing it, so that skipping
 requires `ok`, is a later change, after the shadow shows what it would refuse. Every read of the log is made with
@@ -979,7 +984,7 @@ the head, so a retry behaves the same; the gate prints `decision=run` with a rea
 members of the aggregate read: the whole of `.github` (workflows, the clippy and fleet-compat baselines) and `scripts` (the stage
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
 `docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
-on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/st3`),
+on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
 `claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
 `docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
@@ -1161,10 +1166,11 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
 
 - 24 hours of fresh published log: no line in the window says `log=stale`, `absent`, `unsigned` or `-` (the base did not pin the
   key yet), and the first line with a log value after the last `-` (`log_window_start`) is at least 24 hours old;
-- at least 30 lines with `outcome=satisfied` and `log=ok`;
+- at least 30 lines with `outcome=satisfied` and `log=ok`, except for a check with a lowered trigger (below);
 - no `log=missing`;
 - no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
-  created, or after it;
+  created, or after it. For an aggregate, the time is `log_unlogged_observed_at`, the oldest of its unlogged members, when the line has
+  it, and its `observed_at` when it does not;
 - no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
@@ -1174,6 +1180,17 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   (`linux-test-build`, `linux-tests` and its shards; not the `linux-gate` verdict, which reads it in a step only): its real result
   is `failure` when one of them failed or was cancelled, and that red is hidden. While no job skips on it, it is not ready.
 
+**Lowered trigger for `rust-tests`** (Nathan via Factory, 2026-10-26, mission fleet/factory/no-whole-tree). The 30-line count is replaced by
+**5 agreeing** lines and **0 disagreeing** ones. Only lines whose note was signed at the `host` level count (`trust_level=host`: our
+seats' `st-test`); CI's `fleet` per-crate notes stay observe-only until the trusted-report hardening.
+- An agreeing line is satisfied, has `log=ok`, and its real result (the jobs the per-crate skip would skip) was success.
+- A disagreeing line is satisfied, and its real result was failure. The report lists those runs as `disagreeing`.
+
+Every other condition holds as written above, among them the 24-hour log window, no unexplained `unlogged_pass` and no hidden red at
+any level. The flip `--propose` makes for it also narrows the `wrapper` kind's `trust_levels` to `host`, `agent` and `queue`.
+Pull requests skip on host or agent notes, so another owner's agents skip on their own signed notes exactly as ours do. Queue notes
+apply to `merge_group` runs only, which are never skipped. No CI (`fleet`) note is trusted.
+
 A check can also carry preconditions on its own policy entry at origin/main, whatever its decision lines say. `linux-gate` has one:
 its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`
 notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
@@ -1181,7 +1198,7 @@ notes (each note then names the base it was measured against, not whatever a loc
 It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
 and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read (it pages the pull request runs newest first back to the window start, without GitHub's `created=` filter, which answers an empty listing for about one request in four; a page that is empty or short of what the listing's total says it holds is asked again up to four times, then the run counts as unreadable, not as zero lines; so does a window of more than the listing's 1,000 runs). Enforced checks are reported too. `presign` counts, per account that started the runs, the distinct pull request heads in the window: `presigned` (some check had a host or agent note), `ci_note` (only an earlier CI run's note), `no_note`, and `presigned_share`.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
-temporary worktree of origin/main it sets `"enforce": true` and adds `"events": ["pull_request"]` and `"sample_one_in": 5` where absent,
+temporary worktree of origin/main it sets `"enforce": true` and `"sample_one_in": 1` (no run sampled; it replaces any other value), adds `"events": ["pull_request"]` where absent,
 moves the check to its own row of the table above, adds it to the two `enforced` test lists, adds a release note, pushes the branch and
 opens a pull request whose body carries the trigger. An edit it cannot make mechanically stops that proposal before anything is pushed;
 `--dry-run` prints the diff instead. The pull request is reviewed and queued like any other.
@@ -1611,7 +1628,7 @@ no longer used by default and can be deleted.
 --slice=builds.slice`), so everything it starts is slice-bound, including compiles a test runner starts without the shim (cargo-nextest's own
 cargo, the dev shell's sccache client), and each cargo command inside takes the host's build slots through the cargo admission shim like any
 build. It holds no heavy-slot ticket for the whole check (`cargo --stage-slot`): the tests run under the test guardian
-(`scripts/st3_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
+(`scripts/fractal_test_process.py`), which detaches from its parents, and the shim lets a cargo command skip the queue under a held stage only
 when the stage is its ancestor, so the guardian's cargo commands queued for the one heavy slot their own stage held until the stage limit
 killed it (2026-10-23, on a build host: a canaries stage killed at 2400 s having built nothing). Only what starts `evidence-wrap` changes; the command it
 records and signs does not. A host without a user systemd bus runs the check as before and says so on stderr; `ST_EVIDENCE_GOVERN=off` does the

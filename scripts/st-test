@@ -443,12 +443,27 @@ def run_base_copy(argv):
     os.execve(sys.executable, [sys.executable, str(path), *argv], dict(os.environ, **{REEXEC: commit}))
 
 
+FETCH_LOCK_TRIES, FETCH_LOCK_BACKOFF = 3, 2.0  # seconds before the second try, twice that before the third
+
+
 def fetch_base(base):
     """The base's commit at its current tip: a remote-tracking base (origin/main) is fetched first, since main moves; the lag and the
-    policy are read at that tip."""
+    policy are read at that tip. A shared clone has many worktrees and seats fetching at once, and git refuses to update a remote-tracking
+    ref another fetch moved under it ("cannot lock ref 'refs/remotes/origin/main': is at X but expected Y"): that fetch is tried again,
+    up to FETCH_LOCK_TRIES times with a short backoff, as the race is no failure of the run's (2026-10-27: one ended a run after its
+    44-minute wait for a pool tree). Any other fetch error fails at once."""
     remote, _, branch = base.partition('/')
     if branch:
-        git('fetch', '-q', remote, branch)
+        for attempt in range(1, FETCH_LOCK_TRIES + 1):
+            done = git('fetch', '-q', remote, branch, check=False)
+            if done.returncode == 0:
+                break
+            error = done.stderr.decode(errors='replace').strip()
+            if 'cannot lock ref' not in error or attempt == FETCH_LOCK_TRIES:
+                raise Failure(f'git fetch failed: {error[-400:]}')
+            print(f'fractal-test: another fetch moved {base} at the same moment; fetching again ({attempt + 1} of {FETCH_LOCK_TRIES})',
+                  file=sys.stderr, flush=True)
+            time.sleep(FETCH_LOCK_BACKOFF * attempt)
     return text(git('rev-parse', '--verify', '-q', base + '^{commit}'))
 
 
@@ -520,7 +535,7 @@ def governed(argv, name):
     memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
 
     No heavy-slot ticket is held for the whole check (`cargo --stage-slot`): the checks' tests run under the test guardian
-    (scripts/st3_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
+    (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
     stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
     evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""
