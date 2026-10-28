@@ -69,7 +69,7 @@ fn fixture() -> (Store, VerifyGoRequest) {
 }
 
 fn command(root: &Path, endpoint: &str, request: &VerifyGoRequest) -> std::process::Command {
-    let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     command.env_clear().env("HOME", root).env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_RUNTIME_DIR", root).current_dir(root)
         .args(["--endpoint", endpoint, "--json", "deploy", "verify-go", &request.go_id,

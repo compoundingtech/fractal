@@ -927,6 +927,46 @@ writes the record id to the job summary. The wiring is deliberately conservative
 - Until a producer writes a note for a check, that check never skips. At the time of writing no note exists for
   these two, so both run in full; the first skip needs a producer.
 
+### Our pull requests are signed or refused, never run
+
+Our pull requests are pre-signed (`scripts/st-test --all --push origin` before every push), so CI never runs their heavy jobs. CI is for
+other people's unsigned pull requests and for merge-queue groups. On 2026-10-27, 20 of our 45 pull request heads still ran CI in full,
+because a check had no valid note at the moment its gate looked. Those runs cost runner time, and the gate's quiet fallback hid them.
+
+`.st/evidence-signed-only.json` lists the openers this applies to (`openers`, GitHub logins: the account that opened the pull request,
+which GitHub authenticates). The gate reads it at the accepted BASE, like the author list, so a pull request cannot take itself off it.
+For a same-repository, non-draft `pull_request` run whose opener is listed, an enforced check that the gate would run is refused
+instead: `decision=refuse`, and the gate job's outputs carry `refuse=true` and a one-line `refusal`. That covers no note, a refused
+note, a note that was satisfied but not usable here (say, a protected file main changed since the branch point), and a gate that could
+not check the note. The refusal names the check and the reason, and ends with `sign it with scripts/st-test --all --push origin`. As
+with a skip, the outputs come from a marker step (`evidence refused: not signed`) and are the last thing it writes. A note that
+satisfied the verifier but cannot be used is usually a change to a file that decides skipping, covered only by a note another
+signer made for the same inputs. That run needs this tree signed on our own host, which `st-test` does not redo for a check it
+finds covered, so that refusal says `scripts/st-test --all --rerun --push origin`.
+
+A host note is not hidden by a newer one from CI. CI keeps signing the same inputs for other pull requests (every run of
+`typescript-client` whose inputs did not change carries the same key), and the latest record for a check decides. So on a branch that
+edits a protected file, CI's later pass used to shadow the host's note, and the check ran: #4138 itself ran `typescript-client` that
+way. When only our hosts' notes can cover the run (a `pull_request` run whose branch edits a protected file, compared in head-tree
+mode), the gate asks the base's verifier with `--prefer-levels host`. The newest passing host record then decides, unless a failing
+record is dated after it; a newer failure still decides, and every other rule applies to the record chosen.
+
+The check jobs act on it:
+
+- A job wired with the skip (`typescript-client`, `genie-freshness`, `ci-script-tests`) runs only its checkout. Every other step is
+  skipped, and a last step, `evidence refused: sign it with scripts/st-test --all --push origin`, prints the refusal and fails the job.
+- The Linux stages (`linux-test-build`, the test shards, clippy, fleet compatibility) do not start when `linux-gate`'s gate refuses.
+  The `linux-gate` aggregate fails at its first step with the refusal.
+- `fractal-web-execution` does not start, and `fractal-web` fails with the refusal when the change touches web inputs. With no web
+  input changed, nothing runs and the check passes, as before.
+
+Every other run is decided as before: another opener's pull request, a draft, a fork, a merge group, a push to main. So is a check
+whose skipping is not on (`enforce` false, `rust-tests` today, which is part of `linux-gate`), because no note can cover it. If the
+list is missing or unreadable at the base, or the gate cannot read the base, every run is decided as before, and so the check runs.
+A gate job that dies before it decides also leaves the check to run: the refusal comes only from a gate that positively decided. To
+fix a refused check, sign the head with `scripts/st-test --all --push origin` and push, or re-run the jobs once the notes are on the
+remote. A failed check never needs a new commit.
+
 ### The Linux group
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**

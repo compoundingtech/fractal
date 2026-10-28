@@ -1007,10 +1007,17 @@ It shows as `refused`, with the Fabric node and service, in `st replication stat
 `last_error` is empty and the JSON status carries `refusal_reason`. Doctor's replication check
 passes when the refusal is the only issue.
 
-The worker keeps a refused route selected and retries with normal peer backoff, as
-for other application errors; it does not bypass the refusal through a fallback
-route. A changed membership route retries immediately, and a later successful
-outbound exchange clears the refusal. Members that do not grant each other the
+A refused preferred route stays selected and retries with normal peer backoff, as
+for other application errors; the worker does not bypass the refusal through a fallback
+route. A refusal answers for its own route only. When the worker reached a refused
+route by failing over from the preferred one (a tailnet exchange broken by the member's
+restart, say), it holds that fallback route for 30 minutes and returns to the preferred
+route at once: the refusal adds nothing to the preferred route's backoff, and the held
+route is not redialed as if it were a network fault. The peer shows `refused` until an
+exchange over another route works, and then `up`; the refused attempt stays as its last
+failed exchange. A peer whose every usable route fails keeps the long, accumulating
+backoff. A changed membership route clears the hold and retries immediately, and a
+later successful outbound exchange clears the refusal. Members that do not grant each other the
 service can still converge through a common hub; the hub must grant and exchange
 with both leaves. The worker never changes Fabric grants itself.
 
