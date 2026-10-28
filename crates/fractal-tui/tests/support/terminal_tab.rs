@@ -53,7 +53,7 @@ fn terminal_tab_probe_worker() -> Result<()> {
     let socket = std::env::var_os("STUI_PROBE_SOCKET").expect("probe socket");
     let _guard = Guard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut ui = Ui::new(demo::world());
+    let mut ui = Ui::new(demo::test_world());
     if std::env::var_os("STUI_PROBE_GRAPHICS").is_some() {
         #[allow(deprecated)] // Fixed metrics belong to the harness-owned PTY.
         let mut picker =

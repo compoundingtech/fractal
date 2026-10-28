@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { observeSyncStatus, syncLine, syncLineNextChange, type SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
+import { observeSyncStatus, syncLine, syncLineNextChange, type SyncStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
 describe('portable sync presentation', () => {
  it('retains same-stage transition time and advances only on status or stage changes', () => {
   const first=observeSyncStatus(undefined,{_tag:'Requested',since:100},100)

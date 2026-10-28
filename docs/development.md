@@ -485,7 +485,7 @@ wording consistent when both describe the same change.
 | `crates/fractal-migrate` | Migration tooling. |
 | `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
-| `examples/st3`, `docs` | Runnable declarations and documentation. |
+| `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
 The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
