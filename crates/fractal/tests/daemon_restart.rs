@@ -949,6 +949,49 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     );
 }
 
+/// One request on a kept-alive connection, read through the end of its body; `None` when the
+/// daemon closed the connection instead of answering.
+fn keep_alive_get(stream: &mut std::os::unix::net::UnixStream, path: &str) -> Option<String> {
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: st3\r\n\r\n").ok()?;
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return None,
+        }
+    }
+    let head = String::from_utf8_lossy(&head).into_owned();
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let line = line.to_ascii_lowercase();
+            line.strip_prefix("content-length:").map(|value| value.trim().parse().unwrap())
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    stream.read_exact(&mut body).ok()?;
+    Some(head + &String::from_utf8_lossy(&body))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_daemon_answers_nothing_on_a_connection_it_accepted_before() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(directory.path());
+    daemon.start().await;
+    let mut stream = std::os::unix::net::UnixStream::connect(&daemon.socket).unwrap();
+    let answer = keep_alive_get(&mut stream, "/v1/health").unwrap();
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    // The connection was accepted and served before the stop. An exited daemon cannot answer on
+    // it, so the restart tests' outage must not either.
+    daemon.stop().await;
+    assert_eq!(keep_alive_get(&mut stream, "/v1/health"), None);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail() {
     if fractal_daemon::test_support::supervise_test() {
