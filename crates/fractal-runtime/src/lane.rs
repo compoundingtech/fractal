@@ -291,7 +291,13 @@ fn end_requested(slice: &str) -> Result<()> {
     let loaded = crate::isolate::systemctl()
         .args(["--user", "show", "--property=LoadState", "--value", slice])
         .output()
-        .context("read the lane's state")?;
+        .with_context(|| format!("read the state of the lane {slice}"))?;
+    anyhow::ensure!(
+        loaded.status.success(),
+        "read the state of the lane {slice}: {}",
+        String::from_utf8_lossy(&loaded.stderr).trim()
+    );
+    // A slice that is not loaded has nothing left to end.
     if String::from_utf8_lossy(&loaded.stdout).trim() != "loaded" {
         return Ok(());
     }
