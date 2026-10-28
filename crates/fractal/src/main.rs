@@ -525,7 +525,9 @@ enum DemoCommand {
         /// The demo file.
         file: PathBuf,
         /// Erase an instance a demo did not make: its graph, its interface cache and its
-        /// config. Without it, a demo plays only in a new instance or one a demo made.
+        /// config. Without it, a demo plays only in a new instance or one a demo made. The
+        /// instance then keeps a .st-demo mark, and every later play erases it without asking:
+        /// keep it for demos only.
         #[arg(long)]
         reset: bool,
     },
