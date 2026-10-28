@@ -65,6 +65,9 @@ pub mod observer_subscription_detail_tests;
 #[path = "client_v0/published_attention_tests.rs"]
 mod published_attention_tests;
 #[cfg(test)]
+#[path = "client_v0/stream_sync_tests.rs"]
+mod stream_sync_tests;
+#[cfg(test)]
 #[path = "client_v0/alert_action_tests.rs"]
 mod alert_action_tests;
 #[cfg(test)]
@@ -1101,12 +1104,34 @@ enum Refreshed {
     Closed,
 }
 
+/// The collections whose window frames carry `sync` (docs/st3/client-v0/collections.md).
+fn collection_carries_sync(collection: &str) -> bool {
+    collection == "attention"
+}
+
+/// What a frame's `sync` says, for comparing it with the last one sent: its state and the
+/// peers it names. A peer's counts moving is not a change.
+fn sync_said(sync: &Value) -> (String, Vec<String>) {
+    let state = sync["state"].as_str().unwrap_or_default().to_owned();
+    let mut peers = sync["peers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|peer| peer["host_id"].as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    peers.sort();
+    peers.dedup();
+    (state, peers)
+}
+
 /// Bring one subscription up to date from a fresh read: its snapshot first, then only what
-/// changed.
+/// changed. `sync` is this host's replication for a window that states it, with the flags it
+/// was taken at.
 async fn deliver_collection(
     socket: &mut WebSocket,
     subscription: &mut CollectionSubscription,
     read: Result<(ClientSnapshot, Vec<Value>, bool, Option<u64>), ApiError>,
+    sync: Option<(Value, (bool, bool))>,
 ) -> Refreshed {
     let request = &subscription.request;
     let (snapshot, mut items, has_more, owner_revision) = match read {
@@ -1151,8 +1176,14 @@ async fn deliver_collection(
         .iter()
         .filter_map(|item| Some((item["id"].as_str()?.to_owned(), item.clone())))
         .collect();
+    // Every snapshot states this host's sync; a changes frame only when it changed, even if
+    // no row did.
+    let said = sync.as_ref().map(|(sync, _)| sync_said(sync));
+    let sync_changed = said.is_some() && said != subscription.sync;
     let sent = if !subscription.delivered {
-        send_collection(socket, json!({"kind":"snapshot", "id":request.id, "collection":request.collection, "snapshot":snapshot, "items":items, "order":order, "has_more":has_more})).await
+        let mut frame = json!({"kind":"snapshot", "id":request.id, "collection":request.collection, "snapshot":snapshot, "items":items, "order":order, "has_more":has_more});
+        if let Some((sync, _)) = &sync { frame["sync"] = sync.clone(); }
+        send_collection(socket, frame).await
     } else {
         let upserts = current
             .iter()
@@ -1170,10 +1201,13 @@ async fn deliver_collection(
             && order == subscription.order
             && has_more == subscription.has_more
             && owner_revision == subscription.owner_revision
+            && !sync_changed
         {
             true
         } else {
-            send_collection(socket, json!({"kind":"changes", "id":request.id, "collection":request.collection, "snapshot":snapshot, "upserts":upserts, "removes":removes, "order":order, "has_more":has_more})).await
+            let mut frame = json!({"kind":"changes", "id":request.id, "collection":request.collection, "snapshot":snapshot, "upserts":upserts, "removes":removes, "order":order, "has_more":has_more});
+            if let Some((sync, _)) = sync.as_ref().filter(|_| sync_changed) { frame["sync"] = sync.clone(); }
+            send_collection(socket, frame).await
         }
     };
     if !sent {
@@ -1183,6 +1217,10 @@ async fn deliver_collection(
         super::record_stream_latency(&request.collection, opened.elapsed(), false);
     }
     subscription.delivered = true;
+    if let Some((_, flags)) = sync {
+        subscription.sync = said;
+        subscription.sync_flags = flags;
+    }
     subscription.previous = Arc::new(current);
     subscription.order = order;
     subscription.has_more = has_more;
@@ -1200,17 +1238,18 @@ async fn deliver_ivm_collection(
     subscription: &mut CollectionSubscription,
     read: Result<collection_ivm::Candidate, ApiError>,
     refresh: &mut Vec<String>,
+    sync: Option<(Value, (bool, bool))>,
 ) -> Refreshed {
     use collection_ivm::Output;
     let candidate = match read {
         Ok(candidate) => candidate,
-        Err(error) => return deliver_collection(socket, subscription, Err(error)).await,
+        Err(error) => return deliver_collection(socket, subscription, Err(error), None).await,
     };
     let result = match candidate.output {
         Output::Window(window) => {
             let delivered = subscription.delivered;
             if candidate.replace { subscription.delivered = false; }
-            let result = deliver_collection(socket, subscription, Ok((window.0, window.1, window.2, None))).await;
+            let result = deliver_collection(socket, subscription, Ok((window.0, window.1, window.2, None)), sync).await;
             if !matches!(result, Refreshed::Current) { subscription.delivered = delivered; }
             result
         }
@@ -2137,7 +2176,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         refresh.push(request.id.clone());
                         // Collection results and conversation frames share the same generation fence.
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, sync: None, sync_flags: (false, false), request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -2166,6 +2205,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     }
                 }
                 let governed = state.store.collection_view_published(&subscription.request.collection);
+                // Taken as the frame is built: the flags first, the peers only when not level.
+                let sync = collection_carries_sync(&subscription.request.collection).then(|| {
+                    let flags = super::replication_flags(&state);
+                    (super::client_stream_sync(&state), flags)
+                });
                 let first_span = first_frames.get(&id).map(|first| first.span.clone());
                 let refreshed = first_frame_work(first_span, async {
                     match result {
@@ -2175,8 +2219,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                             && matches!(error.code.as_str(),
                                 super::published_lists::WORK_LIST_NOT_READY | published_missions::NOT_READY)
                             && client_error_retryable(error.status, Some(&error.code)) => Refreshed::NotReady,
-                        CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result).await,
-                        CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh).await,
+                        CollectionRead::Legacy(result) => deliver_collection(&mut socket, subscription, result, sync).await,
+                        CollectionRead::Ivm(result) => deliver_ivm_collection(&mut socket, subscription, *result, &mut refresh, sync).await,
                     }
                 }).await;
                 if subscription.delivered { first_frames.remove(&id); }
@@ -2227,6 +2271,15 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // a commit that can change the agents roster asks its refresher to publish.
                 let index = state.store.index().unwrap_or(weighed);
                 let roster_refresher = state.store.agent_roster_refresher_running();
+                // A host that starts or stops catching up or diverging rereads each window that
+                // states its sync, published or not; a change of peers alone waits for the
+                // window's next read.
+                if subscriptions.values().any(|s| s.delivered && collection_carries_sync(&s.request.collection)) {
+                    let flags = super::replication_flags(&state);
+                    reread_due.extend(subscriptions.iter().filter(|(_, s)| s.delivered
+                        && collection_carries_sync(&s.request.collection) && s.sync_flags != flags)
+                        .map(|(id, _)| id.clone()));
+                }
                 let followed = |s: &CollectionSubscription| s.ivm.is_none()
                     && !state.store.collection_view_published(&s.request.collection);
                 if !subscriptions.values().any(followed) {

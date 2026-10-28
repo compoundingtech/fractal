@@ -349,6 +349,11 @@ change. A client that missed a changes frame learns the current value from the n
 which every resubscribe gets. A client on a daemon that sends none keeps reading a page's `sync`
 (`GET /v1/client/attention?limit=1`).
 
+The daemon sends a change on the window's next frame. A host that starts or stops catching up or
+diverging rereads its attention windows on that commit, paced like any reread (within 1.5 s).
+Another peer named, or a measurement grown too old to say the host is behind, waits for the
+window's next read, which comes at least every 30 s while it is subscribed.
+
 A state this client does not know, or a shape the schema forbids (`level` with peers, or another
 state without them), reads as unknown, never level, and the frame is kept: the Rust client reads
 such a `sync` as none, and the TypeScript transport parses frames without validating them, so a
