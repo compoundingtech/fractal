@@ -107,11 +107,11 @@ The seat counts include every native agent seat. The LLM judge counts are separa
 The paired and st3-only corpus has 14 Claude seats, 43 Codex seats, two Pi seats, two OMP seats,
 and one OpenCode seat. It also has three Codex LLM judges.
 
-Graceful messaging is not in those seat counts: `scripts/st3-graceful-messaging-eval/run` chooses
+Graceful messaging is not in those seat counts: `scripts/fractal-graceful-messaging-eval/run` chooses
 its seats at run time, and its committed reports name them. It needs no eval KDL, because it restarts
 and replaces its own daemon.
 
-Seat queue is counted with its default Claude seat. `scripts/st3-seat-queue-eval/run` can put Codex
+Seat queue is counted with its default Claude seat. `scripts/fractal-seat-queue-eval/run` can put Codex
 `gpt-6-luna` or omp `openai-codex/gpt-5.6-luna` in that seat instead. Its chief agent is a
 model-free command, not a native agent seat.
 
