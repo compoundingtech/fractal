@@ -1,3 +1,4 @@
 record 1896598d85996cc38494d4b0709aee73112a5c21 genie-freshness 0 host/forge 2026-10-28T16:06:43Z
 record c2725a25d1c39aaefd177acb01c0e7741ebdda79 ci-script-tests 0 host/forge 2026-10-28T16:12:03Z
 record 1bd89ef4234745a155cdd1f0eafa06359f047f47 linux-gate 0 host/forge 2026-10-28T16:22:00Z
+record 8f952f069c0626b8b4b8eab088f1f73c3dbf47df rust-tests 0 host/forge 2026-10-28T16:24:43Z
