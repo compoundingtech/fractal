@@ -11,10 +11,11 @@ pub fn legacy_env_name(name: &str) -> Option<String> {
 }
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-/// Fractal spelling of an ST/ST3 environment variable.
+/// Fractal spelling of an ST/ST3/STUI environment variable.
 pub fn fractal_env_name(name: &str) -> Option<String> {
     name.strip_prefix("ST_")
         .or_else(|| name.strip_prefix("ST3_"))
+        .or_else(|| name.strip_prefix("STUI_"))
         .map(|suffix| format!("FRACTAL_{suffix}"))
 }
 
@@ -35,7 +36,7 @@ fn identity_env(name: &str) -> bool {
                 || name.ends_with("_RESUME_GENERATION")))
 }
 
-/// Prefer Fractal, then ST/ST3, then the existing ST2 harness alias.
+/// Prefer Fractal, then ST/ST3/STUI, then the existing ST2 harness alias.
 /// An explicitly empty value masks every older spelling.
 pub fn env_with(name: &str, get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
     env_with_warning(name, get, &mut |message| eprintln!("{message}"))
@@ -189,7 +190,11 @@ mod tests {
 
     #[test]
     fn fractal_names_prefer_new_values_without_disclosing_conflicting_values() {
-        for name in ["ST_AGENT", "ST_SUPERVISOR", "ST_CLAUDE_SESSION", "ST3_SUBJECT", "ST3_BIN"] {
+        for name in [
+            "ST_AGENT", "ST_SUPERVISOR", "ST_CLAUDE_SESSION", "ST3_SUBJECT", "ST3_BIN",
+            "ST3_BLOB_RETENTION_HOURS", "ST3_SUBAGENT_LEASE_MS", "ST3_SUBAGENT_SILENCE_MS",
+            "STUI_FEED_TIMER_CAP_MS", "STUI_CLIENT_LABEL", "ST3_GITHUB_API_URL",
+        ] {
             let new = fractal_env_name(name).unwrap();
             for (old_value, new_value, expected, warning) in [
                 (None, None, None, false),

@@ -9,7 +9,7 @@
     "changelog:registry": "node scripts/changelog-registry.mjs",
     "changelog:registry:check": "node scripts/changelog-registry.mjs --check",
     "typecheck": "node scripts/changelog-registry.mjs && tsc --noEmit",
-    "check:st-coverage": "bun scripts/check-st-coverage.ts",
+    "check:fractal-coverage": "bun scripts/check-fractal-coverage.ts",
     "dev": "vite --config vite.config.ts --configLoader runner",
     "build": "vite build --config vite.config.ts --configLoader runner",
     "build:embed": "vite build --config vite.embed.config.ts --configLoader runner",

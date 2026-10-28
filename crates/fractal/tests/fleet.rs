@@ -17,7 +17,7 @@ use fractal_daemon::client::Client;
 use fractal_daemon::model::ClaimInput;
 
 fn st3() -> &'static str {
-    test_env!("CARGO_BIN_EXE_st3-fixture")
+    test_env!("CARGO_BIN_EXE_fractal-fixture")
 }
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";
@@ -3405,7 +3405,8 @@ PY
     fi
     rm -f "$registry/$(key "$me" "$2")" ;;
   dial) f="$registry/$(key "$2" "$3")"; [ -f "$f" ] || {{ echo '{{"error":{{"code":"service_not_exposed","class":"fault","message":"no such exposure","peer":null,"service":null}}}}'; exit 69; }}; printf '{{"address":"%s"}}\n' "$(cat "$f")" ;;
-  send-file) mkdir -p "$registry/home-$2/inbox/$me" && cp "$3" "$registry/home-$2/inbox/$me/$5" ;;
+  peers) cat "$registry/peers-$me" 2>/dev/null || true ;;
+  send-file) [ ! -f "$registry/fail-send-$me" ] || {{ echo "the receiver refused the file" >&2; exit 1; }}; mkdir -p "$registry/home-$2/inbox/$me" && cp "$3" "$registry/home-$2/inbox/$me/$5" ;;
   probe) [ -f "$registry/$(key "$2" "$3")" ] ;;
   *) exit 1 ;;
 esac
@@ -4133,6 +4134,248 @@ async fn a_legacy_helper_fleet_migrates_to_native_fabric_without_losing_history(
             || calls.contains("dial b-fabric-id st3-peer-v1")
     );
     assert!(!calls.contains("--ephemeral"));
+}
+
+/// Founder `a` advertising `transports` with no st-fabric-adapter: a member whose install
+/// never set up Fabric pairing.
+async fn member_without_fabric_pairing(root: &Path, transports: &str) -> Node {
+    let mut a = Node::new(root, "a");
+    a.env.push((
+        "ST_FABRIC_ADAPTER".into(),
+        root.join("no-st-fabric-adapter").display().to_string(),
+    ));
+    let shim = fabric_shim(root, "a");
+    let no_tailscale = root.join("no-tailscale");
+    let port = a.port.to_string();
+    let mut create = vec![
+        "fleet",
+        "create",
+        "--no-service",
+        "--name",
+        "a",
+        "--port",
+        &port,
+        "--transports",
+        transports,
+        "--fabric",
+        shim.to_str().unwrap(),
+        "--tailscale",
+        no_tailscale.to_str().unwrap(),
+    ];
+    if transports.contains("loopback") {
+        create.push("--advertise-loopback");
+    }
+    a.st_ok(&create);
+    a.start().await;
+    wait_until("a advertises its Fabric endpoint", 30, || {
+        let client = a.client();
+        async move {
+            client
+                .get::<Value>("/v1/internal/fleet/status")
+                .await
+                .is_ok_and(|status| member_has_fabric(&status, "a"))
+        }
+    })
+    .await;
+    a
+}
+
+fn invite_states(node: &Node) -> Vec<String> {
+    node.st_json(&["fleet", "invites", "--all"])
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|invite| invite["state"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn inbox_codes(registry: &Path, home: &str) -> Vec<PathBuf> {
+    let inbox = registry.join(home).join("inbox").join("a-fabric-id");
+    fs::read_dir(inbox)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_fabric_delivers_to_a_trusted_fabric_peer_without_pairing() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("fabric-registry");
+    let a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+    // Fabric already trusts b, though it grants b no services.
+    fs::write(registry.join("peers-a-fabric-id"), "b-fabric-id\tb\tno services\n").unwrap();
+
+    let sent = a.st_ok(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
+    assert!(sent.contains("to b's Fabric inbox"), "{sent}");
+    let delivered = inbox_codes(&registry, "home-b");
+    assert_eq!(delivered.len(), 1, "{delivered:?}");
+    let code = fs::read_to_string(&delivered[0]).unwrap();
+    assert!(!sent.contains(code.trim()), "the code reached stdout");
+    let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim()).unwrap();
+    assert!(decoded.pairing.is_none());
+    assert!(
+        decoded.endpoints.iter().all(|endpoint| {
+            !matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Fabric { .. })
+        }),
+        "without pairing, auto must not route the new machine through Fabric"
+    );
+
+    let mut b = Node::new(root.path(), "b");
+    b.env.push((
+        "FABRIC_HOME".into(),
+        registry.join("home-b").display().to_string(),
+    ));
+    let port = b.port.to_string();
+    b.st_ok(&[
+        "fleet",
+        "join",
+        "--fabric-inbox",
+        "--no-service",
+        "--name",
+        "b",
+        "--port",
+        &port,
+        "--transports",
+        "loopback",
+        "--advertise-loopback",
+    ]);
+    assert!(inbox_codes(&registry, "home-b").is_empty(), "join removes the code");
+    assert_eq!(invite_states(&a), ["redeemed"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_fabric_fails_loudly_when_fabric_does_not_deliver() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let registry = root.path().join("fabric-registry");
+    let a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+
+    // A name Fabric does not trust is refused before any invite exists.
+    let untrusted = a.st(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
+    assert!(!untrusted.status.success());
+    let stderr = String::from_utf8_lossy(&untrusted.stderr);
+    assert!(stderr.contains("b is not a trusted Fabric peer"), "{stderr}");
+    assert!(invite_states(&a).is_empty());
+
+    // A transfer Fabric does not confirm revokes the invite it would have carried.
+    fs::write(registry.join("peers-a-fabric-id"), "b-fabric-id\tb\tsend-file\n").unwrap();
+    fs::write(registry.join("fail-send-a-fabric-id"), "").unwrap();
+    let refused = a.st(&["fleet", "invite", "b", "--send-fabric", "--as", PERSON]);
+    assert!(!refused.status.success());
+    let stdout = String::from_utf8_lossy(&refused.stdout);
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(!stdout.contains("Sent invite"), "{stdout}");
+    assert!(stderr.contains("fabric send-file to b failed"), "{stderr}");
+    assert!(stderr.contains("the receiver refused the file"), "{stderr}");
+    assert!(stderr.contains("which was not delivered"), "{stderr}");
+    assert_eq!(invite_states(&a), ["revoked"]);
+    assert!(inbox_codes(&registry, "home-b").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_file_writes_a_private_file_without_fabric_pairing() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+    let directory = root.path().join("person-home");
+    fs::create_dir(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+    let path = directory.join("invite-b.code");
+
+    let printed = a.st_ok(&[
+        "fleet",
+        "invite",
+        "b",
+        "--code-file",
+        path.to_str().unwrap(),
+        "--expires",
+        "10m",
+        "--as",
+        PERSON,
+    ]);
+    let code = fs::read_to_string(&path).expect("the code file exists");
+    assert!(fractal_daemon::fleet::code::JoinCode::decode(code.trim()).is_ok());
+    assert!(!printed.contains(code.trim()), "the code reached stdout");
+    assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "the person's directory keeps its mode"
+    );
+    assert_eq!(invite_states(&a), ["open"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auto_invites_over_another_endpoint_when_fabric_pairing_fails() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut a = member_without_fabric_pairing(root.path(), "fabric,loopback").await;
+    // An installed adapter whose Fabric was not started with --runtime-peers.
+    let adapter = root.path().join("st-fabric-adapter");
+    fs::write(
+        &adapter,
+        "#!/bin/sh\necho 'runtime_peers_disabled: restart Fabric with --runtime-peers' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&adapter, fs::Permissions::from_mode(0o755)).unwrap();
+    a.env.retain(|(key, _)| key != "ST_FABRIC_ADAPTER");
+    a.env.push(("ST_FABRIC_ADAPTER".into(), adapter.display().to_string()));
+    let path = root.path().join("invite-b.code");
+
+    let output = a.st(&[
+        "fleet",
+        "invite",
+        "b",
+        "--code-file",
+        path.to_str().unwrap(),
+        "--as",
+        PERSON,
+    ]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("inviting over loopback instead"), "{stderr}");
+    let code = fs::read_to_string(&path).unwrap();
+    let decoded = fractal_daemon::fleet::code::JoinCode::decode(code.trim()).unwrap();
+    assert!(decoded.pairing.is_none());
+    assert!(decoded.endpoints.iter().all(|endpoint| {
+        matches!(endpoint, fractal_daemon::fleet::code::CodeEndpoint::Loopback(_))
+    }));
+    let mut states = invite_states(&a);
+    states.sort();
+    assert_eq!(states, ["open", "revoked"]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_invitation_only_fabric_could_carry_fails_before_it_exists() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let a = member_without_fabric_pairing(root.path(), "fabric").await;
+    let path = root.path().join("invite-b.code");
+    let path = path.to_str().unwrap();
+    for delivery in [&["--code-file", path][..], &["--code-only"], &[]] {
+        let mut arguments = vec!["fleet", "invite", "b", "--as", PERSON];
+        arguments.extend(delivery);
+        let output = a.st(&arguments);
+        assert!(!output.status.success(), "{delivery:?} succeeded");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("Fabric invitations need st-fabric-adapter installed"),
+            "{delivery:?}: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "{delivery:?} printed a code");
+    }
+    assert!(!Path::new(path).exists());
+    assert!(invite_states(&a).is_empty(), "a refused invitation left an invite open");
 }
 
 #[tokio::test(flavor = "multi_thread")]

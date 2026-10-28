@@ -78,7 +78,7 @@ class CiLocal(unittest.TestCase):
         # Without the account's admission program the stages' HOME hides nothing to name: no variable is set.
         done, calls = self.run_local('mail-redelivery-canaries')
         self.assertEqual(done.returncode, 0, done.stderr)
-        for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE', 'BUILD_ADMISSION_FALLBACK_LOCK',
+        for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE', 'BUILD_ADMISSION_LOG', 'BUILD_ADMISSION_FALLBACK_LOCK',
                      'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS'):
             self.assertNotIn(name, calls[-1]['env'])
         program = self.home / '.local/bin/build-admission'
@@ -92,17 +92,19 @@ class CiLocal(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         env = calls[-1]['env']
         self.assertNotEqual(env['HOME'], str(self.home))  # the stages still run in a home of their own
-        self.assertEqual({name: env.get(name) for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE',
+        self.assertEqual({name: env.get(name) for name in ('BUILD_ADMISSION_BIN', 'BUILD_ADMISSION_CONFIG', 'BUILD_ADMISSION_STATE', 'BUILD_ADMISSION_LOG',
                                                          'BUILD_ADMISSION_FALLBACK_LOCK', 'CARGO_PRIORITY_FILE', 'CARGO_HEAVY_SLOTS')},
                          {'BUILD_ADMISSION_BIN': str(program),
                           'BUILD_ADMISSION_CONFIG': f'{self.home}/.config/build-admission',
                           'BUILD_ADMISSION_STATE': f'{self.home}/.local/state/st3/operations',
+                          'BUILD_ADMISSION_LOG': f'{self.home}/.local/state/st3/operations/build-admission.log',  # the cargo shim's slot waits
                           'BUILD_ADMISSION_FALLBACK_LOCK': f'{self.home}/.local/state/st3/operations/build-admission-fallback.lock',
                           'CARGO_PRIORITY_FILE': f'{self.home}/.config/cargo-priority',
                           'CARGO_HEAVY_SLOTS': '2'})
         self.log.unlink(missing_ok=True)
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_HEAVY_SLOTS='1', BUILD_ADMISSION_STATE='/elsewhere')
         self.assertEqual((calls[-1]['env']['CARGO_HEAVY_SLOTS'], calls[-1]['env']['BUILD_ADMISSION_STATE']), ('1', '/elsewhere'))  # the caller's
+        self.assertEqual(calls[-1]['env']['BUILD_ADMISSION_LOG'], '/elsewhere/build-admission.log')  # beside the state it names
 
     def test_the_stages_build_without_debug_info_as_ci_does(self):
         done, calls = self.run_local('mail-redelivery-canaries', CARGO_PROFILE_TEST_DEBUG='1')
