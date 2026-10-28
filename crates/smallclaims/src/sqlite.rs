@@ -335,6 +335,9 @@ pub struct WalCheckpointReport {
     pub writer_wait_ms: u128,
     pub truncate_ms: Option<u128>,
     pub recycled: bool,
+    /// When the wait for the writer held the checkpoint up, the longest writer hold that ended
+    /// while it waited (`windows::holds::WaitWatch::blocked_by`).
+    pub blocked_by: Option<serde_json::Value>,
 }
 
 pub fn checkpoint_wal_report(connection: &Connection) -> Result<WalCheckpointReport> {
@@ -347,7 +350,7 @@ pub fn checkpoint_wal_report(connection: &Connection) -> Result<WalCheckpointRep
         })?;
     Ok(WalCheckpointReport {
         frames, backfilled, passive_ms: started.elapsed().as_millis(),
-        writer_wait_ms: 0, truncate_ms: None, recycled: false,
+        writer_wait_ms: 0, truncate_ms: None, recycled: false, blocked_by: None,
     })
 }
 
@@ -615,6 +618,11 @@ impl WriterConnection {
     /// Borrow the foreground writer. Foreground jobs retain their arrival order and can
     /// overtake explicitly background loans. Nothing preempts a loan already in progress.
     /// A panic rolls back its open transaction while its guard returns the connection.
+    /// The thread the writer runs on, where each of its holds begins and ends; `None` once closed.
+    pub fn writer_thread(&self) -> Option<std::thread::ThreadId> {
+        self.thread.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|thread| thread.thread().id())
+    }
+
     #[track_caller]
     pub fn write(&self) -> WriterGuard<'_> {
         self.lend_writer(writer_queue::LoanClass::Foreground)

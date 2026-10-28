@@ -154,6 +154,8 @@ struct Record {
     holders: BTreeMap<Arc<str>, Vec<Slot>>,
     long_holds: VecDeque<Long>,
     long_reads: VecDeque<Long>,
+    /// The `WaitWatch`es open now.
+    watchers: Vec<std::sync::Weak<Mutex<Watched>>>,
 }
 
 fn us(duration: Duration) -> u64 {
@@ -201,6 +203,19 @@ impl Record {
         slot.over += u64::from(over);
         slot.total_us = slot.total_us.saturating_add(us(held));
         slot.max_us = slot.max_us.max(us(held));
+        self.watchers.retain(|watcher| watcher.strong_count() > 0);
+        // A hold ends on its writer's thread.
+        let writer = std::thread::current().id();
+        for watcher in self.watchers.iter().filter_map(std::sync::Weak::upgrade) {
+            let mut watched = watcher.lock().unwrap_or_else(PoisonError::into_inner);
+            if watched.writer != writer {
+                continue;
+            }
+            watched.holds += 1;
+            if watched.longest.as_ref().is_none_or(|(_, _, longest)| held > *longest) {
+                watched.longest = Some((holder.clone(), hold.kind, held));
+            }
+        }
         if over {
             push(&mut self.long_holds, Long {
                 holder: holder.clone(),
@@ -697,6 +712,44 @@ pub fn report() -> Value {
     let now = Instant::now();
     let wall = unix_ms();
     with_record(|record| record.report(now, wall))
+}
+
+struct Watched {
+    writer: ThreadId,
+    holds: u64,
+    longest: Option<(Holder, HoldKind, Duration)>,
+}
+
+/// The holds of one writer that end while it is open, such as the holds queued ahead of a caller
+/// that waits for that writer: how many, and the longest with its holder.
+pub struct WaitWatch(Arc<Mutex<Watched>>);
+
+impl WaitWatch {
+    /// Watch the writer that runs on thread `writer` (`WriterConnection::writer_thread`).
+    pub fn start(writer: ThreadId) -> Self {
+        let watched = Arc::new(Mutex::new(Watched { writer, holds: 0, longest: None }));
+        with_record(|record| record.watchers.push(Arc::downgrade(&watched)));
+        Self(watched)
+    }
+
+    /// The longest hold that ended since `start`, named as the window names a holder, with its
+    /// `kind`, `held_ms` and the number of `holds` that ended; `None` when none did.
+    pub fn blocked_by(self) -> Option<Value> {
+        let watched = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let (holder, kind, held) = watched.longest.as_ref()?;
+        let mut row = holder.json();
+        row["kind"] = json!(kind.name());
+        row["held_ms"] = json!(ms(*held));
+        row["holds"] = json!(watched.holds);
+        Some(row)
+    }
+}
+
+impl Drop for WaitWatch {
+    fn drop(&mut self) {
+        let watched = Arc::as_ptr(&self.0);
+        with_record(|record| record.watchers.retain(|watcher| !std::ptr::eq(watcher.as_ptr(), watched)));
+    }
 }
 
 #[cfg(test)]

@@ -689,7 +689,7 @@ mod tests {
         let instruments = Instruments::new(&provider.meter("checkpoint-test"));
         let report = |frames: i32, recycled: bool| super::super::WalCheckpointReport {
             frames, backfilled: frames, passive_ms: 2, writer_wait_ms: 0,
-            truncate_ms: recycled.then_some(1), recycled,
+            truncate_ms: recycled.then_some(1), recycled, blocked_by: None,
         };
         let reports = [Some(report(0, false)), Some(report(8, true)), Some(report(8, false)), None];
         for operation in [CheckpointOperation::Truncate, CheckpointOperation::Passive] {

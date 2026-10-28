@@ -19107,7 +19107,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                             "outcome": if report.frames == 0 { "empty" } else if report.recycled { "recycled" } else { "deferred" },
                             "frames": report.frames, "backfilled": report.backfilled,
                             "passive_ms": report.passive_ms, "writer_wait_ms": report.writer_wait_ms,
-                            "truncate_ms": report.truncate_ms,
+                            "truncate_ms": report.truncate_ms, "blocked_by": report.blocked_by,
                         }),
                         None => json!({"outcome":"error", "phase_durations_available":false}),
                     };
