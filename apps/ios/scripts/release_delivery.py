@@ -17,8 +17,7 @@ BUNDLE_ID = "com.compoundingtech.fractal"
 # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 def ios_env(suffix, default=None, environment=os.environ):
     """Prefer Fractal; an explicitly empty value masks the legacy spelling."""
-    value = environment.get("FRACTAL_IOS_" + suffix, environment.get("ST_IOS_" + suffix))
-    return value or default
+    return environment.get("FRACTAL_IOS_" + suffix, environment.get("ST_IOS_" + suffix, default))
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
 

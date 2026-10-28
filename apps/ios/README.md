@@ -132,8 +132,9 @@ python3 apps/ios/scripts/release_delivery.py \
 <!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
 Delivery options and push configuration prefer `FRACTAL_IOS_*` variables, with
 the corresponding `ST_IOS_*` spelling as a fallback only when the preferred name
-is absent. An explicitly empty preferred value masks the legacy value and uses
-the option's default (or disables push). Command-line delivery options still win.
+is absent. Explicitly empty delivery values remain empty (and are rejected where
+the option requires a value); an empty push flag disables push. Command-line
+delivery options still win.
 <!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 
 The script starts nothing by itself: delivery runs only when a separately

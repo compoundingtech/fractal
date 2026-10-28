@@ -175,7 +175,9 @@ class IosEnvironmentTests(unittest.TestCase):
                 (None, "fractal", "fractal"),
                 ("same", "same", "same"),
                 ("legacy", "fractal", "fractal"),
-                ("legacy", "", "default"),
+                ("legacy", "", ""),
+                ("", None, ""),
+                (None, "", ""),
             ):
                 with self.subTest(suffix=suffix, legacy=legacy, fractal=fractal):
                     environment = {}
