@@ -37,6 +37,30 @@ assets; the release workflow provisions it on both platforms.
 Release staging and installers make copied assets owner-writable; Nix-store
 permissions must not prevent extraction cleanup, upgrades, or rollback.
 
+### Offline web embed
+
+The release workflow also builds `fractal-web-embed-<full-source-SHA>.tar.gz`
+and its `.sha256` sidecar. The archive root contains `embed.html`, all assets,
+four `poster-{light,dark}-{wide,narrow}.webp` images, and `provenance.json`.
+Provenance records the exact source, flake lock digest, Node/pnpm/browser versions,
+capture viewports and per-file SHA-256 hashes.
+
+Every main build publishes these files under the durable prerelease
+`embed-<full-source-SHA>`; native versioned releases also carry them. Unlike the
+rolling `edge` release, source-addressed embed releases are never replaced by the
+workflow: creation refuses existing releases, and uploads never use `--clobber`.
+Repository maintainers must preserve these releases and their tags. Consumers pin
+both that full version and the archive SHA-256, not `edge`, `latest`, or a temporary
+Actions artifact.
+
+To produce the archive locally, apply the pinned workspace member with `mr apply`,
+then run `nix develop .#web --command node scripts/release-fractal-embed.mjs dist`.
+The web shell stages effect-utils; the builder installs frozen workspace
+dependencies, generates the changelog registry, bundles the offline app and captures
+the real `#web` and `#web-narrow` fixtures with the pinned Chromium. No Cargo build
+or live daemon is involved. Existing output archives are not overwritten.
+
+
 Home Manager enables the daemon's web listener at `127.0.0.1:7410` by default.
 Set `services.smalltalk.webListen = null;` to disable it, or set an explicit
 listener address. Home Manager passes its package's immutable assets explicitly
