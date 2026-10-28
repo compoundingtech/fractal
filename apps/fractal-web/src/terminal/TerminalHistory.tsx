@@ -5,7 +5,8 @@ import { Button } from 'react-aria-components'
 
 import { tokens } from '../ui-compat/tokens.stylex.ts'
 
-import { TERMINAL_FONT_SIZE, TERMINAL_LINE_HEIGHT, TerminalLineView } from './DomTerminal.tsx'
+import { TerminalLineView } from './DomTerminal.tsx'
+import { terminalMetrics } from './terminalMetrics.stylex.ts'
 import type { HistoryState } from './history.ts'
 import type { TerminalHistoryPort } from './historySource.ts'
 import type { TerminalPalette } from './palette.ts'
@@ -154,8 +155,8 @@ const HistoryRows = ({
       {...stylex.props(styles.rows)}
       style={{
         fontFamily: TERMINAL_FONT_FAMILY,
-        fontSize: TERMINAL_FONT_SIZE,
-        lineHeight: `${TERMINAL_LINE_HEIGHT}px`,
+        fontSize: terminalMetrics.fontSize,
+        lineHeight: `${terminalMetrics.lineHeight}px`,
         width: `${window.columns}ch`,
       }}
     >

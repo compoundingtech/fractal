@@ -78,7 +78,7 @@ mod tests {
     use crate::ui::{demo, doc::Hit, view::Tier};
 
     fn requests() -> Ui {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let kind = AttentionKind::Request {
             from: "Asker".into(), from_id: "agent/example/asker".into(),
             question: "Choose".into(), images: Vec::new(),

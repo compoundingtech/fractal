@@ -57,6 +57,8 @@ def entrypoint_case(binary: str) -> None:
                 output += os.read(master, 65536)
             assert result.returncode == 2, f"bare st help returned {result.returncode}"
             assert b"Usage: fractal" in output, "bare st did not show help"
+            assert b"From an agent:" in output, "bare fractal omitted agent guidance"
+            assert b"agent seat" not in output, "bare fractal retained legacy terminology"
             assert b"\x1b[?1049h" not in output, "bare st entered the alternate screen"
         finally:
             os.close(master)

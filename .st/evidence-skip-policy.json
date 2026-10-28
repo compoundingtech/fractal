@@ -9,7 +9,7 @@
       "events": [
         "pull_request"
       ],
-      "sample_one_in": 5,
+      "sample_one_in": 1,
       "inputs": [
         ".cargo",
         ".config/nextest.toml",
@@ -105,7 +105,7 @@
               "events": [
                 "pull_request"
               ],
-              "lane": true
+              "lane": "tree"
             },
             "agent": {
               "command": [
@@ -173,7 +173,7 @@
       "events": [
         "pull_request"
       ],
-      "sample_one_in": 5,
+      "sample_one_in": 1,
       "inputs": [
         "apps/fractal-web/package.json",
         "packages/fractal-sdk/package.json",
@@ -313,7 +313,7 @@
       "events": [
         "pull_request"
       ],
-      "sample_one_in": 5,
+      "sample_one_in": 1,
       "kinds": {
         "observed": {
           "command": [
@@ -433,7 +433,7 @@
       "events": [
         "pull_request"
       ],
-      "sample_one_in": 5,
+      "sample_one_in": 1,
       "inputs": [
         ".config/daily-only.filterset",
         ".gitattributes",
@@ -575,7 +575,7 @@
       "events": [
         "pull_request"
       ],
-      "sample_one_in": 5,
+      "sample_one_in": 1,
       "inputs": [
         ".buckconfig",
         ".buckconfig.genie.ts",
@@ -655,7 +655,8 @@
           "shard_inputs": {
             "count": "kit_shard_count",
             "results": "shard_results",
-            "pull_request_count": 1
+            "pull_request_count": 1,
+            "index": "kit_shard"
           },
           "input_order": {
             "kit_inputs": [
@@ -698,7 +699,7 @@
               "events": [
                 "pull_request"
               ],
-              "lane": true
+              "lane": "tree"
             },
             "agent": {
               "command": [
@@ -772,7 +773,7 @@
       "events": [
         "pull_request"
       ],
-      "sample_one_in": 5,
+      "sample_one_in": 1,
       "kinds": {
         "wrapper": {
           "command": [
@@ -830,7 +831,7 @@
               "events": [
                 "pull_request"
               ],
-              "lane": true
+              "lane": "tree"
             },
             "agent": {
               "command": [

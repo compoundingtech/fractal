@@ -3,7 +3,9 @@
 //! The live client and the demo fixtures both produce a `World`. Anything the graph cannot
 //! answer yet is an `Option` or a `Load`, so a screen can say "unknown" instead of guessing.
 
-pub use fractal_ui_model::missions::{Mission, Step, StepState, Word};
+pub use fractal_ui_model::missions::{Mission, StepState, Word};
+#[cfg(test)]
+pub use fractal_ui_model::missions::Step;
 use std::collections::BTreeMap;
 
 /// Something that arrives later. `Loading` is never drawn as empty.
@@ -99,6 +101,9 @@ pub struct World {
     /// Each account's freshest limits reading, from the same read.
     #[serde(skip)]
     pub usage_limits: Vec<fractal_client::UsageLimit>,
+    /// Every declared account, so the Usage tab lists the same accounts on every screen.
+    #[serde(skip)]
+    pub usage_accounts: Vec<fractal_client::UsageAccount>,
     #[serde(skip)]
     pub agent_messages: Option<fractal_client::AgentMessageEstimate>,
     /// Objectives and budgets, from st's `slo.list` read: the same rows the phone and the web
@@ -292,6 +297,14 @@ pub enum AttentionKind {
         /// The images it carries, read from st through the ask.
         images: Vec<fractal_conversation_ui::MailImage>,
     },
+    /// A row st did not place in a way this client knows: an older st presents nothing, and a
+    /// newer one may name a group or card this client does not know. It shows st's text and
+    /// why, keeps st's alert flag, and offers no answer of its own.
+    Unplaced {
+        text: String,
+        why: String,
+        alert: bool,
+    },
     /// Information the person asked an agent for (`st work update`): it asks nothing, and it
     /// clears once they read it.
     Update {
@@ -307,7 +320,11 @@ pub enum AttentionKind {
 impl AttentionKind {
     /// Whether a card of this kind blocks or waits on the person.
     pub fn is_alert(&self) -> bool {
-        !matches!(self, AttentionKind::Update { .. } | AttentionKind::Message { .. })
+        match self {
+            AttentionKind::Update { .. } | AttentionKind::Message { .. } => false,
+            AttentionKind::Unplaced { alert, .. } => *alert,
+            _ => true,
+        }
     }
 
     pub fn word(&self) -> &'static str {
@@ -322,6 +339,7 @@ impl AttentionKind {
             AttentionKind::Login { .. } => "login",
             AttentionKind::Request { .. } => "request",
             AttentionKind::Update { .. } => "update",
+            AttentionKind::Unplaced { .. } => "unplaced",
         }
     }
 }
@@ -402,6 +420,9 @@ pub struct Agent {
     /// The graph path, a stable id.
     pub id: String,
     pub name: String,
+    /// Declared seat intent; absence is unknown, never inferred from activity or ownership.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<fractal_client::AgentLifecycle>,
     pub harness: Harness,
     pub state: AgentState,
     pub host: String,
@@ -504,7 +525,7 @@ impl Reach {
             Reach::Direct => "connected",
             Reach::Indirect => "online via others",
             Reach::Offline => "offline",
-            Reach::Unknown => "st cannot tell",
+            Reach::Unknown => "Fractal cannot tell",
         }
     }
 }
@@ -545,4 +566,6 @@ pub struct Device {
 
 // -------------------------------------------------------------- conversations
 
-pub use fractal_conversation_ui::{Body, Entry, ToolState};
+pub use fractal_conversation_ui::{Body, Entry};
+#[cfg(test)]
+pub use fractal_conversation_ui::ToolState;

@@ -1,7 +1,10 @@
+import { selectedFaviconState, tabTitle, useTabMetadata } from './useTabMetadata.ts'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
+import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
 import type * as ConversationPaneModule from './ConversationPane.tsx'
+import type * as TerminalDetailModule from '../terminal/TerminalDetail.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
@@ -29,7 +32,7 @@ import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
-import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts'
+import { formatDuration } from '@fractal/ui/human-time/format'
 import { useGatewaySync } from '../data/react.tsx'
 import { NarrowLayoutContext } from '@fractal/ui/assistant-ui/shell'
 import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
@@ -47,9 +50,13 @@ import { FolderAttentionSignal } from './AttentionControls.tsx'
 import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
 import { RosterLoading, RosterStaleNotice, RosterUnavailable, SidebarEmptyState } from './SidebarEmptyState.tsx'
 import { useAgentsLastObservedAt } from './lastObserved.tsx'
+import { ResponsiveAgentSidebar, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
+import { SidebarChromeFooter } from './SidebarChromeFooter.tsx'
+import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
 import { RosterDecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 
 const emptyAgents: readonly Agent[] = []
+
 
 /** A last-observed roster's observation instant: its row times stop there instead of ticking on as if live. */
 const RosterFrozenAt = React.createContext<number | undefined>(undefined)
@@ -73,6 +80,7 @@ const LiveSidebarAgentRow = React.memo((props: {
   const agent = feed._tag === 'Observed' ? feed.value : undefined
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const frozenAt = React.useContext(RosterFrozenAt)
+  const [, requestThreadFocus] = useAtom(subagentThreadFocus(props.agentRef))
   const item = React.useMemo(() => {
     if (agent === undefined) return undefined
     if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission })
@@ -80,7 +88,11 @@ const LiveSidebarAgentRow = React.memo((props: {
     return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
   }, [agent, stale, props.needsMe, props.childId, mission])
   const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
-  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} />
+  const onSubagentsPress = React.useCallback(() => {
+    props.select(props.agentRef)
+    requestThreadFocus(value => value + 1)
+  }, [props.select, props.agentRef, requestThreadFocus])
+  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -187,8 +199,45 @@ class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<
 // Details, its measured resource tabs and Changes import the rich kit; keep them outside the eager shell.
 const AgentDetailsPanel = React.lazy(() => import('./AgentDetailsPanel.tsx').then(module => ({ default: module.AgentDetailsPanel })))
 const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
-// The terminal grid, fonts and native key encoder load only when a terminal pane opens.
-const TerminalDetail = React.lazy(() => import('../terminal/TerminalDetail.tsx').then((module) => ({ default: module.TerminalDetail })))
+/** Demand and idle intent share one request; a failed preload never poisons the next open. */
+let terminalDetailModule: Promise<typeof TerminalDetailModule> | undefined
+/** Set once the module resolves, so a warm reopen renders it directly instead of suspending a fresh lazy identity. */
+let terminalDetailLoaded: typeof TerminalDetailModule | undefined
+const loadTerminalDetail = () => {
+  terminalDetailModule ??= import('../terminal/TerminalDetail.tsx').then(module => {
+    terminalDetailLoaded = module
+    return module
+  }).catch(error => {
+    terminalDetailModule = undefined
+    throw error
+  })
+  return terminalDetailModule
+}
+const makeTerminalDetail = () => React.lazy(() =>
+  loadTerminalDetail().then(module => {
+    void module.prepareTerminal()
+    return { default: module.TerminalDetail }
+  }),
+)
+const prefetchTerminalDetail = () => {
+  void loadTerminalDetail().then(module => module.prepareTerminal()).catch(() => {})
+}
+
+/** The terminal grid, fonts and native key encoder stay outside the eager shell; a fresh lazy identity on retry avoids React's permanently rejected module cache. */
+class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `terminal/${string}` }> {
+  state = { failed: false, Detail: makeTerminalDetail() }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    if (this.state.failed) return <div role="alert">
+      <p>This terminal view could not load.</p>
+      <button type="button" onClick={() => this.setState({ failed: false, Detail: makeTerminalDetail() })}>Try again</button>
+    </div>
+    const Detail = terminalDetailLoaded?.TerminalDetail ?? this.state.Detail
+    return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading terminal" />}>
+      <Detail address={{ ref: this.props.terminalRef, presentation: 'detail' }} visibility="visible" />
+    </React.Suspense>
+  }
+}
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
 
@@ -220,13 +269,36 @@ const subscribeLocation = (callback: () => void) => {
   window.addEventListener('popstate', callback)
   return () => window.removeEventListener('popstate', callback)
 }
-const initialAgentFromUrl = () => {
-  const encoded = window.location.pathname.match(/^\/w\/(.+)$/)?.[1]
+const initialAgentFromUrl = (location: string) => {
+  const encoded = location.split('?')[0]?.match(/^\/w\/(.+)$/)?.[1]
   try {
     return encoded === undefined ? undefined : decodeURIComponent(encoded)
   } catch {
     return undefined
   }
+}
+
+/** The app uses browser history; static embeds supply a private in-memory location. */
+export interface WorkspaceNavigation {
+  readonly getLocation: () => string
+  readonly subscribe: (callback: () => void) => () => void
+  readonly navigate: (href: string) => void
+}
+const browserNavigation: WorkspaceNavigation = {
+  getLocation: locationState,
+  subscribe: subscribeLocation,
+  navigate: (href) => {
+    window.history.pushState(null, '', href)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  },
+}
+interface WorkspaceProps {
+  readonly ux?: UxTelemetry
+  readonly onSelectConversation?: (ref: string) => void
+  readonly dimensions?: { readonly width: number; readonly height: number }
+  readonly navigation?: WorkspaceNavigation
+  readonly persistGeometry?: boolean
+  readonly workspaceLabel?: string
 }
 
 /**
@@ -235,7 +307,7 @@ const initialAgentFromUrl = () => {
  * provider sits above the shell state, so its context value never changes on a switch and the
  * portalled panes inherit it without a context scan.
  */
-export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void }) {
+export function LiveAgentWorkspace(props: WorkspaceProps) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
   usePortalContainerRegistration(getContainer)
@@ -243,7 +315,7 @@ export function LiveAgentWorkspace(props: { readonly ux?: UxTelemetry; readonly 
 }
 
 /** One authoritative agent thread per workspace; local geometry never grants backend authority. */
-function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: UxTelemetry; readonly onSelectConversation?: (ref: string) => void; readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
+function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, workspaceLabel = 'Agent workspace', overlayHost }: WorkspaceProps & { readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), rosterDecode = useRosterDecode()
   const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
   const [phoneAgents, setPhoneAgents] = useAtom(phoneAgentTabs)
@@ -254,12 +326,21 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     query.addEventListener('change', callback)
     return () => query.removeEventListener('change', callback)
   }, [])
-  const narrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
+  const windowNarrow = React.useSyncExternalStore(subscribeNarrow, narrowLayoutMatches, serverNarrow)
+  const narrow = dimensions === undefined ? windowNarrow : dimensions.width < 900
   React.useLayoutEffect(() => setTheme(scheme), [scheme])
-  const viewport = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
-  const phoneHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
+  const sidebarOpener = React.useRef<HTMLButtonElement>(null)
+  const windowWidth = React.useSyncExternalStore(subscribeViewport, viewportWidth, viewportWidth)
+  const windowHeight = React.useSyncExternalStore(subscribePhoneViewport, phoneViewportHeight, phoneViewportHeight)
+  const viewport = dimensions?.width ?? windowWidth
+  const phoneHeight = dimensions?.height ?? windowHeight
   const phoneViewportStyle = narrow ? { height: `calc(${phoneHeight}px - var(--wf-devbar-space, 0px))`, '--wf-phone-height': `${phoneHeight}px` } : undefined
-  const location = React.useSyncExternalStore(subscribeLocation, locationState, locationState)
+  const toggleSidebar = React.useCallback(() => {
+    if (narrow) agentsDrawer.current?.toggle()
+    else setCollapsed(value => !value)
+  }, [narrow, setCollapsed])
+  useSidebarShortcut(toggleSidebar)
+  const location = React.useSyncExternalStore(navigation.subscribe, navigation.getLocation, navigation.getLocation)
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
     hoverOwner.current = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-wf-agent-ref]') : null
@@ -269,6 +350,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     // as closing the card, without replacing any roster nodes during a switch.
     hoverOwner.current?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     hoverOwner.current = null
+    agentsDrawer.current?.close()
   }, [location])
   const agents = fleet._tag === 'Observed' ? fleet.value.agents : emptyAgents
   const rosterObserved = fleet._tag === 'Observed'
@@ -288,7 +370,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     const cancelCapture = ux?.rosterCommitted()
     return () => { cancelTiming(); cancelCapture?.() }
   }, [ux, rosterObserved])
-  const current = initialAgentFromUrl() ?? (storedAgent || agents[0]?.ref || '')
+  const current = initialAgentFromUrl(location) ?? (storedAgent || agents[0]?.ref || '')
   const agent = agents.find((row) => row.ref === current)
   // A canonical subject address is not proof of a terminal. Keep the control disabled
   // from its first render until the roster can establish the selected agent's runtime.
@@ -298,6 +380,28 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
         : agent === undefined ? 'This agent is not in the live agent roster, so it has no terminal.'
           : agent.terminalDisabledReason
   const terminalRef = terminalDisabledReason === undefined ? agent?.terminal : undefined
+  const terminalSource = useDataSource()
+  // After first paint, idle time warms the terminal chunk and fonts; data waits for explicit intent.
+  React.useLayoutEffect(() => {
+    if (terminalRef === undefined) return
+    let cancelIdle: (() => void) | undefined
+    const cancelPaint = afterNextPaint(() => {
+      if (typeof window.requestIdleCallback === 'function') {
+        const idle = window.requestIdleCallback(prefetchTerminalDetail)
+        cancelIdle = () => window.cancelIdleCallback(idle)
+      } else {
+        const timer = window.setTimeout(prefetchTerminalDetail, 0)
+        cancelIdle = () => window.clearTimeout(timer)
+      }
+    })
+    return () => { cancelPaint(); cancelIdle?.() }
+  }, [terminalRef])
+  const prefetchTerminalIntent = (event: React.SyntheticEvent<HTMLElement>) => {
+    if (terminalRef === undefined || !(event.target instanceof Element) ||
+      event.target.closest('[aria-label="Toggle terminal drawer"]') === null) return
+    prefetchTerminalDetail()
+    terminalSource.prefetchTerminal?.(terminalRef)
+  }
   const [headerSlot, setHeaderSlot] = React.useState<HTMLDivElement | null>(null)
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
   const [resourcesHost, setResourcesHost] = React.useState<HTMLDivElement | null>(null)
@@ -316,8 +420,7 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
   const navigate = (ref: string, pane = 'thread') => {
     setStoredAgent(ref)
-    window.history.pushState(null, '', workspaceHref(ref, pane, window.location.search))
-    window.dispatchEvent(new PopStateEvent('popstate'))
+    navigation.navigate(workspaceHref(ref, pane, location.split('?')[1] ?? ''))
   }
   const select = (ref: string) => {
     if (narrow) setPhoneAgents(refs => [...new Set([...refs, current, ref])].filter(Boolean))
@@ -409,6 +512,11 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     previousNeedsYou.current = next
     return next
   }, [agents, subjects])
+  const offline = connection._tag !== 'Live'
+  useTabMetadata({
+    title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),
+    faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
+  })
   // Filtering uses observed status, not wall time; ticking cannot change membership.
   const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
@@ -438,10 +546,10 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     ]
   }, [agents, phoneAgents, current, visiblePanes, byRef])
   const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
-  const width = dragWidth ?? Math.round(ratio * viewport)
-  const maxPanel = Math.max(240, viewport - (collapsed ? 40 : Math.min(width, Math.max(208, Math.min(440, viewport - 640)))) - 640)
+  const maxSidebar = Math.max(sidebarMinimumWidth, Math.min(440, viewport - 640))
+  const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
+  const maxPanel = Math.max(240, viewport - (narrow || collapsed ? 0 : width) - 640)
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
-  const maxSidebar = Math.max(208, Math.min(440, viewport - 640))
   const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
   const changesWorkspace = agent?.workspace._tag === 'Known' ? JSON.stringify([agent.host, agent.workspace.value]) : current
   const terminalOpen = selectedPane.includes('terminal/')
@@ -468,7 +576,6 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
     </header>
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
-  // One roster for both presentations: docked beside the thread, or the agents sheet below the breakpoint.
   const sidebarBody = <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
     {fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
@@ -495,11 +602,10 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       </RosterFrozenAt.Provider>
     </nav>
     {fleet._tag === 'Observed' ? <RosterDecodeNotice decode={rosterDecode} shown={shownRosterRefs(fleet)} /> : null}
-    <footer {...stylex.props(styles.footer)}>
-      <ChromeControl icon="swap" label="Toggle color scheme" tooltipPlacement="top" onPress={() => setScheme(scheme === 'dark' ? 'light' : 'dark')} />
+    <SidebarChromeFooter onToggleScheme={() => setScheme(scheme === 'dark' ? 'light' : 'dark')}>
       <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" onPress={() => open({ ref: MISSIONS_REF, presentation: 'detail' })} />
       <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" onPress={() => open({ ref: 'monitor/quota', presentation: 'detail' })} />
-    </footer>
+    </SidebarChromeFooter>
   </>
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
@@ -509,23 +615,14 @@ function Workspace({ ux, onSelectConversation, overlayHost }: { readonly ux?: Ux
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-              {narrow ? null : <>
-                <aside aria-label="Agents" style={{ width: collapsed ? 40 : Math.min(width, maxSidebar) }} {...stylex.props(styles.sidebar)}>
-                  <header {...stylex.props(styles.brand)}>
-                    <ChromeControl icon={collapsed ? 'chevron-right' : 'chevrons-left'} label={collapsed ? 'Expand agents' : 'Collapse agents'} onPress={() => setCollapsed(!collapsed)} />
-                    {collapsed ? null : <><strong>Fractal</strong><ClockedAlertsPopover onOpen={select} /></>}
-                  </header>
-                  {collapsed ? null : sidebarBody}
-                </aside>
-                <ResizableSplit id="live-agent-sidebar" value={width} min={208} max={maxSidebar} collapsed={collapsed} label="Agent sidebar width" onChange={(value) => { setCollapsed(false); setDragWidth(value) }} onCommit={(value) => { setRatio(value / viewport); setDragWidth(undefined) }} onToggle={() => setCollapsed(!collapsed)} onReset={() => { setCollapsed(false); setRatio(256 / viewport) }} />
-              </>}
-              <DockedSplit persistKey={`live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}`} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
+              {narrow ? null : <ResponsiveAgentSidebar viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)} headerActions={<ClockedAlertsPopover onOpen={select} />}>{sidebarBody}</ResponsiveAgentSidebar>}
+              <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
                   <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
                 </React.Suspense>
               ) : undefined}>
-              <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} />}
+              <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={<ClockedAlertsPopover onOpen={select} />} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} drawerOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined} {...(terminalDisabledReason === undefined ? {} : { terminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} drawerOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleDrawer={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
                 <GatewayConnectionStatus />
                 {!narrow && visiblePanes.length > 0 ? (
                   <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
@@ -603,7 +700,7 @@ const GatewayConnectionStatus = () => {
   // The band's title already says "Reconnecting"; its detail is the next try, after syncLine's grace delay.
   const text = line === undefined ? undefined
     : status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
-      ? `Next try in ${Math.ceil(Math.max(0, status.reason.nextAt - now) / 1000)}s · attempt ${status.reason.attempt}`
+      ? `Next try in ${formatDuration(Math.ceil(Math.max(0, status.reason.nextAt - now) / 1000) * 1000)} · attempt ${status.reason.attempt}`
       : line.text
   return <ConnectionStatus
     state={network._tag === 'Offline' ? 'offline' : reconnecting ? 'reconnecting' : status._tag === 'Stale' ? 'stale' : status._tag === 'Failed' ? 'failed' : 'live'}
@@ -683,9 +780,7 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, agent
     </div>
     {current !== '' && view._tag === 'Terminal' ? (
       <section key={view.ref} aria-label="Terminal drawer" data-testid="terminal-pane" {...stylex.props(styles.terminalDrawer)}>
-        <React.Suspense fallback={<SystemNotice kind="loading" title="Loading terminal" />}>
-          <TerminalDetail address={{ ref: view.ref, presentation: 'detail' }} visibility="visible" />
-        </React.Suspense>
+        <TerminalCodeBoundary terminalRef={view.ref} />
       </section>
     ) : null}
   </ViewportStoreContext.Provider>
@@ -702,10 +797,8 @@ const styles = stylex.create({
   // Out of flow, above the panes. Viewport-wide but zero-height: no hit area of
   // its own, yet shrink-to-fit popovers get the viewport as available width.
   overlayHost: { position: 'fixed', top: 0, left: 0, width: '100%', height: 0, zIndex: 20 },
-  sidebar: { display: 'flex', flexDirection: 'column', flexShrink: 0, minHeight: 0, overflow: 'hidden', backgroundColor: c.sidebar },
-  brand: { height: g.band, paddingInline: s.lg, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
-  iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   textButton: { padding: '4px 8px', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer', fontSize: t.metaSize },
+  iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   // Message fill plus a hairline: raised equals the sidebar surface in light mode.
   searchField: { backgroundColor: c.message, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border },
   // AgentFolders' Tree owns scrolling; the roster only assigns the remaining flex space.
@@ -717,7 +810,6 @@ const styles = stylex.create({
   skeletonLine: { gridColumn: '2', height: 8, borderRadius: 4, backgroundColor: c.border, opacity: 0.5 },
   skeletonName: { gridRow: '1', width: '68%' },
   skeletonHost: { gridRow: '2', width: '44%' },
-  footer: { height: 40, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, flexShrink: 0 },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   resourcesDock: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, height: '100%' },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },

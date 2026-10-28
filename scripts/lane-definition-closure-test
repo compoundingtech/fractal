@@ -98,7 +98,7 @@ class ShellForms(Fixture):
 
     def test_a_word_that_is_not_a_whole_path_names_nothing(self):
         paths = self.paths(['bash', 'scripts/a'], {
-            'scripts/a': SH + 'cfg="st-test:$junit"\necho scripts/b.sh.bak\n', 'scripts/st-test': PY, 'scripts/b.sh': SH})
+            'scripts/a': SH + 'cfg="fractal-test:$junit"\necho scripts/b.sh.bak\n', 'scripts/fractal-test': PY, 'scripts/b.sh': SH})
         self.assertEqual(paths, ['scripts/a'])
 
     def test_bash_c_argv_is_read_as_shell(self):

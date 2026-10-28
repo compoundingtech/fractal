@@ -134,6 +134,7 @@ function MissionRowsStory({ scheme, phone = false }: { readonly scheme: Scheme; 
 
 type Args = React.ComponentProps<typeof MissionRowsStory>
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar/Mission row',
   component: MissionRowsStory,
   parameters: {
@@ -145,6 +146,16 @@ const meta = {
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phone: { control: 'boolean' } },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'MissionRows:contract-fixture',
+  'MissionRowsLight:contract-fixture',
+  'Phone:contract-fixture',
+  'PhoneLight:contract-fixture',
+  'QueuedMissions:contract-fixture',
+  'QueuedMissionsLight:contract-fixture',
+]
 type Story = StoryObj<Args>
 
 const designedRow = (canvasElement: HTMLElement, title: string) => {
@@ -232,7 +243,8 @@ const missionRowsPlay: NonNullable<Story['play']> = async ({ canvasElement }) =>
   await expect(handle.textContent).not.toContain('!')
   await expect(port.querySelector('[data-row-field="question"]')).toHaveTextContent('Pick hover scope')
   await expect(port.querySelector('[data-row-column="attention"]')).toBeNull()
-  await expect(port.querySelector('[data-row-column="signal"]')!.textContent).toBe('')
+  // An empty signal reserves no slot at all.
+  await expect(port.querySelector('[data-row-column="signal"]')).toBeNull()
   // Waiting without a handle shows the question alone.
   const docs = designedRow(canvasElement, 'Refresh the API docs')
   await expect(docs.querySelector('[data-q-handle]')).toBeNull()

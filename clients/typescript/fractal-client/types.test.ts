@@ -1,5 +1,21 @@
 import type { ActionOf, ConversationSearchHit, TimelineMessageBody } from './Models.generated.ts';
 import type { ClientOptions, RequestOptions, FractalClient, TraceContext } from './Client.generated.ts';
+import type { FabricClientOptions, FabricTransport, FabricEndpoint } from './fabric.mjs';
+
+const nativeOptions: FabricClientOptions = {
+    endpoint: 'fabric://studio/st3-client-v0',
+    credential: async () => 'paired-token',
+    traceContext: () => undefined,
+};
+declare const nativeTransport: FabricTransport;
+declare const nativeEndpoint: FabricEndpoint;
+void nativeEndpoint.dial({ signal: new AbortController().signal });
+const nativeCarrier: ClientOptions = {
+    baseUrl: 'http://fabric.local',
+    fetchImpl: nativeTransport.fetchImpl,
+    socket: nativeTransport.socket,
+};
+void [nativeOptions, nativeCarrier];
 
 const traceContext: TraceContext = {
     traceparent: '00-0123456789abcdef0123456789abcdef-0123456789abcdef-01',

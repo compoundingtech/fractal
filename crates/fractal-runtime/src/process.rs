@@ -604,7 +604,7 @@ pub fn process_start_token(pid: u32) -> Result<u64> {
 }
 
 #[cfg(target_os = "linux")]
-fn process_identity(pid: u32) -> Result<(char, u64)> {
+pub(crate) fn process_identity(pid: u32) -> Result<(char, u64)> {
     crate::procfs::require_matching_procfs()?;
     let stat = fs::read_to_string(format!("/proc/{pid}/stat"))?;
     let end = stat.rfind(')').context("malformed process stat")?;

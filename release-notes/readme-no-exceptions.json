@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Documentation only: the README describes CI's evidence skip as it is since #3913 and #3915, with no sampling, and our build hosts' notes covering lane and protected edits.",
+  "replay": {"status": "none", "detail": "Documentation only."},
+  "schema": {"status": "none", "detail": "Documentation only."},
+  "rules": {"status": "none", "detail": "Documentation only."},
+  "compatibility": {"status": "none", "detail": "Documentation only."},
+  "downtime": {"status": "none", "detail": "Documentation only."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

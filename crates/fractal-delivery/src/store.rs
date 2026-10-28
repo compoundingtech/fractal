@@ -142,6 +142,8 @@ pub mod checkpoint_tests;
 pub mod mailbox_lease_tests_shared_seats;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mailbox_tests;
+#[cfg(test)]
+mod conversation_deliveries_tests;
 // Qualification only: no production caller or Source registration.
 #[cfg(test)]
 pub mod message_point_qualification;

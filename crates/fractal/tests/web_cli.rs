@@ -39,7 +39,16 @@ fn web_early_parser_uses_the_public_clap_help_and_usage_statuses() {
     for flag in ["--help", "-h"] {
         let output = web(&["web", flag]);
         assert!(output.status.success(), "{output:?}");
-        assert!(String::from_utf8(output.stdout).unwrap().contains("Usage: fractal web"));
+        let help = String::from_utf8(output.stdout).unwrap();
+        assert!(help.contains("Usage: fractal web"), "{help}");
+        for unsupported in [
+            "--endpoint", "--instance", "--json", "--daemon-wait", "--catalog",
+            "--read-contract-inventory-json", "--checkpoint-space-gate-capabilities",
+        ] {
+            assert!(!help.contains(unsupported), "{unsupported} is advertised: {help}");
+        }
+        assert!(help.contains("--state-dir"), "{help}");
+        assert!(help.contains("--help"), "{help}");
         assert!(output.stderr.is_empty());
     }
     for (arguments, diagnostic) in [

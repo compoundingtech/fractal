@@ -25,7 +25,7 @@ export interface PromptAnswerPort {
 }
 
 /**
- * One fresh fence and one submission, fenced on the alert's own revision. A prompt st says is
+ * One fresh fence and one submission, fenced on the alert's own revision. A prompt Fractal says is
  * gone or answered only in its terminal is never sent again, and neither is any other refusal: the
  * person sees why and answers again if it still waits.
  */
@@ -44,7 +44,7 @@ export const gatewayPromptAnswers = (client: FractalClient): PromptAnswerPort =>
       }
       const snapshot = (observed.snapshot as { id?: unknown } | undefined)?.id
       if (typeof snapshot !== 'string') {
-        return { _tag: 'Refused', detail: 'st did not say what it last saw. Try again in a moment.' }
+        return { _tag: 'Refused', detail: 'Fractal did not say what it last saw. Try again in a moment.' }
       }
       const id = `action/${crypto.randomUUID()}`
       const response = await client.promptRespond({
@@ -56,8 +56,8 @@ export const gatewayPromptAnswers = (client: FractalClient): PromptAnswerPort =>
       const status = (response.value as { status?: unknown }).status
       if (status === 'accepted' || status === 'completed') return { _tag: 'Sent' }
       return status === 'rejected'
-        ? { _tag: 'Refused', detail: 'st did not take this answer. Answer it in the seat\'s terminal.' }
-        : { _tag: 'Refused', detail: 'st did not say whether it took this answer; check the alert before answering again.' }
+        ? { _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the seat\'s terminal.' }
+        : { _tag: 'Refused', detail: 'Fractal did not say whether it took this answer; check the alert before answering again.' }
     } catch (error) {
       return {
         _tag: 'Refused',

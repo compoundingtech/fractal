@@ -363,7 +363,7 @@ fn a_profile_configured_gate_uses_the_gateway_and_node_identity_without_local_cr
     let config = fractal_daemon::config::Config {
         node: "fixture-node".into(), person: Some("person/fixture".into()),
         state_dir: root.path().join("node-state"),
-        github: fractal_daemon::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None, observer_requests_per_hour: None },
+        github: fractal_daemon::config::GithubConfig { sekrets_profile: Some("owner/daemon-gh".into()), token_file: None, observer_requests_per_hour: None, app_token_root: None },
         ..Default::default()
     };
     let key = smallclaims::fleet::MemberKey::load_or_create(
@@ -456,13 +456,13 @@ fn doctor_outage_advice_is_for_people_and_preserves_json_and_agent_exit_status()
             let stderr = String::from_utf8_lossy(&output.stderr);
             if agent {
                 assert!(
-                    !stderr.contains("Run `st`") && !stderr.contains("st setup"),
+                    !stderr.contains("Run `fractal`") && !stderr.contains("fractal setup"),
                     "{stderr}"
                 );
                 assert!(stderr.contains("may be restarting"), "{stderr}");
             } else {
                 assert!(
-                    stderr.contains("Run `st`") && stderr.contains("st setup"),
+                    stderr.contains("Run `fractal`") && stderr.contains("fractal setup"),
                     "{stderr}"
                 );
                 assert!(!stderr.contains("may be restarting"), "{stderr}");

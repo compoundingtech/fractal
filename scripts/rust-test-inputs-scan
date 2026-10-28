@@ -32,7 +32,7 @@ LOADER.exec_module(keys)
 
 GLOBAL = ['.cargo', '.config/daily-only.filterset', '.config/nextest.toml', 'Cargo.lock', 'Cargo.toml', 'flake.lock', 'flake.nix',
           'scripts/ci-local', 'scripts/ci-linux', 'scripts/ci-nextest', 'scripts/ci-nextest-flaky', 'scripts/ci-nextest-targets',
-          'scripts/ci-rustc-wrapper', 'scripts/rust-test-keys', 'scripts/st3_test_process.py']
+          'scripts/ci-rustc-wrapper', 'scripts/rust-test-keys', 'scripts/fractal_test_process.py']
 LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
 BUILDS_A_PATH = re.compile(r'CARGO_MANIFEST_DIR|"\.\."')
 SKIP_NAMES = {'target', '.git', 'node_modules'}

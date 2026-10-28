@@ -1,4 +1,5 @@
 import type { Agent, Runtime, WorkLabel, WorkState } from '@fractal/client'
+import { SUBAGENT_OBSERVING_DRIVERS } from '@fractal/client'
 
 import type { CastAgent, CastMission } from '../cast.ts'
 import type { FactoryContext } from '../context.ts'
@@ -73,7 +74,7 @@ export const agent = (ctx: FactoryContext, member: CastAgent, options: AgentOpti
     upcoming_work: upcoming,
     queued_work_count: upcoming.length,
     under: [],
-    subagents: [],
+    ...(Object.hasOwn(SUBAGENT_OBSERVING_DRIVERS, member.driver) ? { subagents: [] } : {}),
     workspace: member.workspace,
     checkout: { repository: ctx.cast.repository, base: 'origin/main', branch: member.branch },
   }

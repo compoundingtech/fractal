@@ -1,6 +1,6 @@
 # Conversation timeline blocks
 
-st shows in a conversation what the harness shows in its terminal, normalized for
+Fractal shows in a conversation what the harness shows in its terminal, normalized for
 the terminal UI, web and phone without token filtering, secret scrubbing or allow-lists.
 Access checks still apply. Only reasoning the harness exposes is shown.
 

@@ -183,6 +183,15 @@ impl ReadBudget {
             deadline.saturating_duration_since(Instant::now())
         })
     }
+    /// Wait for cancellation or the existing wall deadline, including parent cancellation.
+    /// This is for asynchronous admission waits that must release their worker when a read ends.
+    pub async fn cancelled(&self) {
+        tokio::select! {
+            biased;
+            _ = self.cancellation() => {}
+            _ = self.deadline_elapsed() => self.cancel(),
+        }
+    }
 
     /// Cancellation-only work does not install an artificial timer.
     pub(crate) async fn deadline_elapsed(&self) {

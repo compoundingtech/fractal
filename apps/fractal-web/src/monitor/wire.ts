@@ -77,7 +77,7 @@ export const QuotaAccount = Schema.Struct({
   provider: Schema.String,
   accountId: Schema.String,
   accountLabel: Schema.String,
-  /** Producer ledger identity; absent on native st usage, and never reconstructed. */
+  /** Producer ledger identity; absent on native Fractal usage, and never reconstructed. */
   ledgerAccountId: Schema.optionalKey(Schema.NonEmptyString),
   latestAttempt: Schema.Struct({ at: Iso, outcome: Schema.String, reason: opt(Schema.String) }),
   valueObservedAt: Iso,

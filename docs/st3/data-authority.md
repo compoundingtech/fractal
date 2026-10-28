@@ -1,4 +1,4 @@
-# st data authority
+# Fractal data authority
 
 This document classifies the claim store's SQLite tables. `every_persistent_table_has_a_projection_scope`
 (`crates/fractal-seats/src/store/canonical_audit.rs`) fails when a table has no class; shared projection tables
@@ -211,6 +211,7 @@ order from the same admitted claims.
 | `custom_registrations` | Shared projection | Canonical custom-subject registrations. |
 | `custom_sources` | Shared projection | Canonical source claims for custom-subject reducers. |
 | `desired` | Shared projection | Shared selected declaration, ancestry/conflicts, ownership and full canonical body; existing ancestry/revision/id selection is deterministic and must be preserved. |
+| `declared_resource_edges` | Shared projection | Indexed owner/name/target/reason edges derived from selected seat and mission declarations; every logical column participates in projection digests. |
 | `documents` | Shared projection | Shared immutable name/hash binding, binding_claim_id and materialized canonical binding_key. created_index is a local arrival cursor; latest selection and history order use the indexed binding_key. |
 | `event_positions` | Local | Payload-free admitted event positions and subject routing; replay/admission history can differ. |
 | `events` | Local view | Canonical claim payloads joined to local admitted membership by arrival index. |
@@ -251,6 +252,7 @@ order from the same admitted claims.
 | `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |
 | `local_mailbox_leases` | Local | Authenticated native custody for each subject/component, including exact runtime/provider/session/sequence, process birth, token/epoch and revocation. Retained across daemon restart; excluded from replicated projection digests. |
 | `local_mailbox_owners` | Local | This daemon's native socket subscription owner, live runtime incarnation and replacement epoch. Survives daemon restart; excluded from replicated projection digests. |
+| `local_native_delivery_receipts_v2` | Local | Qualified native session/record identities and receipt-meaning fingerprints attached to an actual newly committed message.read claim in its existing native-authority savepoint. No transcript/envelope payload; not replicated, a claim backup or a shared projection/digest. Normal reopen and unchanged-claim projection rebuild preserve it; receipt identity/meaning mutation or deletion retires it. Missing/ambiguous/unprovable bindings produce no optional timeline link; readers never backfill it. |
 | `local_observations` | Local | Local-retention observations and their local frontier/id; never replicated. |
 | `client_diagnostic_receipts` | Local operational fact | Paired-device diagnostic retry receipts and admission accounting; retained for 30 days independently of local observations, never replicated or included in projection digests. |
 | `local_publication_claims`, `local_publication_starts`, `local_publication_pending`, `local_publication_batches`, `local_publication_bootstrap`, `local_publication_launch_epoch` | Local derived state | Rebuildable retained runtime and incarnation launch evidence, canonical keys, exact delta and coalesced batch queues, cache generation, and durable bootstrap cursor. Outside replicated digests; missing or incomplete evidence is Unknown. |

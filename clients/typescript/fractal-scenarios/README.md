@@ -3,8 +3,11 @@
 Seeded, privacy-safe scenario worlds for every Fractal client, and the kit that builds and
 replays them. [spec.md](spec.md) is the contract.
 
-The registered catalog contains 25 worlds: seven narratives, empty/loading/forward-compatibility
-edges, twelve failed-sync causes, replication divergence, `huge` and Unicode.
+The registered catalog contains 26 worlds: seven recorded narratives, the authored
+`transcript-families` conversation, empty/loading/forward-compatibility edges, twelve
+failed-sync causes, replication divergence, `huge` and Unicode.
+`transcript-families` prompts use a user message header followed by user `text/plain`
+content, preserving prompt text and speaker attribution through `conversationEntries()`.
 
 ## Recorded narratives
 
@@ -19,7 +22,7 @@ Roster, details, attention and sync remain authored synthetic slices, including 
 cast members on other hosts and product timing milestones. Recorded receipt offsets are not
 scaled to those milestones. The long-debug story uses the recorded 22-turn selection: all
 three wrong hypotheses, their rejections, forty-minute history and causal fix remain; repetitive
-middle batches are not inserted. The 17 edge worlds retain their original synthetic data.
+middle batches are not inserted. The edge worlds retain their original synthetic data.
 See [D3's per-world provenance table](spec.md#catalog-cutover-provenance-and-splice-points)
 for exact splice boundaries and reasons.
 
@@ -40,7 +43,7 @@ const oneAgent = world.with({ roster: 'one-agent' }) // same cast, one slice rep
 
 // Real data layer over a fake gateway: pass both seams to the client or SDK.
 const replay = createReplay(world, { clock: realClock({ start: world.now }) })
-// St3Options: { socket: replay.socket, fetch: replay.fetch }
+// FractalOptions: { socket: replay.socket, fetch: replay.fetch }
 ```
 
 Components read wire state through `ScenarioProvider` and `useScenarioSlice(kind, project?)` from

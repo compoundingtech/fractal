@@ -67,7 +67,7 @@ pub fn signature_mark(provenance: &fractal_client::MessageProvenance) -> Option<
 
 /// Said once at the start of a conversation st read only the newest part of.
 const NATIVE_PREFIX_NOTE: &str =
-    "Earlier history is not shown: st reads only the newest part of this agent's transcript";
+    "Earlier history is not shown: Fractal reads only the newest part of this agent's transcript";
 
 pub fn conversation(timeline: &[TimelineEntry], names: &BTreeMap<String, String>) -> Vec<Entry> {
     conversation_with_filters(timeline, names, crate::DEFAULT_FILTERS)
@@ -111,7 +111,7 @@ fn conversation_with_output_mode(
     let timeline = &displayed;
     let name = |id: &str| -> String {
         names.get(id).cloned().unwrap_or_else(|| match id {
-            "daemon/runtime" => "st".into(),
+            "daemon/runtime" => "Fractal".into(),
             id if id.starts_with("person/") => id.trim_start_matches("person/").to_owned(),
             id => short(id),
         })
@@ -223,7 +223,7 @@ fn conversation_with_output_mode(
                     body.push('\n');
                 }
                 body.push_str(&format!(
-                    "[the start of a {} message · `st conversations read {}` shows all of it]",
+                    "[the start of a {} message · `fractal conversations read {}` shows all of it]",
                     size_text(bytes),
                     message.message_id
                 ));
@@ -473,7 +473,7 @@ fn conversation_with_output_mode(
                 "native-delivery-degraded" => {
                     delivery.insert(entry.id.clone(), false);
                     Body::Event(if error.message.contains("unreachable") {
-                        "delivery paused · st unreachable".into()
+                        "delivery paused · Fractal unreachable".into()
                     } else {
                         "delivery failing · retrying".into()
                     })
@@ -2075,7 +2075,7 @@ fn tool_output(content: &Value, full: bool) -> (Vec<String>, bool) {
         ));
     }
     if cut {
-        lines.push("… st kept only the start of this output".into());
+        lines.push("… Fractal kept only the start of this output".into());
     }
     (lines, failed)
 }

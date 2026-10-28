@@ -19,15 +19,15 @@ import {
   type FollowEvent,
   type FollowSpec,
   followKey,
-  St3,
+  Fractal,
   type SyncStatus,
-  St3Live,
-  St3Platform,
+  FractalLive,
+  FractalPlatform,
   collectionWindow,
   type WindowValue,
 } from './mod.ts'
 import type { FollowFreshness } from './freshness.ts'
-import type { St3Diagnostic } from './socket.ts'
+import type { FractalDiagnostic } from './socket.ts'
 import { makeAdmission } from './admission.ts'
 
 /** Collections a window follow can name; the wire CollectionName also carries unfollowable ones. */
@@ -150,7 +150,7 @@ interface Mounted<A> {
 
 /** Mount one follow plus its freshness watcher; `interrupt` ends both. */
 const watchFollow = <A>(
-  st3: St3['Service'],
+  fractal: Fractal['Service'],
   key: string,
   follow: Stream.Stream<FollowEvent<A>>,
 ): Effect.Effect<Mounted<A>, never, Scope.Scope> =>
@@ -166,12 +166,12 @@ const watchFollow = <A>(
       ),
     )
     const watch = yield* Effect.forkChild(
-      st3.followFreshness(key).pipe(
+      fractal.followFreshness(key).pipe(
         Stream.runForEach((value) => Effect.sync(() => freshness.push(value))),
       ),
     )
     const statusWatch = yield* Effect.forkChild(
-      st3.followSyncStatus(key).pipe(
+      fractal.followSyncStatus(key).pipe(
         Stream.runForEach((value) => Effect.sync(() => statuses.push(value))),
       ),
     )
@@ -193,25 +193,25 @@ const watchFollow = <A>(
 
 const mountWindow = (
   collection: WindowCollection,
-): Effect.Effect<Mounted<WindowValue>, never, St3 | Scope.Scope> =>
+): Effect.Effect<Mounted<WindowValue>, never, Fractal | Scope.Scope> =>
   Effect.gen(function* () {
-    const st3 = yield* St3
+    const fractal = yield* Fractal
     return yield* watchFollow(
-      st3,
+      fractal,
       followKey({ _tag: 'Window', collection, limit: 50 }),
-      st3.watch(collectionWindow({ _tag: 'Window', collection, limit: 50 })),
+      fractal.watch(collectionWindow({ _tag: 'Window', collection, limit: 50 })),
     )
   })
 
 const mountConversation = (
   ref: string,
-): Effect.Effect<Mounted<ConversationChunk>, never, St3 | Scope.Scope> =>
+): Effect.Effect<Mounted<ConversationChunk>, never, Fractal | Scope.Scope> =>
   Effect.gen(function* () {
-    const st3 = yield* St3
+    const fractal = yield* Fractal
     return yield* watchFollow(
-      st3,
+      fractal,
       followKey({ _tag: 'Conversation', ref }),
-      st3.followConversation({ _tag: 'Conversation', ref }),
+      fractal.followConversation({ _tag: 'Conversation', ref }),
     )
   })
 
@@ -223,20 +223,20 @@ const runEffect = (
     readonly maxFollows: number
     readonly conversationSlots?: number | 'advertised'
     readonly setup?: (gateway: FakeGateway) => void
-    readonly onDiagnostics?: (event: St3Diagnostic) => void
+    readonly onDiagnostics?: (event: FractalDiagnostic) => void
   },
-  test: (gateway: FakeGateway) => Effect.Effect<void, never, St3 | Scope.Scope>,
+  test: (gateway: FakeGateway) => Effect.Effect<void, never, Fractal | Scope.Scope>,
 ) => {
   const gateway = new FakeGateway()
   options.setup?.(gateway)
-  const layer = St3Live({
+  const layer = FractalLive({
     baseUrl: 'http://gateway.test',
     maxFollows: options.maxFollows,
     ...(options.conversationSlots === undefined ? {} : { conversationSlots: options.conversationSlots }),
     socket: gateway.factory,
     fetch: gateway.fetch,
     ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
-  }).pipe(Layer.provide(Layer.succeed(St3Platform, {
+  }).pipe(Layer.provide(Layer.succeed(FractalPlatform, {
     admission: (budget) => {
       let clock = 0
       const priorities = new Map<string, number>()
@@ -360,9 +360,9 @@ describe('follow freshness', () => {
   it('ends with Stale(Evicted) when the conversation pool reclaims the slot', () =>
     run({ maxFollows: 8, conversationSlots: 2 }, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const first = yield* mountConversation('agent/first')
-        yield* st3.setVisible({ _tag: 'Conversation', ref: 'agent/first' }, false)
+        yield* fractal.setVisible({ _tag: 'Conversation', ref: 'agent/first' }, false)
         yield* mountConversation('agent/second')
         const third = yield* mountConversation('agent/third')
 
@@ -377,13 +377,13 @@ describe('follow freshness', () => {
   it('does not let window follows take conversation slots nor conversations take window slots', () =>
     run({ maxFollows: 5, conversationSlots: 2 }, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const missions = yield* mountWindow('missions')
-        yield* st3.setVisible(windowSpec('missions'), false)
-        yield* st3.setVisible(windowSpec('missions'), true)
+        yield* fractal.setVisible(windowSpec('missions'), false)
+        yield* fractal.setVisible(windowSpec('missions'), true)
         const first = yield* mountConversation('agent/first')
         const second = yield* mountConversation('agent/second')
-        yield* st3.setVisible({ _tag: 'Conversation', ref: 'agent/second' }, false)
+        yield* fractal.setVisible({ _tag: 'Conversation', ref: 'agent/second' }, false)
         yield* mountWindow('agents')
         yield* mountWindow('attention')
         // The conversation pool is full (one visible, one invisible); the next conversation
@@ -408,18 +408,18 @@ describe('follow freshness', () => {
   it('clears the freshness table when every follow ends', () =>
     run({ maxFollows: 4 }, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const agents = yield* mountWindow('agents')
-        expect((yield* SubscriptionRef.get(st3.freshness)).size).toBe(1)
+        expect((yield* SubscriptionRef.get(fractal.freshness)).size).toBe(1)
         yield* agents.interrupt
         yield* settle
-        expect((yield* SubscriptionRef.get(st3.freshness)).size).toBe(0)
+        expect((yield* SubscriptionRef.get(fractal.freshness)).size).toBe(0)
         expect(gateway.unsubscribed()).toEqual([gateway.idOf('agents')])
       }),
     ))
 
   it.each([401, 403])('settles the fallback budget and ends follows after a %s probe refusal', (status) => {
-    const diagnostics: St3Diagnostic[] = []
+    const diagnostics: FractalDiagnostic[] = []
     let refuseProbe: (() => void) | undefined
     return run({
       maxFollows: 8,
@@ -434,7 +434,7 @@ describe('follow freshness', () => {
       },
       onDiagnostics: (event) => diagnostics.push(event),
     }, () => Effect.gen(function* () {
-      const st3 = yield* St3
+      const fractal = yield* Fractal
       const follow = yield* mountConversation('agent/refused')
       expect(follow.ended()).toBe(false)
       expect(refuseProbe).toBeDefined()
@@ -449,12 +449,12 @@ describe('follow freshness', () => {
       const later = yield* mountConversation('agent/later-refused')
       expect(later.events).toMatchObject([{ _tag: 'Failed', error: { _tag: 'Rejected' } }])
       expect(later.ended()).toBe(true)
-      expect((yield* SubscriptionRef.get(st3.freshness)).size).toBe(0)
+      expect((yield* SubscriptionRef.get(fractal.freshness)).size).toBe(0)
     }))
   })
 
   it('settles an 8/4 fallback after a transient failed probe and proceeds on retry', () => {
-    const diagnostics: St3Diagnostic[] = []
+    const diagnostics: FractalDiagnostic[] = []
     return run({
       maxFollows: 8, conversationSlots: 'advertised',
       setup: (gateway) => {
@@ -485,7 +485,7 @@ describe('follow freshness', () => {
         gateway.probe = () => new Promise<Response>((_, reject) => { rejectProbe = reject })
       },
     }, (gateway) => Effect.gen(function* () {
-      const st3 = yield* St3
+      const fractal = yield* Fractal
       const follow = yield* mountConversation('agent/cancelled')
       yield* follow.interrupt
       expect(follow.ended()).toBe(true)
@@ -494,26 +494,26 @@ describe('follow freshness', () => {
       rejectProbe!(new Error('first probe failed after cancellation'))
       yield* settle
       // A leaked freshener receives SocketDropped from Reconnecting and recreates this key.
-      expect((yield* SubscriptionRef.get(st3.freshness)).size).toBe(0)
+      expect((yield* SubscriptionRef.get(fractal.freshness)).size).toBe(0)
       yield* Effect.promise(() => vi.advanceTimersByTimeAsync(500))
       yield* settle
       expect(gateway.commands).toEqual([])
       gateway.end()
       yield* settle
-      expect((yield* SubscriptionRef.get(st3.freshness)).size).toBe(0)
+      expect((yield* SubscriptionRef.get(fractal.freshness)).size).toBe(0)
     }))
   })
 
   it('preserves admitted keys and LRU visibility across a successful reconnect probe', () =>
     run({ maxFollows: 8, conversationSlots: 'advertised' }, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const first = yield* mountConversation('agent/oldest')
-        yield* st3.setVisible({ _tag: 'Conversation', ref: 'agent/oldest' }, false)
+        yield* fractal.setVisible({ _tag: 'Conversation', ref: 'agent/oldest' }, false)
         const second = yield* mountConversation('agent/second')
-        yield* st3.setVisible({ _tag: 'Conversation', ref: 'agent/second' }, false)
+        yield* fractal.setVisible({ _tag: 'Conversation', ref: 'agent/second' }, false)
         const third = yield* mountConversation('agent/third')
-        yield* st3.setVisible({ _tag: 'Conversation', ref: 'agent/third' }, false)
+        yield* fractal.setVisible({ _tag: 'Conversation', ref: 'agent/third' }, false)
         const fourth = yield* mountConversation('agent/fourth')
         gateway.end()
         yield* settle
@@ -534,12 +534,12 @@ describe('follow freshness', () => {
       maxFollows: 8, conversationSlots: 'advertised',
       setup: (gateway) => { gateway.collectionsV1 = true },
     }, (gateway) => Effect.gen(function* () {
-      const st3 = yield* St3
+      const fractal = yield* Fractal
       const follows: Mounted<ConversationChunk>[] = []
       for (let index = 0; index < 6; index += 1) {
         follows.push(yield* mountConversation(`agent/shrink-${index}`))
         if (index < 5)
-          yield* st3.setVisible({ _tag: 'Conversation', ref: `agent/shrink-${index}` }, false)
+          yield* fractal.setVisible({ _tag: 'Conversation', ref: `agent/shrink-${index}` }, false)
       }
       gateway.collectionsV1 = false
       gateway.end()
@@ -557,7 +557,7 @@ describe('follow freshness', () => {
       maxFollows: 8, conversationSlots: 'advertised',
       setup: (gateway) => { gateway.collectionsV1 = true },
     }, (gateway) => Effect.gen(function* () {
-      const st3 = yield* St3
+      const fractal = yield* Fractal
       const follows: Mounted<ConversationChunk>[] = []
       for (let index = 0; index < 6; index += 1)
         follows.push(yield* mountConversation(`agent/visible-${index}`))
@@ -572,10 +572,10 @@ describe('follow freshness', () => {
         { _tag: 'Failed', error: { _tag: 'SubscriptionLimit', cap: 8 } },
       ])
       for (let index = 0; index < 2; index += 1)
-        yield* st3.setVisible({ _tag: 'Conversation', ref: `agent/visible-${index}` }, false)
+        yield* fractal.setVisible({ _tag: 'Conversation', ref: `agent/visible-${index}` }, false)
       yield* settle
       expect(follows.map((follow) => follow.ended())).toEqual([true, true, false, false, false, false])
-      yield* st3.setVisible({ _tag: 'Conversation', ref: 'agent/visible-2' }, false)
+      yield* fractal.setVisible({ _tag: 'Conversation', ref: 'agent/visible-2' }, false)
       yield* mountConversation('agent/now-admitted')
       expect(follows[2]!.ended()).toBe(true)
       expect(follows[5]!.ended()).toBe(false)
@@ -584,9 +584,9 @@ describe('follow freshness', () => {
   effectIt.live('keeps roster, pooled conversation and gateway non-live until decoded data after open and reconnect', () =>
     runEffect({ maxFollows: 8, conversationSlots: 2, setup: (gateway) => { gateway.autoOpen = false } }, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const gatewayStatuses: SyncStatus[] = []
-        yield* Effect.forkChild(st3.gatewaySyncStatus.pipe(
+        yield* Effect.forkChild(fractal.gatewaySyncStatus.pipe(
           Stream.runForEach((status) => Effect.sync(() => gatewayStatuses.push(status))),
         ))
         const roster = yield* mountWindow('agents')
@@ -655,7 +655,7 @@ describe('follow freshness', () => {
   effectIt.live('retains exact local cap failure for the running status consumer', () =>
     runEffect({ maxFollows: 2 }, () =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         yield* mountWindow('agents')
         yield* mountWindow('missions')
         const refused = yield* mountWindow('attention')
@@ -663,10 +663,10 @@ describe('follow freshness', () => {
           _tag: 'Failed', cause: { _tag: 'Local', kind: 'subscription-limit', detail: { cap: 2 } },
         }
         expect(refused.lastStatus()).toEqual(expected)
-        expect((yield* SubscriptionRef.get(st3.syncStatuses)).get(followKey(windowSpec('attention')))).toEqual(expected)
+        expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(followKey(windowSpec('attention')))).toEqual(expected)
         yield* refused.interrupt
         yield* settle
-        expect((yield* SubscriptionRef.get(st3.syncStatuses)).has(followKey(windowSpec('attention')))).toBe(false)
+        expect((yield* SubscriptionRef.get(fractal.syncStatuses)).has(followKey(windowSpec('attention')))).toBe(false)
       }),
     ))
 
@@ -750,7 +750,7 @@ describe('follow freshness', () => {
   effectIt.live('refreshes Live window snapshot evidence without restarting its since clock', () =>
     runEffect({ maxFollows: 4 }, (gateway) =>
       Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         const roster = yield* mountWindow('agents')
         gateway.window('agents')
         yield* settle
@@ -764,7 +764,7 @@ describe('follow freshness', () => {
         yield* settle
         expect(roster.events.at(-1)).toMatchObject({ _tag: 'Observed', value: { snapshot: updated } })
         expect(roster.lastStatus()).toEqual({ ...first, snapshot: updated })
-        expect((yield* SubscriptionRef.get(st3.syncStatuses)).get(followKey(windowSpec('agents'))))
+        expect((yield* SubscriptionRef.get(fractal.syncStatuses)).get(followKey(windowSpec('agents'))))
           .toEqual({ ...first, snapshot: updated })
       }),
     ))

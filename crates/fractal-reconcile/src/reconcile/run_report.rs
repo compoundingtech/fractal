@@ -151,6 +151,50 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(None)
     }
 
+    /// Tell the reporter of the run that owns `seat` that the seat stays down after its launch was retried
+    /// as often as it is: one message for each seat and declaration, so a seat that stays stopped is
+    /// noticed. A run that reports to nobody, or to an agent that is not running, is not told.
+    pub(super) fn tell_seat_down(&self, seat: &str, run: &str, token: &str, reason: &str) -> Result<()> {
+        let Some(report) = self.run_report(run)? else {
+            return Ok(());
+        };
+        let key = format!("st3-run-report:{run}:seat-down:{seat}:{token}");
+        let message_id = &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16];
+        let subject = format!("message/{message_id}");
+        if self.store.latest_claim(&subject, Some("message.sent"))?.is_some()
+            || !self.store.agent_is_live(&report.to)?
+        {
+            return Ok(());
+        }
+        self.store.append_claim(&ClaimInput {
+            subject,
+            kind: "message.sent".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([
+                ("from".into(), Value::String("daemon/runtime".into())),
+                ("to".into(), Value::String(report.to.clone())),
+                (
+                    "content".into(),
+                    Value::String(format!(
+                        "The seat {seat} of run {run} stays down: {reason}\n\nInspect: `st agents show {seat}`; restart it with `st agents restart {seat} --as YOU`.\n\nYou are told because the run names you in `report-to`. st sends one message for each seat and declaration."
+                    )),
+                ),
+                ("status".into(), Value::String("sent".into())),
+                ("title".into(), Value::String(format!("Seat stays down: {seat}"))),
+                ("in_reply_to".into(), Value::Null),
+                (
+                    "tags".into(),
+                    json!([format!("st3-run-report:seat-down"), format!("mission-run:{run}")]),
+                ),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key),
+        })?;
+        self.signal_changed();
+        Ok(())
+    }
+
     fn tell_reporter(
         &self,
         run: &MissionRunView,

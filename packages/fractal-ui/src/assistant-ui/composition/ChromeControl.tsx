@@ -2,6 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Focusable, Pressable } from 'react-aria-components'
+import { useFocusRing } from 'react-aria'
 import { interactionVars as interaction, geometryVars as g, motionVars as m, radiusVars as r, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { Tooltip } from './Controls'
@@ -27,6 +28,10 @@ export interface ChromeControlProps {
   readonly popup?: 'dialog' | 'menu'
   readonly expanded?: boolean
   readonly controls?: string
+  /** Tooltip text when it should say more than the accessible name, e.g. a keyboard shortcut. Defaults to `label`. */
+  readonly tooltip?: string
+  /** The enabled button, for hosts that move focus to it. */
+  readonly ref?: React.Ref<HTMLButtonElement>
   /** Warm the control's data on hover, focus or press start; it never opens or presses anything itself. */
   readonly onPrefetch?: () => void
   /** A header-edge control: in a narrow host its 44px touch target overhangs the gutter so the glyph stays where the 28px control put it. */
@@ -37,9 +42,11 @@ export interface ChromeControlProps {
 /**
  * One quiet 28px icon button for the chrome: borderless, filled on hover, named by the kit tooltip.
  * Inside a React Aria trigger (MenuTrigger, DialogTrigger) it is the trigger's button.
+ * Tooltips follow hover or user keyboard navigation, never autofocus or programmatic focus restoration.
  */
-export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, onPrefetch, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
+export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltip, ref, onPrefetch, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
   const reasonId = React.useId()
+  const { focusProps, isFocusVisible } = useFocusRing()
   // Inside a narrow (phone) host every chrome control is a 44px touch target; a narrow desktop pane keeps desktop density.
   const narrow = React.useContext(NarrowLayoutContext)
   const touch = narrow ? [styles.touch, edge === 'lead' && styles.touchLead, edge === 'trail' && styles.touchTrail] : []
@@ -50,10 +57,12 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
     // handler on the button, which opens on Enter, Space and the arrows unless the event is default-prevented,
     // so the capture phase prevents those keys before any trigger sees them. Tab and Escape still pass.
     return <>
-      <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement}>
+      <Tooltip label={`${label} · ${disabledReason}`} placement={tooltipPlacement} navigationFocusOnly>
         <Focusable>
           <Pressable isDisabled>
             <button
+              {...focusProps}
+              data-focus-visible={isFocusVisible || undefined}
               onKeyDownCapture={event => { if (triggerKeys[event.key] === true) event.preventDefault() }}
               type="button"
               aria-label={label}
@@ -70,8 +79,9 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
       <span id={reasonId} hidden>{disabledReason}</span>
     </>
   }
-  return <Tooltip label={label} placement={tooltipPlacement}>
+  return <Tooltip label={tooltip ?? label} placement={tooltipPlacement} navigationFocusOnly>
     <Button
+      {...(ref === undefined ? {} : { ref })}
       aria-label={label}
       {...(pressed === undefined ? {} : { 'aria-pressed': pressed })}
       {...(popup === undefined ? {} : { 'aria-haspopup': popup })}
@@ -98,10 +108,11 @@ const styles = stylex.create({
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxSizing: 'border-box',
     width: g.controlMd, height: g.controlMd, padding: 0,
     borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fgMuted,
+    outlineStyle: 'none',
     cursor: 'pointer',
     transitionProperty: 'background-color, color', transitionDuration: m.fast, transitionTimingFunction: m.ease,
     ':hover': { backgroundColor: surface.rowHover, color: ink.fg },
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
+    ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
     ':disabled': { opacity: 0.64, cursor: 'default', backgroundColor: 'transparent', color: ink.fgMuted },
   },
   pressed: { backgroundColor: surface.rowActive, color: ink.fg, ':hover': { backgroundColor: surface.rowActive, color: ink.fg } },

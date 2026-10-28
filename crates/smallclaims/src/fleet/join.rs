@@ -648,7 +648,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
         if let Some(bound) = store.bound_fleet()? {
             anyhow::ensure!(
                 bound == code.fleet_id.to_string(),
-                "this store belongs to fleet {bound}; reset it (st service reset) to join another"
+                "this store belongs to fleet {bound}; reset it (fractal service reset) to join another"
             );
         }
         store
@@ -696,7 +696,7 @@ async fn join_inner(options: &JoinOptions, adapter: Option<&Path>) -> Result<Joi
         403 => anyhow::bail!(
             "the sponsor refused this code: it is unknown, expired, revoked, for another name, \
              or already used by another machine. If you did not use it before, someone else may \
-             have; check `st fleet invites` on a member"
+             have; check `fractal fleet invites` on a member"
         ),
         429 => anyhow::bail!("the sponsor is refusing join attempts for a minute; try again"),
         status => anyhow::bail!("the sponsor answered {status}"),
@@ -827,7 +827,7 @@ pub fn migrate_anchor(
                 bound == fleet_id,
                 "this store belongs to fleet {bound}, not the configured {fleet_id}"
             ),
-            None => anyhow::bail!("this store is not bound to a fleet yet; start st3 once first"),
+            None => anyhow::bail!("this store is not bound to a fleet yet; start fractal once first"),
         }
     }
     let key = member_key(state_dir)?;

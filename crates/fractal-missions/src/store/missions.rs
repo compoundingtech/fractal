@@ -1247,6 +1247,10 @@ pub trait MissionsStore {
     fn mission_specs_for_runs(&self, runs: &[String]) -> Result<BTreeMap<String, MissionSpec>>;
     /// The mission behind each of these runs, in one read.
     fn run_missions(&self, runs: &[String]) -> Result<BTreeMap<String, String>>;
+    /// A run's header and the state of every step of its current generation, for what the run
+    /// waits on: one primary-key read of the run and a range of `step_runs_run_index`. It reads
+    /// no claims, so its cost is the run's own steps, never the store's history.
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>>;
     /// Return every current published mission definition, including definitions with no runs.
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>>;
     /// The definitions of the missions that have no run, as `mission_definitions` reads them,
@@ -1751,6 +1755,17 @@ pub trait MissionsStore {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error>;
+    /// [`Self::work_action_with_handoff`]. A renewal answers with the step's row view alone unless
+    /// `enrich_renewal`: its queue, timing, summaries and wake are folded from a reader after COMMIT.
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
     fn set_step_state(
@@ -2073,6 +2088,43 @@ impl MissionsStore for Store {
             })?
             .collect::<rusqlite::Result<_>>()
             .map_err(Into::into)
+    }
+
+    fn run_step_states(&self, run: &str) -> Result<Option<crate::waiting_on::RunSteps>> {
+        let run = run.strip_prefix("mission-run/").unwrap_or(run);
+        let connection = self.readers.get();
+        let header = connection
+            .query_row(
+                "SELECT mission_id, status, current_generation_id FROM mission_runs WHERE id=?1",
+                [run],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+            )
+            .optional()?;
+        let Some((mission, status, generation)) = header else {
+            return Ok(None);
+        };
+        let steps = connection
+            .prepare_cached(
+                "SELECT subject, step_path, title, status, updated_at_unix_ms FROM step_runs
+                 WHERE run_id=?1 AND generation_id=?2 ORDER BY step_path",
+            )?
+            .query_map([run, generation.as_str()], |row| {
+                Ok(crate::waiting_on::RunStep {
+                    subject: row.get(0)?,
+                    path: row.get(1)?,
+                    title: row.get(2)?,
+                    status: row.get(3)?,
+                    updated_at_unix_ms: row.get::<_, String>(4)?.parse().unwrap_or_default(),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(Some(crate::waiting_on::RunSteps {
+            run: format!("mission-run/{run}"),
+            mission: format!("mission/{mission}"),
+            status,
+            generation: format!("run-generation/{generation}"),
+            steps,
+        }))
     }
 
     fn mission_definitions(&self) -> Result<Vec<MissionDefinitionView>> {
@@ -5609,6 +5661,18 @@ impl MissionsStore for Store {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error> {
+        self.work_action_answering(subject, action, request, extend_ms, handoff, true)
+    }
+
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error> {
         if action == "extend" {
             if !extend_ms.is_some_and(|by| (1..=MAX_STEP_EXTENSION_MS).contains(&by)) {
                 return Err(St3Error::new(
@@ -5712,7 +5776,7 @@ impl MissionsStore for Store {
                 }
                 // A revision carries a claim into the successor generation. Its worker may still name the
                 // step by the predecessor subject.
-                let (subject, current) = match (action != "claim")
+                let (subject, mut current) = match (action != "claim")
                     .then(|| carried_claim_successor_tx(transaction, &current, &actor))
                     .transpose()
                     .map_err(internal)?
@@ -5721,6 +5785,9 @@ impl MissionsStore for Store {
                     Some(successor) => (successor.subject.clone(), successor),
                     None => (subject, current),
                 };
+                if handoff.is_some() {
+                    enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
+                }
                 let (run_status, run_phase, current_generation, generation_status, root_status, root_phase): (
                     String,
                     String,
@@ -6110,6 +6177,9 @@ impl MissionsStore for Store {
                         )
                         .map_err(internal)?;
                 }
+                if let Some(input) = handoff {
+                    adhoc_work::clear_eta_tx(transaction, &self.origin, &current, input)?;
+                }
                 let mut view = transaction.query_row(
                     "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                             lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
@@ -6136,7 +6206,7 @@ impl MissionsStore for Store {
             })
             .map_err(|error| St3Error::new("internal", error))?;
         let mut view = committed?;
-        if action == "renew" {
+        if action == "renew" && enrich_renewal {
             // An exact retry of a renewal also replays a view cached without these fields.
             self.enrich_work_response(&mut view)
                 .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;

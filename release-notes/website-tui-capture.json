@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The fractal.how capture tooling renders seeded TUI screens through a detached tmux pane",
+  "replay": {"status": "none", "detail": "Only the website capture fixture and scripts change; no claim or projection replay."},
+  "schema": {"status": "none", "detail": "No persisted table, file format or schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest changes."},
+  "compatibility": {"status": "none", "detail": "No runtime, client, wire or harness changes; only crates/fractal/tests/website_cli_capture.rs and scripts/website-cli-capture."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No upgrade steps; tmux is needed only when running the optional TUI capture script."},
+  "recovery": {"status": "none", "detail": "No upgrade state changes to recover."}
+}

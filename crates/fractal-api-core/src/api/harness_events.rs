@@ -171,6 +171,25 @@ mod tests {
             .is_ok()
     }
 
+    /// The member CPU target's seat check reads what a native driver's events write.
+    #[tokio::test]
+    async fn the_cpu_seat_check_sees_a_native_drivers_events() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        // A minute after now, so every event below is before it.
+        let busy = |state: &AppState| {
+            let from = (client_now_ms() as u64 / 60_000 + 2) * 60_000;
+            state.store.local_seats_busy(from, from + 60_000, None).unwrap().0
+        };
+        runtime(&state, "native-one");
+        assert!(busy(&state), "a running seat with no observation is not quiet");
+        for (sequence, status, working) in [(1, "ready", false), (2, "working", true), (3, "idle", false), (4, "blocked", false)] {
+            let (code, admitted) = post(&state, &event(sequence, status), SEAT).await;
+            assert_eq!(code, StatusCode::OK, "{admitted}");
+            assert_eq!(busy(&state), working, "{status}");
+        }
+    }
+
     #[tokio::test]
     async fn native_readiness_and_idle_events_wake_reconcile_but_replay_does_not() {
         let root = tempfile::tempdir().unwrap();

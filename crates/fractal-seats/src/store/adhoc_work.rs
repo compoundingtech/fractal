@@ -32,6 +32,24 @@ mod tests {
                 &request(&start.actor, "claim-alder"),
             )
             .unwrap();
+        let eta = fractal_store::work_eta::summary(
+            Some("Fixture inspected"),
+            "2h",
+            &start.actor,
+            now_ms(),
+        )
+        .unwrap();
+        let mut progress = request(&start.actor, "progress-eta");
+        progress.summary = Some(eta.clone());
+        source.work_action(&work.subject, "progress", &progress).unwrap();
+        let unchanged = source
+            .work_action(
+                &work.subject,
+                "progress",
+                &request(&start.actor, "progress-without-summary"),
+            )
+            .unwrap();
+        assert_eq!(unchanged.progress_summary.as_deref(), Some(eta.as_str()));
         let input = WorkHandoffRequest {
             actor: start.actor.clone(),
             incarnation: Some(format!("{}-one", start.actor)),
@@ -59,6 +77,10 @@ mod tests {
                 Some(start.actor.as_str())
             );
             assert!(source.messages(None, true).unwrap().is_empty());
+            assert_eq!(
+                source.step_run(&work.subject).unwrap().unwrap().progress_summary.as_deref(),
+                Some(eta.as_str())
+            );
         }
         let mut empty = input.clone();
         empty.note = " ".into();
@@ -66,7 +88,12 @@ mod tests {
             source.handoff_work(&work.subject, &empty).unwrap_err().code,
             "handoff-needs-note"
         );
-        source.handoff_work(&work.subject, &input).unwrap();
+        assert_eq!(
+            source.step_run(&work.subject).unwrap().unwrap().progress_summary.as_deref(),
+            Some(eta.as_str())
+        );
+        let released = source.handoff_work(&work.subject, &input).unwrap();
+        assert_eq!(released.progress_summary.as_deref(), Some("Fixture inspected"));
         assert_eq!(
             source
                 .handoff_work(&work.subject, &input)
@@ -97,6 +124,7 @@ mod tests {
             .remove(0);
         assert_eq!(transferred.assigned_to.as_deref(), Some(input.to.as_str()));
         assert!(transferred.claimant.is_none());
+        assert_eq!(transferred.progress_summary.as_deref(), Some("Fixture inspected"));
         let message = target.messages(Some(&input.to), true).unwrap().remove(0);
         assert!(message.content.contains(&input.note));
         assert_eq!(
