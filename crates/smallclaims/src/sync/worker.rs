@@ -237,6 +237,9 @@ const PEER_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Recently working HTTP routes can return without any transport presence event. Probe
 /// briefly without exporting inventories or writing failures; long absences stay quiet.
 const PEER_PROBE_WINDOW: Duration = Duration::from_secs(5 * 60);
+/// How long a fallback route a member's Fabric grants refused is left out of route selection.
+/// Grants change by hand, so the refusal is asked again about as often as its words promise.
+const REFUSED_ROUTE_HOLD: Duration = Duration::from_secs(30 * 60);
 
 /// What every route on the peer listener shares: the store, this node, its fleet auth, and
 /// what it knows of the fleet. A runtime adds its own routes with this as their state.
@@ -1637,6 +1640,9 @@ async fn dial_peer<B: Backend>(
     let mut early_spent = BTreeSet::new();
     // Routes that answered for another shard than the one asked for, until the route set changes.
     let mut misconfigured = Vec::<Route>::new();
+    // Fallback routes the member's Fabric grants refused, each until its hold ends or the route
+    // set changes. A refused preferred route is never held: see the refusal below.
+    let mut refused = Vec::<(Route, tokio::time::Instant)>::new();
     loop {
         // A removed node stops dialing; `st3 doctor` says what to do next.
         if fleet.is_removed() {
@@ -1706,6 +1712,7 @@ async fn dial_peer<B: Backend>(
         }
         if routes.has_changed().unwrap_or(false) {
             misconfigured.clear();
+            refused.clear();
         }
         // Retry waits must retain signs of life received during this attempt, including
         // an inbound request that arrives just before the outbound request fails.
@@ -1718,9 +1725,15 @@ async fn dial_peer<B: Backend>(
                 route = 0;
                 preferred_retry = None;
             }
-            (0..routes.len())
-                .map(|offset| routes[route.wrapping_add(offset) % routes.len()].clone())
-                .find(|candidate| !misconfigured.contains(candidate))
+            refused.retain(|(_, until)| now < *until);
+            let candidates = || {
+                (0..routes.len())
+                    .map(|offset| routes[route.wrapping_add(offset) % routes.len()].clone())
+                    .filter(|candidate| !misconfigured.contains(candidate))
+            };
+            candidates()
+                .find(|candidate| !refused.iter().any(|(held, _)| held == candidate))
+                .or_else(|| candidates().next())
         };
         if selected.is_none() && !misconfigured.is_empty() {
             // Every route answered for another shard. There is nothing to dial until the
@@ -1870,6 +1883,25 @@ async fn dial_peer<B: Backend>(
                     // A stalled or broken stream must not be reused on the next attempt.
                     http = replication_http_client();
                 }
+                // The worker reached this route only by failing over from the preferred one,
+                // and the member's grants answered for this route alone. Hold it, and go back
+                // to the preferred route now on that route's own backoff: the refusal is not
+                // a network fault and adds nothing to it. A refused preferred route stays
+                // selected instead, so a refusal never selects a fallback around it.
+                let mut refused_fallback = false;
+                if error.is::<FabricGrantRefusal>()
+                    && preferred_route == Some(false)
+                    && let Some(selected_route) = selected_route
+                {
+                    refused.push((selected_route, tokio::time::Instant::now() + REFUSED_ROUTE_HOLD));
+                    route = 0;
+                    preferred_retry = None;
+                    // With no other usable route the peer keeps its normal backoff.
+                    refused_fallback = routes.borrow().iter().any(|candidate| {
+                        !misconfigured.contains(candidate)
+                            && !refused.iter().any(|(held, _)| held == candidate)
+                    });
+                }
                 let overloaded = error.is::<PeerOverloaded>();
                 let status = if overloaded {
                     "overloaded"
@@ -1891,6 +1923,9 @@ async fn dial_peer<B: Backend>(
                 }
                 let _ = backend.record_failure(&peer.name, status, &error.to_string(), Some(carrier), Some(&failure))
                     .await;
+                if refused_fallback {
+                    continue;
+                }
                 let delay = retry_delay(backoff.next(), &fleet, &name);
                 record_worker(
                     &backend,
