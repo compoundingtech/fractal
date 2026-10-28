@@ -290,6 +290,40 @@
           {
             "id": "agent/example/atlas/builder",
             "name": "Atlas Builder"
+          }
+        ],
+        "hosts": [
+          {
+            "id": "host/meadow",
+            "name": "meadow"
+          }
+        ],
+        "people": [
+          {
+            "id": "person/ada",
+            "name": "Ada"
+          }
+        ]
+      },
+      "id": "transcript-families",
+      "narrative": "An Atlas builder inspects a release report using visible reasoning and native structured tools, loses an export run, then cancels its retry before summarizing the retained evidence.",
+      "seed": 25,
+      "slices": {
+        "attention": "transcript-families/attention.json",
+        "conversation": "transcript-families/conversation.json",
+        "details": "transcript-families/details.json",
+        "roster": "transcript-families/roster.json",
+        "sync": "transcript-families/sync.json",
+        "terminal": "transcript-families/terminal.json"
+      },
+      "title": "Transcript families"
+    },
+    {
+      "cast": {
+        "agents": [
+          {
+            "id": "agent/example/atlas/builder",
+            "name": "Atlas Builder"
           },
           {
             "id": "agent/example/atlas/reviewer",

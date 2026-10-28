@@ -284,7 +284,7 @@ mission "example/preview" state="ready" {
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
-            stderr.contains("is legacy; use st apply FILE"),
+            stderr.contains("is legacy; use fractal apply FILE"),
             prefix.len() == 2
         );
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-10-st-apply-aliases
@@ -338,6 +338,44 @@ mission "example/preview" state="ready" {
         let agents = daemon.command(&["agents", "ls", "--all"]);
         assert!(!agents.to_string().contains("example/helper"), "{agents}");
     }
+}
+
+#[test]
+fn harness_bare_codex_dry_run_uses_defaults() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("worker.kdl");
+    std::fs::write(
+        &file,
+        "version 2\nagent \"garden/worker\" {\n  workspace \"/tmp/garden\"\n  restart \"always\"\n  harness \"codex\"\n}\n",
+    )
+    .unwrap();
+    let preview = daemon.command(&[
+        "apply", file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run",
+    ]);
+    assert_eq!(preview["blockers"], serde_json::json!([]));
+}
+
+#[test]
+fn harness_explicit_executable_dry_run_is_accepted() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("worker.kdl");
+    std::fs::write(
+        &file,
+        "version 2\nagent \"garden/worker\" {\n  workspace \"/tmp/garden\"\n  harness \"codex\" { executable \"/opt/codex/bin/codex\"; }\n}\n",
+    )
+    .unwrap();
+    let preview = daemon.command(&[
+        "apply", file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run",
+    ]);
+    assert_eq!(preview["blockers"], serde_json::json!([]));
 }
 
 #[test]

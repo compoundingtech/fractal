@@ -133,7 +133,7 @@ describe('gatewayPromptAnswers', () => {
   })
   const promptAlert = { id: 'attention/one', revision: 'r1', source_id: seat, target_id: seat, episode: 'episode-1' } as const
 
-  it('sends one answer fenced on the alert, and says why st refused one', async () => {
+  it('sends one answer fenced on the alert, and says why Fractal refused one', async () => {
     const sent: unknown[] = []
     const client = {
       capabilities: async () => capabilities(true),
@@ -170,6 +170,20 @@ describe('gatewayPromptAnswers', () => {
       } as unknown as FractalClient)
       expect((await answered.respond({ alert: promptAlert as never, answer: 'allow' }))._tag, status).toBe(tag)
     }
+    const rejected = gatewayPromptAnswers({
+      capabilities: async () => capabilities(true),
+      promptRespond: async () => ({ value: { id: 'action/b', status: 'rejected', targets: [seat] }, snapshot }),
+    } as unknown as FractalClient)
+    expect(await rejected.respond({ alert: promptAlert as never, answer: 'allow' })).toEqual({
+      _tag: 'Refused', detail: 'Fractal did not take this answer. Answer it in the seat\'s terminal.',
+    })
+    const unseen = gatewayPromptAnswers({
+      capabilities: async () => ({ value: { capabilities: [{ id: 'prompt.respond', state: 'granted' }] }, snapshot: {} }),
+      promptRespond: async () => ({ value: { id: 'action/b', status: 'completed', targets: [seat] }, snapshot }),
+    } as unknown as FractalClient)
+    expect(await unseen.respond({ alert: promptAlert as never, answer: 'allow' })).toEqual({
+      _tag: 'Refused', detail: 'Fractal did not say what it last saw. Try again in a moment.',
+    })
 
     let called = false
     const ungranted = gatewayPromptAnswers({

@@ -2,13 +2,12 @@
 name = "fractal-drivers"
 version = "0.1.0"
 edition = "2024"
-description = "Harness drivers, native delivery, and catalog support shared by st2 and st3"
+description = "Harness drivers, native delivery, and catalog support shared by st2 and Fractal"
 license = "MIT"
 autotests = false
 
 [dependencies]
-# Sync by design: the runner is I/O-light (shell-outs to `pty` plus a
-# folder watch + a sleep), so no tokio.
+# Drivers remain synchronous; daemon ownership admission uses Tokio before blocking submission.
 agent-spec = { path = "../agent-spec" }
 anyhow = "1"
 kdl = "6"
@@ -35,11 +34,13 @@ tracing = "0.1"
 tracing-opentelemetry = "0.31"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["ansi", "env-filter", "fmt", "registry", "std"] }
 tungstenite = "0.30"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 parking_lot = "0.12"
 toml = "0.9"
 wat = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 [[test]]
 name = "integration"

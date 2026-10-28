@@ -6,7 +6,7 @@ Read the [product README](../README.md) and the guide for the behavior you are c
 Use invented people, host names, and paths in this public repository. Run
 `python3 scripts/check-public-repo` before opening a pull request.
 
-For st3 claims, missions, replication, runtime ownership, or recovery, start with the
+For Fractal claims, missions, replication, runtime ownership, or recovery, start with the
 [documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
 read and preserve the proofs in [st2 invariants](st2/invariants.md).
 
@@ -136,22 +136,22 @@ the installed `st3`. `st` is never a separate build. On macOS, st3 lives in a fi
 `packages/fractal-sdk` owns the app-independent `@fractal/sdk` package. Its
 `@fractal/sdk/effect` entry point provides transport, follow state, decoding, and
 trace-context propagation without browser startup or UI dependencies.
-`St3Live(options)` works without an application platform layer; callers can supply
+`FractalLive(options)` works without an application platform layer; callers can supply
 an explicit socket in options for custom transports and tests.
 
 Browser behavior stays in `apps/fractal-web/src/data`: early collection socket
 adoption, traced browser fetch/WebSocket wrappers, and visibility/LRU admission
-policy. The app supplies those through `St3Platform`; the neutral SDK does not
+policy. The app supplies those through `FractalPlatform`; the neutral SDK does not
 adopt a browser bootstrap socket or install browser visibility policy by default.
 `@fractal/sdk/admission` exposes the admission primitives used by that adapter.
 
-`St3.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
+`Fractal.watch` accepts a typed `FollowDescriptor<TResource>`: `spec` selects an
 existing window collection and the descriptor's `decodeRow` decodes its rows.
 Optional `spec.descriptor` is a stable local decoder ID for independent decoder
 and admission identity; it is never sent on the wire. The watch shares the scoped
 follow lifecycle and multiplexed socket; it does not introduce another wire format.
 
-`St3Options.credential` resolves a bearer credential for each HTTP request and
+`FractalOptions.credential` resolves a bearer credential for each HTTP request and
 socket open. It is not an actor selector. The `client` option is only a reported
 client/build label, never authenticated identity or authority. An explicit
 credential bypasses browser bootstrap socket adoption; non-browser socket
@@ -295,7 +295,7 @@ domain must belong to a zone in the configured Cloudflare account.
 
 Materialize the pinned `effect-utils` member before installing dependencies,
 as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
-Use the web shell's pnpm 12.7.0, not a separate global install:
+Use the web shell's pnpm 12.15.0, not a separate global install:
 
 ```sh
 mr apply --worktree-mode commit
@@ -318,6 +318,46 @@ To restore earlier Storybook content, build the desired revision and redeploy
 stage `main` using the same Cloudflare account and remote state.
 These instructions describe the deployment configuration, not evidence of a
 successful live deployment or a recorded approval for public hosting.
+
+### Production app stories
+
+The kit Storybook loads app stories only by the explicit file entries in
+`packages/fractal-ui/.storybook/stories.ts`. A story titled `Fractal/App/<Module>` is a
+production module suite: its `meta.component` is that app module, imported from its
+production file and mounted by the story. `Fractal/App/LiveAgentWorkspace` and
+`Fractal/App/ConversationPane` mount the real modules under `DataSourceProvider` over
+`fixtureSource` feeds of the deterministic fixture world (`src/fixtures/appStoryStates.ts`);
+they never start the live runtime or contact a gateway. Each suite has one story per state,
+with a scheme control for light and dark: loading, empty, populated, failed tool, offline (stale
+feeds, reconnecting socket, browser offline), unavailable and the streaming repair session. Each
+story mounts exactly one production boundary; its play waits for the real transcript, composer
+and, for the workspace, the workspace root, then marks the canvas `data-proof="passed"`. The
+responsive phone layout stays in `Fractal/Narrow layout`.
+
+These states do not depend on width or scheme, so `APP_CASE_OVERRIDES` in
+`packages/fractal-ui/scripts/kit-play-commit-set.mjs` runs each of the 14 stories in one case,
+dark at 1440 px: 14 merge-gate cases instead of the full four-case matrix. A state whose
+behaviour does depend on width needs its own reviewed override. The suites carry no `critical`
+tag, so the per-commit set does not run them; they run in the merge gate (`KIT_PLAY_SET=all`).
+Every file they bundle is listed in `KIT_PATTERNS` in `scripts/ci-fractal-web-changes`, so a
+change to any of them selects kit plays.
+
+`LiveAgentWorkspace.graph.integration.test.ts` keeps the eager startup boundary and adds a
+lazy-inclusive identity check: it follows literal `import()` edges from `main.tsx` without
+evaluating modules, resolves every configured module suite's `meta.component` through imports,
+aliases and `React.lazy`, and requires both directions: each suite mounts a module of that
+production graph whose name matches its title, and `LiveAgentWorkspace.tsx` and
+`ConversationPane.tsx` each have a configured suite. Planted story-local, lazily imported,
+renamed and missing suites must fail. `appStoryAssertions.unit.test.ts` is the negative
+control for the play assertion: a stubbed production module or a gallery of boundaries fails.
+
+The synthetic-fixture privacy scanner
+(`apps/fractal-web/scripts/synthetic-fixtures/scan.mjs`) scans a root inside Git by its
+publication inputs, `git ls-files --cached --others --exclude-standard`: committed and
+untracked non-ignored files, including tracked files under an ignored directory. Git-ignored
+build output such as `storybook-static` or installed dependencies is not a publication input.
+Roots outside Git are scanned in full, and a root reached through a symlinked directory is
+matched by its resolved path. This adds no filename, vendor or content-hash exemptions.
 
 ## Continuous integration
 
@@ -369,7 +409,7 @@ Header and agent-work composition remain outside this crate.
 ## Embedding native conversations
 
 `crates/fractal-conversation-ui` provides the same native conversation presentation used by
-`st`’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
+Fractal’s terminal interface, without terminal acquisition, application tabs or daemon connections. Feed
 `fractal-client` conversation frames into `Timeline::apply(Frame { replace, has_more, items })`,
 adapt the timeline with caller-owned display names, and render it with `Cache::render`
 and caller-supplied `Theme` tokens. The returned document contains styled lines and typed
@@ -437,7 +477,7 @@ wording consistent when both describe the same change.
 | Path | Contents |
 | --- | --- |
 | `crates/fractal` | Current daemon and CLI. |
-| `crates/fractal-tui` | Terminal UI library used by `st`. |
+| `crates/fractal-tui` | Terminal UI library used by Fractal. |
 | `crates/fractal-drivers`, `crates/fractal-runtime` | Harness drivers and shared runtime. |
 | `crates/fractal-client`, `crates/fractal-feed`, `crates/fractal-schema`, `crates/fractal-client-codegen` | Client API, feeds, schema, and code generation. |
 | `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
@@ -445,7 +485,7 @@ wording consistent when both describe the same change.
 | `crates/fractal-migrate` | Migration tooling. |
 | `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
-| `examples/st3`, `docs` | Runnable declarations and documentation. |
+| `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
 The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing

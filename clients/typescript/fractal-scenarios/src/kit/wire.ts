@@ -6,6 +6,10 @@ export type WireDefinition =
   | 'Arrangement'
   | 'Runtime'
   | 'Machine'
+  | 'Session'
+  | 'Device'
+  | 'Launch'
+  | 'LaunchVariant'
   | 'Mission'
   | 'Work'
   | 'Attention'
@@ -40,12 +44,16 @@ export const wireValues = (slice: AnySlice): WireValue[] => {
       list('/state/resources', slice.state.resources ?? [], 'Resource')
       list('/state/runtimes', slice.state.runtimes, 'Runtime')
       list('/state/machines', slice.state.machines, 'Machine')
+      list('/state/sessions', slice.state.sessions, 'Session')
+      list('/state/devices', slice.state.devices, 'Device')
       slice.state.recorded_history?.forEach((event, index) => list(`/state/recorded_history/${index}/upserts`, event.upserts, 'Resource'))
       break
     case 'details':
       list('/state/missions', slice.state.missions, 'Mission')
       list('/state/resources', slice.state.resources ?? [], 'Resource')
       list('/state/work', slice.state.work, 'Work')
+      list('/state/launches', slice.state.launches, 'Launch')
+      list('/state/launch_variants', slice.state.launch_variants, 'LaunchVariant')
       break
     case 'attention':
       list('/state/attention', slice.state.attention, 'Attention')

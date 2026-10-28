@@ -78,11 +78,12 @@ const BASELINE_RUNS: usize = 5;
 /// The daemon's CPU, in cores, may differ from the baseline by this much whatever the ratio.
 const CPU_SLACK: f64 = 0.05;
 
-/// The daemon's average CPU over the run may not pass this many cores: the CPU target in
-/// `slo/targets.toml`, built into st3. A missing file fails the build and an invalid one fails
-/// the run; there is no default.
+/// The daemon's average CPU over the run may not pass this many cores: `load_max_cores` in
+/// `slo/targets.toml`, built into st3, the bound under this synthetic load rather than the
+/// member's production target. A missing file fails the build and an invalid one fails the run;
+/// there is no default.
 fn cpu_budget() -> f64 {
-    fractal_daemon::slo::targets().cpu.max_cores
+    fractal_daemon::slo::targets().cpu.load_max_cores
 }
 
 /// Requests in flight at once before the load stops adding more; a daemon this far behind fails.
@@ -1250,7 +1251,7 @@ fn unchanged_work_tolerates_bounded_shared_runner_variation() {
 #[test]
 fn targets_come_from_the_targets_file_and_describe_without_gating() {
     // The CPU budget is the file's, not a copy of it here.
-    assert_eq!(cpu_budget(), fractal_daemon::slo::targets().cpu.max_cores);
+    assert_eq!(cpu_budget(), fractal_daemon::slo::targets().cpu.load_max_cores);
     // Each request stands for the path in the file that serves it, and takes that target's
     // owner-side p99, so editing the file moves these without editing this test.
     let targets = fractal_daemon::slo::targets();
@@ -1855,21 +1856,19 @@ fn run(
     let pty = stub_pty(root);
     let notify = Arc::new(Notify::new());
     let (event_notify, _events) = watch::channel(0_u64);
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: notify.clone(),
-        event_notify: event_notify.clone(),
-        node: NODE.into(),
-        state_dir: root.join("state"),
-        pty_root: root.join("pty"),
-        pty_binary: pty.clone(),
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![PEER.into()],
-        client_relay: None,
-        native_session_home: Some(root.join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: notify.clone(),
+    event_notify: event_notify.clone(),
+    node: NODE.into(),
+    state_dir: root.join("state"),
+    pty_root: root.join("pty"),
+    pty_binary: pty.clone(),
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![PEER.into()],
+    client_relay: None,
+    native_session_home: Some(root.join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let subjects = {
         let _entered = daemon.enter();
         fractal_daemon::api::start_operation_report(&state);

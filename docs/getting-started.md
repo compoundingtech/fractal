@@ -1,6 +1,6 @@
 # Get started with Fractal
 
-Download Fractal and run `fractal`. The first run sets up your machine and opens a
+Download Fractal and run `st`. The first run sets up your machine and opens a
 conversation with the built-in Fractal Assistant, when a coding harness is available. The Assistant
 helps you give agents a mission and follow its progress in the terminal interface.
 
@@ -16,8 +16,8 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/compound
 ```
 
 The installer detects your platform, downloads the latest release and its SHA256
-sidecar, checks the archive, installs `fractal`, its `fractal` link and `pty` in `~/.local/bin`,
-and opens `fractal`. The checksum comes from the same release endpoint as the archive;
+sidecar, checks the archive, installs `st3`, its `st` link and `pty` in `~/.local/bin`,
+and opens `st`. The checksum comes from the same release endpoint as the archive;
 it checks the downloaded bytes, rather than supplying an independent signature.
 
 Linux x86_64 needs glibc 2.35+ (Ubuntu 22.04+), `curl`, `tar` and `sha256sum` or
@@ -31,7 +31,7 @@ To download without opening the interface, use the same installer with `--no-run
 `--tag` chooses a release and `--bin-dir` changes the command destination; see
 [binary releases](st3/binary-releases.md).
 
-On macOS, the installer puts `fractal` in `~/Applications/Fractal.app` and links the
+On macOS, the installer puts `st3` in `~/Applications/Fractal.app` and links the
 command to that stable app path. Configure an optional persistent signing identity
 before installation using [macOS installation and signing](st3/macos-installation.md).
 The default is ad-hoc signing, which can require renewed OS approvals after an update.
@@ -40,7 +40,7 @@ and TCC permission setup remain a separate manual rehearsal.
 
 ## 2. Answer the first-run screen
 
-In a terminal, `fractal setup` (and the first plain `fractal`) shows one screen instead of asking
+In a terminal, `st setup` (and the first plain `st`) shows one screen instead of asking
 questions one at a time. It says in a few lines what Fractal is and that your first
 agent runs on your own Claude or Codex account and uses its usage. Then it lists
 everything to choose:
@@ -71,7 +71,7 @@ One dim line under the login choices names the **work folder**: `~/st` by defaul
 Agents started without a folder of their own work in a subfolder of it, so none of them
 has to look through your home folder, which on macOS would raise a permission prompt.
 `work_root` must be an absolute path, not the home folder itself and not inside Documents,
-Desktop or Downloads. `fractal uninstall` leaves its contents alone.
+Desktop or Downloads. `st uninstall` leaves its contents alone.
 
 One consent line sits above the two buttons: *Set up fractal for the selected agents, adding
 its local integrations and required workspace configuration?* **Set up** does it for
@@ -85,7 +85,7 @@ the rows that did not finish. The first agent that is ready starts the Assistant
 screen is still up.
 
 Pipes, `--yes` and anything that is not a terminal keep the line-mode setup: flags
-supply the answers and nothing is asked. `fractal setup --help` lists them.
+supply the answers and nothing is asked. `st setup --help` lists them.
 
 An installed program does not prove that its account is signed in. With no supported
 agent, setup starts no onboarding run and still opens the interface. After installing
@@ -112,9 +112,9 @@ unattended operation too. See
 [Claude's authentication instructions](https://code.claude.com/docs/en/authentication#authentication-precedence).
 
 If `agent/st/assistant` is already waiting at those screens, complete native Claude
-setup first, then run `fractal agents restart agent/st/assistant --as person/ada` to retry
+setup first, then run `st agents restart agent/st/assistant --as person/ada` to retry
 the existing agent (replace `ada` with your configured person). Keep its
-original onboarding run; do not use `fractal setup --onboarding` while that run is active.
+original onboarding run; do not use `st setup --onboarding` while that run is active.
 
 Setup prints the access mode your agents run in. A new install uses `auto`: the provider's
 managed permission checks, which reduce accidents but are not a security boundary. A config
@@ -135,16 +135,16 @@ When a usable harness is available, the first run, the one that creates your con
 asks before it starts anything. It says that the built-in Fractal Assistant is an agent that runs on your
 own harness account, so it uses that harness's usage and quota, and which access mode it
 runs in, then asks `Start the built-in Fractal Assistant now?` (default yes). `--yes` answers yes and
-`--assistant false` declines; a decline prints `Not started. Run fractal setup --onboarding when you
+`--assistant false` declines; a decline prints `Not started. Run st setup --onboarding when you
 want it.` On yes, setup creates `agent/st/assistant` and starts `mission/st/onboarding`, and says
-what it created and how to stop it. When setup publishes the Assistant during a plain `fractal`
+what it created and how to stop it. When setup publishes the Assistant during a plain `st`
 launch, the interface opens that conversation. You can also open its conversation from the sidebar or **Ctrl+K**.
 The Assistant greets you and plays three short acts, in about five minutes. First, two agents
 talk to each other (a Claude and a Codex when both are ready). Second, a small mission runs in a split
 beside the conversation. Third, an alert from the Assistant appears above the message input, where you
 can read it and dismiss it, and the Assistant asks what you want to accomplish in Fractal today. That
 question ends onboarding; it starts real work only if you answer. Say `skip` at any point to stop, and
-`fractal setup --onboarding` brings the tour back. The Assistant stays available afterward.
+`st setup --onboarding` brings the tour back. The Assistant stays available afterward.
 The follow-on [mission guide](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/missions-in-practice.md) explains how to declare
 the `garden/worker` agent used in its examples.
 
@@ -160,7 +160,7 @@ st
 ```
 
 If setup reported that the login PATH lacks `~/.local/bin`, add that export to your
-shell's startup file so new terminals can find `fractal` too. The installer can open fractal
+shell's startup file so new terminals can find `st` too. The installer can open st
 using its full path even before that PATH change.
 
 You can also send the Assistant a question from the shell. This example assumes you
@@ -173,12 +173,12 @@ st
 ```
 
 Setup starts the Assistant on its own only on that first run. On a machine that already has a
-configuration, plain `fractal` and `fractal setup` start nothing and, for `fractal setup`, say so. To begin
+configuration, plain `st` and `st setup` start nothing and, for `st setup`, say so. To begin
 (or begin again) deliberately, finish or cancel any active onboarding run, then use
-`fractal setup --onboarding`. That command skips the question because it is the request, can
+`st setup --onboarding`. That command skips the question because it is the request, can
 restore a stopped Assistant and starts a distinct onboarding run; it refuses when the running
 daemon is too old to report onboarding history. It does not cancel an existing run for you.
-Use `fractal setup --help` for scripted answers and other options.
+Use `st setup --help` for scripted answers and other options.
 
 ## 4. Check the installation
 
@@ -189,8 +189,8 @@ st service status
 ```
 
 `doctor` should show a reachable daemon and `pty`. A machine with no fleet configured
-is healthy. If an older daemon was already running, compare `fractal --version --json`
-with its `machine_version` in `fractal doctor --json` before continuing. See
+is healthy. If an older daemon was already running, compare `st --version --json`
+with its `machine_version` in `st doctor --json` before continuing. See
 [when something is wrong](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md) for failed checks, provider
 login and channel-delivery problems.
 
@@ -213,7 +213,7 @@ installs use store paths; source and release installers own the macOS app bundle
 ### Daemon details
 
 The background service is a systemd user unit on Linux and a launchd agent on macOS.
-To inspect it, use `fractal service status`. On Linux, lingering allows the service to run
+To inspect it, use `st service status`. On Linux, lingering allows the service to run
 after logout and before login after a reboot. Setup prints the needed command if it
 cannot enable it. On macOS, run:
 
@@ -224,8 +224,8 @@ st service permissions
 Follow the instructions for the OS permissions you must grant, including Full Disk
 Access and Developer Tools. Fractal does not automate those approval prompts.
 
-For an upgrade, `fractal service install` refreshes definitions and restarts services;
-`fractal service restart` suffices when definitions already point at the intended binaries.
+For an upgrade, `st service install` refreshes definitions and restarts services;
+`st service restart` suffices when definitions already point at the intended binaries.
 Coordinate that restart with active work and any continuous health checks. Replacing
 archive files alone does not restart running services.
 
@@ -235,7 +235,7 @@ it lives in the state directory. An explicit `--endpoint` or `ST3_ENDPOINT` take
 precedence. Commands wait up to 30 seconds for a restarting daemon, then exit with
 status 5; `--daemon-wait` and `ST3_DAEMON_WAIT` change that wait. Restarting the daemon
 leaves durable agents running so it can adopt them again. For foreground operation,
-use `fractal up`.
+use `st up`.
 
 The [daemon troubleshooting guide](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/troubleshooting.md),
 [command recorder](st3/command-recorder.md) and [compatibility policy](st3/compatibility.md)
@@ -247,6 +247,6 @@ cover socket paths, recorded commands and recovery details.
 - [Talking to agents](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/talking-to-agents.md): UI, phone, CLI, attachments, and requests.
 - [Two machines](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/two-machines.md): create a fleet, invite another machine and check replication.
 - [Web and iOS clients](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/web-and-ios.md): follow work and pair the phone app.
-- [Runnable examples](../examples/st3/README.md): agents, other harnesses, schedules and gates.
+- [Runnable examples](../examples/fractal/README.md): agents, other harnesses, schedules and gates.
 - [Agent lifecycle](seat-lifecycle.md): restart, suspend/resume and stopped agents.
 - [GitHub integration](https://github.com/compoundingtech/fractal/blob/main/docs/site/guides/github-integration.md): optional repository intake and review.

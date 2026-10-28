@@ -10,7 +10,7 @@ const message = {
   role: 'user', content: [{ type: 'text', text: 'hello' }], createdAt: new Date(0),
   metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
 } as const
-const grants = { actions: 'granted', messageSend: 'granted', attachmentUpload: 'granted', terminalInput: 'ungranted' } as const
+const grants = { actions: 'granted', messageSend: 'granted', attachmentUpload: 'granted', terminalInput: 'ungranted', terminalControl: 'ungranted' } as const
 const seat = 'agent/example/scratch'
 
 describe('composer send contract', () => {
@@ -95,7 +95,7 @@ describe('composer send contract', () => {
     expect(onRefused).not.toHaveBeenCalled()
     await binding.retry({ _tag: 'Text', id: 'pending/unconfirmed-key', role: 'user', text: 'hello', attachments: [], streaming: false, at: new Date(0).toISOString(), sendState: { _tag: 'Unconfirmed', detail: 'st could not confirm the send in time' } })
     expect(send.mock.calls[1]![0]).toMatchObject({ _tag: 'Resend', idempotencyKey: 'unconfirmed-key' })
-    expect(sendFailureDetail('unconfirmed')).toBe('st may have taken this message and has not confirmed it yet. Sending it again is safe.')
+    expect(sendFailureDetail('unconfirmed')).toBe('Fractal may have taken this message and has not confirmed it yet. Sending it again is safe.')
   })
 
   it('disables absent ports and actual refusals instead of inventing a capability or fence', async () => {

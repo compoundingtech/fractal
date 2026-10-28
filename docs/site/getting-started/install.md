@@ -26,6 +26,8 @@ fractal --version
 
 The installer downloads the latest release and checks its SHA256 sidecar. The archive and checksum come from the same release endpoint; this is an integrity check, not an independent signature. `--no-run` installs the commands without launching a client.
 
+Already installed? Follow the [upgrade guide](../guides/upgrading.md) before running the installer. Archive installation replaces the installed command files (and the macOS app), not the running daemon process. The installer reports an existing CLI's old and new versions and, when the service manager reports a running daemon, prints a restart reminder. Nix-owned paths are refused; update the owning [Home Manager configuration](../reference/home-manager.md) instead.
+
 The download installer records the selected release tag and the verified binary's
 commit in `RELEASE.json` beside the Linux executable. On macOS the receipt is
 beside the signed application bundle, named `SmallTalk.app.RELEASE.json`; it does
@@ -49,6 +51,8 @@ fallback.
 Run `fractal setup` in your terminal. Choose your person name, a persistent machine name, which installed harnesses to integrate, and whether to keep the daemon running as a user service. The machine name `local` is reserved. Native harness login and workspace trust may need your interaction.
 
 Setup describes each integration before changing it. A new installation uses the `auto` access mode: provider-managed permission checks reduce accidents but are not a security boundary. `bypass` removes those prompts. Do not change that setting without the user's authorization.
+
+An explicit `--harness claude` (or an interactive Claude selection) fails if Claude channel installation fails; setup reports the provider's error and does not silently choose another harness. Correct the reported problem and rerun setup. Automatic harness selection may fall back to another installed harness.
 
 Use the CLI to inspect agents and missions, or run `fractal web` to open the daemon's [local web app](../guides/web-and-ios.md). The daemon serves installed web assets on loopback port 7410 by default; the launcher opens an authenticated browser session without starting another server. If web access is unavailable, check `fractal doctor` for missing assets or person configuration.
 

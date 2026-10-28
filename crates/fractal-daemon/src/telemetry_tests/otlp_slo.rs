@@ -46,5 +46,6 @@ fn the_live_report_names_every_target_in_the_targets_file() {
     for store in ["sql-statement", "transaction"] {
         assert!(samples.iter().any(|point| label(point, "target") == Some(store)), "{store}");
     }
-    assert!(!points(&body, "st_slo_cpu_cores").is_empty());
+    // CPU minutes not yet known send no cores point rather than a zero; the target always goes out.
+    assert_eq!(points(&body, "st_slo_cpu_max_cores")[0]["asDouble"], crate::slo::targets().cpu.max_cores);
 }

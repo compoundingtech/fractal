@@ -280,6 +280,7 @@ impl Store {
         agent_person_walk(
             agent,
             |subject| self.desired_subject_with_writer(subject),
+            |subject| self.helper_launcher_binding(subject),
             |run| {
                 self.mission_run(run)
                     .map(|view| view.map(|view| view.requester))

@@ -1775,7 +1775,7 @@ async fn a_leaked_code_is_visible_and_can_be_revoked() {
     let rightful = Node::new(root.path(), "laptop");
     let refused = rightful.join(&code, &[]);
     assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("st fleet invites"));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("fractal fleet invites"));
 
     for node in [&a, &m] {
         wait_until(
@@ -2519,9 +2519,9 @@ fn supervise_leave_with_diagnostics() -> bool {
         let scripts = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts");
         let root = tempfile::tempdir().unwrap();
         let output = Command::new("python3")
-            .arg(scripts.join("st3_test_process.py"))
+            .arg(scripts.join("fractal_test_process.py"))
             .args(["--owner", &std::process::id().to_string(), "--", "python3"])
-            .arg(scripts.join("st3_fleet_leave_diagnostics.py"))
+            .arg(scripts.join("fractal_fleet_leave_diagnostics.py"))
             .args(["--seconds", "600", "--root"])
             .arg(root.path())
             .arg("--")
@@ -2772,7 +2772,7 @@ async fn uninstall_leaves_nothing_behind() {
     ]);
     assert!(!first.status.success());
     assert!(
-        String::from_utf8_lossy(&first.stderr).contains("stop st3 up"),
+        String::from_utf8_lossy(&first.stderr).contains("stop fractal up"),
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
@@ -3674,7 +3674,7 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             args.push("--prefer");
         }
         let output = node.st_ok(&args);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(
             configured_file(&node).transports,
             if prefer_on_add {
@@ -3705,14 +3705,14 @@ async fn fabric_transport_preference_preserves_other_transports_and_existing_exp
             "--no-service",
         ]);
         if !prefer_on_add {
-            assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+            assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         }
         let preferred = configured_file(&node);
         assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
         assert_eq!(preferred.fabric_protocol, before.fabric_protocol);
         assert_eq!(node.st_json(&["fleet", "status"])["view"], endpoints);
         let output = node.st_ok(&["fleet", "transports", "remove", "fabric", "--no-service"]);
-        assert!(output.contains("Restart st3 daemon and st3 replication-worker"));
+        assert!(output.contains("Restart fractal daemon and fractal replication-worker"));
         assert_eq!(configured_file(&node).transports, ["loopback", "tailscale"]);
     }
 }
@@ -3774,7 +3774,7 @@ async fn transport_prefer_reorders_under_lock_without_changing_exposure() {
     );
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains("Restart st3 daemon and st3 replication-worker")
+            .contains("Restart fractal daemon and fractal replication-worker")
     );
     let preferred = configured_file(&node);
     assert_eq!(preferred.transports, ["fabric", "loopback", "tailscale"]);
@@ -5112,7 +5112,7 @@ async fn suspended_seat_moves_between_two_daemons_with_its_workspace_and_convers
             format!(
                 "#!/bin/sh\nexec env STUB_HARNESS=omp '{}' '{}' \"$@\"\n",
                 node_program.display(),
-                repo.join("scripts/st3-boot-canaries/stub-pi-family.mjs")
+                repo.join("scripts/fractal-boot-canaries/stub-pi-family.mjs")
                     .display()
             ),
         )

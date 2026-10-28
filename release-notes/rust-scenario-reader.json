@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Read shared scenario worlds and rebased client-v0 wire fixtures from Rust",
+  "replay": { "status": "none", "detail": "Fixture-only reader; no daemon replay or backfill." },
+  "schema": { "status": "none", "detail": "No wire or storage schema changes. Reads st3.scenario.index.v1 and st3.scenario.slice.v1." },
+  "rules": { "status": "none", "detail": "No admission or checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Adds fractal-client::scenarios. Strict fixtures reject unknown wire fields and enum cases; tolerant fixtures use existing forward-compatible client models." },
+  "downtime": { "status": "none", "detail": "No service changes or restart required." },
+  "manual": { "status": "none", "detail": "No configuration or manual steps." },
+  "recovery": { "status": "none", "detail": "No persistent state changes; ordinary rollback is supported." }
+}

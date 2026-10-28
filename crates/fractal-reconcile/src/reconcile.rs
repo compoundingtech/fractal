@@ -47,8 +47,8 @@ use crate::model::{
     WorkSelector, ObserverSpec,
 };
 use crate::resource::{
-    ObservationRequest, ObserverCondition, ProviderRateLimit, RegisteredResourceProvider,
-    ResourceProvider,
+    LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
+    RegisteredResourceProvider, ResourceProvider,
 };
 use crate::store::Store;
 
@@ -61,6 +61,9 @@ pub mod start_jobs;
 pub mod waits;
 #[cfg(test)]
 mod schedule_standby_selection_tests;
+#[cfg(test)]
+mod schedule_admission_tests;
+mod schedule_replication_block;
 
 pub use idle_nudge::{IDLE_NUDGE_AFTER_MS, IDLE_NUDGE_QUIET_WATCH_MS, IdleNudgeSettings};
 
@@ -131,9 +134,14 @@ const DEADLINE_SOURCE_RETRY_MS: u128 = 5_000;
 // draws no graph change, and a pass used to read every running seat's screen.
 const SCREEN_POLL_EVERY_MS: u128 = 10_000;
 
-/// When a seat's retention was last checked, why the seat is held (if it is), and what the
-/// check read.
-type SeatRetention = (u128, Option<String>, BTreeSet<String>);
+/// Why a seat is held (if it is), and what the retention check read.
+type SeatRetention = (Option<String>, BTreeSet<String>);
+
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread read a seat's retention answer from the store.
+    static SEAT_RETENTION_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 // A seat kept running past its run is checked again this soon for unread mail and other work.
 // Reading a conversation message does not wake the reconciler, so this check is what lets the
@@ -164,7 +172,10 @@ fn schedule_admission_ready(
     host: &str,
     configured: &[String],
     since: u128,
+    schedule: &DesiredSubject,
 ) -> Result<bool> {
+    // Include the due callback: an armed timer cannot bypass a staged or conflicting owner.
+    store.owned_desired_guard(schedule).map_err(anyhow::Error::new)?;
     if store.replication_projection_deferred()
         || store.replication_catching_up()
         || store
@@ -173,29 +184,57 @@ fn schedule_admission_ready(
     {
         return Ok(false);
     }
-    let membership = store.fleet_membership()?;
-    let peers = configured
-        .iter()
-        .cloned()
-        .chain(
-            membership
-                .incarnations()
-                .filter(|member| member.end.is_none())
-                .map(|member| member.name.clone()),
-        )
-        .filter(|peer| peer != host && !matches!(membership.state(peer),
-            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let peers = schedule_admission_peers(store, host, configured)?;
     if peers.is_empty() {
         return Ok(true);
     }
     let sync = store.replication_peer_sync(&peers);
-    Ok(!sync.values().any(|peer| peer.peer_only_envelopes > 0)
-        && sync
-            .values()
-            .any(|peer| peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0))
+    let strict = sync.values().any(|peer| peer.stale && peer.peer_only_envelopes > 0)
+        && schedule_requires_complete_history(store, schedule)?;
+    Ok(schedule_progress_ready(sync.values(), since, strict))
+}
+
+fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) -> Result<Vec<String>> {
+    let membership = store.fleet_membership()?;
+    Ok(configured.iter().cloned()
+        .chain(membership.incarnations().filter(|member| member.end.is_none())
+            .map(|member| member.name.clone()))
+        .filter(|peer| peer != host && !matches!(membership.state(peer),
+            crate::fleet::MemberState::Ended(_) | crate::fleet::MemberState::LegacyRemoved(_)))
+        .collect::<BTreeSet<_>>().into_iter().collect())
+}
+
+/// Moving a schedule (or removing its standby) must not turn an old missing-history
+/// comparison into permission to run on a second host. Conservatively retain the strict
+/// policy for the entire retained history after any role/owner change, not just a timeout.
+fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
+    let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
+    if current.standby.is_some() { return Ok(true); }
+    for claim in store.claims_for(&schedule.subject, Some("intent.desired"))? {
+        let Some(previous) = crate::graph::schedule_spec(&claim.body["desired"], &claim.origin) else {
+            return Ok(true);
+        };
+        if previous.host != current.host || previous.standby.is_some()
+            || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
+            || claim.body["owner_generation"].as_str() != schedule.owner_generation.as_deref()
+            || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn schedule_progress_ready<'a>(
+    sync: impl IntoIterator<Item = &'a smallclaims::replication::ReplicationPeerSync>,
+    since: u128,
+    strict: bool,
+) -> bool {
+    let mut complete = false;
+    for peer in sync {
+        if peer.peer_only_envelopes > 0 && (strict || !peer.stale) { return false; }
+        complete |= peer.measured_at_unix_ms >= since && peer.peer_only_envelopes == 0;
+    }
+    complete
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -410,6 +449,11 @@ pub trait RuntimeControl: Send + Sync + 'static {
             self.observe_exec(&member.runtime_id)
         }
     }
+    /// Daemon-observed live harness identity for this exact incarnation. Missing evidence
+    /// never falls back to declaration/environment values or a PID parsed from an incarnation.
+    fn start_process_identity(&self, _member: &MemberSpec, _incarnation: &str) -> Result<Option<(u32, u64)>> {
+        Ok(None)
+    }
     fn start(&self, member: &MemberSpec) -> Result<()>;
     fn start_guarded(&self, member: &MemberSpec, guard: &dyn Fn() -> Result<()>) -> Result<()> {
         guard()?;
@@ -616,6 +660,28 @@ impl RuntimeControl for NativeRuntime {
 
     fn snapshot_ptys_with_provenance(&self) -> Result<PtyRegistrySnapshot> {
         self.snapshot_pty_registry(true)
+    }
+
+    fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (member, incarnation);
+            Ok(None)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if member.terminal {
+                return self.pty()?.process_identity_if(&member.runtime_id, incarnation);
+            }
+            Ok(match self.exec.observe(&member.runtime_id)? {
+                Some(fractal_runtime::ExecObservation::Running(generation))
+                    if generation.generation_id == incarnation =>
+                {
+                    Some((generation.pid, generation.start_token))
+                }
+                _ => None,
+            })
+        }
     }
 
     fn observe_exec(&self, runtime_id: &str) -> Result<Option<RuntimeObservation>> {
@@ -1081,6 +1147,7 @@ pub struct Reconciler<R = NativeRuntime> {
     armed_schedules: Arc<Mutex<std::collections::HashSet<String>>>,
     /// A locally selected future standby tick is not a replicated scheduling claim.
     standby_due_ticks: Mutex<HashMap<String, (String, u64, i64)>>,
+    schedule_replication_blocks: Mutex<HashMap<String, schedule_replication_block::BlockedTick>>,
     schedule_peers: Vec<String>,
     /// The request and deadline of a failed workspace attempt, by schedule. Local retry state
     /// never enters the replicated graph; durable diagnostic dedupe survives a restart.
@@ -1135,7 +1202,7 @@ pub struct Reconciler<R = NativeRuntime> {
     person: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     mission_declaration_parses: std::sync::atomic::AtomicUsize,
-    file_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    file_watchers: Arc<Mutex<HashMap<String, FileWatch>>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     resource_provider: Arc<dyn ResourceProvider>,
@@ -1175,6 +1242,8 @@ pub struct Reconciler<R = NativeRuntime> {
     /// When the fault stage last sent faults to their owning agents.
     fault_delivery: Mutex<Option<u128>>,
     fault_delivery_every_ms: u128,
+    /// The wall time of the last fault snapshot, which spaces the next delivery.
+    fault_snapshot_ms: std::sync::atomic::AtomicU64,
     /// The claim the subagent stage starts its next look from; see `SubagentSweep::low_water`.
     subagent_low_water: Mutex<u64>,
     /// How long run cleanup waits for its runtimes to stop before the run ends without them.
@@ -1186,6 +1255,38 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Publish during a unit test after the work feed was observed, before wake selection.
     #[cfg(any(test, feature = "test-support"))]
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
+}
+
+struct FileWatch {
+    // Keep the subscription alive, including across replacements of the target file.
+    _watcher: notify::RecommendedWatcher,
+    target: PathBuf,
+    directory: PathBuf,
+    referent: Option<PathBuf>,
+}
+
+impl FileWatch {
+    fn relevant(event: &notify::Event, target: &Path, directory: &Path, referent: Option<&Path>) -> bool {
+        // Overflow/rescan means paths may have been lost; every subscription must reread.
+        event.need_rescan()
+            || (matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_)
+            ) && (event.paths.is_empty()
+                || event.paths.iter().any(|path| {
+                    path == target
+                        || referent == Some(path.as_path())
+                        || ((path == directory
+                            || referent.and_then(Path::parent) == Some(path.as_path()))
+                            && matches!(
+                                event.kind,
+                                notify::EventKind::Remove(_)
+                                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                            ))
+                })))
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1264,6 +1365,7 @@ impl Reconciler<NativeRuntime> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1317,6 +1419,7 @@ impl Reconciler<NativeRuntime> {
             disk_check_every_ms: DISK_CHECK_EVERY_MS,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: FAULT_DELIVERY_EVERY_MS,
+            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: SCREEN_POLL_EVERY_MS,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -1425,6 +1528,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             background_wake_hook: None,
             armed_schedules: Arc::new(Mutex::new(std::collections::HashSet::new())),
             standby_due_ticks: Mutex::new(HashMap::new()),
+            schedule_replication_blocks: Mutex::default(),
             schedule_peers: Vec::new(),
             schedule_workspace_retries: Mutex::new(HashMap::new()),
             started_at_unix_ms: now_ms(),
@@ -1478,6 +1582,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             disk_check_every_ms: 0,
             fault_delivery: Mutex::new(None),
             fault_delivery_every_ms: 0,
+            fault_snapshot_ms: Default::default(),
             screen_poll_every_ms: 0,
             subagent_low_water: Mutex::new(0),
             cleanup_deadline: CLEANUP_DEADLINE,
@@ -1746,6 +1851,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
+                        this.incremental.finish_pass(now_ms().saturating_sub(started));
                         Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
@@ -2015,19 +2121,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(());
         }
         let now = now_ms();
+        // The snapshot rebuilds every fault in the fleet. Where that is slow, deliver at most
+        // every ten times its wall time (up to ten minutes) rather than every 30 seconds.
+        let every = match self.fault_delivery_every_ms {
+            0 => 0,
+            every => crate::incremental::cost_scaled_interval(
+                every,
+                u128::from(self.fault_snapshot_ms.load(std::sync::atomic::Ordering::Relaxed)),
+                FAULT_DELIVERY_MAX_MS,
+            ),
+        };
         {
             let mut last = self
                 .fault_delivery
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
             if let Some(at) = *last
-                && now.saturating_sub(at) < self.fault_delivery_every_ms
+                && now.saturating_sub(at) < every
             {
                 // A fault raised since then still reaches its agent without another change.
-                self.arm_restart(
-                    "stage/faults",
-                    at.saturating_add(self.fault_delivery_every_ms),
-                );
+                self.arm_restart("stage/faults", at.saturating_add(every));
                 return Ok(());
             }
             *last = Some(now);
@@ -2038,6 +2151,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             phase.items(faults.len());
             faults
         };
+        self.fault_snapshot_ms.store(
+            u64::try_from(now_ms().saturating_sub(now)).unwrap_or(u64::MAX),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         for fault in faults {
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
@@ -2467,7 +2584,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             for claim in self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
+                .iter()
             {
                 let fields = claim.body.get("fields").unwrap_or(&claim.body);
                 if fields.get("code").and_then(Value::as_str) != Some("provider-capacity")
@@ -3163,6 +3281,17 @@ impl<R: RuntimeControl> Reconciler<R> {
                             });
                             self.runtime.observe_exec(&member.runtime_id)?
                         };
+                        if !self.store.helper_launcher_alive(&subject.subject)? {
+                            self.reconcile_runtime_stop(
+                                &subject.subject,
+                                &member.runtime_id,
+                                member.terminal,
+                                observed.as_ref().and_then(|o| o.incarnation_id.as_deref()),
+                                member.shutdown_timeout_ms,
+                                observed.as_ref(),
+                            )?;
+                            return Ok(());
+                        }
                         if member.lifecycle == MemberLifecycle::TerminalBound {
                             if let Some(incarnation) =
                                 self.reconcile_terminal_binding(subject, member, observed.as_ref())?
@@ -3177,6 +3306,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         // A pending publication must not orphan a suspend or block its resume.
                         if let Some(suspension) = &suspension {
+                            self.retire_obsolete_failed_restart(subject, now_ms())?;
                             return self.reconcile_suspension(
                                 subject,
                                 member,
@@ -3753,6 +3883,19 @@ impl<R: RuntimeControl> Reconciler<R> {
         })
     }
 
+    /// Whether this host may answer `subject`'s member fault: it recorded the fault, or the
+    /// seat's declaration places it here.
+    fn member_fault_is_ours(&self, subject: &str) -> Result<bool> {
+        if self.store.member_reconcile_fault_origin(subject)?.as_deref() == Some(self.host.as_str()) {
+            return Ok(true);
+        }
+        Ok(self
+            .store
+            .desired_subject_with_writer(subject)?
+            .and_then(|(desired, _)| desired.member)
+            .is_some_and(|member| member.host == self.host))
+    }
+
     fn record_member_reconcile_result(&self, subject: &str, result: Result<()>) -> Result<()> {
         let previous = self.store.member_reconcile_fault(subject, None)?;
         let (decision, reason) = match result {
@@ -3764,6 +3907,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 ("member-fault", reason)
             }
+            // A member fault is the word of the host that recorded it, or of the host that runs
+            // the seat now. Another peer's clean pass only retired its own leftover process: it
+            // says nothing about the seat, and answering the fault made the two hosts trade
+            // fault and recovery every few seconds while the seat stayed parked.
+            Ok(()) if previous.is_some() && !self.member_fault_is_ours(subject)? => return Ok(()),
             // A pass that returns Ok may have started nothing: the member loop returns early while a
             // start is pending, while a restart waits, or when nothing is due. Only a member seen
             // alive has recovered; for any other, say what the pass did, so an earlier fault does
@@ -3824,7 +3972,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_provider_capacity_retry(&self, subject: &DesiredSubject, now: u128) -> Result<()> {
         for claim in self
             .store
-            .claims_for(&subject.subject, Some("harness.diagnostic"))?
+            .harness_diagnostics(&subject.subject)?
+            .iter()
         {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("code").and_then(Value::as_str) != Some("provider-capacity")
@@ -3873,7 +4022,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ),
                         ("status".into(), Value::String("accepted".into())),
                     ]),
-                    evidence: vec![claim.id],
+                    evidence: vec![claim.id.clone()],
                     expected_subject: None,
                     idempotency_key: Some(retry_key),
                 })?;
@@ -3923,7 +4072,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ]),
                     ),
                 ]),
-                evidence: vec![claim.id],
+                evidence: vec![claim.id.clone()],
                 expected_subject: None,
                 idempotency_key: Some(retry_key),
             })?;
@@ -4265,7 +4414,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         current_incarnation: &str,
     ) -> Result<()> {
-        for claim in self.store.claims_for(subject, Some("harness.diagnostic"))? {
+        for claim in self.store.harness_diagnostics(subject)?.iter() {
             if claim.body.pointer("/fields/code").and_then(Value::as_str)
                 != Some("provider-auth-expired")
             {
@@ -4485,7 +4634,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // replayed pass records it once and a later prompt of the same kind is its own.
             let earlier = self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
                 .iter()
                 .filter(|claim| {
                     claim.body.pointer("/fields/code").and_then(Value::as_str)
@@ -4716,13 +4865,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut key = format!("{prefix}:{}:{incarnation}", subject.subject);
             for claim in self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
+                .iter()
             {
-                if claim_incarnation(&claim) != Some(incarnation) {
+                if claim_incarnation(claim) != Some(incarnation) {
                     continue;
                 }
                 match claim.body.pointer("/fields/code").and_then(Value::as_str) {
-                    Some(found) if found == code => fence = Some(claim),
+                    Some(found) if found == code => fence = Some(claim.clone()),
                     Some(found) if found == restored => {
                         fence = None;
                         key = format!("{prefix}:{}:{incarnation}:{}", subject.subject, claim.id);
@@ -5253,12 +5403,13 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn claude_trust_prompts(&self, subject: &str) -> Result<Vec<crate::model::ClaimRecord>> {
         Ok(self
             .store
-            .claims_for(subject, Some("harness.diagnostic"))?
-            .into_iter()
+            .harness_diagnostics(subject)?
+            .iter()
             .filter(|claim| {
                 claim.body.pointer("/fields/code").and_then(Value::as_str)
                     == Some("provider-trust-prompt")
             })
+            .cloned()
             .collect())
     }
 
@@ -6032,6 +6183,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return Ok(None);
                 }
                 Ok(Some(caught(|| -> Result<()> {
+                    self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
@@ -7027,7 +7179,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() {
+        if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }
         let selected_token = self.store.selected_desired_token(&subject.subject)?;
@@ -7050,6 +7202,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         self.store.owned_desired_guard(subject)?;
         // A self-restart released at its quiet boundary is as explicit as an immediate one.
+        anyhow::ensure!(
+            self.store.helper_launcher_alive(&subject.subject)?,
+            "the helper's launcher run has ended"
+        );
         let explicit_retry = request.is_some_and(|request| {
             matches!(
                 request.body["fields"]["action"].as_str(),
@@ -7148,6 +7304,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             launch_member.terminal_size = self.launch_geometry()?;
         }
         self.bind_account(subject, member, &mut launch_member)?;
+        if let Some(harness) = crate::accounts::harness_driver(&subject.desired)
+            && let Some(variable) = crate::accounts::login_environment_name(harness)
+        {
+            let directory = self.launch_credential_home(harness, &launch_member)?;
+            launch_member.environment.insert(variable.into(), directory);
+        }
         if let Some(id) = member.environment.get(crate::rollout::OPERATION_ENV) {
             let operation = self
                 .store
@@ -7419,11 +7581,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             ),
             ("reason".into(), Value::String(reason.into())),
         ]);
+        if let Some(harness) = crate::accounts::harness_driver(&subject.desired) {
+            fields.insert("harness".into(), Value::String(harness.into()));
+            if let Some(variable) = crate::accounts::login_environment_name(harness)
+                && let Some(directory) = prepared.launch_member.environment.get(variable)
+            {
+                fields.insert("credential_home".into(), Value::String(directory.clone()));
+            }
+        }
         if let Some(operation) = member.environment.get(crate::rollout::OPERATION_ENV) {
             fields.insert("rollout_operation".into(), serde_json::json!(operation));
         }
         if let Some(incarnation) = &incarnation {
             fields.insert("incarnation_id".into(), Value::String(incarnation.clone()));
+            if subject.kind == "agent"
+                && let Ok(Some((pid, token))) =
+                    self.runtime.start_process_identity(member, incarnation)
+            {
+                fields.insert("runtime_pid".into(), Value::from(pid));
+                fields.insert("runtime_pid_start_token".into(), Value::String(token.to_string()));
+            }
         }
         let succeeded = ClaimInput {
             subject: subject.subject.clone(),
@@ -7434,7 +7611,21 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-succeeded:{operation_id}")),
         };
-        let mut starting = member_fields(member, "starting", incarnation.as_deref(), false);
+        // Native drivers must bind before readiness can be established. Publish running
+        // authority at launch completion only for the physically observed incarnation
+        // owned by this start operation; readiness and restart completion remain separate.
+        let running = if let Some(incarnation) = incarnation.as_deref().filter(|_| member.driver.is_some()) {
+            self.runtime.observe_start(member)?.is_some_and(|observation| {
+                observation.status == "running"
+                    && observation.incarnation_id.as_deref() == Some(incarnation)
+            }) && self.runtime.start_operation(&member.runtime_id, member.terminal, incarnation)?
+                .as_deref() == Some(operation_id)
+        } else {
+            false
+        };
+        let mut starting = member_fields(
+            member, if running { "running" } else { "starting" }, incarnation.as_deref(), false,
+        );
         if let Some(previous) = self.store.latest_actual_value(&subject.subject)?
             && let Some(from) = actual_field(&previous, "restarting_from")
         {
@@ -7449,10 +7640,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             expected_subject: None,
             idempotency_key: Some(format!("start-observed:{operation_id}")),
         };
-        if !self
-            .store
-            .apply_runtime_start_result(operation_id, &[succeeded, observed])?
-        {
+        let applied = if let Some(binding) = self.store.helper_launcher_binding(&subject.subject)? {
+            let mut fields: BTreeMap<String, Value> = serde_json::from_value(binding.attribution())?;
+            fields.insert("operation_id".into(), Value::String(operation_id.into()));
+            if let Some(incarnation) = incarnation {
+                fields.insert("helper_incarnation".into(), Value::String(incarnation));
+            }
+            let receipt = ClaimInput {
+                subject: subject.subject.clone(),
+                kind: "agent.helper-launched".into(),
+                actor: None,
+                fields,
+                evidence: vec![prepared.start_request.clone()],
+                expected_subject: None,
+                idempotency_key: Some(format!("helper-launched:{operation_id}")),
+            };
+            self.store.apply_runtime_start_result(operation_id, &[succeeded, observed, receipt])?
+        } else {
+            self.store.apply_runtime_start_result(operation_id, &[succeeded, observed])?
+        };
+        if !applied {
             return Ok(start_jobs::StartCompletion::Superseded);
         }
         self.signal_changed();
@@ -7483,8 +7690,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             .map(|(rows, columns)| fractal_runtime::TerminalSize { rows, columns }))
     }
 
-    /// The declared account whose login directory an unbound seat's harness is launched with, from
-    /// the seat's own environment or else the one it inherits.
+    /// The declared account an unbound seat's harness runs on: the login directory it is launched
+    /// with, from the seat's own environment or else the one it inherits, or else the harness's
+    /// default login.
     fn declared_login_account(
         &self,
         subject: &DesiredSubject,
@@ -7492,18 +7700,46 @@ impl<R: RuntimeControl> Reconciler<R> {
         launch: &MemberSpec,
     ) -> Option<String> {
         let driver = crate::accounts::harness_driver(&subject.desired)?;
-        let variable = crate::accounts::login_environment_name(driver)?;
-        let directory = launch
-            .environment
-            .get(variable)
-            .cloned()
-            .or_else(|| std::env::var(variable).ok())
-            .filter(|directory| !directory.is_empty())?;
+        // A harness with a login directory names it in that variable; omp names the key file it
+        // reads in its own.
+        let configured = crate::accounts::login_environment_name(driver)
+            .or_else(|| (driver == "omp").then_some(crate::accounts::OMP_KEY_FILE_ENV))
+            .and_then(|variable| {
+                launch
+                    .environment
+                    .get(variable)
+                    .cloned()
+                    .or_else(|| std::env::var(variable).ok())
+            });
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let directory = crate::accounts::expand_login(&directory, home.as_deref())?;
         let accounts = self.store.declared_accounts().ok()?;
-        crate::accounts::account_by_login(&accounts, driver, &member.host, &directory, home.as_deref())
-            .map(|account| account.name.clone())
+        crate::accounts::unbound_login_account(
+            &accounts,
+            driver,
+            &member.host,
+            configured.as_deref(),
+            home.as_deref(),
+        )
+        .map(|account| account.name.clone())
+    }
+
+
+    /// Resolve only a credential-directory reference, never the files inside it.
+    fn launch_credential_home(&self, harness: &str, launch: &MemberSpec) -> Result<String> {
+        let variable = crate::accounts::login_environment_name(harness)
+            .context("the harness requires a credential-home variable")?;
+        let home = launch.environment.get("HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+        let inherited = std::env::var(variable).ok();
+        let directory = launch.environment.get(variable).or(inherited.as_ref());
+        let directory = if let Some(directory) = directory {
+            crate::accounts::expand_login(directory, home.as_deref())
+                .context("credential home requires HOME")?
+        } else {
+            home.context("a harness credential home requires HOME")?
+                .join(if harness == "claude" { ".claude" } else { ".codex" })
+        };
+        Ok(directory.to_string_lossy().into_owned())
     }
 
     /// Point a seat whose harness block binds an account (or a pool) at that account's login
@@ -7519,6 +7755,26 @@ impl<R: RuntimeControl> Reconciler<R> {
         if subject.kind != "agent" {
             return Ok(());
         }
+        if let Some(binding) = self.store.helper_launcher_binding(&subject.subject)? {
+            anyhow::ensure!(
+                self.store.helper_launcher_alive(&subject.subject)?,
+                "the helper's credential binding ended with its launcher run"
+            );
+            anyhow::ensure!(
+                crate::accounts::harness_driver(&subject.desired) == Some(binding.harness.as_str()),
+                "a helper cannot change its launcher's bound harness"
+            );
+            if let Some(directory) = binding.credential_home {
+                let variable = crate::accounts::login_environment_name(&binding.harness)
+                    .context("the helper's harness has no credential home")?;
+                launch.environment.insert(variable.into(), directory);
+            }
+            return Ok(());
+        }
+        anyhow::ensure!(
+            !self.store.helper_launcher_has_lifetime_binding(&subject.subject)?,
+            "the helper declaration no longer matches its credential binding; stop and recreate it"
+        );
         let Some(binding) = crate::accounts::harness_binding(&subject.desired) else {
             // No binding: the harness keeps its login, but a login that is a declared account's
             // directory still belongs to that account.
@@ -7805,13 +8061,33 @@ impl<R: RuntimeControl> Reconciler<R> {
                     );
                 };
                 let mut resumed = member.clone();
-                resumed
-                    .environment
-                    .insert(suspended::RESUME_ENV.into(), session);
                 if agent.starts_with("agent/import/omp/") {
-                    // A cold resume names the suspension's session, not the import.
+                    // The authored import path may name an older session; recover the captured
+                    // incarnation's binding below instead of carrying that path into a cold resume.
                     crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 }
+                // Recover the suspended incarnation's durable path, not the current launch's
+                // latest binding. The snapshot's existing native ID remains the resume fence.
+                if let (Some(incarnation), Some(harness)) =
+                    (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
+                {
+                    match suspended::bound_session_path(
+                        &self.store, agent, incarnation, harness, &session,
+                    ) {
+                        Ok(Some(path)) => {
+                            crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path);
+                        }
+                        Ok(None) => {
+                            crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
+                        }
+                        Err(error) => {
+                            return self.fail_suspension(
+                                agent, suspension, "snapshot-binding-changed", format!("{error:#}"), Vec::new(),
+                            );
+                        }
+                    }
+                }
+                crate::environment::set(&mut resumed.environment, suspended::RESUME_ENV, session);
                 if let Err(error) =
                     self.perform_start(subject, &resumed, "a suspended seat was resumed")
                 {
@@ -7978,16 +8254,79 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// A requester-authored action replicates to the runtime owner. The declaration and old
-    /// incarnation fence it, so a delayed request cannot stop a replacement or revive a stop.
-    /// A start that FAILED and whose producer closure was never proven stays pending, and while it
-    /// does an explicit restart is swallowed (the seat looks parked for good). Once the failed start
-    /// is older than any launcher could still publish a session, no runtime of the seat is observed
-    /// running, and no launch worker holds the start lock, the failure is final: close the operation
-    /// so the request makes a new attempt. Returns whether it did.
-    fn supersede_stale_failed_start(
+    /// A failed launch is not a durable grant to restart after later lifecycle intent.
+    /// Keep its unresolved producer fenced, but consume the obsolete restart request.
+    fn retire_obsolete_failed_restart(&self, subject: &DesiredSubject, now: u128) -> Result<bool> {
+        let Some(pending) = self.store.runtime_start_for(&subject.subject)? else {
+            return Ok(false);
+        };
+        if !pending.finished || pending.cleanup_verified
+            || !pending.result.as_ref().is_some_and(|result| result["error"].is_string())
+        {
+            return Ok(false);
+        }
+        let Some(request) = crate::restart::latest_request(&self.store, &subject.subject)? else {
+            return Ok(false);
+        };
+        let completion = format!("agent-restart-completed:{}", request.id);
+        if self.store.operation_claim(&completion)?.is_some() {
+            return Ok(false);
+        }
+        let later_control = self.store.observations_for(&subject.subject, "runtime.action.requested")?
+            .into_iter().rev().take_while(|claim| claim.id != request.id)
+            .any(|claim| matches!(
+                claim.body["fields"]["action"].as_str(),
+                Some("suspend" | "resume" | "stop" | "terminate")
+            ));
+        let retired = self.store.claims_for(&subject.subject, Some("agent.retired"))?
+            .into_iter().any(|claim| claim.store_index > request.store_index);
+        let reason = if self.store.selected_desired_token(&subject.subject)?.as_deref()
+            != request.body.pointer("/evidence/0").and_then(Value::as_str)
+        {
+            "the desired declaration changed after the restart request"
+        } else if retired || later_control || crate::suspension::current(&self.store, &subject.subject)?
+            .is_some_and(|suspension| suspension.holds_seat())
+        {
+            "later lifecycle control or suspension superseded the restart request"
+        } else if now.saturating_sub(request.accepted_at_unix_ms) > crate::restart::FAILED_START_RETRY_MAX_AGE_MS {
+            "the failed-start restart request exceeded its one-hour retry authority"
+        } else {
+            return Ok(false);
+        };
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("decision".into(), Value::from("restart-retired-obsolete-request")),
+                ("reason".into(), Value::from(reason)),
+                ("key".into(), Value::from(format!("restart-retired-obsolete-request:{}", request.id))),
+            ]),
+            evidence: vec![request.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(format!("restart-retired-obsolete-request:{}", request.id)),
+        })?;
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.action.succeeded".into(),
+            actor: Some(RECONCILER_ACTOR.into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("operation_status".into(), Value::from("retired")),
+                ("reason".into(), Value::from(reason)),
+            ]),
+            evidence: vec![request.id],
+            expected_subject: None,
+            idempotency_key: Some(completion),
+        })?;
+        self.signal_changed();
+        Ok(true)
+    }
+
+    /// Preflight the stale producer and runtime evidence. This never releases admission;
+    /// the replacement's writer transaction fences intent and closes the old hold together.
+    fn stale_failed_start_ready(
         &self,
-        subject: &DesiredSubject,
         pending: &RuntimeStartOperation,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
@@ -8021,30 +8360,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         if observation.is_some_and(|item| !matches!(item.status.as_str(), "exited" | "vanished" | "stopped")) {
             return Ok(false);
         }
-        // The kernel lock, not a PID guess, says no launch worker holds admission.
-        let Some(_lock) = self.store.try_runtime_start_lock(&subject.subject)? else {
-            return Ok(false);
-        };
-        if pending.revoked_by.is_none() {
-            self.revoke_start(&subject.subject)?;
-        }
-        self.store.retain_runtime_start_producer_closed(&pending.id)?;
-        self.record_once(
-            &subject.subject,
-            "runtime.reconcile-decision",
-            BTreeMap::from([
-                ("key".into(), Value::String(format!("restart-superseded-failed-start:{}", pending.id))),
-                ("decision".into(), Value::String("restart-superseded-failed-start".into())),
-                (
-                    "reason".into(),
-                    Value::String(format!(
-                        "the failed runtime start {} never proved its producer closed; it is older than any launcher could still publish and no runtime is running, so a new restart request makes a new attempt",
-                        pending.id
-                    )),
-                ),
-            ]),
-        )?;
-        self.start_changed(&subject.subject);
+        // This is only physical preflight. The admission writer must fence lifecycle intent,
+        // release this exact failed operation and admit its replacement atomically.
         Ok(true)
     }
 
@@ -8062,6 +8379,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(false);
         };
+        if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
+        }
         if self
             .store
             .selected_desired_token(&subject.subject)?
@@ -8088,8 +8408,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .operation_claim(&format!("agent-restart-attempt:{}", request.id))?;
         if let Some(pending) = self.store.runtime_start_for(&subject.subject)? {
-            if self.supersede_stale_failed_start(subject, &pending, observation)? {
-                // The failed start no longer holds the seat: this request makes the new attempt.
+            if self.stale_failed_start_ready(&pending, observation)? {
+                // Admission will release this exact failed operation with the replacement.
             } else {
                 // The request is not lost: it waits for this start. Say so (once per request and
                 // start), so a restart that is never consumed is visible and not a silent success.
@@ -8346,7 +8666,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
         if attempted.is_some() {
             return self.fail_requested_restart(
                 subject,
@@ -8534,8 +8853,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let token = self.launch_token(&subject.subject)?;
                     let diagnostic = self
                         .store
-                        .claims_for(&subject.subject, Some("harness.diagnostic"))?
-                        .into_iter()
+                        .harness_diagnostics(&subject.subject)?
+                        .iter()
                         .rev()
                         .find(|claim| {
                             claim.body.pointer("/fields/code").and_then(Value::as_str)
@@ -13118,10 +13437,31 @@ impl<R: RuntimeControl> Reconciler<R> {
         let source = crate::mission::interpolate_kdl(source, &variables)?;
         let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
         if assigned_agents_only {
-            intent.subjects.retain(|subject, desired| {
+            let selected_agent = |subject: &str, desired: &DesiredSubject| {
                 desired.kind == "agent"
-                    && (view.assigned_to.as_deref() == Some(subject.as_str())
+                    && (view.assigned_to.as_deref() == Some(subject)
                         || view.available_to.iter().any(|agent| agent == subject))
+            };
+            // Publish a selected agent's synthesized targets before it can start, without
+            // bringing forward other agents, resources, or execution declarations.
+            let uri_targets = intent.subjects.iter()
+                .filter(|(subject, desired)| selected_agent(subject, desired))
+                .flat_map(|(_, desired)| {
+                    desired.desired.get("resources").and_then(Value::as_array)
+                        .into_iter().flatten()
+                })
+                .filter(|edge| edge["kind"] == "uri")
+                .filter_map(|edge| edge["subject"].as_str().map(str::to_owned))
+                .collect::<BTreeSet<_>>();
+            intent.subjects.retain(|subject, desired| {
+                selected_agent(subject, desired)
+                    || (uri_targets.contains(subject)
+                        && desired.kind == "resource"
+                        && subject.starts_with("resource/uri/")
+                        && desired.owner_run.is_none()
+                        && desired.owner_generation.is_none()
+                        && desired.owner_step.is_none()
+                        && crate::graph::declared_uri(&desired.desired).is_some())
             });
         }
         self.keep_stops_by_hand(&mut intent, run)?;
@@ -13129,6 +13469,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         }
         for subject in intent.subjects.values_mut() {
+            if subject.kind == "resource" && crate::graph::declared_uri(&subject.desired).is_some() {
+                continue;
+            }
             subject.owner_run = Some(run.subject.clone());
             subject.owner_generation = Some(run.generation.clone());
             subject.owner_step = Some(view.subject.clone());
@@ -13383,11 +13726,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
+        let admitted_uri_targets = admitting_gate
+            .into_iter()
+            .filter_map(|gate| {
+                let agent = deferred_gate?;
+                (gate.assigned_to.as_deref() == Some(agent))
+                    .then(|| intent.subjects.get(agent))
+                    .flatten()
+            })
+            .flat_map(|desired| crate::graph::declared_resources(&desired.desired))
+            .filter(|reference| reference.kind == crate::model::ResourceReferenceKind::Uri)
+            .map(|reference| reference.subject)
+            .collect::<BTreeSet<_>>();
         intent.subjects.retain(|subject, desired| {
             if let Some(gate) = admitting_gate {
-                return desired.kind == "agent"
+                return (desired.kind == "agent"
                     && deferred_gate == Some(subject.as_str())
-                    && gate.assigned_to.as_deref() == Some(subject.as_str());
+                    && gate.assigned_to.as_deref() == Some(subject.as_str()))
+                    || (admitted_uri_targets.contains(subject)
+                        && desired.kind == "resource"
+                        && crate::graph::declared_uri(&desired.desired).is_some());
             }
             if desired.kind != "agent" || deferred_gate != Some(subject.as_str()) {
                 return true;
@@ -13425,6 +13783,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         });
         self.keep_stops_by_hand(&mut intent, run)?;
         for subject in intent.subjects.values_mut() {
+            if subject.kind == "resource" && crate::graph::declared_uri(&subject.desired).is_some() {
+                continue;
+            }
             subject.owner_run = Some(run.subject.clone());
             subject.owner_generation = Some(run.generation.clone());
             subject.owner_step = None;
@@ -14065,6 +14426,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .and_then(Value::as_str)
                     .filter(|reason| !reason.trim().is_empty())
                     .context("a request for changes has no feedback text")?;
+                let reviewer = decision
+                    .actor
+                    .as_deref()
+                    .context("human feedback has no reviewer actor")?;
                 self.apply_human_feedback(subject, attempt, reviewer, reason, &decision.id)?;
                 Ok(GateOutcome::Pending)
             }
@@ -14250,28 +14615,48 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     /// Why a run-owned stop must wait for `seat`: it holds a message nobody has read, or work in a
     /// run other than the one that is ending. The stop declaration stays, so the seat stops once
-    /// both are gone. Read at most every [`SEAT_RETENTION_CHECK_MS`] per seat.
+    /// both are gone. The answer is read again only when something it read changed: a seat with
+    /// thousands of messages costs a view of each one, so a held seat's 60 s recheck only wakes the
+    /// pass that notices a change.
     fn seat_retention(&self, seat: &str, owner_run: &str) -> Result<Option<String>> {
         if !seat.starts_with("agent/") {
             return Ok(None);
         }
         let now = now_ms();
-        if let Some((at, reason, reads)) = self
+        let item = format!("retain:{seat}");
+        let cached = self
             .seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(seat)
-            && now.saturating_sub(*at) < SEAT_RETENTION_CHECK_MS
-        {
-            // The cached answer stands until the next check, and depends on what that check read.
-            for key in reads {
-                smallclaims::touched::note_read(|| key.clone());
+            .filter(|_| !self.incremental.needs(&item, now))
+            .cloned();
+        let reason = match cached {
+            // The cached answer stands while nothing it read changed, and depends on those reads.
+            Some((reason, reads)) => {
+                for key in reads {
+                    smallclaims::touched::note_read(|| key);
+                }
+                reason
             }
-            if reason.is_some() {
-                smallclaims::touched::note_due(at.saturating_add(SEAT_RETENTION_CHECK_MS));
-            }
-            return Ok(reason.clone());
+            None => self.read_seat_retention(seat, owner_run, &item)?,
+        };
+        if reason.is_some() {
+            smallclaims::touched::note_due(now.saturating_add(SEAT_RETENTION_CHECK_MS));
+            self.arm_restart(&item, now.saturating_add(SEAT_RETENTION_CHECK_MS));
         }
+        Ok(reason)
+    }
+
+    /// Read `seat`'s retention answer and remember it, with what it read, as incremental `item`.
+    fn read_seat_retention(
+        &self,
+        seat: &str,
+        owner_run: &str,
+        item: &str,
+    ) -> Result<Option<String>> {
+        #[cfg(test)]
+        SEAT_RETENTION_READS.with(|count| count.set(count.get() + 1));
         let (reason, reads) = smallclaims::touched::record(|| -> Result<Option<String>> {
             let unread = self
                 .store
@@ -14298,16 +14683,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
         });
         let reason = reason?;
+        self.incremental.evaluated(item, reads.clone(), None);
         self.seat_retention
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(seat.to_owned(), (now, reason.clone(), reads));
-        if reason.is_some() {
-            self.arm_restart(
-                &format!("retain:{seat}"),
-                now.saturating_add(SEAT_RETENTION_CHECK_MS),
-            );
-        }
+            .insert(seat.to_owned(), (reason.clone(), reads));
         Ok(reason)
     }
 
@@ -14405,13 +14785,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
-    fn schedules_caught_up(&self) -> Result<bool> {
-        schedule_admission_ready(
+    fn schedules_caught_up(&self, schedule: &DesiredSubject) -> Result<bool> {
+        let ready = schedule_admission_ready(
             &self.store,
             &self.host,
             &self.schedule_peers,
             self.started_at_unix_ms,
-        )
+            schedule,
+        )?;
+        self.observe_schedule_replication_gate(schedule, ready, now_ms())?;
+        Ok(ready)
     }
 
     /// A late standby wake cannot turn a past candidate into new catch-up policy.
@@ -14445,12 +14828,16 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         if spec.stopped || (spec.host != self.host
             && !spec.standby.as_ref().is_some_and(|standby| standby.host == self.host)) {
+            self.clear_schedule_replication_block(schedule)?;
             return Ok(());
         }
         if self.schedule_has_open_work(&schedule.subject)? {
+            if self.store.schedule_has_active_started_run(&schedule.subject)? {
+                self.clear_schedule_replication_block(schedule)?;
+            }
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -14703,7 +15090,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     },
                     _ => false,
                 };
-                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at)
+                let ready = owner_ready && schedule_admission_ready(&store, &host, &schedule_peers, started_at, &schedule_declaration)
                     .unwrap_or(false);
                 let reached_history = store.claims_for(&schedule_subject, Some("schedule.occurrence-reached"));
                 let last_reached = reached_history.as_ref().ok().and_then(|claims| claims.iter()
@@ -14869,6 +15256,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let on_standby = spec.host != self.host
             && spec.standby.as_ref().is_some_and(|standby| standby.host == self.host);
         if spec.host != self.host && !on_standby {
+            self.clear_schedule_replication_block(schedule)?;
             self.schedule_workspace_retries
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -14887,7 +15275,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .remove(&schedule.subject);
             return Ok(());
         }
-        if !self.schedules_caught_up()? {
+        if !self.schedules_caught_up(schedule)? {
             self.arm_restart("stage/schedule-sync", now_ms().saturating_add(DEADLINE_SOURCE_RETRY_MS));
             return Ok(());
         }
@@ -15930,14 +16318,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
         // a newer watcher observation if it was already in flight.
         if watched_ref && refresh_attempt.is_none() && observer_actual.as_ref().is_none_or(|actual|
-            actual["error_code"] != "rate-limited") {
+            !matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget"))) {
             next_check = next_check.min(now_ms().saturating_add(u128::from(spec.every_ms.unwrap())));
         }
-        // Provider retry deadlines remain a lower bound even after a restart or a
-        // desired revision change. Older rate-limit receipts have no revision.
+        // Provider and local admission deadlines remain lower bounds after restart or
+        // desired revision changes. Older rate-limit receipts have no revision.
         if refresh_attempt.is_none()
             && let Some(retry_at) = observer_actual.as_ref()
-                .filter(|actual| actual["error_code"] == "rate-limited")
+                .filter(|actual| matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget")))
                 .and_then(|actual| actual.get("next_check_unix_ms"))
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<u128>().ok())
@@ -16178,25 +16566,40 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
-                        let rate_limit = error.downcast_ref::<ProviderRateLimit>();
-                        let retry_at = rate_limit.map_or_else(
-                            || now_ms().saturating_add(60_000),
-                            |limit| limit.retry_at_unix_ms.max(now_ms().saturating_add(1_000)),
+                        let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
+                            .map(|limit| limit.retry_at_unix_ms)
+                            .or_else(|| error.downcast_ref::<LocalObserverBudget>()
+                                .map(|limit| limit.retry_at_unix_ms));
+                        let now = now_ms();
+                        let retry_at = refusal_deadline.map_or_else(
+                            || now.saturating_add(60_000),
+                            |deadline| if deadline > now { deadline }
+                                else { now.saturating_add(15 * 60_000) },
                         );
                         let reason = error.to_string();
                         completed_deadline = Some(retry_at);
                         error_backoff = true;
                         let previous = store.latest_actual_value(&observer_subject).ok().flatten();
                         let condition = ObserverCondition::of(&error, previous.as_ref());
+                        let state = if matches!(condition, ObserverCondition::LocalBudget(_)) {
+                            // Existing readers alert on degraded and reject new state values.
+                            // Local admission made no provider attempt; retain facts and expose the defer code/deadline.
+                            "healthy"
+                        } else {
+                            "unreachable"
+                        };
                         let unchanged_failure = previous.as_ref().is_some_and(|actual| {
-                            actual.get("state").and_then(Value::as_str) == Some("unreachable")
+                            actual.get("state").and_then(Value::as_str) == Some(state)
                                 && actual.get("reason").and_then(Value::as_str)
                                     == Some(reason.as_str())
+                                && (refusal_deadline.is_none()
+                                    || actual.get("next_check_unix_ms").and_then(Value::as_str)
+                                        .and_then(|value| value.parse::<u128>().ok()) == Some(retry_at))
                         });
                         if !unchanged_failure || refresh_attempt.is_some() {
                             let failure_hash = hex::encode(sha2::Sha256::digest(
                                 format!(
-                                    "{operation}:{reason}:{}",
+                                    "{operation}:{reason}:{retry_at}:{}",
                                     store
                                         .claims_for(&observer_subject, Some("observer.state"))
                                         .unwrap_or_default()
@@ -16208,7 +16611,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .as_bytes(),
                             ));
                             let mut fields = BTreeMap::from([
-                                ("state".into(), Value::String("unreachable".into())),
+                                ("state".into(), Value::String(state.into())),
                                 ("reason".into(), Value::String(reason)),
                                 ("error_code".into(), Value::String(condition.code().into())),
                                 ("revision".into(), Value::String(revision.clone())),
@@ -17527,16 +17930,50 @@ impl<R: RuntimeControl> Reconciler<R> {
             .file_watchers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if watchers.contains_key(subject) {
+        let target = std::path::absolute(path)?;
+        // Watching the file itself attaches to its inode and misses later replacements.
+        // Descend from a missing target's nearest existing parent on each observation.
+        let directory = target
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .find(|candidate| candidate.is_dir())
+            .context("file watch has no existing parent directory")?;
+        let next_component = target
+            .strip_prefix(directory)?
+            .components()
+            .next()
+            .context("file watch has no target component")?;
+        // Backends report canonical directories (notably /private/tmp on macOS).
+        // Keep the lexical target as identity, but compare events in their namespace.
+        let directory = directory.canonicalize()?;
+        let relevant = directory.join(next_component);
+        // A file symlink can point outside the lexical parent. Observe its referent's
+        // parent too, so both writes and inode replacements preserve file-gate behavior.
+        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        if watchers.get(subject).is_some_and(|watch| {
+            watch.target == target
+                && watch.directory == directory
+                && watch.referent == referent
+        }) {
             return Ok(());
         }
+        let watched_directory = directory.clone();
+        let watched_referent = referent.clone();
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
         let watched_subject = subject.to_owned();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok() {
+                let Ok(event) = event else { return };
+                // Reads (including this observer's own reads) must never self-wake.
+                if FileWatch::relevant(
+                    &event,
+                    &relevant,
+                    &watched_directory,
+                    watched_referent.as_deref(),
+                ) {
                     observations
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -17547,12 +17984,23 @@ impl<R: RuntimeControl> Reconciler<R> {
                     notify.notify_one();
                 }
             })?;
-        let watched = path
-            .ancestors()
-            .find(|candidate| candidate.exists())
-            .unwrap_or(path);
-        watcher.watch(watched, notify::RecursiveMode::NonRecursive)?;
-        watchers.insert(subject.into(), watcher);
+        watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        if let Some(parent) = referent.as_ref().and_then(|path| path.parent())
+            && parent != directory
+        {
+            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        }
+        watchers.insert(subject.into(), FileWatch {
+            _watcher: watcher,
+            target,
+            directory,
+            referent,
+        });
+        // A refreshed subscription may now refer to a different file at the same stamp.
+        self.file_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(subject);
         Ok(())
     }
 
@@ -17631,6 +18079,7 @@ fn permanent_observation_error(code: &str) -> bool {
 const DISK_CHECK_EVERY_MS: u128 = 30_000;
 /// How often a host sends new faults to the agents it runs.
 const FAULT_DELIVERY_EVERY_MS: u128 = 30_000;
+const FAULT_DELIVERY_MAX_MS: u128 = 10 * 60_000;
 
 type DiskProbe = Arc<dyn Fn(&Path) -> std::io::Result<crate::disk::DiskSpace> + Send + Sync>;
 const RECONCILER_FAILING_TITLE: &str = "The reconciler is failing";
@@ -19083,6 +19532,7 @@ pub mod tests {
     mod slo_breach_flow_tests;
     mod gate_on_demand;
     mod github_watch_selection;
+    mod helper_launcher;
     mod incremental_deadlines;
     #[cfg(test)]
     mod schedule_standby_parent;
@@ -19156,6 +19606,50 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 runtime.read_exec_log(id).unwrap().unwrap(),
                 "from-declaration"
             );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_start_receipt_records_only_exact_runtime_process_provenance() {
+        for provenance in ["current", "stale", "missing"] {
+            let root = tempfile::tempdir().unwrap();
+            let store = Arc::new(Store::open_memory("node").unwrap());
+            apply_source(&store, &format!(
+                "version 2\nagent \"worker\" {{ workspace {:?}; command \"sleep 600\"; }}",
+                root.path().display().to_string(),
+            ), "process-provenance");
+            let subject = store.desired_subjects().unwrap().remove(0);
+            let mut member = subject.member.clone().unwrap();
+            // Client-controlled identity-looking variables must never supply a fallback.
+            member.environment.insert("runtime_pid".into(), "123".into());
+            member.environment.insert("runtime_pid_start_token".into(), "forged".into());
+            let runtime = Arc::new(FakeRuntime::default());
+            runtime.ptys.lock().unwrap().push(RuntimeObservation {
+                runtime_id: member.runtime_id.clone(), terminal: true, status: "running".into(),
+                exit_code: None, incarnation_id: Some("current".into()),
+            });
+            let pid = std::process::id();
+            let token = fractal_runtime::process_start_token(pid).unwrap();
+            if provenance != "missing" {
+                runtime.process_identities.lock().unwrap_or_else(PoisonError::into_inner).insert(
+                    (member.runtime_id.clone(), provenance.into()), (pid, token),
+                );
+            }
+            let reconciler = Reconciler::new(
+                store.clone(), runtime, "node".into(), Arc::new(Notify::new()),
+            );
+            reconciler.perform_start(&subject, &member, "test process provenance").unwrap();
+            let receipt = store.observations_for(&subject.subject, "runtime.action.succeeded")
+                .unwrap().into_iter().find(|claim| claim.body["fields"]["action"] == "start").unwrap();
+            assert_eq!(receipt.body["fields"]["incarnation_id"], "current");
+            if provenance == "current" {
+                assert_eq!(receipt.body["fields"]["runtime_pid"], pid);
+                assert_eq!(receipt.body["fields"]["runtime_pid_start_token"], token.to_string());
+            } else {
+                assert!(receipt.body["fields"].get("runtime_pid").is_none());
+                assert!(receipt.body["fields"].get("runtime_pid_start_token").is_none());
+            }
         }
     }
 
@@ -19460,6 +19954,7 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         failed_stops: Mutex<std::collections::HashSet<String>>,
         pub started_members: Mutex<Vec<MemberSpec>>,
         start_operations: Mutex<HashMap<(String, String), String>>,
+        process_identities: Mutex<HashMap<(String, String), (u32, u64)>>,
         pub stops: Mutex<Vec<String>>,
         kills: Mutex<Vec<String>>,
         removes: Mutex<Vec<String>>,
@@ -19578,6 +20073,10 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
     }
 
     impl RuntimeControl for FakeRuntime {
+        fn start_process_identity(&self, member: &MemberSpec, incarnation: &str) -> Result<Option<(u32, u64)>> {
+            Ok(self.process_identities.lock().unwrap_or_else(PoisonError::into_inner)
+                .get(&(member.runtime_id.clone(), incarnation.into())).copied())
+        }
         fn observe_start(&self, member: &MemberSpec) -> Result<Option<RuntimeObservation>> {
             let started = self
                 .started_members
@@ -21265,6 +21764,129 @@ version 2
         );
     }
 
+    #[test]
+    fn shared_uri_resources_survive_run_discard_and_eval_cleanup_without_rewrites() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+agent "shared/reader" {
+  workspace "/tmp"
+  command "true"
+  restart "never"
+  resource "issue" uri="https://github.com/example/project/issues/42"
+  resource "mission-worker" uri="urn:example:one" reason="mission-worker"
+  resource "agent/mission-worker" uri="urn:example:two" reason="agent/mission-worker"
+  resource "step-worker" uri="urn:example:three" reason="step-worker"
+  resource "agent/step-worker" subject="resource/worker" reason="agent/step-worker"
+}
+mission "shared-resource" state="ready" timeout="1m" {
+  concurrent-runs max=4
+  goal "Work on the same issue without owning its shared reference."
+  agent "mission-worker" {
+    workspace "/tmp"
+    command "true"
+    restart "never"
+    resource "issue" uri="https://github.com/example/project/issues/42"
+    resource "mission-worker" uri="urn:example:one" reason="mission-worker"
+    resource "agent/mission-worker" uri="urn:example:two" reason="agent/mission-worker"
+    resource "step-worker" uri="urn:example:three" reason="step-worker"
+    resource "agent/step-worker" subject="resource/worker" reason="agent/step-worker"
+  }
+  step "work" {
+    assigned-to "agent/${ST_MISSION_RUN}/step-worker"
+    agent "step-worker" {
+      workspace "/tmp"
+      command "true"
+      restart "never"
+      resource "issue" uri="https://github.com/example/project/issues/42"
+      resource "mission-worker" uri="urn:example:one" reason="mission-worker"
+      resource "agent/mission-worker" uri="urn:example:two" reason="agent/mission-worker"
+      resource "step-worker" uri="urn:example:three" reason="step-worker"
+      resource "agent/step-worker" subject="resource/worker" reason="agent/step-worker"
+    }
+  }
+}
+"#,
+            "publish-shared-uri",
+        );
+        let (_, reader) = store.agent_declaration("agent/shared/reader", None).unwrap().unwrap();
+        let references = crate::graph::declared_resources(&reader);
+        let resource = &references[0].subject;
+        let original = store.claims_for(resource, Some("intent.desired")).unwrap();
+        let original_ids = original.iter().map(|claim| claim.id.clone()).collect::<Vec<_>>();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let mut runs = Vec::new();
+        for (mode, key) in [
+            ("run", "shared-run-first"),
+            ("run", "shared-run-second"),
+            ("eval", "shared-eval-first"),
+            ("eval", "shared-eval-second"),
+        ] {
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "shared-resource".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some(mode.into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: key.into(),
+            }).unwrap();
+            for _ in 0..3 {
+                reconciler.reconcile_once().unwrap();
+            }
+            let declared = store.desired_subjects_for_owner_run(&run.subject).unwrap();
+            for local in ["mission-worker", "step-worker"] {
+                let worker = declared.iter()
+                    .find(|desired| desired.subject == format!("agent/{}/{local}", run.id))
+                    .unwrap();
+                assert_eq!(crate::graph::declared_resources(&worker.desired), references);
+            }
+            let shared = store.desired_subjects_named(std::slice::from_ref(resource)).unwrap();
+            assert_eq!(shared[0].owner_run, None);
+            assert_eq!(shared[0].owner_generation, None);
+            assert_eq!(shared[0].owner_step, None);
+            assert_eq!(
+                store.claims_for(resource, Some("intent.desired")).unwrap()
+                    .iter().map(|claim| claim.id.clone()).collect::<Vec<_>>(),
+                original_ids,
+                "materializing another run must not rewrite the shared URI subject",
+            );
+            runs.push((mode, run));
+        }
+        for (mode, run) in runs {
+            if mode == "eval" {
+                assert!(store.retire_eval_owned_desired(&run.subject).unwrap().is_empty());
+            } else {
+                assert!(store.discard_desired_owned_by(&run.subject).unwrap() >= 2);
+            }
+            assert!(store.desired_subjects_for_owner_run(&run.subject).unwrap().is_empty());
+            let uris = store.declared_resource_uris(&references).unwrap();
+            assert_eq!(
+                uris.get(resource).map(String::as_str),
+                Some("https://github.com/example/project/issues/42"),
+                "another seat's URI must still resolve after each run's cleanup",
+            );
+            let kdl = crate::graph::render_agent_desired_kdl(&reader, &uris).unwrap();
+            let restored = parse_intent(&kdl, "node").unwrap();
+            assert_eq!(
+                crate::graph::declared_resources(&restored.subjects["agent/shared/reader"].desired),
+                references,
+            );
+        }
+        assert_eq!(
+            store.claims_for(resource, Some("intent.desired")).unwrap()
+                .iter().map(|claim| claim.id.clone()).collect::<Vec<_>>(),
+            original_ids,
+        );
+    }
+
     #[tokio::test]
     async fn materialized_step_declarations_wake_member_reconciliation() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -22482,7 +23104,18 @@ mission "self-assigned" state="ready" {
   goal "Bring up the judge before offering its work."
   step "judge" {
     assigned-to "agent/${ST_MISSION_RUN}/judge"
-    agent "judge" { workspace "/tmp"; command "true"; restart "never" }
+    agent "judge" {
+      workspace "/tmp"
+      command "true"
+      restart "never"
+      resource "judge" uri="urn:example:assigned" reason="judge"
+      resource "agent/judge" uri="urn:example:assigned-two" reason="agent/judge"
+    }
+    agent "bystander" {
+      workspace "/tmp"
+      command "true"
+      resource "unrelated" uri="urn:example:unrelated"
+    }
   }
 }
 "#,
@@ -22515,6 +23148,18 @@ mission "self-assigned" state="ready" {
         assert!(store.desired_subjects().unwrap().iter().any(|desired| {
             desired.subject == format!("agent/{}/judge", run.id)
                 && desired.owner_step.as_deref() == Some(judge.subject.as_str())
+        }));
+        let (_, desired) = store.agent_declaration(&format!("agent/{}/judge", run.id), None)
+            .unwrap().unwrap();
+        let edges = crate::graph::declared_resources(&desired);
+        let uris = store.declared_resource_uris(&edges).unwrap();
+        assert_eq!(uris[&edges[0].subject], "urn:example:assigned");
+        assert_eq!(uris[&edges[1].subject], "urn:example:assigned-two");
+        let published = store.desired_subjects().unwrap();
+        assert!(published.iter().all(|subject| {
+            subject.subject != format!("agent/{}/bystander", run.id)
+                && crate::graph::declared_uri(&subject.desired)
+                    != Some("urn:example:unrelated")
         }));
     }
 
@@ -22977,6 +23622,58 @@ mission "feedback-review" state="ready" {
             "found evidence must use no SQLite statements on repeated passes: {cost:?}"
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_start_restart_authority_expires_without_closing_the_producer() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "original",
+        );
+        let subject = "agent/example/worker";
+        let desired = store.desired_subject_with_writer(subject).unwrap().unwrap().0;
+        let token = store.selected_desired_token(subject).unwrap().unwrap();
+        let mut operation = RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(),
+            subject: subject.into(),
+            owner: "fixture".into(),
+            body: serde_json::json!({
+                "subject": desired, "selected_token": token, "request": null,
+                "member": desired.member, "reason": "fixture failed start",
+            }),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        store.admit_runtime_start(&mut operation, 2).unwrap();
+        store.finish_runtime_start(&operation.id, &serde_json::json!({
+            "error": "producer closure unverified", "producer_closed": false,
+        })).unwrap();
+        let request = store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/avery".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+            evidence: vec![token], expected_subject: None,
+            idempotency_key: Some("age-bounded-restart".into()),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let deadline = request.accepted_at_unix_ms + 60 * 60 * 1000;
+        assert!(!reconciler.retire_obsolete_failed_restart(&desired, deadline).unwrap());
+        assert!(reconciler.retire_obsolete_failed_restart(&desired, deadline + 1).unwrap());
+        let result = store.operation_claim(&format!("agent-restart-completed:{}", request.id))
+            .unwrap().unwrap();
+        assert_eq!(result.body["fields"]["operation_status"], "retired");
+        assert_eq!(result.body["evidence"][0], request.id);
+        let pending = store.runtime_start_for(subject).unwrap().unwrap();
+        assert_eq!(pending.id, operation.id);
+        assert!(!pending.cleanup_verified);
     }
 
     #[test]
@@ -23459,7 +24156,7 @@ agent "worker" {{
             Some("ada/two")
         );
         let plain = environment("agent/node.plain");
-        assert!(!plain.contains_key("CODEX_HOME") && !plain.contains_key("ST3_ACCOUNT"));
+        assert!(plain.contains_key("CODEX_HOME") && !plain.contains_key("ST3_ACCOUNT"));
     }
 
     #[test]
@@ -23623,6 +24320,21 @@ agent "import/omp/repair-order" {{
         old.import_replication("author", &declaration.export_replication(0).unwrap())
             .unwrap();
         let append_binding = |store: &Store, incarnation: &str| {
+            // A driver's binding is accepted only while its incarnation is the running one.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), Value::String("running".into())),
+                        ("incarnation_id".into(), Value::String(incarnation.into())),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                })
+                .unwrap();
             store
                 .append_claim(&ClaimInput {
                     subject: seat.into(),
@@ -23821,6 +24533,20 @@ agent "import/omp/repair-order" {{
         old_build
             .append_claim(&ClaimInput {
                 subject: seat.into(),
+                kind: "runtime.observed".into(),
+                actor: Some(seat.into()),
+                fields: BTreeMap::from([
+                    ("status".into(), Value::String("running".into())),
+                    ("incarnation_id".into(), Value::String("old-build".into())),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        old_build
+            .append_claim(&ClaimInput {
+                subject: seat.into(),
                 kind: "harness.session-file".into(),
                 actor: Some(seat.into()),
                 fields: BTreeMap::from([
@@ -23893,6 +24619,21 @@ agent "import/omp/fixture" {{
                     "desired_token".into(),
                     Value::String(store.launch_lineage(&subject.subject).unwrap().pop().unwrap()),
                 );
+                // A driver's binding is accepted only while its incarnation is the running one.
+                store
+                    .append_claim(&ClaimInput {
+                        subject: subject.subject.clone(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.subject.clone()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("running".into())),
+                            ("incarnation_id".into(), Value::String(incarnation.into())),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: None,
+                    })
+                    .unwrap();
             }
             store
                 .append_claim(&ClaimInput {
@@ -24243,6 +24984,270 @@ agent "import/omp/fixture" {{
     }
 
     #[test]
+    fn file_gate_watchers_rescan_after_lost_or_unscoped_mutations() {
+        let target = Path::new("/watched/gate");
+        let directory = target.parent().unwrap();
+        let rescan = notify::Event::new(notify::EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan);
+        assert!(FileWatch::relevant(&rescan, target, directory, None));
+        for kind in [
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+        ] {
+            assert!(FileWatch::relevant(&notify::Event::new(kind), target, directory, None));
+        }
+        let read = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
+        assert!(!FileWatch::relevant(&read, target, directory, None));
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_ignore_reads_and_unrelated_mutations() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            store,
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        // Publishing the initial file.observed claim signals a graph change. Consume
+        // that known wake before asserting that subsequent reads stay quiet.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the initial observation must publish its graph-change wake");
+        for _ in 0..3 {
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "ready");
+            reconciler.ensure_file_observation(&subject).unwrap();
+        }
+        let unrelated = root.path().join("unrelated.txt");
+        std::fs::write(&unrelated, "not a gate").unwrap();
+        std::fs::write(&unrelated, "still not a gate").unwrap();
+        std::fs::remove_file(&unrelated).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "reading the gate and mutating siblings must not wake reconciliation"
+        );
+
+        std::fs::write(&path, "changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_missing_parents_and_file_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("outer/inner/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
+            std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                    .await
+                    .is_err(),
+                "unrelated ancestor mutations must not wake reconciliation"
+            );
+            std::fs::create_dir(&parent).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("the next missing parent must wake reconciliation");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_ok()
+            {}
+        }
+
+        std::fs::write(&path, "created").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("creating the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, "replacement").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "staging a replacement beside the target must stay quiet"
+        );
+        std::fs::rename(&replacement, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("replacing the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "replacement"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::write(&path, "replacement changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the replacement's subsequent mutations must remain watched");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_refresh_when_the_target_path_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.txt");
+        let second = root.path().join("second.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch("file/node:gate", &first).unwrap();
+        reconciler.ensure_file_watch("file/node:gate", &second).unwrap();
+        std::fs::write(&first, "old target changed").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "the old target must no longer wake reconciliation"
+        );
+        std::fs::write(&second, "new target changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the new target must wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_resolve_symlinked_parent_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let path = alias.join("missing/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        std::fs::write(actual.join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::create_dir(actual.join("missing")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("canonical ancestor creation must wake an aliased file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(actual.join("missing/gate.txt"), "ready").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the file under an aliased parent must remain watched");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_symlink_referent_writes_and_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let referents = tempfile::tempdir().unwrap();
+        let first = referents.path().join("first.txt");
+        let second = referents.path().join("second.txt");
+        let path = root.path().join("gate.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        std::os::unix::fs::symlink(&first, &path).unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+
+        for content in ["written", "replaced"] {
+            if content == "written" {
+                std::fs::write(&first, content).unwrap();
+            } else {
+                let replacement = referents.path().join("replacement");
+                std::fs::write(&replacement, content).unwrap();
+                std::fs::rename(&replacement, &first).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("referent writes and replacements must wake the file gate");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert_eq!(
+                reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+                content
+            );
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await.is_ok()
+            {}
+        }
+
+        let replacement_link = root.path().join("replacement-link");
+        std::os::unix::fs::symlink(&second, &replacement_link).unwrap();
+        std::fs::rename(&replacement_link, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("retargeting the symlink must wake the file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "second"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(&first, "old referent").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::write(&second, "new referent").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the newly resolved referent must remain watched");
+    }
+
+    #[test]
     fn file_gate_watchers_are_released_without_active_gates() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let root = tempfile::tempdir().unwrap();
@@ -24295,6 +25300,44 @@ agent "import/omp/fixture" {{
         let reason = last.body.pointer("/fields/reason").and_then(Value::as_str).unwrap();
         assert!(reason.contains("absent") && reason.contains("nothing was started"), "{reason}");
         assert!(!reason.contains("recovered"), "{reason}");
+    }
+
+    #[test]
+    fn a_peer_that_does_not_run_the_seat_leaves_its_member_fault_alone() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, "version 2\nagent \"seat\" { command \"sleep 100\" }", "seat");
+        let subject = "agent/seat";
+        let reconciler = |host: &str| {
+            Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                host.into(),
+                Arc::new(Notify::new()),
+            )
+        };
+        let (host, peer) = (reconciler("node"), reconciler("peer"));
+        let decisions = || {
+            store
+                .claims_for(subject, Some("runtime.reconcile-decision"))
+                .unwrap()
+                .into_iter()
+                .filter_map(|claim| claim.body.pointer("/fields/decision").and_then(Value::as_str).map(str::to_owned))
+                .collect::<Vec<_>>()
+        };
+        host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+            .unwrap();
+        // The peer's pass only retired its own leftover process, over and over: the seat is
+        // still parked on its host, and the fault stays, once.
+        for _ in 0..3 {
+            peer.record_member_reconcile_result(subject, Ok(())).unwrap();
+            host.record_member_reconcile_result(subject, Err(anyhow::anyhow!("spawn PTY failed: launcher-incompatible")))
+                .unwrap();
+        }
+        assert_eq!(decisions(), ["member-fault"]);
+        assert!(store.member_reconcile_fault(subject, None).unwrap().is_some());
+        // The host that runs the seat answers it.
+        host.record_member_reconcile_result(subject, Ok(())).unwrap();
+        assert_eq!(decisions(), ["member-fault", "member-pass-clean"]);
     }
 
     #[test]
@@ -26706,6 +27749,44 @@ agent "test/worker" {
     }
 
     #[test]
+    fn declared_resource_edits_do_not_relaunch_an_exited_restart_never_seat() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |resource: &str| format!(
+            "version 2\nagent \"test/worker\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\"\n{resource}\n}}\n"
+        );
+        apply_source(&store, &source(""), "resource-seat");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let launch = reconciler.launch_token("agent/test/worker").unwrap();
+        let runtime_id = runtime.starts.lock().unwrap()[0].clone();
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "exited".into(),
+            exit_code: Some(0),
+            incarnation_id: Some("finished-resource-seat".into()),
+        });
+        reconciler.reconcile_once().unwrap();
+        for (key, resource) in [
+            ("add-resource", "resource \"notes\" uri=\"https://example.com/notes\""),
+            ("remove-resource", ""),
+        ] {
+            apply_source(&store, &source(resource), key);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(reconciler.launch_token("agent/test/worker").unwrap(), launch);
+            assert_eq!(
+                runtime.starts.lock().unwrap().as_slice(),
+                std::slice::from_ref(&runtime_id),
+                "{key} must not relaunch an exited restart-never seat",
+            );
+            assert!(runtime.stops.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn a_relabel_of_an_older_launch_runs_again_after_another_revision_launched() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, r#"version 2
@@ -27384,6 +28465,19 @@ agent "worker" {
         store.rename_agent("agent/node.worker", Some("Renamed"), "rename-exhausted").unwrap();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.starts.lock().unwrap().len(), 1);
+        for (key, resource) in [
+            ("add-exhausted-resource", "resource \"notes\" uri=\"https://example.com/notes\""),
+            ("remove-exhausted-resource", ""),
+        ] {
+            let edited = source.replace(
+                "command \"true\"",
+                &format!("command \"true\"\n{resource}"),
+            );
+            apply_source(&store, &edited, key);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(reconciler.launch_token("agent/node.worker").unwrap(), desired_token);
+            assert_eq!(runtime.starts.lock().unwrap().len(), 1, "{key} must preserve the exhausted budget");
+        }
         store
             .append_claim(&ClaimInput {
                 subject: "agent/node.worker".into(),
@@ -27498,6 +28592,20 @@ agent "worker" {
         store.rename_agent("agent/node.worker", Some("Renamed"), "rename-parked").unwrap();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.starts.lock().unwrap().len(), 3, "a rename must not unpark the seat");
+        let launch = reconciler.launch_token("agent/node.worker").unwrap();
+        for (key, resource) in [
+            ("add-parked-resource", "resource \"notes\" uri=\"https://example.com/notes\""),
+            ("remove-parked-resource", ""),
+        ] {
+            let source = format!(
+                "version 2\nagent \"worker\" {{ workspace \"/tmp\"; command \"true\"; restart \"always\"\n{resource}\n}}\n"
+            );
+            apply_source(&store, &source, key);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(reconciler.launch_token("agent/node.worker").unwrap(), launch);
+            assert_eq!(runtime.starts.lock().unwrap().len(), 3, "{key} must not unpark the seat");
+            assert!(reconciler.runtime_crash_loop_raised("agent/node.worker", &launch).unwrap());
+        }
     }
 
     #[test]
@@ -33904,6 +35012,26 @@ version 2
             desired.subject == format!("agent/{run_id}/worker") && desired.kind == "stop"
         }));
 
+        // While nothing the answer read changes, the held seat's minute rechecks reuse it: a
+        // seat's mailbox is not read again, however many messages it holds.
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        let start = now_ms();
+        SEAT_RETENTION_READS.with(|count| count.set(0));
+        for minute in 1..=3 {
+            smallclaims::store::set_thread_clock(Some(
+                start + minute * (SEAT_RETENTION_CHECK_MS + 1_000),
+            ));
+            reconciler.reconcile_once().unwrap();
+        }
+        assert_eq!(SEAT_RETENTION_READS.with(std::cell::Cell::get), 0);
+        assert!(runtime.stops.lock().unwrap().is_empty());
+
         // Once the message is read the stop goes ahead.
         for (kind, status) in [
             ("message.staged", "staged"),
@@ -33922,7 +35050,6 @@ version 2
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
     }
@@ -34000,7 +35127,6 @@ version 2
         store
             .set_step_state(&elsewhere[0], "completed", None)
             .unwrap();
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().as_slice(), &[runtime_id]);
         assert!(store.fault_items(None).unwrap().is_empty());
@@ -34251,7 +35377,6 @@ mission "held-stop" state="ready" {
                 })
                 .unwrap();
         }
-        reconciler.seat_retention.lock().unwrap().clear();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.stops.lock().unwrap().len(), 1);
         assert!(store.fault_items(None).unwrap().is_empty());
@@ -35193,7 +36318,8 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
         Observe,
         /// An observation that asks to continue at once, as a listing longer than one read does.
         Continue,
-        RateLimit,
+        RateLimitAt(u128),
+        LocalBudget(u128),
         Forbidden,
         Fail,
     }
@@ -35247,10 +36373,15 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
                         next_check_unix_ms: now_ms()
                             .saturating_add(crate::resource::PROVIDER_CONTINUE_MS),
                     }),
-                    ScriptedObservation::RateLimit => {
+                    ScriptedObservation::RateLimitAt(deadline) => {
                         Err(anyhow::Error::new(crate::resource::ProviderRateLimit {
-                            retry_at_unix_ms: now_ms() + 180_000,
+                            retry_at_unix_ms: deadline,
                             status: 403,
+                        }))
+                    }
+                    ScriptedObservation::LocalBudget(deadline) => {
+                        Err(anyhow::Error::new(crate::resource::LocalObserverBudget {
+                            retry_at_unix_ms: deadline,
                         }))
                     }
                     ScriptedObservation::Forbidden => {
@@ -35430,6 +36561,24 @@ observer "{subject}" {{
             .unwrap();
         let key = format!("observer/repo:{revision}");
         let expected = calls.load(Ordering::SeqCst) + 1;
+        // Persisted refusal deadlines deliberately override an in-memory deadline. Use the
+        // public refresh contract to force the next scripted refusal without sleeping.
+        if reconciler.store.latest_actual_value("observer/repo").unwrap().is_some_and(|actual|
+            matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget")))
+        {
+            reconciler.store.append_claim(&ClaimInput {
+                subject: "observer/repo".into(),
+                kind: "observer.refresh-requested".into(),
+                actor: Some("person/test".into()),
+                fields: BTreeMap::from([
+                    ("revision".into(), Value::String(revision)),
+                    ("attempt".into(), Value::String(format!("scripted-{expected}"))),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
         reconciler
             .armed_observers
             .lock()
@@ -35550,10 +36699,11 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
     }
 
     #[tokio::test]
-    async fn a_rate_limit_asks_a_person_only_after_it_outlasts_its_reset() {
+    async fn a_rate_limit_persists_each_new_deadline_and_clears_stale_attention() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, SCRIPTED_OBSERVER, "outlasted-rate-limit");
         let calls = Arc::new(AtomicUsize::new(0));
+        let reset = now_ms() + 180_000;
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -35563,8 +36713,9 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         .with_resource_provider(Arc::new(ScriptedResourceProvider::new(
             calls.clone(),
             [
-                ScriptedObservation::RateLimit,
-                ScriptedObservation::RateLimit,
+                ScriptedObservation::RateLimitAt(reset),
+                ScriptedObservation::RateLimitAt(reset + 180_000),
+                ScriptedObservation::RateLimitAt(reset + 360_000),
                 ScriptedObservation::Observe,
             ],
         )));
@@ -35575,7 +36726,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(state["error_code"], "rate-limited");
         assert!(observer_items(&store).is_empty());
 
-        // The reset it named passed, and the observer is still limited.
+        // Until another refusal is observed, a missed reset can ask for attention.
         let revision = store
             .selected_desired_revision("observer/repo")
             .unwrap()
@@ -35603,7 +36754,6 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 idempotency_key: None,
             })
             .unwrap();
-        observe_now(&reconciler, &calls).await;
         let items = observer_items(&store);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "A GitHub rate limit outlasted its reset");
@@ -35614,6 +36764,14 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
             "{}",
             items[0].detail
         );
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 180_000).to_string());
+        assert!(observer_items(&store).is_empty(), "the new refusal supersedes the old reset");
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 360_000).to_string());
+        assert!(observer_items(&store).is_empty());
 
         // Observing again closes it.
         observe_now(&reconciler, &calls).await;
@@ -35626,6 +36784,28 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 .body["fields"]["state"],
             "healthy"
         );
+    }
+
+    #[tokio::test]
+    async fn a_local_observer_refusal_persists_its_slot_without_provider_attention() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "local-budget");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slot = now_ms() + 180_000;
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(ScriptedResourceProvider::new(
+            calls.clone(), [ScriptedObservation::LocalBudget(slot)],
+        )));
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["error_code"], "local-observer-budget");
+        assert_eq!(state["state"], "healthy", "compatible non-fault deferred receipt");
+        assert_eq!(state["next_check_unix_ms"], slot.to_string());
+        assert_eq!(state["reason"], format!("local observer budget reached, next slot at {slot} (Unix ms)"));
+        assert!(observer_items(&store).is_empty());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

@@ -1,0 +1,75 @@
+#!/usr/bin/env python3
+"""Validate canonical release archives and their temporary compatibility copies."""
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent.parent
+SOURCE = 'a' * 40
+TARGETS = ('x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')
+
+
+def archive(root, prefix, target, *, source=SOURCE, binary=b'cli', alias='st3'):
+    package = f'{prefix}-{target}'
+    with tarfile.open(root / f'{package}.tar.gz', 'w:gz') as output:
+        def add(name, data=b'', mode=0o755, link=None):
+            member = tarfile.TarInfo(f'{package}/{name}')
+            member.mode = mode
+            if link is not None:
+                member.type, member.linkname = tarfile.SYMTYPE, link
+                output.addfile(member)
+            else:
+                member.size = len(data)
+                output.addfile(member, io.BytesIO(data))
+        add('BUILD.json', json.dumps({'source': source, 'target': target, 'pty_revision': 'pty', 'tag': ''}).encode(), 0o644)
+        add('bin/st3', binary)
+        add('bin/pty', b'pty')
+        add('bin/st', link=alias)
+        add('bin/fractal', link=alias)
+        add('share/fractal-web/index.html', b'web', 0o644)
+        add('install.sh')
+        add('install-macos.py')
+        add('macos-installation.md', mode=0o644)
+
+
+class Manifest(unittest.TestCase):
+    def validate(self, root):
+        return subprocess.run([sys.executable, str(ROOT / 'scripts/release-fractal-manifest.py'), SOURCE],
+                              cwd=root, capture_output=True, text=True)
+
+    def fixtures(self, root):
+        for target in TARGETS:
+            for prefix in ('fractal', 'smalltalk'):
+                archive(root, prefix, target)
+
+    def test_both_targets_and_compatibility_copies_produce_the_manifest(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.fixtures(root)
+            result = self.validate(root)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((root / 'RELEASE.json').read_text())
+            self.assertEqual(manifest['source'], SOURCE)
+            self.assertEqual([build['target'] for build in manifest['builds']], list(TARGETS))
+
+    def test_invalid_source_alias_and_divergent_compatibility_copy_are_refused(self):
+        for mutation, message in (({'source': 'b' * 40}, 'different source'),
+                                  ({'alias': 'fractal'}, 'relative st3 symlink'),
+                                  ({'binary': b'different'}, 'legacy archive differs')):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                self.fixtures(root)
+                archive(root, 'smalltalk', TARGETS[0], **mutation)
+                result = self.validate(root)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stderr)
+                self.assertFalse((root / 'RELEASE.json').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -42,7 +42,7 @@ class CiLocalWeb(unittest.TestCase):
         recorder = self.home / '.local/state/st3/recorder/bin'
         env = {'PATH': f'{recorder}:{self.wrappers}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_WEB_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'ST_AGENT': 'agent/x', 'FRACTAL_AGENT': 'agent/x', 'GH_TOKEN': 'secret', 'SSH_AUTH_SOCK': '/x',
-               'LD_PRELOAD': '/nix/store/x-jemalloc/lib/libjemalloc.so.2', 'KIT_PLAY_MAX_SECONDS': '100', 'APP_TEST_SET': 'related',
+               'LD_PRELOAD': '/nix/store/x-jemalloc/lib/libjemalloc.so.2', 'KIT_PLAY_WALL_GUARD_SECONDS': '268', 'APP_TEST_SET': 'related',
                'FRACTAL_WEB_BUCK_ROOT': '/nix/store/x-buck-root', 'FRACTAL_WEB_OTHER': '/var/elsewhere', **extra}
         done = subprocess.run(['bash', 'scripts/ci-local-web'], cwd=self.work, env=env, capture_output=True, text=True,
                               preexec_fn=lambda: os.umask(0o002))
@@ -59,7 +59,7 @@ class CiLocalWeb(unittest.TestCase):
                                                              'KIT_PLAY_A11Y', 'APP_TEST_SET', 'BASE_SHA', 'HEAD_SHA')},
                              {'KIT_INPUTS': 'true', 'KIT_SHARD_INDEX': '0', 'KIT_SHARD_COUNT': '1', 'KIT_PLAY_SET': 'all',
                               'KIT_PLAY_A11Y': 'on', 'APP_TEST_SET': 'all', 'BASE_SHA': self.head, 'HEAD_SHA': self.head})
-            self.assertNotIn('KIT_PLAY_MAX_SECONDS', env)  # no per-play time cap
+            self.assertNotIn('KIT_PLAY_WALL_GUARD_SECONDS', env)  # no commit-only wall ceiling
             scratch = Path(env['HOME']).parent
             self.assertTrue(str(scratch).startswith(f'{self.home}/.cache/ci-local/web.'), scratch)
             for name in ('TMPDIR', 'RUNNER_TEMP', 'GITHUB_STEP_SUMMARY', 'XDG_STATE_HOME', 'KIT_RECEIPT_DIRECTORY'):

@@ -128,6 +128,49 @@ fn custom_registration_document_record_change_reaches_registry_expansion() {
     }).unwrap().unwrap();
 }
 
+fn invalidations_view(connection: &Connection) -> String {
+    connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='view' AND name='custom_claim_invalidations'",
+        [], |row| row.get(0),
+    ).unwrap()
+}
+
+#[test]
+fn custom_batch_suffix_invalidations_look_claims_up_by_id_not_every_document_binding() {
+    let store = Store::open_memory("example").unwrap();
+    let connection = store.connection.write();
+    // The statement custom_claim_insert runs for every claim it appends. Without
+    // sqlite_stat1 the planner guesses, as it does on a member that never ran ANALYZE.
+    let plan: Vec<String> = connection.prepare(
+        "EXPLAIN QUERY PLAN SELECT subject FROM custom_claim_invalidations WHERE id IN
+         (SELECT id FROM claims WHERE batch_id=?1 AND store_index>?2
+          AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id))",
+    ).unwrap().query_map(params!["batch/example", 0], |row| row.get(3)).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap();
+    let binding: Vec<&String> = plan.iter().filter(|line| line.contains("binding")).collect();
+    assert!(!binding.is_empty(), "{plan:#?}");
+    assert!(
+        binding.iter().all(|line| !line.contains("claims_kind_index")),
+        "a lookup by claim ID must not walk every doc.bound claim: {plan:#?}",
+    );
+}
+
+#[test]
+fn custom_schema_replaces_an_installed_older_invalidations_view_once() {
+    let store = Store::open_memory("example").unwrap();
+    let connection = store.connection.write();
+    let current = invalidations_view(&connection);
+    let older = current.replace("+binding.kind", "binding.kind");
+    assert_ne!(older, current);
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5d05266b3a85 owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "DROP VIEW custom_claim_invalidations").unwrap();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h285b42617459 owner=fractal_store::store::custom::tests TODO=trace-statement-and-value-representation */ &older).unwrap();
+    create_schema(&connection).unwrap();
+    assert_eq!(invalidations_view(&connection), current);
+    let cookie: i64 = connection.query_row("PRAGMA schema_version", [], |row| row.get(0)).unwrap();
+    create_schema(&connection).unwrap();
+    assert_eq!(connection.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0)).unwrap(), cookie);
+}
+
 #[test]
 fn custom_bad_projection_isolated_from_other_sources_and_core_reads() {
     let s = Store::open_memory("alder").unwrap();

@@ -111,6 +111,35 @@ pub fn transfer_tx(
     Ok(())
 }
 
+pub(super) fn clear_eta_tx(
+    tx: &Transaction<'_>,
+    origin: &str,
+    current: &StepRunView,
+    input: &WorkHandoffRequest,
+) -> Result<(), St3Error> {
+    let Some(summary) = current
+        .progress_summary
+        .as_deref()
+        .and_then(fractal_store::work_eta::without_eta)
+    else {
+        return Ok(());
+    };
+    // Keep this summary-only progress after the release in the same transaction:
+    // replay clears only the advisory note, without changing ownership or the clock.
+    append_claim_tx(
+        tx,
+        origin,
+        &current.subject,
+        "work.progress",
+        Some(&input.actor),
+        &json!({"fields": {"attempt": current.attempt, "summary": summary}}),
+        &[],
+        None,
+    )
+    .map_err(claim_append_error)?;
+    Ok(())
+}
+
 pub fn is_adhoc(connection: &Connection, run: &str) -> rusqlite::Result<bool> {
     connection.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='mission-run.created' AND json_extract(body,'$.fields.ad_hoc_title') IS NOT NULL)", [run], |row| row.get(0))
 }

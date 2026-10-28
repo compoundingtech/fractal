@@ -55,7 +55,7 @@ pub const IMAGE_ROWS: usize = 12;
 pub struct Key {
     pub conversation: String,
     pub entry: String,
-    pub revision: u32,
+    pub revision: u64,
     pub reference: String,
 }
 
@@ -1335,7 +1335,7 @@ pub async fn fetch(client: &Client, key: &Key) -> Result<Fetched, String> {
         let bytes = client
             .blob(sha256, Some(key.conversation.as_str()))
             .await
-            .map_err(|error| error.plain())?;
+            .map_err(|error| error.human())?;
         (String::new(), bytes)
     } else {
         let mut bytes = Vec::new();
@@ -1345,7 +1345,7 @@ pub async fn fetch(client: &Client, key: &Key) -> Result<Fetched, String> {
             let chunk = client
                 .conversation_content_chunk(&key.conversation, &key.reference, offset)
                 .await
-                .map_err(|error| error.plain())?
+                .map_err(|error| error.human())?
                 .value;
             append_chunk(&mut bytes, &mut identity, &key.reference, offset, &chunk)?;
             match chunk.next_offset {
