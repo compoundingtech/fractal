@@ -15,12 +15,29 @@ const TABLES: &[&str] = &[
     "checkpoint_claims",
     "checkpoint_envelopes",
 ];
+/// Projection rows protect the captured claims they name. Their fences move `protection`, not
+/// the epoch: a capture whose protection changed reads its protection pass again and keeps the
+/// history it captured, while every read after the capture checks both. They are named apart
+/// from the history fences, so an older build, which fences these rows under its own names and
+/// moves the epoch, installs its own again when it opens the store.
+const PROJECTIONS: &[&str] = &["documents", "desired", "mission_definitions", "mission_revisions"];
+const EVENTS: [&str; 4] = ["INSERT", "UPDATE", "DELETE", "replace"];
+
+/// The counter a table's fences move and the name they are installed under.
+fn fence(table: &str) -> (&'static str, &'static str) {
+    if PROJECTIONS.contains(&table) {
+        ("protection", "checkpoint_protection")
+    } else {
+        ("value", "checkpoint_capture")
+    }
+}
 
 pub(super) fn initialize(connection: &Connection) -> Result<()> {
     let transaction = connection.unchecked_transaction()?;
     // Earlier version-18 PR heads have the singleton but neither of these columns.
     // Add them before any cut-aware trigger is installed; preserve its epoch/frontier.
-    for column in ["cut_unix_ms", "trigger_version"] {
+    // `protection` came later still, with the projection fences that move it.
+    for column in ["cut_unix_ms", "trigger_version", "protection"] {
         let exists: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('checkpoint_capture_epoch') WHERE name=?1)",
             [column],
@@ -42,18 +59,23 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
         // IF NOT EXISTS alone would keep the previous blanket predicates. DDL and the
         // epoch bump commit together, so a capture using the old guard must restart.
         for table in TABLES {
-            for event in ["INSERT", "UPDATE", "DELETE", "replace"] {
-                transaction.execute_batch(&format!(
-                    /* sqlite-large-value: allow-for-now lv-he1de637574d4 owner=smallclaims::store::checkpoint_capture_epoch TODO=stage-generation-and-keyed-reclamation */ "DROP TRIGGER IF EXISTS {table}_checkpoint_capture_{event};"
-                ))?;
+            for name in ["checkpoint_capture", "checkpoint_protection"] {
+                drop_triggers(&transaction, table, name)?;
             }
         }
     }
+    for table in PROJECTIONS {
+        // An older build fenced projection rows under the history name, moving the epoch, and
+        // installs those fences again whenever it opens the store. Dropping a fence invalidates
+        // no capture: the protection fences below cover the same rows.
+        drop_triggers(&transaction, table, "checkpoint_capture")?;
+    }
     for table in TABLES {
+        let (_, name) = fence(table);
         let (exists, installed): (bool, bool) = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1),
                     EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?2)",
-            params![table, format!("{table}_checkpoint_capture_replace")],
+            params![table, format!("{table}_{name}_replace")],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         // Installation is atomic; the final BEFORE trigger marks that table complete.
@@ -70,6 +92,24 @@ pub(super) fn initialize(connection: &Connection) -> Result<()> {
     }
     transaction.commit()?;
     Ok(())
+}
+
+fn drop_triggers(connection: &Connection, table: &str, name: &str) -> Result<()> {
+    for event in EVENTS {
+        connection.execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-h87d6928cd702 owner=smallclaims::store::checkpoint_capture_epoch TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS {table}_{name}_{event};"
+        ))?;
+    }
+    Ok(())
+}
+
+/// The epoch and the projection counter in one read, as a capture page checks them.
+pub(super) fn counters(connection: &Connection) -> Result<(i64, i64)> {
+    Ok(connection.query_row(
+        "SELECT value, protection FROM checkpoint_capture_epoch WHERE id=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 /// Envelope admission, including pending backfills and late-claim exclusion witnesses.
@@ -262,10 +302,11 @@ fn create_trigger(
     condition: &str,
 ) -> Result<()> {
     let operation = if event == "replace" { "INSERT" } else { event };
+    let (counter, name) = fence(table);
     connection.execute_batch(&format!(
-        /* sqlite-large-value: allow-for-now lv-heaf3fdbc6d5f owner=smallclaims::store::checkpoint_capture_epoch TODO=stage-generation-and-keyed-reclamation */ "CREATE TRIGGER IF NOT EXISTS {table}_checkpoint_capture_{event} {timing} {operation} ON {table}
+        /* sqlite-large-value: allow-for-now lv-hce148b274a96 owner=smallclaims::store::checkpoint_capture_epoch TODO=stage-generation-and-keyed-reclamation */ "CREATE TRIGGER IF NOT EXISTS {table}_{name}_{event} {timing} {operation} ON {table}
          WHEN (SELECT cut_unix_ms FROM {GUARD})>0 AND ({condition}) BEGIN
-             UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1;
+             UPDATE checkpoint_capture_epoch SET {counter}={counter}+1 WHERE id=1;
          END;"
     ))?;
     Ok(())

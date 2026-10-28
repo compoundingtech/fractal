@@ -10,6 +10,12 @@
 //! snapshot of its own, after checking the epoch, and written to the staging file with its
 //! cursor in one transaction, so a crash leaves a consistent prefix.
 //!
+//! Projection rows (desired state, documents, mission definitions and revisions) move a
+//! counter of their own, `protection`, instead of the epoch. The protection pass, which reads
+//! them last, records the counter it starts at, and every later page and every resumption checks
+//! it, so the protection a finished capture holds is a snapshot of the projections, as a fresh
+//! capture's is. When it moves, only the protection pass reads again; the history stays.
+//!
 //! The tables are the planner's contract: a runtime's `plan_staged_checkpoint_drops` reads
 //! `claims` and marks `dropped`, and `finish` derives the plan from those marks.
 use super::checkpoint::{
@@ -19,22 +25,37 @@ use super::checkpoint::{
 };
 use super::*;
 
+/// A projection fence moved while the capture read or held its protection.
+#[derive(Debug)]
+struct ProtectionChanged;
+
+impl std::fmt::Display for ProtectionChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a projection row changed what the checkpoint capture protects")
+    }
+}
+
+impl std::error::Error for ProtectionChanged {}
+
 /// Bump on any change to the tables below or to what a phase writes, so a newer build never
 /// resumes a file an older one staged.
-const STAGING_FORMAT: i64 = 1;
+const STAGING_FORMAT: i64 = 2;
+/// How often one pass reads its protection again before it stops and resumes there next pass.
+const PROTECTION_RESTARTS: usize = 8;
 /// Rows each page reads from the store.
 pub const STAGING_PAGE: i64 = 64;
 /// SQLite's page cache for the staging file, in KiB. Its sorter spills past it to disk.
 const STAGING_CACHE_KIB: i64 = 2_048;
 
-pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb1622b55b32a owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
+pub(super) const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h9d07b841808a owner=smallclaims::store::checkpoint_staging TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS meta(
     id INTEGER PRIMARY KEY CHECK(id=1),
     identity TEXT NOT NULL,
     phase INTEGER NOT NULL,
     cursor INTEGER NOT NULL,
     bound INTEGER,
-    plan TEXT
+    plan TEXT,
+    protection INTEGER
 );
 CREATE TABLE IF NOT EXISTS envelopes(
     writer TEXT NOT NULL, sequence INTEGER NOT NULL, envelope_hash TEXT NOT NULL,
@@ -88,8 +109,11 @@ const ENVELOPES: i64 = 0;
 const RECORDS: i64 = 1;
 const ORDER: i64 = 2;
 const CLAIMS: i64 = 3;
-/// One phase per protection query, `PROTECTED..PROTECTED + PROTECTIONS.len()`.
-const PROTECTED: i64 = 4;
+const EARLIER_ENVELOPES: i64 = 4;
+const EARLIER_CLAIMS: i64 = 5;
+/// One phase per protection query, `PROTECTED..PROTECTED + PROTECTIONS.len()`. They come last:
+/// a projection row that changes what they protect restarts only them.
+const PROTECTED: i64 = 6;
 const PROTECTIONS: [(&str, &str, &str); 6] = [
     ("desired", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
     ("mission_definitions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
@@ -98,9 +122,7 @@ const PROTECTIONS: [(&str, &str, &str); 6] = [
     ("claims", "json_extract(body, '$.fields.replacement')", "kind='record.repaired' AND ?3 IS NOT NULL"),
     ("replica_records", "replacement_claim_id", "replacement_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
 ];
-const EARLIER_ENVELOPES: i64 = PROTECTED + PROTECTIONS.len() as i64;
-const EARLIER_CLAIMS: i64 = EARLIER_ENVELOPES + 1;
-const CAPTURED: i64 = EARLIER_CLAIMS + 1;
+const CAPTURED: i64 = PROTECTED + PROTECTIONS.len() as i64;
 
 /// What a planner reads of one sealed claim's body. The capture computes it once, while the
 /// body is in hand, so the plan holds no bodies.
@@ -498,27 +520,77 @@ impl StagedSet {
 
     /// Run the capture's phases from where the file stopped.
     fn capture(&self, store: &Store) -> Result<()> {
+        let mut restarts = 0;
         loop {
             if let Some(space) = &self.space {
                 space.check_now()?;
             }
             let (phase, cursor, bound) = self.position()?;
-            match phase {
-                ENVELOPES => self.capture_envelopes(store, cursor)?,
-                RECORDS => self.capture_records(store, cursor, bound)?,
-                ORDER => self.order_records()?,
-                CLAIMS => self.capture_claims(store, cursor)?,
-                phase if (PROTECTED..EARLIER_ENVELOPES).contains(&phase) => {
-                    self.capture_protection(store, phase, cursor, bound)?
+            let step = match phase {
+                ENVELOPES => self.capture_envelopes(store, cursor),
+                RECORDS => self.capture_records(store, cursor, bound),
+                ORDER => self.order_records(),
+                CLAIMS => self.capture_claims(store, cursor),
+                EARLIER_ENVELOPES | EARLIER_CLAIMS => self.capture_earlier(store, phase, cursor, bound),
+                phase if (PROTECTED..CAPTURED).contains(&phase) => {
+                    self.capture_protection(store, phase, cursor, bound)
                 }
-                EARLIER_ENVELOPES | EARLIER_CLAIMS => self.capture_earlier(store, phase, cursor, bound)?,
-                CAPTURED => {
-                    // The last page's epoch check covers every page before it.
-                    return store.checkpoint_capture_page(self.epoch, || Ok(()));
-                }
+                // The last page's checks cover every page before it, and this one the time
+                // since, so a file resumed after a projection changed reads its protection again.
+                CAPTURED => match self.protection_page(store, || Ok(())) {
+                    Ok(_) => return Ok(()),
+                    Err(error) => Err(error),
+                },
                 other => anyhow::bail!("checkpoint staging phase {other} is unknown"),
+            };
+            match step {
+                Err(error) if error.downcast_ref::<ProtectionChanged>().is_some() => {
+                    restarts += 1;
+                    anyhow::ensure!(
+                        restarts <= PROTECTION_RESTARTS,
+                        "projection rows changed what the checkpoint capture protects \
+                         {PROTECTION_RESTARTS} times in one pass; it reads its protection again \
+                         on the next pass"
+                    );
+                    self.restart_protection(phase == CAPTURED)?;
+                }
+                step => step?,
             }
         }
+    }
+
+    /// Read one page of the protection pass, or check a finished one, on a snapshot whose
+    /// epoch is the capture's and whose projection counter is the one the pass started at.
+    /// Returns that counter; at the pass's start, any counter is the one it starts at.
+    fn protection_page<T>(&self, store: &Store, read: impl FnOnce() -> Result<T>) -> Result<(i64, T)> {
+        let started: Option<i64> =
+            self.staging.query_row("SELECT protection FROM meta WHERE id=1", [], |row| row.get(0))?;
+        store.read_snapshot(|_| {
+            let (epoch, protection) = super::checkpoint_capture_epoch::counters(&store.readers.get())?;
+            if epoch != self.epoch {
+                return Err(CheckpointCaptureChanged.into());
+            }
+            if started.is_some_and(|started| started != protection) {
+                return Err(ProtectionChanged.into());
+            }
+            Ok((protection, read()?))
+        })
+    }
+
+    /// Start the protection pass again, keeping the history phases: a projection row changed
+    /// what the pass read, and no history the rest of the capture read.
+    fn restart_protection(&self, applied: bool) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        if applied {
+            transaction.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-h17846b8d9956 owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=0 WHERE protected<>0;",
+            )?;
+        }
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h3b836a42fa7d owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM protected; UPDATE meta SET protection=NULL, plan=NULL WHERE id=1;",
+        )?;
+        Self::advance(&transaction, PROTECTED, 0, None)?;
+        Ok(transaction.commit()?)
     }
 
     /// The highest rowid of `table`, read on an epoch-checked page.
@@ -685,7 +757,7 @@ impl StagedSet {
             .query_row("SELECT COALESCE(MAX(n), 0) FROM ordered", [], |row| row.get(0))?;
         if after >= last {
             let transaction = self.staging.unchecked_transaction()?;
-            Self::advance(&transaction, PROTECTED, 0, None)?;
+            Self::advance(&transaction, EARLIER_ENVELOPES, 0, None)?;
             return Ok(transaction.commit()?);
         }
         let sql = format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1");
@@ -762,11 +834,23 @@ impl StagedSet {
         let (table, columns, filter) = PROTECTIONS[usize::try_from(phase - PROTECTED)?];
         let high = match bound {
             Some(high) => high,
-            None => self.high(store, table)?,
+            None => {
+                let (protection, high) = self.protection_page(store, || {
+                    Ok(store.readers.get().query_row(
+                        /* sqlite-large-value: allow-for-now lv-h4393dc360b1e owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &format!("SELECT COALESCE(MAX(rowid), 0) FROM {table}"), [], |row| row.get(0),
+                    )?)
+                })?;
+                // The pass starts at its first table; every later page must see this counter.
+                self.staging.execute(
+                    /* sqlite-large-value: allow-for-now lv-hce7a194a51c0 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET protection=COALESCE(protection, ?1) WHERE id=1",
+                    [protection],
+                )?;
+                high
+            }
         };
         if after >= high {
             let transaction = self.staging.unchecked_transaction()?;
-            if phase + 1 == EARLIER_ENVELOPES {
+            if phase + 1 == CAPTURED {
                 transaction.execute_batch(
                     /* sqlite-large-value: allow-for-now lv-hdd7330128d54 owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=1 WHERE id IN (SELECT id FROM protected);",
                 )?;
@@ -777,7 +861,7 @@ impl StagedSet {
         let upto = after.saturating_add(STAGING_PAGE).min(high);
         let cut = accepted(self.cut_unix_ms)?;
         let sql = format!("SELECT {columns} FROM {table} WHERE rowid>?1 AND rowid<=?2 AND ({filter})");
-        let page = store.checkpoint_capture_page(self.epoch, || {
+        let (_, page) = self.protection_page(store, || {
             Ok(store.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h39c0873480c9 owner=smallclaims::store::checkpoint_staging TODO=trace-statement-and-value-representation */ &sql)?
                 .query_map(params![after, upto, cut], |row| row.get::<_, Option<String>>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1226,6 +1310,10 @@ fn remove_file_set(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "checkpoint_staging_protection_tests.rs"]
+mod protection_tests;
 
 #[cfg(test)]
 mod headroom_resume_tests {
