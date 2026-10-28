@@ -22,7 +22,7 @@ fn git(directory: &Path, arguments: &[&str]) {
 
 fn gate(root: &Path, mode: &str, repository: &Path) -> (Option<i32>, String) {
     std::fs::write(root.join("cargo-mode"), mode).unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env_clear()
         .env("HOME", root)
         .env(
