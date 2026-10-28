@@ -314,14 +314,21 @@ CREDENTIAL_VARIABLES = ("GH_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "OPENAI
 PUBLIC_CREDENTIAL_FILES = ("known_hosts", "known_hosts.old", "authorized_keys")
 
 
+def is_git_repository(path):
+    return path.name == ".git" or path.name.endswith(".git") or (Path(path, "HEAD").is_file() and Path(path, "objects").is_dir())
+
+
 def credential_files(root):
-    """The files under ROOT that can hold a secret: not a git repository (a scratch repo's FETCH_HEAD and object names are public
-    commit ids, and they made every verdict naming that head fail), not a public key or a known_hosts list. At most 200."""
+    """The files under ROOT that can hold a secret: not the inside of a git repository (a scratch repo's FETCH_HEAD, refs and objects
+    are public commit ids, and they made every verdict naming that head fail), except its `config`, whose remote URL can carry a
+    token; not a public key or a known_hosts list. At most 200."""
     if root.is_file():
         return [root]
     found = []
     for directory, names, files in os.walk(root):
-        names[:] = sorted(name for name in names if name != ".git" and not name.endswith(".git") and not (Path(directory, name, "HEAD").is_file() and Path(directory, name, "objects").is_dir()))
+        repositories = [name for name in names if is_git_repository(Path(directory, name))]
+        names[:] = sorted(name for name in names if name not in repositories)
+        found += [Path(directory, name, "config") for name in sorted(repositories) if Path(directory, name, "config").is_file()]
         found += [Path(directory, name) for name in sorted(files) if name not in PUBLIC_CREDENTIAL_FILES and not name.endswith(".pub")]
         if len(found) >= 200:
             break
