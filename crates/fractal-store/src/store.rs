@@ -5371,7 +5371,40 @@ impl Store {
         Ok(faults)
     }
 
-    /// Every claim and local observation of `kind` for `subject`, in log order.
+    /// Each claim's acceptance time, read only for claims not read before. A claim's time never
+    /// changes, and a trimmed claim is no longer any status's selected claim, so a kept time is
+    /// never stale; a list that shows each runtime's last change reads only the claims that
+    /// became current since its last fold.
+    pub fn kept_claim_acceptance_times(&self, ids: &[&str]) -> Result<BTreeMap<String, u128>> {
+        let kept = self.extension::<ClaimAcceptanceTimes>();
+        let mut times = BTreeMap::new();
+        let mut missing = Vec::new();
+        {
+            let kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
+            for id in ids {
+                match kept.get(*id) {
+                    Some(time) => {
+                        times.insert((*id).to_owned(), *time);
+                    }
+                    None => missing.push(*id),
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(times);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        CLAIM_ACCEPTANCE_TIMES_READ.with(|read| read.set(read.get() + missing.len()));
+        let read = self.claim_acceptance_times(&missing)?;
+        let mut kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() + read.len() > CLAIM_ACCEPTANCE_TIMES_LIMIT {
+            kept.clear();
+        }
+        kept.extend(read.iter().map(|(id, time)| (id.clone(), *time)));
+        times.extend(read);
+        Ok(times)
+    }
+
     /// A seat's harness diagnostics in canonical order, without the Claude channel's
     /// attachment reports: those are most of a long-lived seat's diagnostics, and their own
     /// index serves the attachment fence. An append raises the newest index and a checkpoint
@@ -5413,6 +5446,7 @@ impl Store {
         Ok(diagnostics)
     }
 
+    /// Every claim and local observation of `kind` for `subject`, in log order.
     pub fn observations_for(&self, subject: &str, kind: &str) -> Result<Vec<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let mut records = self.claims_for(subject, Some(kind))?;
@@ -18886,6 +18920,19 @@ pub fn step_timing_events(
         kept.insert(file, (key, Arc::new(events.clone())));
     }
     Ok(events)
+}
+
+/// Claims' acceptance times as read, by claim ID.
+#[derive(Default)]
+struct ClaimAcceptanceTimes(Mutex<HashMap<String, u128>>);
+
+/// Kept acceptance times; past this many the next read starts again.
+const CLAIM_ACCEPTANCE_TIMES_LIMIT: usize = 65_536;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How many claims' acceptance times this thread read from the store.
+    pub static CLAIM_ACCEPTANCE_TIMES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Each seat's harness diagnostics as last read, under the newest index and the count of them.

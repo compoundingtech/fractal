@@ -7720,13 +7720,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         launch: &MemberSpec,
     ) -> Option<String> {
         let driver = crate::accounts::harness_driver(&subject.desired)?;
-        let configured = crate::accounts::login_environment_name(driver).and_then(|variable| {
-            launch
-                .environment
-                .get(variable)
-                .cloned()
-                .or_else(|| std::env::var(variable).ok())
-        });
+        // A harness with a login directory names it in that variable; omp names the key file it
+        // reads in its own.
+        let configured = crate::accounts::login_environment_name(driver)
+            .or_else(|| (driver == "omp").then_some(crate::accounts::OMP_KEY_FILE_ENV))
+            .and_then(|variable| {
+                launch
+                    .environment
+                    .get(variable)
+                    .cloned()
+                    .or_else(|| std::env::var(variable).ok())
+            });
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let accounts = self.store.declared_accounts().ok()?;
         crate::accounts::unbound_login_account(

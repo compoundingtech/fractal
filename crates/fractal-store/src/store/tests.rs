@@ -11342,6 +11342,38 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
 }
 
 #[test]
+fn a_claims_acceptance_time_is_read_from_the_store_once() {
+    let store = Store::open_memory("node").unwrap();
+    let observe = |n: usize| {
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("agent/node.worker-{n}"),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({"status": "running"})).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let first = observe(0);
+    let second = observe(1);
+    let read = || CLAIM_ACCEPTANCE_TIMES_READ.with(std::cell::Cell::get);
+    let before = read();
+    let times = store.kept_claim_acceptance_times(&[&first.id, &second.id]).unwrap();
+    assert_eq!(times.get(&first.id), Some(&first.accepted_at_unix_ms));
+    assert_eq!(times.get(&second.id), Some(&second.accepted_at_unix_ms));
+    assert_eq!(read(), before + 2);
+    // A later fold that shows the same claims reads none of them again; a new one only itself.
+    let third = observe(2);
+    let times = store.kept_claim_acceptance_times(&[&first.id, &second.id, &third.id]).unwrap();
+    assert_eq!(times.get(&third.id), Some(&third.accepted_at_unix_ms));
+    assert_eq!(times, store.claim_acceptance_times(&[&first.id, &second.id, &third.id]).unwrap());
+    assert_eq!(read(), before + 3, "kept acceptance times were read again");
+}
+
+#[test]
 fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
     let store = Store::open_memory("node").unwrap();
     let subject = "agent/node.worker";
