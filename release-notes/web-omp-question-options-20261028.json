@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show pending OMP ask options, recommendations, previews and question tabs above the web composer with terminal fallback",
+  "replay": { "status": "none", "detail": "Reads existing native timeline input only; no claim replay changes." },
+  "schema": { "status": "none", "detail": "No database, public client schema or persisted answer format changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules or digest changes." },
+  "compatibility": { "status": "none", "detail": "Web answer transport remains explicitly unavailable pending the metadata-only harness.answer contract and separately admitted adapter. Other and notes stay terminal-only." },
+  "downtime": { "status": "none", "detail": "No restart coordination or expected service interruption." },
+  "manual": { "status": "none", "detail": "No flags or operator actions are required; answer native questions with Open terminal." },
+  "recovery": { "status": "none", "detail": "No persistent state changes. Rolling back restores the previous alert surface without migrating or replaying answers." }
+}
