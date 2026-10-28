@@ -1418,6 +1418,28 @@ pub const ACTUAL_STATE_CLAIM: &str = "(claims.kind<'harness.' OR claims.kind>='h
      AND claims.kind NOT IN ('intent.desired', 'runtime.readiness-deadline-reached',
                              'reconcile.fault')";
 
+/// The newest of a subject's actual-state claims, which keys its cached actual state. One
+/// range over the subject's index entries would read each of its claims on every call, so this
+/// steps from each kind the subject has to the next and takes the newest claim of each
+/// actual-state kind: a few seeks, however long the subject's history.
+pub(crate) static ACTUAL_STATE_NEWEST: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let kind_is_actual_state = ACTUAL_STATE_CLAIM.replace("claims.kind", "kinds.kind");
+    format!(
+        "WITH RECURSIVE kinds(kind) AS (
+             SELECT MIN(claims.kind) FROM claims INDEXED BY claims_subject_kind_index
+             WHERE claims.subject=?1
+             UNION ALL
+             SELECT (SELECT MIN(claims.kind) FROM claims INDEXED BY claims_subject_kind_index
+                     WHERE claims.subject=?1 AND claims.kind>kinds.kind)
+             FROM kinds WHERE kinds.kind IS NOT NULL
+         )
+         SELECT COALESCE(MAX((SELECT MAX(claims.store_index)
+                              FROM claims INDEXED BY claims_subject_kind_index
+                              WHERE claims.subject=?1 AND claims.kind=kinds.kind)), 0)
+         FROM kinds WHERE kinds.kind IS NOT NULL AND {kind_is_actual_state}"
+    )
+});
+
 // Repaired originals are not live actual-state sources, even if a node retains their
 // claim rows or has trimmed the admission receipt. The digest's repaired-ID set survives
 // receipt cleanup and is maintained transactionally by repair claims. Keep this separate
@@ -6136,15 +6158,7 @@ impl Store {
         // of those identifies it. A write elsewhere in the graph, or a harness report the fold
         // skips (a busy seat writes one every turn), must not re-read and re-parse its history.
         let newest: u64 = connection
-            .prepare_cached(
-                format!(
-                    "SELECT COALESCE(MAX(claims.store_index), 0)
-                     FROM claims INDEXED BY claims_subject_kind_index
-                     WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-                       AND claims.kind NOT LIKE 'harness.%'"
-                )
-                .as_str(),
-            )?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd7c27cacf277 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &ACTUAL_STATE_NEWEST)?
             .query_row(/* sqlite-large-value: allow-for-now lv-h2b7668e3f927 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
         if let Some((_, value)) = self.fractal
             .actual_cache
