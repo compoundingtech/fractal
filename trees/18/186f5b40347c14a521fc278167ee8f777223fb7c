@@ -50,3 +50,4 @@ record ef15bbf1a7586f4fd0dbc8c7294496568fdd55b2 rust-tests 0 host/spindle 2026-1
 record f393356f9eee3b79b2f8e24727fd92df4129c312 rust-tests 0 host/spindle 2026-10-28T19:17:30Z
 record f5d4e54bdf135cb09302a7a99881a4e3a772013a rust-tests 0 host/spindle 2026-10-28T19:17:29Z
 record fae5025b6ae9f5de981c9b915ca759476ec45db5 rust-tests 0 host/spindle 2026-10-28T19:17:36Z
+record 68161b4857b3e3e7a850c0936f17a62daa3b6920 ci-script-tests 0 host/spindle 2026-10-28T19:26:58Z
