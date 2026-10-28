@@ -323,9 +323,20 @@ def lane_entry(text, lane):
 
 
 def ci_inputs_unchanged(repo, ci, revisions):
-    """True when the CI inputs `ci` (a lane's declared ci_inputs) project to the same key at every one of `revisions`."""
-    return len({project(repo, git(repo, 'rev-parse', '--verify', '--end-of-options', f'{rev}^{{tree}}').decode().strip(), ci)
-                for rev in revisions}) == 1
+    """True when the CI inputs `ci` (a lane's declared ci_inputs) name something at every one of `revisions` and project to the same key
+    at each. An entry that names nothing (a job main renamed, a typo) would project to nothing at every revision and so look unchanged
+    while the job it meant changes: it is not unchanged, and the check falls back to the merge tree."""
+    trees = [git(repo, 'rev-parse', '--verify', '--end-of-options', f'{rev}^{{tree}}').decode().strip() for rev in revisions]
+    if any(unresolved_ci_inputs(repo, tree, ci) for tree in trees):
+        return False
+    return len({project(repo, tree, ci) for tree in trees}) == 1
+
+
+def unresolved_ci_inputs(repo, tree, ci):
+    """The declared CI inputs that name nothing in `tree`: a path it lacks, or a job or JSON entry its file does not have. An excluded
+    path (!PATH) may name nothing."""
+    return [item for item in ci if not item.startswith('!') and item != '.'
+            and not (selected(repo, tree, item) if '::' in item else git(repo, 'ls-tree', '--full-tree', tree, '--', item).strip())]
 
 
 def definition_entries(repo, tree, paths):
@@ -476,6 +487,11 @@ def selected(repo, tree, item):
         text = git(repo, 'show', '--end-of-options', f'{tree}:{path}').decode()
     except UnicodeDecodeError:
         raise Failure('error', f'{path} is not text')
+    return select_part(text, path, selector)
+
+
+def select_part(text, path, selector):
+    """The canonical bytes SELECTOR selects in the text of the file at `path`, or None when the job or the entry is not there."""
     if selector.startswith('jobs.'):
         return workflow_job(text, selector[len('jobs.'):])
     try:

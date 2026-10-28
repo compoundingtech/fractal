@@ -1416,7 +1416,8 @@ A lane entry in `.st/required-lanes.json` may declare `ci_inputs`: the protected
 When main moved protected files since a pull request's branch point, the gate (`branch_point_verdict`, with the run's check) projects the
 check's `ci_inputs` (as the base declares them, read with the base's verifier) at the branch point, the base and the current tip. If all
 three keys are equal, main moved nothing this check uses, and the head tree is still asked about (`ci_inputs=kept`). Otherwise it falls
-back as before (`ci_inputs=changed`). A lane with no `ci_inputs`, or a base that cannot say, keeps the earlier rule: any protected change on
+back as before (`ci_inputs=changed`). Every entry must also name something at all three revisions: an entry that names nothing (a
+job main renamed, a typo) would project to nothing everywhere and look unchanged however the job it meant changes, so it counts as changed. A lane with no `ci_inputs`, or a base that cannot say, keeps the earlier rule: any protected change on
 main falls back. `scripts/fractal-test` asks the same question for each check it signs before it decides to merge main in.
 
 ci-script-tests and genie-freshness declare none, because their own tests read the gate, the verifier, the policy and the lanes. A change
@@ -1425,7 +1426,8 @@ scripts read all of `fleet.yml` and `workspace-ci.ts`, so it declares both whole
 
 **Keeping the declarations honest.** `scripts/lane-definition-closure --check`, which genie-freshness runs on the whole tree, fails a lane
 that declares `ci_inputs` and executes or reads a protected file they leave out. A selector covers only its part, so a lane that reads the
-whole file must declare it whole; an excluded path is left out. Files only ever read at the base (`BASE_READ`) don't count. Notes carry
+whole file must declare it whole; an excluded path is left out. It also fails an entry that names nothing in the tree (a file, job or JSON entry that isn't there),
+read with the verifier's own selector. Files only ever read at the base (`BASE_READ`) don't count. Notes carry
 nothing new: a head-tree note is about the head tree whichever way the gate decides, so older notes need no special case.
 
 `.st/rust-test-inputs.json` is not protected. It is data that changes with ordinary code, and the verifier reads it only at the base when it

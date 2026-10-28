@@ -470,7 +470,7 @@ def ci_inputs_kept(check, branch_point, base, current):
         return bool(ci) and verify.ci_inputs_unchanged('.', ci, (branch_point, base, current))
     except Fallback:
         return False
-    except BaseException:  # the base's verifier refused the lane file or the trees: not kept
+    except Exception:  # the base's verifier refused the lane file or the trees: not kept
         return False
 
 

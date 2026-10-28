@@ -277,7 +277,8 @@ class CommandLine(Fixture):
     def test_check_fails_a_lane_that_reads_a_protected_file_its_ci_inputs_leave_out(self):
         gate = "PROTECTED = ('scripts/judge', '.st/keys', '.github/workflows/fleet.yml')\nBASE_READ = ('.st/keys',)\n"
         self.tree({'scripts/a': SH + 'bash scripts/judge\ncat .st/keys\n', 'scripts/judge': SH, '.st/keys': 'k',
-                   'scripts/ci-evidence-gate': gate, '.github/workflows/fleet.yml': 'jobs:\n'})
+                   'scripts/ci-evidence-gate': gate, '.github/workflows/fleet.yml': 'jobs:\n  demo:\n    runs-on: box\n',
+                   '.st/policy.json': '{"checks": {"demo": {}}}'})
         (self.root / '.st').mkdir(exist_ok=True)
 
         def lane(ci_inputs):
@@ -294,6 +295,13 @@ class CommandLine(Fixture):
         self.assertNotIn('.st/keys', done.stdout)  # read only at the base: main changing it decides nothing
         self.assertEqual(lane(['scripts', '!scripts/judge']).returncode, 1)  # an exclusion leaves it out
         self.assertEqual(lane(['.github/workflows/fleet.yml::jobs.demo', 'scripts/judge']).returncode, 0, lane(['scripts/judge']).stdout)
+        for typo, why in (('.github/workflows/fleet.yml::jobs.dmeo', '.github/workflows/fleet.yml has no jobs.dmeo'),
+                          ('.st/policy.json::checks.dmeo', '.st/policy.json has no checks.dmeo'),
+                          ('scripts/jugde', 'scripts/jugde is not in the tree')):
+            with self.subTest(typo):  # names nothing: the gate would always fall back, so --check says so
+                done = lane(['.github/workflows/fleet.yml::jobs.demo', 'scripts/judge', typo])
+                self.assertEqual(done.returncode, 1, done.stdout)
+                self.assertIn(f'demo: its ci_inputs entry {typo} names nothing ({why})', done.stdout)
 
     def test_check_names_an_uncovered_file_and_write_fixes_it(self):
         self.tree({'scripts/a': SH + 'bash scripts/b\n', 'scripts/b': SH})

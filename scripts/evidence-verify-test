@@ -1696,6 +1696,22 @@ class CIInputs(unittest.TestCase):
         self.edited('LEVEL: "1"', 'LEVEL: "2"')
         self.assertFalse(evidence_verify.ci_inputs_unchanged(str(self.f.repo), ci, (first, second, self.f.git('rev-parse', 'HEAD'))))
 
+    def test_an_entry_that_names_nothing_is_never_unchanged(self):
+        """A renamed job or a typo would project to nothing at every revision; unchanged would then keep the head tree however the job
+        it meant changes, so an entry that names nothing at any revision is not unchanged."""
+        first = self.f.git('rev-parse', 'HEAD')
+        self.commit({'tools/judge': 'judged differently'})
+        second = self.f.git('rev-parse', 'HEAD')
+        for typo in ('.github/workflows/fleet.yml::jobs.gaet', '.st/required-lanes.json::lanes.gaet', 'tool', '.github/workflows/flet.yml::jobs.gate'):
+            with self.subTest(typo):
+                ci = evidence_verify.declared_paths([*self.CI, typo], 'test', selectors=True)
+                self.assertEqual(evidence_verify.unresolved_ci_inputs(str(self.f.repo), self.tree, ci), [typo])
+                self.assertFalse(evidence_verify.ci_inputs_unchanged(str(self.f.repo), ci, (first, second)))
+        ci = evidence_verify.declared_paths(list(self.CI), 'test', selectors=True)
+        self.assertEqual(evidence_verify.unresolved_ci_inputs(str(self.f.repo), self.tree, ci), [])
+        self.edited('  gate:\n', '  renamed:\n')  # main renames the job: the base no longer has it
+        self.assertFalse(evidence_verify.ci_inputs_unchanged(str(self.f.repo), ci, (first, second, self.f.git('rev-parse', 'HEAD'))))
+
     def test_a_workflow_it_cannot_read_has_no_key_rather_than_a_guess(self):
         self.commit({'.github/workflows/fleet.yml': self.WORKFLOW.replace('jobs:\n', 'jobs:\n   stray: at three spaces\n')})
         with self.assertRaises(evidence_verify.Failure):

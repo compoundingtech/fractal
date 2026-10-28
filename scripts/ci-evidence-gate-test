@@ -821,11 +821,11 @@ class EndToEnd(unittest.TestCase):
                                      '.st/evidence-skip-policy.json::checks.linux-gate']},
         'ci-script-tests': {'argv': ['bash', 'scripts/ci-script-tests'], 'definition_paths': ['scripts/ci-script-tests']}}}
 
-    def ci_inputs_pull_request(self, main_files):
+    def ci_inputs_pull_request(self, main_files, lanes=None):
         """A pull request whose base declares linux-gate's CI inputs (and none for ci-script-tests), with main moving `main_files`."""
         (self.f.repo / '.github/workflows').mkdir(parents=True, exist_ok=True)
         (self.f.repo / '.st').mkdir(exist_ok=True)
-        base_files = {'.github/workflows/fleet.yml': self.CI_WORKFLOW, '.st/required-lanes.json': json.dumps(self.CI_LANES, indent=2)}
+        base_files = {'.github/workflows/fleet.yml': self.CI_WORKFLOW, '.st/required-lanes.json': json.dumps(lanes or self.CI_LANES, indent=2)}
         return self.pull_request(base_files=base_files, main_files=main_files)
 
     def workflow(self, old, new):
@@ -866,6 +866,16 @@ class EndToEnd(unittest.TestCase):
                 else:
                     self.assertEqual((fields['tree_of'], fields['head_tree'], fields['ci_inputs']),
                                      ('merge', 'fallback:protected_files_differ_from_the_branch_point', 'changed'))
+
+    def test_a_ci_input_that_names_nothing_falls_back_however_the_job_it_meant_changes(self):
+        # A typo, or a job main renamed: the entry projects to nothing at every revision, which must not read as "unchanged".
+        lanes = json.loads(json.dumps(self.CI_LANES))
+        lanes['lanes']['linux-gate']['ci_inputs'][0] = '.github/workflows/fleet.yml::jobs.linux-gaet'
+        s = self.ci_inputs_pull_request({'.github/workflows/fleet.yml': self.workflow('needs: [build]', 'needs: [build, other]')}, lanes)
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields, _ = self.run_gate(s['tip'], **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree'], fields['ci_inputs']),
+                         ('merge', 'fallback:protected_files_differ_from_the_branch_point', 'changed'))
 
     def test_the_rust_test_inputs_file_is_not_protected(self):
         self.assertNotIn('.st/rust-test-inputs.json', gate.PROTECTED)
