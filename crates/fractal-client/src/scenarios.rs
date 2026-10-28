@@ -111,7 +111,13 @@ pub fn load_index(path: impl AsRef<Path>) -> Result<Index> {
 }
 
 pub fn load_slice(path: impl AsRef<Path>) -> Result<Slice> {
-    let slice: Slice = read_json(path.as_ref())?;
+    parse_slice(&std::fs::read_to_string(path.as_ref())
+        .with_context(|| format!("read {}", path.as_ref().display()))?)
+}
+
+/// Read an embedded committed fixture with the same checks as [`load_slice`].
+pub fn parse_slice(json: &str) -> Result<Slice> {
+    let slice: Slice = serde_json::from_str(json).context("decode scenario slice")?;
     ensure!(slice.format == "st3.scenario.slice.v1", "unsupported scenario slice format: {}", slice.format);
     ensure!(["roster", "conversation", "sync", "terminal", "details", "attention"].contains(&slice.slice.as_str()), "unknown slice: {}", slice.slice);
     Ok(slice)

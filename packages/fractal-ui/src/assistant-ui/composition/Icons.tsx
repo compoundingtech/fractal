@@ -8,7 +8,7 @@ export type IconName =
   | 'attach' | 'image' | 'copy' | 'send' | 'stop' | 'check' | 'x' | 'alert'
   | 'spinner' | 'folder' | 'message' | 'dot' | 'info'
   | 'wrap' | 'whitespace' | 'pull-request' | 'stop-circle' | 'thought'
-  | 'person' | 'checklist' | 'gauge' | 'filter' | 'sort' | 'bell' | 'sliders'
+  | 'person' | 'checklist' | 'gauge' | 'filter' | 'sort' | 'bell' | 'sliders' | 'globe'
 
 const PATHS: Record<IconName, React.ReactNode> = {
   search: <><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 14 14" /></>,
@@ -47,6 +47,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   sliders: <path d="M2 4h3m3 0h6M2 12h7m3 0h2M5 2h3v4H5zM9 10h3v4H9z" />,
   sort: <path d="M4 3v10l-2-2m2 2 2-2M8 4h6M8 8h4M8 12h2" />,
   bell: <><path d="M4 11V7a4 4 0 0 1 8 0v4l1 1.5H3z" /><path d="M6.75 14a1.4 1.4 0 0 0 2.5 0" /></>,
+  globe: <><circle cx="8" cy="8" r="6" /><ellipse cx="8" cy="8" rx="2.5" ry="6" /><path d="M2 8h12" /></>,
 }
 
 /** One 16px stroke icon set; stroke inherits currentColor, fill none. */

@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn pointer_footer_names_both_operations_and_keeps_status_and_keyboard_hints() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.build = true;
         let before = draw(&ui);
         assert!(line(&before, 47).contains("Keys:"));
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn unattached_terminal_button_hovers_and_runs_the_keyboard_attach_action() {
         for shell in [false, true] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             let id = if shell {
                 "terminal/example-shell".to_owned()
             } else {
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn middle_click_closes_only_on_release_over_the_pressed_tab() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.open(&agent);
         let other = ui.world.agents.items()[1].id.clone();
@@ -317,7 +317,7 @@ mod tests {
 
     #[test]
     fn message_hover_still_allows_text_selection_and_more_precise_links() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         ui.world.conversations.insert(
             agent.clone(),
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn popover_links_take_clicks_without_focusing_or_resizing_an_underlying_split() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         if let Load::Ready(agents) = &mut ui.world.agents {
             agents[0].details.progress = Some("https://example.com/notes".into());
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn subject_text_and_dividers_show_their_gestures_and_unfocused_buttons_name_focus() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let mission = ui.world.missions.items()[0].id.clone();
         ui.open_in_glass(Pane::Mission(Some(mission)), glass::Open::Right);
         draw(&ui);
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn host_and_person_are_status_and_inert_references_are_plain() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let buf = draw(&ui);
         let word = target(&ui, |hit| matches!(hit, Hit::Connection));
         assert!(!ui.frame.borrow().hits.iter().any(|(rect, _)| contains(
@@ -517,7 +517,7 @@ mod tests {
     fn sweeping_the_pointer_over_every_cell_of_a_busy_conversation_never_panics() {
         // Nathan, 2026-10-07: hovering messages seemed to crash stui.
         for (width, height) in [(60, 20), (100, 30), (160, 48)] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             ui.live = true;
             ui.open_in_glass(
                 Pane::Agent(Some("agent/example/atlas/builder".to_owned())),
