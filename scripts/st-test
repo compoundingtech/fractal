@@ -536,17 +536,20 @@ def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
     path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/')
     if not path:
         return None
+    def limited(cgroup, file):  # whether CGROUP's FILE holds a limit; a missing or unreadable file (no controller) is none
+        try:
+            return cgroup.joinpath(file).read_text().split()[0] != 'max'
+        except (OSError, IndexError):
+            return False
+
     memory = cpu = None
     parts = path.split('/')
     for depth in range(len(parts), 0, -1):
         cgroup = Path(root, *parts[:depth])
-        try:
-            if memory is None and cgroup.joinpath('memory.max').read_text().strip() != 'max':
-                memory = parts[depth - 1]
-            if cpu is None and cgroup.joinpath('cpu.max').read_text().split()[0] != 'max':
-                cpu = parts[depth - 1]
-        except (OSError, IndexError):
-            continue
+        if memory is None and limited(cgroup, 'memory.max'):
+            memory = parts[depth - 1]
+        if cpu is None and limited(cgroup, 'cpu.max'):
+            cpu = parts[depth - 1]
     return f'memory by {memory}, CPU by {cpu}' if memory and cpu else None
 
 

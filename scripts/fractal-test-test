@@ -120,7 +120,8 @@ class GovernedTest(unittest.TestCase):
             cgroup = Path(tmp, 'sys', *parts[:depth])
             cgroup.mkdir(parents=True, exist_ok=True)
             memory, cpu = limits.get(parts[depth - 1], ('max', 'max 100000'))
-            cgroup.joinpath('memory.max').write_text(memory + '\n')
+            if memory is not None:
+                cgroup.joinpath('memory.max').write_text(memory + '\n')
             if cpu is not None:
                 cgroup.joinpath('cpu.max').write_text(cpu + '\n')
         Path(tmp, 'cgroup').write_text(f'0::/{leaf}\n')
@@ -157,6 +158,9 @@ class GovernedTest(unittest.TestCase):
 
     def test_limits_on_different_levels_together_are_a_cap(self):
         limits = {'app-lanes.slice': ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
+        self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
+        # A level without a memory controller still caps CPU: each file is read on its own.
+        limits = {'app-lanes.slice': ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
         self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
 
     def test_an_unreadable_cgroup_is_no_cap(self):
