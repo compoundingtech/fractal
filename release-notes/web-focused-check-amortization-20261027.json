@@ -3,9 +3,9 @@
   "summary": "Batch focused web/UI checks with a shared rooted dev shell and cross-worktree incremental TypeScript seeds.",
   "replay": { "status": "none", "detail": "No replay format changes." },
   "schema": { "status": "none", "detail": "No persistent application schema changes; compiler state is disposable." },
-  "rules": { "status": "none", "detail": "Focused checks retain check-lane admission; preparation happens before admission and full suites are not accepted." },
+  "rules": { "status": "none", "detail": "Focused checks retain check-lane admission; warm preparation happens before admission, cold shell realization happens inside admission, and full suites are not accepted." },
   "compatibility": { "status": "none", "detail": "Existing package scripts and CI workflows remain unchanged. Buck client targets are not used as evidence for app/UI checks." },
   "downtime": { "status": "none", "detail": "No service deployment or interruption." },
-  "manual": { "status": "changed", "detail": "Use python3 scripts/web-check check followed by selected app test paths. Preparation reuses the shared profile and installs frozen dependencies before taking a check slot." },
-  "recovery": { "status": "none", "detail": "Delete .devenv/web-check to discard incremental state. Remove the affected shared fractal-web-check/v1 shell cache entry and run prepare again to reconstruct its profile." }
+  "manual": { "status": "changed", "detail": "Use python3 scripts/web-check check followed by selected app test paths. Warm preparation reuses the shared profile and installs frozen dependencies before taking a check slot; cold shells are realized inside the slot." },
+  "recovery": { "status": "none", "detail": "Delete .devenv/web-check to discard incremental state. Remove the affected shared fractal-web-check/v1 shell cache entry and run check FILE... again to reconstruct its profile under admission." }
 }

@@ -614,17 +614,22 @@ tests into one check-lane admission:
 python3 scripts/web-check check src/web/sidebarRow.unit.test.ts
 ```
 
-`check` prepares megarepo members, the frozen pnpm installation, and the shell before
-requesting a slot. `prepare` performs only that setup; `run FILE...` is the payload
-for a caller that already owns a check slot. Neither entrypoint runs browsers or a
-full test suite. Every batch runs both typechecks and the selected tests and
-returns failure if any phase fails.
+With a warm shell, `check` prepares megarepo members and the frozen pnpm installation
+before requesting a slot. `prepare` performs only that warm setup and fails closed
+without building when the rooted profile is missing (including a broken symlink).
+With a cold shell, `check` requests admission first, realizes the profile inside
+the slot, then prepares dependencies and runs the batch. Cold realizations are
+serialized across all cache keys, with one local Nix build job and no remote
+builders. `run FILE...` and the internal `cold-run FILE...` payload require a caller
+that already owns a check slot. Neither runs browsers or a full test suite.
+Every batch runs both typechecks and the selected tests and fails if any phase fails.
 
 The shared shell profile lives under `$XDG_CACHE_HOME/fractal-web-check/v1` (default
 `~/.cache`) and is keyed by the tracked Nix definitions plus `flake.lock`, not the
-worktree path. `.devenv/gc/devshell` links to this rooted profile. The admitted
-payload opens that profile offline with builds and substitution disabled; it never
-evaluates the flake. A changed Nix input requires preparation before admission.
+worktree path. `.devenv/gc/devshell` links to this rooted profile. Warm preparation
+and the check payload open that profile offline with builds and substitution
+disabled; they never evaluate the flake. A changed Nix input takes the admitted
+cold path if its profile is not already realized.
 
 TypeScript writes incremental state to `.devenv/web-check/*.tsbuildinfo`. Successful
 batches publish seed files under the shared cache, keyed by the pnpm lock and
@@ -633,8 +638,9 @@ depth; TypeScript validates source versions and compiler options before reusing
 them. A main-worktree batch can therefore prime later PR worktrees. Type state is
 an optimization, never a success receipt: the compiler and tests always execute.
 Delete `.devenv/web-check` to force a cold compiler run; remove the shared cache
-entry and run `prepare` again to rebuild a shell. Existing package scripts and CI
-remain unchanged.
+entry and run `check FILE...` again to rebuild a shell under admission. Cold builds
+consume the slot's hold time and may take longer than warm checks. Existing package
+scripts and CI remain unchanged.
 
 The root `//:typecheck` Buck target covers the TypeScript clients only. There are no
 app/UI BUCK files, so this wrapper does not claim Buck action-cache hits for these

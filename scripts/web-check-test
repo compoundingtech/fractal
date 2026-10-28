@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 import subprocess
@@ -62,6 +63,99 @@ class WebCheckTest(unittest.TestCase):
                 web.prepare()
                 self.assertEqual((local / "0.tsbuildinfo").read_text(), "local newer")
                 self.assertEqual((root / ".devenv/gc/devshell").resolve(), (directory / "profile").resolve())
+
+    def test_cold_prepare_fails_without_invoking_any_command(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            directory = Path(temporary) / "missing"
+            with patch.object(web, "shell_dir", return_value=directory), patch.object(web, "call") as call:
+                with self.assertRaisesRegex(RuntimeError, "inside a gate slot"):
+                    web.prepare()
+                call.assert_not_called()
+                self.assertFalse(directory.exists())
+                directory.mkdir()
+                (directory / "profile").symlink_to(directory / "collected-store-output")
+                with self.assertRaisesRegex(RuntimeError, "inside a gate slot"):
+                    web.prepare()
+                call.assert_not_called()
+
+    def test_check_admits_cold_before_preparing_and_preserves_warm_path(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            directory = Path(temporary)
+            for warm in (False, True):
+                with self.subTest(warm=warm):
+                    if warm:
+                        (directory / "profile").touch()
+                    events = []
+                    def admitted(argv, **kwargs):
+                        events.append("admit")
+                        self.assertEqual(argv[0], "gate-slot")
+                        self.assertEqual(argv[-2], "run" if warm else "cold-run")
+                        return subprocess.CompletedProcess(argv, 7)
+                    with patch.object(web, "shell_dir", return_value=directory), patch.object(web, "prepare", side_effect=lambda: events.append("prepare")), patch.object(web, "realize") as realize, patch.object(web.subprocess, "run", side_effect=admitted), patch("sys.argv", ["web-check", "check", "src/test.test.ts"]):
+                        self.assertEqual(web.main(), 7)
+                        realize.assert_not_called()
+                    self.assertEqual(events, ["prepare", "admit"] if warm else ["admit"])
+
+    def test_admitted_cold_payload_realizes_then_prepares_then_runs(self):
+        events = []
+        with patch.object(web, "realize", side_effect=lambda: events.append("realize")), patch.object(web, "prepare", side_effect=lambda: events.append("prepare")), patch.object(web, "run", side_effect=lambda files: events.append(files) or 3), patch("sys.argv", ["web-check", "cold-run", "src/test.test.ts"]):
+            self.assertEqual(web.main(), 3)
+        self.assertEqual(events, ["realize", "prepare", ["src/test.test.ts"]])
+
+    def test_failed_realization_never_prepares_or_runs_checks(self):
+        with patch.object(web, "realize", side_effect=subprocess.CalledProcessError(1, ["nix"])), patch.object(web, "prepare") as prepare, patch.object(web, "run") as run, patch("sys.argv", ["web-check", "cold-run", "src/test.test.ts"]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                web.main()
+            prepare.assert_not_called()
+            run.assert_not_called()
+
+    def test_realizations_for_different_keys_are_serialized(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:
+            cache = Path(temporary)
+            first_build = threading.Event()
+            second_lock = threading.Event()
+            release = threading.Event()
+            errors = []
+            commands = []
+            flock = web.fcntl.flock
+            def acquire(lock, operation):
+                if threading.current_thread().name == "second":
+                    second_lock.set()
+                return flock(lock, operation)
+            def build(argv):
+                commands.append(argv)
+                if threading.current_thread().name == "first":
+                    first_build.set()
+                    if not release.wait(5):
+                        raise RuntimeError("Timed out waiting to release first realization")
+                Path(argv[argv.index("--profile") + 1]).touch()
+            def worker():
+                try:
+                    web.realize()
+                except Exception as error:
+                    errors.append(error)
+            threads = [threading.Thread(target=worker, name=name) for name in ("first", "second")]
+            with patch.object(web, "CACHE", cache), patch.object(web, "shell_dir", side_effect=lambda: cache / threading.current_thread().name), patch.object(web, "call", side_effect=build), patch.object(web.fcntl, "flock", side_effect=acquire):
+                try:
+                    threads[0].start()
+                    self.assertTrue(first_build.wait(5))
+                    threads[1].start()
+                    self.assertTrue(second_lock.wait(5))
+                    self.assertEqual(len(commands), 1)
+                finally:
+                    release.set()
+                    for thread in threads:
+                        if thread.ident is not None:
+                            thread.join(5)
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            self.assertEqual(len(commands), 2)
+            for command in commands:
+                self.assertEqual(command[command.index("max-jobs") + 1], "1")
+                self.assertEqual(command[command.index("builders") + 1], "")
+            with patch.object(web, "CACHE", cache), patch.object(web, "shell_dir", return_value=cache / "first"), patch.object(web, "call") as call:
+                web.realize()
+                call.assert_not_called()
 
     def test_failed_batch_does_not_publish_seed(self):
         with tempfile.TemporaryDirectory(dir=SCRATCH) as temporary:

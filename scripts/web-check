@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare once outside admission; batch focused checks with reusable shell/type state."""
+"""Reuse warm shell/type state; admit cold shell realization before building."""
 import argparse
 import fcntl
 import hashlib
@@ -50,14 +50,22 @@ def atomic_copy(source, destination):
     temporary.replace(destination)
 
 
-def prepare():
+def realize():
     directory = shell_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    # Preparation is deliberately separate from the check-lane reservation.
-    with (directory / "lock").open("w") as lock:
+    # Serialize all cache keys, not just callers preparing the same shell.
+    with (CACHE / "realize.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not (directory / "profile").exists():
-            call(["nix", "develop", ".#web", "--profile", str(directory / "profile"), "--option", "builders", "", "-c", "true"])
+            call(["nix", "develop", ".#web", "--profile", str(directory / "profile"), "--option", "builders", "", "--option", "max-jobs", "1", "-c", "true"])
+
+
+def prepare():
+    directory = shell_dir()
+    if not (directory / "profile").exists():
+        raise RuntimeError("Shared shell is cold; use `python3 scripts/web-check check FILE...` to realize it inside a gate slot")
+    # Ungated preparation only opens a rooted profile offline with local and
+    # remote builds and substitution disabled (including an incomplete closure).
     gc = ROOT / ".devenv/gc"
     gc.mkdir(parents=True, exist_ok=True)
     link = gc / "devshell"
@@ -109,16 +117,24 @@ def run(files):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("prepare", "check", "run"))
+    parser.add_argument("command", choices=("prepare", "check", "run", "cold-run"))
     parser.add_argument("files", nargs="*", help="Explicit Vitest files relative to apps/fractal-web")
     args = parser.parse_args()
     if args.command != "prepare" and (not args.files or any(not name.endswith((".test.ts", ".test.tsx")) or name.startswith("-") for name in args.files)):
         parser.error("Name selected .test.ts/.test.tsx files; full suites are not supported")
-    if args.command in ("prepare", "check"):
+    if args.command == "prepare":
         prepare()
     if args.command == "check":
-        return subprocess.run(["gate-slot", "--lane", "check", "--expect-short", "--max-wait", "300", "--", "nice", "-n", "19", "ionice", "-c3", "env", "CI=1", "NODE_OPTIONS=--max-old-space-size=3072", sys.executable, str(Path(__file__).resolve()), "run", *args.files], cwd=ROOT).returncode
-    if args.command == "run":
+        warm = (shell_dir() / "profile").exists()
+        if warm:
+            prepare()
+        else:
+            print("Shared shell is cold; requesting admission before realization", flush=True)
+        return subprocess.run(["gate-slot", "--lane", "check", "--expect-short", "--max-wait", "300", "--", "nice", "-n", "19", "ionice", "-c3", "env", "CI=1", "NODE_OPTIONS=--max-old-space-size=3072", sys.executable, str(Path(__file__).resolve()), "run" if warm else "cold-run", *args.files], cwd=ROOT).returncode
+    if args.command == "cold-run":
+        realize()
+        prepare()
+    if args.command in ("run", "cold-run"):
         return run(args.files)
     return 0
 
