@@ -1243,8 +1243,18 @@ mod tests {
         assert_eq!(again.parent().unwrap(), slice, "a restart starts in the seat's own lane");
         assert_eq!(systemctl_show(&job, "ActiveState"), "active", "the job outlived the restart");
 
-        // Stopped for good: the lane ends, its job with it, and its limits are gone.
+        // An end asked before a launch does not end the lane that launch runs in: a seat stopped
+        // for good and started again at once keeps its new lane.
+        let stale_end = crate::lane::request_end_for_test(&id);
         runtime.stop_if(&id, Some(&restarted.generation_id)).unwrap();
+        wait_for_exit(&runtime, &id);
+        let (relaunched, _) = spawn_laned(&runtime, &id, root.path(), "exec sleep 600");
+        stale_end().unwrap();
+        assert!(matches!(runtime.observe(&id).unwrap(), Some(ExecObservation::Running(_))));
+        assert_eq!(systemctl_show(&job, "ActiveState"), "active", "a stale end left the lane's job");
+
+        // Stopped for good: the lane ends, its job with it, and its limits are gone.
+        runtime.stop_if(&id, Some(&relaunched.generation_id)).unwrap();
         wait_for_exit(&runtime, &id);
         crate::lane::end(&id);
         wait_until("the lane's job outlived the lane", || systemctl_show(&job, "ActiveState") != "active");
