@@ -1441,20 +1441,38 @@ impl Store {
             })?;
             claims.extend(page);
         }
+        // Projection fences move their own counter, not the epoch. Equal counters around the
+        // protection reads mean no projection changed what they protect while they ran.
+        let protection = || -> Result<i64> {
+            Ok(self.read_snapshot(|_| super::checkpoint_capture_epoch::counters(&self.readers.get()))?.1)
+        };
         let mut protected = BTreeSet::new();
-        for (table, columns, filter) in [
-            ("desired", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
-            ("mission_definitions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
-            ("mission_revisions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
-            ("documents", "binding_claim_id", "binding_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
-            ("claims", "json_extract(body, '$.fields.replacement')", "kind='record.repaired' AND ?3 IS NOT NULL"),
-            ("replica_records", "replacement_claim_id", "replacement_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
-        ] {
-            let page = self.checkpoint_capture_rows(
-                epoch, CheckpointCaptureQuery { table, columns, filter }, cut, record_page,
-                |row| row.get::<_, Option<String>>(0),
-            )?;
-            protected.extend(page.into_iter().flatten());
+        let mut started = protection()?;
+        for attempt in 1.. {
+            protected.clear();
+            for (table, columns, filter) in [
+                ("desired", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+                ("mission_definitions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+                ("mission_revisions", "claim_id", "claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+                ("documents", "binding_claim_id", "binding_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+                ("claims", "json_extract(body, '$.fields.replacement')", "kind='record.repaired' AND ?3 IS NOT NULL"),
+                ("replica_records", "replacement_claim_id", "replacement_claim_id IS NOT NULL AND ?3 IS NOT NULL"),
+            ] {
+                let page = self.checkpoint_capture_rows(
+                    epoch, CheckpointCaptureQuery { table, columns, filter }, cut, record_page,
+                    |row| row.get::<_, Option<String>>(0),
+                )?;
+                protected.extend(page.into_iter().flatten());
+            }
+            let ended = protection()?;
+            if ended == started {
+                break;
+            }
+            anyhow::ensure!(
+                attempt < 8,
+                "projection rows changed what the checkpoint capture protects 8 times"
+            );
+            started = ended;
         }
         for claim in &mut claims {
             claim.protected = protected.contains(&claim.claim.id);

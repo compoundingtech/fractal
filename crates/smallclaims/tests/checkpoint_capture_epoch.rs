@@ -3,7 +3,7 @@ use rusqlite::Connection;
 use smallclaims::{
     Store,
     claim::ClaimInput,
-    store::{checkpoint_capture_epoch, configure_projection_writer, runtime::Plain},
+    store::{checkpoint_capture_epoch, checkpoint_capture_fences, configure_projection_writer, runtime::Plain},
 };
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -344,15 +344,15 @@ fn all_below_cut_tombstone_and_document_protection_mutations_invalidate_capture(
         ("checkpoint_envelopes", "INSERT INTO checkpoint_envelopes VALUES('remote',1,'hash',0,'checkpoint/test')".to_owned(), "accepted_at_unix_ms=1".to_owned()),
         ("documents", format!("INSERT INTO documents(name,hash,created_index,binding_claim_id) VALUES('document','blob',1,'{}')", claim.id), format!("binding_claim_id='{}'", other.id)),
     ] {
-        let before = checkpoint_capture_epoch(&writer).unwrap();
+        let before = checkpoint_capture_fences(&writer).unwrap();
         writer.execute(&insert, []).unwrap();
-        let inserted = checkpoint_capture_epoch(&writer).unwrap();
+        let inserted = checkpoint_capture_fences(&writer).unwrap();
         assert!(inserted > before, "{table} insert");
         writer.execute(&format!("UPDATE {table} SET {change}"), []).unwrap();
-        let updated = checkpoint_capture_epoch(&writer).unwrap();
+        let updated = checkpoint_capture_fences(&writer).unwrap();
         assert!(updated > inserted, "{table} update");
         writer.execute(&format!("DELETE FROM {table}"), []).unwrap();
-        assert!(checkpoint_capture_epoch(&writer).unwrap() > updated, "{table} delete");
+        assert!(checkpoint_capture_fences(&writer).unwrap() > updated, "{table} delete");
     }
 }
 
@@ -771,7 +771,7 @@ fn tombstone_and_document_replace_fence_old_below_cut_content_not_identical_igno
         "INSERT INTO documents(name,hash,created_index,binding_claim_id) VALUES('document','blob',1,?1)",
         [&captured.id],
     ).unwrap();
-    let before = checkpoint_capture_epoch(&writer).unwrap();
+    let before = checkpoint_capture_fences(&writer).unwrap();
     for sql in [
         "INSERT OR IGNORE INTO checkpoint_claims SELECT * FROM checkpoint_claims",
         "INSERT OR IGNORE INTO checkpoint_envelopes SELECT * FROM checkpoint_envelopes",
@@ -780,7 +780,7 @@ fn tombstone_and_document_replace_fence_old_below_cut_content_not_identical_igno
         "UPDATE documents SET binding_claim_id=binding_claim_id",
     ] {
         writer.execute(sql, []).unwrap();
-        assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), before, "{sql}");
+        assert_eq!(checkpoint_capture_fences(&writer).unwrap(), before, "{sql}");
     }
     for sql in [
         "INSERT OR REPLACE INTO checkpoint_claims(id,writer,sequence,envelope_hash,subject,kind,
@@ -798,9 +798,9 @@ fn tombstone_and_document_replace_fence_old_below_cut_content_not_identical_igno
         } else {
             tx.execute(sql, []).unwrap();
         }
-        assert!(checkpoint_capture_epoch(&tx).unwrap() > before, "{sql}");
+        assert!(checkpoint_capture_fences(&tx).unwrap() > before, "{sql}");
         tx.rollback().unwrap();
-        assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), before);
+        assert_eq!(checkpoint_capture_fences(&writer).unwrap(), before);
     }
 }
 
@@ -842,4 +842,67 @@ fn envelope_cut_crossings_fence_both_sides_and_frontier_still_limits_core_rows()
     tx.execute("DELETE FROM replica_records WHERE claim_id=?1", [&outside.id]).unwrap();
     assert_eq!(checkpoint_capture_epoch(&tx).unwrap(), after_insert);
     tx.rollback().unwrap();
+}
+
+fn protection(connection: &Connection) -> i64 {
+    connection
+        .query_row("SELECT protection FROM checkpoint_capture_epoch WHERE id=1", [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn projection_rows_move_the_protection_counter_and_history_moves_the_epoch() {
+    let store = Store::open_memory("writer", Arc::new(Plain)).unwrap();
+    let claim = append(&store, "captured");
+    store.seal_local_batches().unwrap();
+    capture_prefix(&store);
+    let writer = store.connection.write();
+    writer.execute("INSERT INTO blobs(hash,bytes,size) VALUES('blob',x'',0)", []).unwrap();
+    let (epoch, before) = (checkpoint_capture_epoch(&writer).unwrap(), protection(&writer));
+    writer.execute(
+        "INSERT INTO documents(name,hash,created_index,binding_claim_id) VALUES('document','blob',1,?1)",
+        [&claim.id],
+    ).unwrap();
+    writer.execute("DELETE FROM documents", []).unwrap();
+    assert_eq!(protection(&writer), before + 2, "a document naming a captured claim, then its removal");
+    assert_eq!(checkpoint_capture_epoch(&writer).unwrap(), epoch, "projection rows leave the epoch");
+    writer.execute("UPDATE replica_envelopes SET accepted_at_unix_ms='101'", []).unwrap();
+    assert!(checkpoint_capture_epoch(&writer).unwrap() > epoch, "captured history moves the epoch");
+    assert_eq!(protection(&writer), before + 2, "and leaves the protection counter");
+}
+
+#[test]
+fn an_older_builds_projection_fences_give_way_to_protection_fences_on_open() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("claims.sqlite3");
+    let triggers = |connection: &Connection| -> Vec<String> {
+        connection.prepare(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='documents' AND name LIKE '%checkpoint%' ORDER BY name",
+        ).unwrap().query_map([], |row| row.get(0)).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    let store = Store::open(&path, "writer", Arc::new(Plain)).unwrap();
+    let ours = triggers(&store.readers.get());
+    assert_eq!(ours, [
+        "documents_checkpoint_protection_DELETE", "documents_checkpoint_protection_INSERT",
+        "documents_checkpoint_protection_UPDATE", "documents_checkpoint_protection_replace",
+    ]);
+    let opened = epoch(&store);
+    drop(store);
+
+    // An older build checks for its own `replace` fence, finds none, and installs all four
+    // under its own names, which move the epoch.
+    let older = Connection::open(&path).unwrap();
+    for event in ["INSERT", "UPDATE", "DELETE", "replace"] {
+        let (timing, operation) = if event == "replace" { ("BEFORE", "INSERT") } else { ("AFTER", event) };
+        older.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS documents_checkpoint_capture_{event} {timing} {operation} ON documents
+             BEGIN UPDATE checkpoint_capture_epoch SET value=value+1 WHERE id=1; END;"
+        )).unwrap();
+    }
+    assert_eq!(triggers(&older).len(), 8, "the older build's fences sit beside these");
+    drop(older);
+
+    let reopened = Store::open(&path, "writer", Arc::new(Plain)).unwrap();
+    assert_eq!(triggers(&reopened.readers.get()), ours);
+    assert_eq!(epoch(&reopened), opened, "removing an older build's fences invalidates no capture");
 }

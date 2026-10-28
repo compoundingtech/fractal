@@ -9811,6 +9811,14 @@ pub fn checkpoint_capture_epoch(connection: &Connection) -> Result<i64> {
         .query_row(/* sqlite-large-value: allow-for-now lv-hf473a2f9c732 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
 }
 
+/// Every capture fence in one number: the epoch, which history moves, plus the protection
+/// counter, which projection rows move. It grows whenever either does.
+pub fn checkpoint_capture_fences(connection: &Connection) -> Result<i64> {
+    Ok(connection
+        .prepare_cached("SELECT value+protection FROM checkpoint_capture_epoch WHERE id=1")?
+        .query_row(/* sqlite-large-value: allow-for-now lv-h6e3d0cae14ec owner=smallclaims::store TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+}
+
 pub fn digest_queries(connection: &Connection, queries: &[(&str, &str)]) -> Result<String> {
     let mut digest = Sha256::new();
     digest.update(b"st3-logical-digest-v1\0");

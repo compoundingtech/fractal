@@ -1,8 +1,9 @@
 #![allow(unused_imports)]
 use crate::store::*;
 
-pub fn epoch(store: &Store) -> i64 {
-    smallclaims::store::checkpoint_capture_epoch(&store.readers.get()).unwrap()
+/// Every capture fence: history moves the epoch and projection rows the protection counter.
+pub fn fences(store: &Store) -> i64 {
+    smallclaims::store::checkpoint_capture_fences(&store.readers.get()).unwrap()
 }
 
 pub fn capture_bounds(store: &Store) -> i64 {

@@ -92,6 +92,14 @@ could include bumps the epoch, and nothing else does. A capture whose epoch stil
 therefore a capture of exactly the same set, however long ago it started and however many times
 the daemon restarted since.
 
+Projection rows (desired state, documents, mission definitions and revisions) only protect
+captured claims, so their fences move a counter of their own, `protection`, and leave the epoch.
+The protection pass runs last. It records the counter it starts at, and every later protection
+page and every resumption checks it. When the counter moved, only the protection pass is read
+again (and any plan made from it dropped), so a busy member whose projections change during a
+long capture no longer starts the whole capture over, and a finished capture's protection is
+still a snapshot of the projections, as a fresh capture's is.
+
 The capture writes into a staging SQLite file, `capture-<checkpoint>-<seal_rowid>.sqlite3`, in the
 checkpoint scratch directory, which the scheduler no longer deletes at startup (it deletes only
 proof copies there). The file's `meta` row records one identity: the staging format version, which
