@@ -1,6 +1,6 @@
 # Messaging faults
 
-`scripts/st3-messaging-faults-eval/run ST3_BIN OUT --old-binary OLD_ST3_BIN` exercises
+`scripts/fractal-messaging-faults-eval/run ST3_BIN OUT --old-binary OLD_ST3_BIN` exercises
 the sender-to-reader path across two isolated nodes. It uses real daemon processes,
 signed fleet replication, native omp drivers, channels, and the extension embedded in
 each tested binary. Node.js supplies a small provider API stand-in that loads that
@@ -14,7 +14,7 @@ Run outside a Fractal seat, since the sender acts as `person/eval`. For example:
 setsid -f env -i HOME="$HOME" USER="$USER" PATH="$PATH" \
   XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
   DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
-  scripts/st3-messaging-faults-eval/run "$ST3_BIN" /tmp/messaging-faults-run \
+  scripts/fractal-messaging-faults-eval/run "$ST3_BIN" /tmp/messaging-faults-run \
   --old-binary "$(scripts/messaging-compat-binary)" \
   >/tmp/messaging-faults-run.log 2>&1 </dev/null
 ```
@@ -128,7 +128,7 @@ The oracle's negative controls run with:
 
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
-  -s scripts/st3-messaging-faults-eval -p 'test_*.py'
+  -s scripts/fractal-messaging-faults-eval -p 'test_*.py'
 ```
 
 Set `ST3_MFE_TEST_BINARY=/path/to/st3` to include the cleanup regression. It starts
@@ -162,7 +162,7 @@ commits a native receipt then discards the HTTP acknowledgement; its retry retur
 The real OMP 18.4.4 title bakeoff is reproducible without prompts, credentials or model calls:
 
 ```sh
-python3 scripts/st3-omp-labels-eval/run /path/to/omp-18.4.4 \
+python3 scripts/fractal-omp-labels-eval/run /path/to/omp-18.4.4 \
   crates/fractal-daemon/hooks/omp-channel.ts /tmp/omp-labels-result.json
 ```
 

@@ -151,7 +151,8 @@ fn cstring(name: &[u8]) -> io::Result<CString> {
 fn open_at(parent: &File, name: &[u8], flags: i32, mode: libc::mode_t) -> io::Result<File> {
     let name = cstring(name)?;
     // SAFETY: name is NUL-terminated and the directory descriptor is borrowed for this call.
-    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode) };
+    // C variadics require promotion: mode_t is only u16 on Darwin.
+    let descriptor = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode as libc::c_uint) };
     if descriptor < 0 { return Err(io::Error::last_os_error()); }
     // SAFETY: openat returned a new descriptor, whose sole ownership is transferred to File.
     Ok(unsafe { File::from_raw_fd(descriptor) })
