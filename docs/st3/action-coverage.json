@@ -84,6 +84,13 @@
       "behavior": "real API handler and store tests: stale layout fences merge; fenced retirement compares the current revision and refuses concurrent edits without writes; unfenced retirement remains unconditional; stale authority and launch fences refuse without edits; replay preserves receipts and rejects changed action identity; fenced retirement recovers receipt gaps; agent attribution preserves person ownership; projected heads survive reopen, upgrade backfill and replication"
     },
     {
+      "action": "arrangement.membership.edit",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::arrangement_membership_edits_survive_stale_fences_and_restarts"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; version-2 membership edit accepted after restart; exact replay after another restart adds no duplicate claim and preserves owner, actor, and projected root placement"
+    },
+    {
       "action": "attention.resolve",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::unavailable_actions_refuse_before_and_after_restart_without_writes"

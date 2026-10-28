@@ -538,6 +538,7 @@ const tracedStream = (
     subscribe: issue(stream.subscribe),
     subscribeGlasses: issue(stream.subscribeGlasses),
     subscribeArrangements: issue(stream.subscribeArrangements),
+    subscribeOrderedMemberships: issue(stream.subscribeOrderedMemberships),
     subscribeTerminal: issue(stream.subscribeTerminal),
     subscribeConversation: issue(stream.subscribeConversation),
   }

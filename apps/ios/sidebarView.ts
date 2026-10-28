@@ -1,4 +1,4 @@
-import type { Arrangement } from '../../clients/typescript/fractal-client';
+import type { SidebarArrangement } from './sidebarEdits';
 import { sidebarArrangement } from './sidebarEdits';
 
 export type SidebarKind = 'Agents' | 'Missions' | 'Terminals' | 'Machines' | 'Pull requests' | 'Repositories' | 'Resources' | 'Unavailable';
@@ -15,7 +15,7 @@ export function rememberResources(previous: Map<string, SidebarResource>, curren
 }
 
 /** One deterministic Sidebar arrangement, flattened to one folder level without rewriting it. */
-export function sidebarGroups(arrangements: Arrangement[], resources: Map<string, SidebarResource>, choices: SidebarChoices = {}, filter = ''): { groups: SidebarGroup[]; everythingCollapsed: boolean; unfiledCount: number } {
+export function sidebarGroups(arrangements: SidebarArrangement[], resources: Map<string, SidebarResource>, choices: SidebarChoices = {}, filter = ''): { groups: SidebarGroup[]; everythingCollapsed: boolean; unfiledCount: number } {
   const arrangement = sidebarArrangement(arrangements);
   const catalog = new Map(resources);
   for (const id of Object.keys(arrangement?.body.placements ?? {})) if (!catalog.has(id)) catalog.set(id, { id, title: id, kind: 'Unavailable', target: id, missing: true });

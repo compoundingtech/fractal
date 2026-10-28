@@ -31,6 +31,8 @@
 //!
 //! Arrangement probes keep one live resource's register heads fixed while its edit history grows
 //! with the generated scale, so both the owner-selected list and detail must be history-independent.
+//! The ordered-membership page keeps one live member of a version-2 arrangement fixed while its
+//! move history and retained absent members grow with the generated scale.
 //! Per-subject conversation-owner probes grow sparse identity history at fixed answer size,
 //! including other-origin actual-state claims without a rival runtime. SQL VM row work and
 //! statement counts must stay bounded; this path has no `KNOWN_GROWTH` exemption.
@@ -599,6 +601,10 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
+    ),
+    get(
+        "GET /v1/client/arrangements/{person_name}/{uuid}/memberships",
+        MEMBERSHIP_PATH,
     ),
     post("POST /v1/sets/preview", "/v1/sets/preview", |_, attempt| {
         owned_set_request(&format!("preview-{attempt}"))
@@ -1248,6 +1254,74 @@ fn seed_arrangement(store: &Store, scale: f64) -> String {
     append(
         "cost-arrangement-current",
         json!([{"op":"rename","name":"Invented arrangement"}]),
+    )
+}
+
+const MEMBERSHIP_OWNER: &str = "person/avery";
+const MEMBERSHIP_SUBJECT: &str = "arrangement/person/avery/019a0000-0000-7000-8000-000000000002";
+const MEMBERSHIP_PATH: &str =
+    "/v1/client/arrangements/avery/019a0000-0000-7000-8000-000000000002/memberships?person=person%2Favery";
+/// A live member: another of the owner's arrangements, visible while it is created and unretired.
+const MEMBERSHIP_MEMBER: &str = "arrangement/person/avery/019a0000-0000-7000-8000-000000000003";
+
+/// Grow the container's move history and retained absent members, not the live page, to catch
+/// membership reads that fold old edits or scan absent heads.
+fn seed_memberships(store: &Store, scale: f64) -> String {
+    let arrangement = |subject: &str, fields: Value| {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "arrangement.edited".into(),
+                actor: Some(MEMBERSHIP_OWNER.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(format!("cost-membership-create-{subject}")),
+            })
+            .expect("the membership cost fixture's arrangement must publish")
+    };
+    arrangement(
+        MEMBERSHIP_SUBJECT,
+        json!({"owner":MEMBERSHIP_OWNER,"version":2,"operations":[{"op":"create","name":"Invented memberships"}]}),
+    );
+    arrangement(
+        MEMBERSHIP_MEMBER,
+        json!({"owner":MEMBERSHIP_OWNER,"operations":[{"op":"create","name":"Invented member"}]}),
+    );
+    let edit = |key: String, operations: Value| {
+        store
+            .edit_ordered_memberships(
+                &ClaimInput {
+                    subject: MEMBERSHIP_SUBJECT.into(),
+                    kind: "ordered-membership.edited".into(),
+                    actor: Some(MEMBERSHIP_OWNER.into()),
+                    fields: serde_json::from_value(json!({
+                        "owner": MEMBERSHIP_OWNER,
+                        "operations": operations,
+                    }))
+                    .unwrap(),
+                    evidence: vec![],
+                    expected_subject: None,
+                    idempotency_key: Some(key),
+                },
+                &BTreeMap::new(),
+            )
+            .expect("the membership cost fixture must publish")
+            .id
+    };
+    for edit_index in 0..((scale * 10_000.0).round() as usize).max(1) {
+        edit(
+            format!("cost-membership-history-{edit_index}"),
+            json!([
+                {"op":"place","member":MEMBERSHIP_MEMBER,"bucket":null,"key":if edit_index % 2 == 0 { "a1" } else { "a0" }},
+                // A distinct variant nibble keeps these from naming the container or live member.
+                {"op":"remove","member":format!("arrangement/person/avery/019a0000-0000-7000-9000-{edit_index:012}")},
+            ]),
+        );
+    }
+    edit(
+        "cost-membership-current".into(),
+        json!([{"op":"place","member":MEMBERSHIP_MEMBER,"bucket":null,"key":"a0"}]),
     )
 }
 
@@ -2381,6 +2455,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    let membership_revision = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || seed_memberships(&store, scale))
+            .await
+            .unwrap()
+    };
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -2470,6 +2550,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     let notes: Value = person.get("/v1/client/notes").await.unwrap();
     assert_eq!(notes["notes"], json!([seeded["note"]]));
     let arrangement_person = Client::unix_as(&socket, ARRANGEMENT_OWNER).unwrap();
+    let membership_person = Client::unix_as(&socket, MEMBERSHIP_OWNER).unwrap();
     let subjects = {
         let store = store.clone();
         tokio::task::spawn_blocking(move || fleet_subjects(&store, 3))
@@ -2626,6 +2707,18 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         .await
         .expect("the arrangement list probe must read the selected owner's fixture");
     assert_eq!(page["items"], json!([selected]));
+    let page: Value = membership_person
+        .get(MEMBERSHIP_PATH)
+        .await
+        .expect("the ordered-membership probe must read the live version-2 fixture");
+    assert_eq!(
+        page["items"],
+        json!([{
+            "id":MEMBERSHIP_MEMBER, "container":MEMBERSHIP_SUBJECT, "member":MEMBERSHIP_MEMBER,
+            "position":{"bucket":null,"key":"a0"}, "revision":membership_revision,
+        }])
+    );
+    assert_eq!(page["page"]["has_more"], false);
 
     prepare_custom_fixture(&store, &mut fixture, scale);
     let event_page: Value = client
@@ -2698,7 +2791,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             } else {
                 let path = fixture.fill(probe.path, attempt);
                 let body = probe.body.map(|body| body(&fixture, attempt));
-                let client = if path.starts_with("/v1/client/arrangements") {
+                let client = if path == MEMBERSHIP_PATH {
+                    membership_person.clone()
+                } else if path.starts_with("/v1/client/arrangements") {
                     arrangement_person.clone()
                 } else if path.starts_with("/v1/client/adapter/") {
                     adapter.clone()

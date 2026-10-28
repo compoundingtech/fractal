@@ -2635,6 +2635,7 @@ name = "fractal-ui-model"
 version = "0.1.0"
 dependencies = [
  "fractal-client",
+ "fractal-schema",
  "serde",
  "serde_json",
 ]
