@@ -526,16 +526,21 @@ def shared_target(tree_target=None):
 
 
 def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
-    """The cgroup that caps this process's memory and the one that caps its CPU, as one string, or None when either is
-    unlimited: read from its own cgroup v2 path and each ancestor's memory.max and cpu.max, never from a name or a variable. A
-    seat lane (docs/st3/seat-lanes.md) caps both on its scope, builds.slice on the slice."""
+    """The cap this process runs under, as one string, or None. Only the two caps made for builds count: builds.slice, and a
+    seat's lane, app-lanes-<seat>.slice directly in app-lanes.slice (docs/st3/seat-lanes.md). The process must be inside one, and
+    that slice or a cgroup below it, on the way to the process, must hold a memory.max and a cpu.max quota: read from the kernel's
+    files, never from a name alone or a variable. Limits above the cap (any other cgroup's) do not count."""
     try:
         text = Path(cgroup_file).read_text()
     except OSError:
         return None
     path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '').strip('/')
-    if not path:
+    parts = path.split('/') if path else []
+    cap = next((depth for depth, part in enumerate(parts) if part == 'builds.slice' or (
+        depth > 0 and parts[depth - 1] == 'app-lanes.slice' and part.startswith('app-lanes-') and part.endswith('.slice'))), None)
+    if cap is None:
         return None
+
     def limited(cgroup, file):  # whether CGROUP's FILE holds a limit; a missing or unreadable file (no controller) is none
         try:
             return cgroup.joinpath(file).read_text().split()[0] != 'max'
@@ -543,14 +548,13 @@ def own_cap(cgroup_file='/proc/self/cgroup', root='/sys/fs/cgroup'):
             return False
 
     memory = cpu = None
-    parts = path.split('/')
-    for depth in range(len(parts), 0, -1):
+    for depth in range(cap + 1, len(parts) + 1):
         cgroup = Path(root, *parts[:depth])
         if memory is None and limited(cgroup, 'memory.max'):
             memory = parts[depth - 1]
         if cpu is None and limited(cgroup, 'cpu.max'):
             cpu = parts[depth - 1]
-    return f'memory by {memory}, CPU by {cpu}' if memory and cpu else None
+    return f'{parts[cap]}: memory by {memory}, CPU by {cpu}' if memory and cpu else None
 
 
 def governed(argv, name):

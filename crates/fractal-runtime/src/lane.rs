@@ -8,7 +8,6 @@
 //! declaration is logged as not enforced and the seat starts as it does without one.
 
 use std::collections::BTreeMap;
-use std::hash::{Hash as _, Hasher as _};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result, bail};
@@ -160,14 +159,21 @@ pub fn enforced() -> bool {
     ENFORCED.load(Ordering::Relaxed)
 }
 
-/// A seat's slice: `app-lanes-<seat>.slice`, inside [`LANES_SLICE`]. A dash in a slice name
-/// nests it, so the seat's own dashes become underscores.
+/// A seat's slice: `app-lanes-<seat>_<digest>.slice`, inside [`LANES_SLICE`]. A dash in a slice
+/// name nests it, so the seat's own dashes, like its other unsafe bytes, become underscores for
+/// reading; the digest of the whole runtime id keeps two seats that read alike apart, and is the
+/// same on every build, so a seat finds its slice again after an upgrade.
 pub fn seat_slice(runtime_id: &str) -> String {
     let seat: String = crate::isolate::sanitize(runtime_id)
         .chars()
         .map(|character| if character == '-' { '_' } else { character })
         .collect();
-    format!("app-lanes-{seat}.slice")
+    format!("app-lanes-{seat}_{}.slice", &digest(runtime_id)[..12])
+}
+
+fn digest(value: &str) -> String {
+    use sha2::Digest as _;
+    format!("{:x}", sha2::Sha256::digest(value.as_bytes()))
 }
 
 /// A lane a launch starts in: the seat's capped slice.
@@ -280,12 +286,10 @@ pub(crate) fn environment(
         && environment("SCCACHE_SERVER_PORT").is_none()
         && let Some(runtime) = environment("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty())
     {
-        // A slice name can be longer than a socket path may be, so the socket is named by its hash.
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        lane.slice.hash(&mut hasher);
+        // A slice name can be longer than a socket path may be, so the socket is named by its digest.
         added.push((
             "SCCACHE_SERVER_UDS",
-            format!("{runtime}/sccache-lane-{:016x}.sock", hasher.finish()),
+            format!("{runtime}/sccache-lane-{}.sock", &digest(&lane.slice)[..16]),
         ));
     }
     added
@@ -350,16 +354,22 @@ mod tests {
         let lane = Lane { slice: seat_slice("fleet.example.seat-1") };
         assert_eq!(
             lane.scope_arguments(),
-            ["--slice=app-lanes-fleet.example.seat_1.slice", "--property=OOMPolicy=continue"]
+            [format!("--slice={}", lane.slice), "--property=OOMPolicy=continue".to_owned()]
         );
     }
 
     #[test]
-    fn a_seat_slice_nests_only_under_the_lanes_slice() {
+    fn a_seat_slice_nests_only_under_the_lanes_slice_and_is_the_seats_alone() {
         // A dash nests a slice, so the seat's own become underscores; other unsafe bytes do too.
-        assert_eq!(seat_slice("fleet.factory.seat-lanes.01-a"), "app-lanes-fleet.factory.seat_lanes.01_a.slice");
-        assert_eq!(seat_slice("a b/c"), "app-lanes-a_b_c.slice");
-        assert_eq!(seat_slice("same"), seat_slice("same"), "a restart finds its seat's slice again");
+        let slice = seat_slice("fleet.factory.seat-lanes.01-a");
+        assert!(slice.starts_with("app-lanes-fleet.factory.seat_lanes.01_a_"), "{slice}");
+        assert!(slice.ends_with(".slice") && slice.matches('-').count() == 2, "{slice}");
+        // Seats that read alike once their bytes are made safe still get slices of their own.
+        for (one, other) in [("a-b", "a_b"), ("a b/c", "a_b_c"), ("x.y", "x.y ")] {
+            assert_ne!(seat_slice(one), seat_slice(other), "{one} and {other}");
+        }
+        // The same on every build, so a restart (or an upgrade) finds its seat's slice again.
+        assert_eq!(seat_slice("same"), "app-lanes-same_0967115f2813.slice");
     }
 
     #[test]

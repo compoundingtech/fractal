@@ -109,9 +109,10 @@ class PoolTreeTest(unittest.TestCase):
 class GovernedTest(unittest.TestCase):
     """A building check runs in builds.slice unless its caller's own cgroup is already under a memory and a CPU limit."""
 
-    LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/st3-seat-1-0.scope'
+    LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/st3-seat-1-0.scope'
     BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
     SEAT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st3-seat-1-0.scope'
+    LANE_SLICE = 'app-lanes-seat_1_0a1b2c3d4e5f.slice'
 
     def tree(self, tmp, leaf, limits):
         """A cgroup v2 tree under TMP whose every level is unlimited but the ones LIMITS names ({level: (memory.max, cpu.max)})."""
@@ -142,25 +143,33 @@ class GovernedTest(unittest.TestCase):
         self.assertEqual(governed[-1], 'check')
 
     def test_a_capped_lane_or_build_scope_runs_in_place(self):
-        lane = {'st3-seat-1-0.scope': ('268435456', '100000 100000')}
-        self.assertEqual(self.governed_in(self.LANE, lane), ['check'])
+        self.assertEqual(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', '100000 100000')}), ['check'])
         self.assertEqual(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), ['check'])
 
     def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
         self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
-        # A scope in the lanes slice without a lane's limits is not capped.
+        # A seat's lane slice without its limits is not capped.
         self.assert_scoped(self.governed_in(self.LANE, {}), 'name')
-        # Both limits are needed, at any level: memory alone, or CPU alone, is not a cap.
-        self.assert_scoped(self.governed_in(self.LANE, {'st3-seat-1-0.scope': ('268435456', 'max 100000')}), 'memory only')
-        self.assert_scoped(self.governed_in(self.LANE, {'app-lanes.slice': ('max', '100000 100000')}), 'cpu only')
+        # Both limits are needed: memory alone, or CPU alone, is not a cap.
+        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', 'max 100000')}), 'memory only')
+        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('max', '100000 100000')}), 'cpu only')
         # A cpu controller that is not enabled (no cpu.max) is no CPU limit.
-        self.assert_scoped(self.governed_in(self.LANE, {'st3-seat-1-0.scope': ('268435456', None)}), 'no cpu controller')
+        self.assert_scoped(self.governed_in(self.LANE, {self.LANE_SLICE: ('268435456', None)}), 'no cpu controller')
 
-    def test_limits_on_different_levels_together_are_a_cap(self):
-        limits = {'app-lanes.slice': ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
+    def test_only_a_build_or_lane_cap_counts_never_an_unrelated_one(self):
+        # Limits on a cgroup above the cap, or on any other cgroup, are not the build cap.
+        self.assert_scoped(self.governed_in(self.SEAT, {'st3-seat-1-0.scope': ('268435456', '100000 100000')}), 'any capped scope')
+        self.assert_scoped(self.governed_in(self.SEAT, {'app.slice': ('68719476736', '1600000 100000')}), 'an ancestor')
+        self.assert_scoped(self.governed_in(self.LANE, {'app-lanes.slice': ('68719476736', '1600000 100000')}), 'above the lane')
+        unrelated = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes-seat_1_0a1b2c3d4e5f.slice/x.scope'
+        self.assert_scoped(self.governed_in(unrelated, {'app-lanes-seat_1_0a1b2c3d4e5f.slice': ('268435456', '100000 100000')}),
+                           'a lane-named slice outside app-lanes.slice')
+
+    def test_limits_on_different_levels_inside_the_cap_together_are_a_cap(self):
+        limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
         self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
         # A level without a memory controller still caps CPU: each file is read on its own.
-        limits = {'app-lanes.slice': ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
+        limits = {self.LANE_SLICE: ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': (None, '200000 100000')}
         self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
 
     def test_an_unreadable_cgroup_is_no_cap(self):

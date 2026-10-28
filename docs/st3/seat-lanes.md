@@ -23,8 +23,9 @@ a merge lane (see [lanes.md](lanes.md)) and keeps that one meaning.
 Every seat already runs in its own transient user scope, created by `systemd-run --user --scope` in
 `crates/fractal-runtime/src/isolate.rs`, one per launch of its harness. The user manager on our
 hosts has cpu, io, memory and pids delegated, so no root is needed. A lane is a slice of the seat's
-own, `app.slice/app-lanes.slice/app-lanes-<seat>.slice` (the seat's dashes become underscores, since
-a dash nests a slice), capped before anything starts in it (`crates/fractal-runtime/src/lane.rs`):
+own, `app.slice/app-lanes.slice/app-lanes-<seat>_<digest>.slice` (the seat's dashes become
+underscores, since a dash nests a slice, and a digest of the whole seat id keeps two seats that read
+alike apart), capped before anything starts in it (`crates/fractal-runtime/src/lane.rs`):
 
 | On | Property | Value | Why |
 | --- | --- | --- | --- |
@@ -59,10 +60,11 @@ new scope elsewhere. Today three do:
 3. `scripts/st-test` `governed()` wraps each building check in a `builds.slice` scope.
 
 The first two already run in place when `BUILDS_SLICE_ACTIVE` is set, so a lane's environment sets
-it. `governed()` signs checks, so it takes neither a variable's nor a slice name's word: it runs a check
-in place only when its own cgroup, or an ancestor, holds a real `memory.max` and a real `cpu.max`
-quota (a lane's scope does, and so does `builds.slice`); otherwise it starts the check in
-`builds.slice` as before. The host's sccache server runs in `builds.slice`, so
+it. `governed()` signs checks, so it takes neither a variable's nor a name's word alone: it runs a check
+in place only when it runs inside one of the two caps made for builds, `builds.slice` or a seat's
+lane (an `app-lanes-<seat>.slice` directly in `app-lanes.slice`), and that slice or a cgroup below it
+holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. Otherwise
+it starts the check in `builds.slice` as before. The host's sccache server runs in `builds.slice`, so
 compiles sent to it would leave the lane: a lane sets `SCCACHE_SERVER_UDS` to a socket of its own,
 and the client starts that server inside the lane, on the same on-disk cache (the socket is named for
 the seat, so a restarted harness reuses it). A seat that names its own server keeps it. The build admission queue (slots, load and memory checks) still applies to a
