@@ -402,6 +402,25 @@ export type AgentWorkspace = {
   workspace: string;
 };
 
+export type AgentsPublication = {
+  has_more: false;
+  items: Array<Agent>;
+  order: Array<Id>;
+  publication: AgentsPublicationMetadata;
+};
+
+export type AgentsPublicationMetadata = {
+  materialized_at_ms: number;
+  node_epoch: string;
+  revision: number;
+  status_watermark: AgentsStatusWatermark;
+};
+
+export type AgentsStatusWatermark = {
+  local_frontier: number;
+  store_index: number;
+};
+
 export type Arrangement = ResourceHeader & {
   body: ArrangementBody;
   deleted: false;
@@ -1205,6 +1224,7 @@ export type CollectionFrame = ({
   kind: "snapshot";
   order: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
 } | {
   collection: CollectionName;
   has_more: boolean;
@@ -1213,6 +1233,7 @@ export type CollectionFrame = ({
   order: Array<Id>;
   removes: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
   upserts: Array<Resource>;
 } | {
   collection: "terminal";
@@ -2814,6 +2835,11 @@ export type StatusTransition = {
 };
 
 export type StepRunId = string;
+
+export type StreamSync = {
+  peers?: Array<SyncPeer>;
+  state: ("level" | "catching-up" | "diverged" | string);
+};
 
 export type StructuredDiff = {
   changes: Array<{

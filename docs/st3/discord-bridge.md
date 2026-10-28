@@ -31,7 +31,7 @@ never a token. These example values are invented:
 ```
 
 To check the token and channel before running the bridge,
-`python3 -I scripts/st3-discord-probe test --route PATH` posts one labelled message
+`python3 -I scripts/fractal-discord-probe test --route PATH` posts one labelled message
 and verifies your `st probe hello` reply; it never retries a post. It uses a hidden
 local token prompt and does not route to an agent. The token's application,
 channel's server/type and bot account are checked before importing messages.
@@ -43,7 +43,7 @@ terminal without that identity cannot import native messages. The managed progra
 seat recipe below supplies the identity automatically.
 
 ```sh
-python3 -I scripts/st3-discord-bridge run --agent agent/example/discord-test \
+python3 -I scripts/fractal-discord-bridge run --agent agent/example/discord-test \
   --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock"
 ```
 
@@ -79,7 +79,7 @@ you remove the file yourself.
 
 Stop the current bridge before launching its replacement. To run it under Fractal,
 adapt the invented paths, placement and subjects in
-[`examples/st3/discord-bridge.kdl`](../../examples/st3/discord-bridge.kdl), then
+[`examples/fractal/discord-bridge.kdl`](../../examples/fractal/discord-bridge.kdl), then
 preview and apply that declaration:
 
 ```sh
@@ -165,8 +165,8 @@ copy its ID. `status` prints retained IDs and delivery states without a token.
 author, channel, text, reference and nonce when present:
 
 ```sh
-python3 -I scripts/st3-discord-bridge status --agent agent/example/discord-test
-python3 -I scripts/st3-discord-bridge resolve --agent agent/example/discord-test \
+python3 -I scripts/fractal-discord-bridge status --agent agent/example/discord-test
+python3 -I scripts/fractal-discord-bridge resolve --agent agent/example/discord-test \
   --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock" \
   --fractal-message message/0123456789abcdef --discord-message 505 --part 0
 ```
@@ -178,9 +178,9 @@ for an uncertain Discord send.
 Run focused checks:
 
 ```sh
-python3 -I scripts/st3-discord-bridge-test
-ST3_BRIDGE_NATIVE_TEST_BIN=/path/to/st3 python3 -I scripts/st3-discord-bridge-test
-python3 -I scripts/st3-discord-probe-test
+python3 -I scripts/fractal-discord-bridge-test
+ST3_BRIDGE_NATIVE_TEST_BIN=/path/to/st3 python3 -I scripts/fractal-discord-bridge-test
+python3 -I scripts/fractal-discord-probe-test
 ```
 
 The native check creates and cleans up an isolated daemon with invented identities

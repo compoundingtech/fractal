@@ -318,7 +318,11 @@ def prefetch_manifests(revision, base):
     missing = [oid for oid in wanted if OID.match(oid) and run('git', 'cat-file', '-e', oid, env={'GIT_NO_LAZY_FETCH': '1'}).returncode != 0]
     if not missing:
         return 'none'
-    return 'ok' if run('git', 'fetch', '--no-tags', '-q', 'origin', *missing).returncode == 0 else 'failed'
+    # No negotiation: the clone has main's commits but not their blobs, and a server with bitmaps would leave out every manifest that
+    # an advertised commit reaches, which is each one main changed since the branch point. The lazy fetch of a partial clone asks the
+    # same way.
+    return 'ok' if run('git', '-c', 'fetch.negotiationAlgorithm=noop', 'fetch', '--no-tags', '-q', 'origin', *missing).returncode == 0 \
+        else 'failed'
 
 
 def fetch_member_notes(verifier, base, check, repository, revision='HEAD'):
@@ -376,6 +380,9 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
         ('log', result.get('log')), ('log_head', result.get('log_head')), ('log_age_s', result.get('log_age_s')),
         ('log_missing', result.get('log_missing')), ('log_fetch', context.get('log_fetch')),
+        # A per-crate check's unlogged pass: how many members, the first few as crate=record, and the oldest of their observed_at.
+        ('log_unlogged', result.get('log_unlogged')), ('log_unlogged_crates', result.get('log_unlogged_crates')),
+        ('log_unlogged_observed_at', result.get('log_unlogged_observed_at')),
         # A per-crate check: how many workspace members, and how many of them no satisfying note covers.
         ('members', result.get('members')), ('missing', len(result['missing']) if isinstance(result.get('missing'), (dict, list)) else None),
         ('manifests_fetch', context.get('manifests_fetch')), ('members_fetch', context.get('members_fetch')),

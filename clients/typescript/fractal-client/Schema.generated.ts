@@ -1152,6 +1152,37 @@ export const AgentWorkspace = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentWorkspace = typeof AgentWorkspace.Type
 export type AgentWorkspaceEncoded = typeof AgentWorkspace.Encoded
 
+/** Node-local graph cut and roster-relevant local activity frontier. These numbers are not comparable across nodes or epochs. */
+export const AgentsStatusWatermark = /*#__PURE__*/ (() => Schema.Struct({
+  "local_frontier": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "store_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AgentsStatusWatermark", description: "Node-local graph cut and roster-relevant local activity frontier. These numbers are not comparable across nodes or epochs." }))()
+export type AgentsStatusWatermark = typeof AgentsStatusWatermark.Type
+export type AgentsStatusWatermarkEncoded = typeof AgentsStatusWatermark.Encoded
+
+/** Identity and source cut of one immutable complete current agents publication. This definition does not add fields to legacy HTTP responses or collection frames. */
+export const AgentsPublicationMetadata = /*#__PURE__*/ (() => Schema.Struct({
+  /** Server-captured presentation time in Unix milliseconds, not producer observation time or evidence receipt time. */
+  "materialized_at_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Server-captured presentation time in Unix milliseconds, not producer observation time or evidence receipt time." }),
+  /** Opaque UUID for the publication owner's epoch. Restart, full projection reset or revision exhaustion starts a new epoch. */
+  "node_epoch": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "u"))).annotate({ description: "Opaque UUID for the publication owner's epoch. Restart, full projection reset or revision exhaustion starts a new epoch." }),
+  /** Increasing JSON-safe publication number within one node epoch. Gaps are allowed; this is not a replay cursor. */
+  "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)).annotate({ description: "Increasing JSON-safe publication number within one node epoch. Gaps are allowed; this is not a replay cursor." }),
+  "status_watermark": AgentsStatusWatermark
+}).annotate({ identifier: "AgentsPublicationMetadata", description: "Identity and source cut of one immutable complete current agents publication. This definition does not add fields to legacy HTTP responses or collection frames." }))()
+export type AgentsPublicationMetadata = typeof AgentsPublicationMetadata.Type
+export type AgentsPublicationMetadataEncoded = typeof AgentsPublicationMetadata.Encoded
+
+/** Complete immutable current agents view. Order contains each item ID once in presentation order. No core row-count or encoded-byte limit applies. This transport-neutral definition does not change legacy response shapes. */
+export const AgentsPublication = /*#__PURE__*/ (() => Schema.Struct({
+  "has_more": Schema.Literal(false),
+  "items": Schema.Array(Agent),
+  "order": Schema.Array(Id).check(Schema.isUnique()),
+  "publication": AgentsPublicationMetadata
+}).annotate({ identifier: "AgentsPublication", description: "Complete immutable current agents view. Order contains each item ID once in presentation order. No core row-count or encoded-byte limit applies. This transport-neutral definition does not change legacy response shapes." }))()
+export type AgentsPublication = typeof AgentsPublication.Type
+export type AgentsPublicationEncoded = typeof AgentsPublication.Encoded
+
 export const ArrangementNameRegister = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   "value": ArrangementName
@@ -3178,6 +3209,19 @@ export const Snapshot = /*#__PURE__*/ (() => Schema.Struct({
 export type Snapshot = typeof Snapshot.Type
 export type SnapshotEncoded = typeof Snapshot.Encoded
 
+/** This host's replication as a stream frame states it: level, or catching up with or diverged from the peers named. Unlike a page's SyncNotice it is explicit when level, so that its absence on a stream means unknown. A state this client does not know reads as unknown, never level. */
+export const StreamSync = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "peers": optionalKey(Schema.Array(Schema.Unknown).check(Schema.isMaxLength(0))), "state": Schema.Literal("level") }),
+  Schema.Struct({ /** The peers this host is behind or diverged from: present exactly when the state is not level. */
+"peers": Schema.Array(SyncPeer).check(Schema.isMinLength(1)).annotate({ description: "The peers this host is behind or diverged from: present exactly when the state is not level." }), "state": Schema.Literal("catching-up") }),
+  Schema.Struct({ /** The peers this host is behind or diverged from: present exactly when the state is not level. */
+"peers": Schema.Array(SyncPeer).check(Schema.isMinLength(1)).annotate({ description: "The peers this host is behind or diverged from: present exactly when the state is not level." }), "state": Schema.Literal("diverged") }),
+  Schema.Struct({ /** The peers this host is behind or diverged from: present exactly when the state is not level. */
+"peers": optionalKey(Schema.Array(SyncPeer).check(Schema.isMinLength(1))).annotate({ description: "The peers this host is behind or diverged from: present exactly when the state is not level." }), "state": unknownCase(["level","catching-up","diverged"]) })
+], { mode: "oneOf" }).annotate({ identifier: "StreamSync", description: "This host's replication as a stream frame states it: level, or catching up with or diverged from the peers named. Unlike a page's SyncNotice it is explicit when level, so that its absence on a stream means unknown. A state this client does not know reads as unknown, never level." }))()
+export type StreamSync = typeof StreamSync.Type
+export type StreamSyncEncoded = typeof StreamSync.Encoded
+
 export const TerminalFacts = /*#__PURE__*/ (() => Schema.Struct({
   "clients": optionalKey(Schema.Struct({ "attached": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "read_only": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) })),
   "columns": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
@@ -3853,8 +3897,10 @@ export type TimelineEntry = typeof TimelineEntry.Type
 export type TimelineEntryEncoded = typeof TimelineEntry.Encoded
 
 export const CollectionFrame = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot }),
-  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(Resource) }),
+  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot, /** This host's replication, taken when this frame was built. A daemon that sends it sends it on every snapshot of the collections that carry it (attention). Absent means unknown (an older daemon), never level. */
+"sync": optionalKey(StreamSync) }),
+  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, /** Present only when this host's replication changed since the last frame of this subscription (its state, or which peers are ahead), including back to level. Absent means it did not change. */
+"sync": optionalKey(StreamSync), "upserts": Schema.Array(Resource) }),
   Schema.Struct({ "collection": Schema.Literal("terminal"), "id": Schema.String, "kind": Schema.Literal("screen"), "snapshot": Snapshot, "value": TerminalScreen }),
   Schema.Struct({ "collection": Schema.Literal("conversation"), "has_more": optionalKey(Schema.Boolean), /** Present when conversation-blocks.v1 is negotiated and at least one header field is available */
 "header": optionalKey(ConversationHeader), "id": Schema.String, "items": Schema.Array(TimelineEntry), "kind": Schema.Literal("conversation"), /** Replacement frames only, present whenever has_more is true: the timeline cursor (GET /v1/client/sessions/{id}/timeline?cursor=...) for the entries just before this frame's oldest entry. */

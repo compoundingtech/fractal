@@ -67,6 +67,10 @@ contributor's pull requests later, so set it up now.
 **You need** a Linux x86_64 machine with Nix. On our machines a run peaks at about 16 cores and 18 GB of RAM. The kept build
 folder takes 60 to 110 GB of disk. A full warm run takes about 12 minutes (our target is 12 minutes or less).
 
+**Clone without the evidence tags.** Signed records are tags under `refs/tags/evidence/`, tens of thousands of them. Clone with
+`git clone --no-tags https://github.com/compoundingtech/fractal`; `nix develop` (`scripts/install-git-hooks`) then sets a negative
+refspec, so a later `git fetch --tags` brings every other tag and none of these.
+
 **Once, enrol a key.** Run `scripts/evidence-keygen --level agent --name ALIAS`. Use an invented alias, never a machine or account
 name. It prints one line; open a pull request that adds that line to `.st/evidence-keys`. Keys are read from `main`, so the key counts
 once that pull request merges. Deleting the line revokes everything the key signed. The accounts and commit emails that open and
@@ -124,6 +128,32 @@ Details: [the evidence gate and the skip policy](docs/st3/gate-evidence.md#evide
 [agent keys](docs/st3/gate-evidence.md#agent-keys) and
 [running the checks locally](docs/st3/gate-evidence.md#running-the-checks-locally-scriptsfractal-test). Questions or problems: open an
 issue in this repository.
+
+## Reviewing your change
+
+Every change is reviewed against one written standard, [docs/review.md](docs/review.md), by the agent that wrote it, with the same
+script for everyone. There is no central reviewer.
+
+```sh
+scripts/review                      # reviews HEAD against origin/main and prints the path of the verdict
+scripts/review --harness codex      # choose the agent CLI: claude or codex (.st/review-harness.json lists them)
+scripts/review --author-family anthropic   # refuse a reviewer of the same model family as the author
+```
+
+- It runs the agent CLI you have in a detached checkout of the head, read-only and confined to that checkout: the diff is untrusted
+  input, and a prompt injected through it must not be able to read your signing key or a token and print it into a verdict that is
+  posted on a pull request. claude runs with `Read`, `Grep` and `Glob` scoped to the checkout, no shell and no MCP servers; codex runs
+  in a permissions profile that can read only the checkout and its own install; omp can't scope its reads yet, so it is refused. A
+  harness whose command does not carry this is refused, and a verdict that holds a private key, a token or the content of one of your
+  credential files is not written. The deterministic risk score
+  (`scripts/review-risk`) and the per-file patch-ids are computed by script from the diff; the model adds its own score, and the final
+  risk is the higher of the two. The risk script, the verdict validator and their schema are always the base's, never the head's.
+- The verdict is one JSON file that must validate against `.st/review-verdict.schema.json`. If it does not, the review fails and
+  nothing is written. A `GO` at low or medium risk can go in the merge queue; a high risk is iterated down, or goes to your own human.
+- It reads only what changed: the record of earlier verdicts is kept in your clone, a later round or a merge of `main` is read as a
+  delta, and a clean merge of `main` carries the verdict without asking the model.
+- At most three rounds. `OUT.metrics.json` beside the verdict has the time, the cost (when the CLI reports it) and what was read.
+  A round costs about a minute and 30 to 40 cents on a diff of a few hundred lines.
 
 ## Reference
 

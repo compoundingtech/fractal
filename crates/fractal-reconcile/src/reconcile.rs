@@ -1192,6 +1192,11 @@ pub struct Reconciler<R = NativeRuntime> {
     /// index of the subject's newest declaration it was read from.
     declared_checkouts: Mutex<HashMap<String, (u64, Option<(Checkout, String)>)>>,
     materialized_mission_generations: Mutex<BTreeSet<String>>,
+    /// Held while mission runs are evaluated, by a pass or by `evaluate_changed_mission_runs`, so
+    /// no run is evaluated twice at once.
+    mission_evaluation: Mutex<()>,
+    /// How far `evaluate_changed_mission_runs` has read the change feed, apart from the passes.
+    mission_reads_cursor: Mutex<Option<(u64, i64)>>,
     /// Found launch evidence is immutable for one origin and incarnation. Missing evidence
     /// is checked again on a subject change or the existing full-pass safety interval.
     launched_members: Mutex<HashMap<(String, String, String), LaunchEvidence>>,
@@ -1202,7 +1207,7 @@ pub struct Reconciler<R = NativeRuntime> {
     person: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     mission_declaration_parses: std::sync::atomic::AtomicUsize,
-    file_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    file_watchers: Arc<Mutex<HashMap<String, FileWatch>>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     resource_provider: Arc<dyn ResourceProvider>,
@@ -1255,6 +1260,38 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Publish during a unit test after the work feed was observed, before wake selection.
     #[cfg(any(test, feature = "test-support"))]
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
+}
+
+struct FileWatch {
+    // Keep the subscription alive, including across replacements of the target file.
+    _watcher: notify::RecommendedWatcher,
+    target: PathBuf,
+    directory: PathBuf,
+    referent: Option<PathBuf>,
+}
+
+impl FileWatch {
+    fn relevant(event: &notify::Event, target: &Path, directory: &Path, referent: Option<&Path>) -> bool {
+        // Overflow/rescan means paths may have been lost; every subscription must reread.
+        event.need_rescan()
+            || (matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_)
+            ) && (event.paths.is_empty()
+                || event.paths.iter().any(|path| {
+                    path == target
+                        || referent == Some(path.as_path())
+                        || ((path == directory
+                            || referent.and_then(Path::parent) == Some(path.as_path()))
+                            && matches!(
+                                event.kind,
+                                notify::EventKind::Remove(_)
+                                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                            ))
+                })))
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1358,6 +1395,8 @@ impl Reconciler<NativeRuntime> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            mission_evaluation: Mutex::new(()),
+            mission_reads_cursor: Mutex::new(None),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -1521,6 +1560,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            mission_evaluation: Mutex::new(()),
+            mission_reads_cursor: Mutex::new(None),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -7668,13 +7709,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         launch: &MemberSpec,
     ) -> Option<String> {
         let driver = crate::accounts::harness_driver(&subject.desired)?;
-        let configured = crate::accounts::login_environment_name(driver).and_then(|variable| {
-            launch
-                .environment
-                .get(variable)
-                .cloned()
-                .or_else(|| std::env::var(variable).ok())
-        });
+        // A harness with a login directory names it in that variable; omp names the key file it
+        // reads in its own.
+        let configured = crate::accounts::login_environment_name(driver)
+            .or_else(|| (driver == "omp").then_some(crate::accounts::OMP_KEY_FILE_ENV))
+            .and_then(|variable| {
+                launch
+                    .environment
+                    .get(variable)
+                    .cloned()
+                    .or_else(|| std::env::var(variable).ok())
+            });
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let accounts = self.store.declared_accounts().ok()?;
         crate::accounts::unbound_login_account(
@@ -9764,6 +9809,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_mission_runs_pass(&self) -> Result<()> {
+        // Before reading what changed: a mark set while `evaluate_changed_mission_runs` evaluated
+        // the run would be cleared when that evaluation finished.
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.incremental.observe(&self.store)?;
         // A gate runner's exit is not a claim: look again at the runners evaluations wait on.
         self.incremental.observe_execs(|runtime_id| {
@@ -9774,10 +9825,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .map(|observation| observation.status)
         });
         let ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
-        self.evaluate_mission_run_ids(ids)
+        self.evaluate_mission_run_ids_held(ids)
     }
 
     pub fn evaluate_mission_run_ids(&self, ids: Vec<String>) -> Result<()> {
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.evaluate_mission_run_ids_held(ids)
+    }
+
+    /// [`Self::evaluate_mission_run_ids`], with `mission_evaluation` already held.
+    fn evaluate_mission_run_ids_held(&self, ids: Vec<String>) -> Result<()> {
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
         let mut changed = false;
@@ -9803,85 +9863,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 continue;
             }
-            let cpu_started = crate::incremental::thread_cpu();
-            let wrote_mark = smallclaims::touched::wrote_len();
-            let mut due = None;
-            let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
-                smallclaims::touched::record_due(|| {
-                    self.isolate("mission-run", &subject, || {
-                        let (run, mission) = self.store.mission_run_for_evaluation(id)?;
-                        active_generations.insert(run.generation.clone());
-                        active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
-                        // From the view the evaluation started with: a write it makes changes subjects
-                        // it read, so the next pass evaluates it again and takes the new times.
-                        due = crate::incremental::run_due(&run, now_ms());
-                        // Telling a run's reporter never holds the run back or fails it.
-                        match self.run_report(&run.subject).and_then(|report| {
-                            report
-                                .map(|report| self.report_run(&run, &report, now_ms()))
-                                .transpose()
-                        }) {
-                            Ok(None) => {
-                                // A run whose reporter was cleared has nobody left to fail.
-                                if let Err(error) = self.close_fault(
-                                    &run.subject,
-                                    run_report::REPORT_FAULT_SCOPE,
-                                    "the run reports to nobody",
-                                ) {
-                                    eprintln!("st3: run report for {}: {error:#}", run.subject);
-                                }
-                            }
-                            Ok(Some(stalls_at)) => {
-                                due = [due, stalls_at].into_iter().flatten().min();
-                            }
-                            Err(error) => {
-                                if let Err(error) = self.record_fault(
-                                    &run.subject,
-                                    run_report::REPORT_FAULT_SCOPE,
-                                    Err(error),
-                                ) {
-                                    eprintln!("st3: run report for {}: {error:#}", run.subject);
-                                }
-                            }
-                        }
-                        let evaluated = self.evaluate_active_mission_run(&run, mission);
-                        // Recovery is diagnostic too: admission and execution writes come first.
-                        if (!first_readiness_pending(&run)
-                            || now_ms().saturating_sub(first_readiness_since(&run))
-                                < FIRST_READINESS_FAULT_AFTER_MS)
-                            && let Err(error) = self.close_fault(
-                                &run.subject,
-                                FIRST_READINESS_FAULT_SCOPE,
-                                "the run no longer has an overdue first-readiness wait",
-                            )
-                        {
-                            eprintln!(
-                                "st3: first-readiness recovery for {}: {error:#}", run.subject
-                            );
-                        }
-                        evaluated
-                    })
-                })
-            });
-            due = match (due, armed) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-            changed |= evaluated.unwrap_or(false);
-            crate::performance::record_evaluation(
-                "mission-run",
+            changed |= self.evaluate_one_mission_run(
+                id,
                 needed,
-                crate::incremental::thread_cpu().saturating_sub(cpu_started),
+                false,
+                &mut active_generations,
+                &mut active_steps,
             );
-            if !needed {
-                let wrote = smallclaims::touched::wrote_since(wrote_mark);
-                // Rows that are not claims or observations (caches, capabilities) change no
-                // graph state a later pass would have to catch up with.
-                if !wrote.is_empty() {
-                    self.incremental_correction("mission-run", &subject, &reads, &wrote);
-                }
-            }
-            self.incremental.evaluated(&subject, reads, due);
         }
         self.incremental.retain(
             "mission-run/",
@@ -9927,6 +9915,174 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.signal_changed();
         }
         Ok(())
+    }
+
+    /// Evaluate one run and remember what it read. `active_only` skips a run that has ended since
+    /// the last pass listed the active runs.
+    fn evaluate_one_mission_run(
+        &self,
+        id: &str,
+        needed: bool,
+        active_only: bool,
+        active_generations: &mut BTreeSet<String>,
+        active_steps: &mut BTreeSet<String>,
+    ) -> bool {
+        let subject = format!("mission-run/{id}");
+        let cpu_started = crate::incremental::thread_cpu();
+        let wrote_mark = smallclaims::touched::wrote_len();
+        let mut due = None;
+        let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::record_due(|| {
+                self.isolate("mission-run", &subject, || {
+                    let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    if active_only
+                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
+                    {
+                        return Ok(false);
+                    }
+                    active_generations.insert(run.generation.clone());
+                    active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
+                    // From the view the evaluation started with: a write it makes changes subjects
+                    // it read, so the next pass evaluates it again and takes the new times.
+                    due = crate::incremental::run_due(&run, now_ms());
+                    // Telling a run's reporter never holds the run back or fails it.
+                    match self.run_report(&run.subject).and_then(|report| {
+                        report
+                            .map(|report| self.report_run(&run, &report, now_ms()))
+                            .transpose()
+                    }) {
+                        Ok(None) => {
+                            // A run whose reporter was cleared has nobody left to fail.
+                            if let Err(error) = self.close_fault(
+                                &run.subject,
+                                run_report::REPORT_FAULT_SCOPE,
+                                "the run reports to nobody",
+                            ) {
+                                eprintln!("st3: run report for {}: {error:#}", run.subject);
+                            }
+                        }
+                        Ok(Some(stalls_at)) => {
+                            due = [due, stalls_at].into_iter().flatten().min();
+                        }
+                        Err(error) => {
+                            if let Err(error) = self.record_fault(
+                                &run.subject,
+                                run_report::REPORT_FAULT_SCOPE,
+                                Err(error),
+                            ) {
+                                eprintln!("st3: run report for {}: {error:#}", run.subject);
+                            }
+                        }
+                    }
+                    let evaluated = self.evaluate_active_mission_run(&run, mission);
+                    // Recovery is diagnostic too: admission and execution writes come first.
+                    if (!first_readiness_pending(&run)
+                        || now_ms().saturating_sub(first_readiness_since(&run))
+                            < FIRST_READINESS_FAULT_AFTER_MS)
+                        && let Err(error) = self.close_fault(
+                            &run.subject,
+                            FIRST_READINESS_FAULT_SCOPE,
+                            "the run no longer has an overdue first-readiness wait",
+                        )
+                    {
+                        eprintln!(
+                            "st3: first-readiness recovery for {}: {error:#}", run.subject
+                        );
+                    }
+                    evaluated
+                })
+            })
+        });
+        due = match (due, armed) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        crate::performance::record_evaluation(
+            "mission-run",
+            needed,
+            crate::incremental::thread_cpu().saturating_sub(cpu_started),
+        );
+        if !needed {
+            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            // Rows that are not claims or observations (caches, capabilities) change no
+            // graph state a later pass would have to catch up with.
+            if !wrote.is_empty() {
+                self.incremental_correction("mission-run", &subject, &reads, &wrote);
+            }
+        }
+        self.incremental.evaluated(&subject, reads, due);
+        evaluated.unwrap_or(false)
+    }
+
+    /// Evaluate the runs whose last evaluation read a subject that changed since, such as a
+    /// baseline's resource or a step they depend on, without waiting for a pass. A pass reaches
+    /// mission runs once, after its other stages, so on a slow host a run that a change makes
+    /// ready would wait for the rest of the pass running then and most of the next. It reads the
+    /// change feed with its own cursor and marks nothing, so a pass's evaluation running at the
+    /// same time cannot clear a mark it set. Leaves full passes, due times and runs no pass has
+    /// evaluated yet to the pass. Returns how many runs it evaluated and whether any wrote.
+    pub fn evaluate_changed_mission_runs(&self) -> Result<(usize, bool)> {
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut cursor = self
+            .mission_reads_cursor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (next, changed_runs) =
+            self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
+        *cursor = Some(next);
+        let mut active_generations = BTreeSet::new();
+        let mut active_steps = BTreeSet::new();
+        let mut changed = false;
+        for subject in &changed_runs {
+            let Some(id) = subject.strip_prefix("mission-run/") else {
+                continue;
+            };
+            let _clock = smallclaims::store::clock_snapshot();
+            changed |= self.evaluate_one_mission_run(
+                id,
+                true,
+                true,
+                &mut active_generations,
+                &mut active_steps,
+            );
+        }
+        Ok((changed_runs.len(), changed))
+    }
+
+    /// Follow the post-commit feed and evaluate the runs each change touched; see
+    /// [`Self::evaluate_changed_mission_runs`]. A run that wrote wakes the pass, which carries
+    /// its effects on (seats, wake messages) and tells clients when it ends.
+    pub async fn follow_mission_reads(self: Arc<Self>) {
+        let mut changes = self.event_notify.subscribe();
+        // Look once at the start too, for what committed before this subscribed.
+        changes.mark_changed();
+        loop {
+            if changes.changed().await.is_err() {
+                return;
+            }
+            changes.borrow_and_update();
+            let changed = self
+                .blocking(|this| {
+                    crate::profile::task("task mission-reads", || {
+                        this.recording_writes(|| this.evaluate_changed_mission_runs())
+                    })
+                })
+                .await;
+            match changed {
+                Ok((_, true)) => {
+                    crate::reconcile_telemetry::record_wake(
+                        crate::reconcile_telemetry::WakeCause::Reconciler,
+                        None,
+                    );
+                    self.notify.notify_one();
+                }
+                Ok((_, false)) => {}
+                Err(error) => eprintln!("st3: evaluating the runs a change touched: {error:#}"),
+            }
+        }
     }
 
     /// An evaluation of `subject` wrote although nothing it read had changed and nothing was due:
@@ -17894,16 +18050,50 @@ impl<R: RuntimeControl> Reconciler<R> {
             .file_watchers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if watchers.contains_key(subject) {
+        let target = std::path::absolute(path)?;
+        // Watching the file itself attaches to its inode and misses later replacements.
+        // Descend from a missing target's nearest existing parent on each observation.
+        let directory = target
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .find(|candidate| candidate.is_dir())
+            .context("file watch has no existing parent directory")?;
+        let next_component = target
+            .strip_prefix(directory)?
+            .components()
+            .next()
+            .context("file watch has no target component")?;
+        // Backends report canonical directories (notably /private/tmp on macOS).
+        // Keep the lexical target as identity, but compare events in their namespace.
+        let directory = directory.canonicalize()?;
+        let relevant = directory.join(next_component);
+        // A file symlink can point outside the lexical parent. Observe its referent's
+        // parent too, so both writes and inode replacements preserve file-gate behavior.
+        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        if watchers.get(subject).is_some_and(|watch| {
+            watch.target == target
+                && watch.directory == directory
+                && watch.referent == referent
+        }) {
             return Ok(());
         }
+        let watched_directory = directory.clone();
+        let watched_referent = referent.clone();
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
         let watched_subject = subject.to_owned();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok() {
+                let Ok(event) = event else { return };
+                // Reads (including this observer's own reads) must never self-wake.
+                if FileWatch::relevant(
+                    &event,
+                    &relevant,
+                    &watched_directory,
+                    watched_referent.as_deref(),
+                ) {
                     observations
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -17914,12 +18104,23 @@ impl<R: RuntimeControl> Reconciler<R> {
                     notify.notify_one();
                 }
             })?;
-        let watched = path
-            .ancestors()
-            .find(|candidate| candidate.exists())
-            .unwrap_or(path);
-        watcher.watch(watched, notify::RecursiveMode::NonRecursive)?;
-        watchers.insert(subject.into(), watcher);
+        watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        if let Some(parent) = referent.as_ref().and_then(|path| path.parent())
+            && parent != directory
+        {
+            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        }
+        watchers.insert(subject.into(), FileWatch {
+            _watcher: watcher,
+            target,
+            directory,
+            referent,
+        });
+        // A refreshed subscription may now refer to a different file at the same stamp.
+        self.file_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(subject);
         Ok(())
     }
 
@@ -21413,6 +21614,122 @@ version 2
         );
     }
 
+    /// A run blocked on a step baseline of `resource/allocation` being "resumed", evaluated by
+    /// skipping passes until it is blocked and nothing it read changes.
+    fn run_paused_on_its_allocation(
+        store: Arc<Store>,
+    ) -> (Arc<Store>, Arc<Reconciler<FakeRuntime>>, String) {
+        let source = r#"
+            version 2
+              resource "allocation" { kind "custom.st3.document-source" }
+              resource "elsewhere" { kind "custom.st3.document-source" }
+
+              mission "paused" state="ready" {
+                goal "Work only once the allocation resumes."
+
+                  agent "worker" { workspace "/tmp"; command "true"; restart "never" }
+
+                step "fix" {
+                  baseline "allocation resumed" {
+                    field "state" "resource/allocation" is "resumed"
+                  }
+                }
+              }
+
+        "#;
+        apply_source(&store, source, "paused-mission");
+        observe_state(&store, "resource/allocation", "paused", "allocation-paused");
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "paused".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "paused-run".into(),
+            })
+            .unwrap();
+        let reconciler = Arc::new(
+            Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            )
+            .skipping_unneeded(true),
+        );
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let blocked = store.mission_run(&run.id).unwrap().unwrap().steps[0].clone();
+        assert_eq!(blocked.status, "blocked");
+        assert_eq!(
+            blocked.blocked_reason.as_deref(),
+            Some("step baseline `allocation resumed` does not hold")
+        );
+        (store, reconciler, run.id)
+    }
+
+    fn observe_state(store: &Store, subject: &str, state: &str, key: &str) {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::String(state.into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_change_to_a_baselines_resource_readies_its_step_without_waiting_for_a_pass() {
+        let (store, reconciler, run) =
+            run_paused_on_its_allocation(Arc::new(Store::open_memory("node").unwrap()));
+        let fix = || store.mission_run(&run).unwrap().unwrap().steps[0].clone();
+        let before = fix();
+        // A claim no run read evaluates no run.
+        observe_state(&store, "resource/elsewhere", "resumed", "elsewhere-resumed");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+
+        // No pass runs: the resource's own claim names the run that read it.
+        observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (1, true));
+        let ready = fix();
+        assert_eq!((ready.status.as_str(), ready.blocked_reason.as_deref()), ("ready", None));
+        assert_eq!(ready.readiness_epoch, before.readiness_epoch + 1);
+        assert_eq!(ready.attempt, before.attempt, "the step is not reset");
+    }
+
+    #[tokio::test]
+    async fn the_post_commit_feed_wakes_the_runs_a_change_touched() {
+        // On disk, so this test's reads wait for the follower's writes rather than fail.
+        let root = tempfile::tempdir().unwrap();
+        let (store, reconciler, run) = run_paused_on_its_allocation(Arc::new(
+            Store::open(&root.path().join("store.sqlite"), "node").unwrap(),
+        ));
+        let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
+        observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        // What a write through the API does after it commits.
+        reconciler.event_notify.send_modify(|generation| *generation += 1);
+        let ready = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let step = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
+                if step.status == "ready" {
+                    return step;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the step is ready without a pass");
+        assert_eq!(ready.blocked_reason, None);
+        follower.abort();
+    }
+
     #[test]
     fn mission_products_and_gates_hold_completion_and_record_evidence() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -24900,6 +25217,270 @@ agent "import/omp/fixture" {{
             argv.first().map(Path::new),
             Some(std::env::current_exe().unwrap().as_path())
         );
+    }
+
+    #[test]
+    fn file_gate_watchers_rescan_after_lost_or_unscoped_mutations() {
+        let target = Path::new("/watched/gate");
+        let directory = target.parent().unwrap();
+        let rescan = notify::Event::new(notify::EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan);
+        assert!(FileWatch::relevant(&rescan, target, directory, None));
+        for kind in [
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+        ] {
+            assert!(FileWatch::relevant(&notify::Event::new(kind), target, directory, None));
+        }
+        let read = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
+        assert!(!FileWatch::relevant(&read, target, directory, None));
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_ignore_reads_and_unrelated_mutations() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            store,
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        // Publishing the initial file.observed claim signals a graph change. Consume
+        // that known wake before asserting that subsequent reads stay quiet.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the initial observation must publish its graph-change wake");
+        for _ in 0..3 {
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "ready");
+            reconciler.ensure_file_observation(&subject).unwrap();
+        }
+        let unrelated = root.path().join("unrelated.txt");
+        std::fs::write(&unrelated, "not a gate").unwrap();
+        std::fs::write(&unrelated, "still not a gate").unwrap();
+        std::fs::remove_file(&unrelated).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "reading the gate and mutating siblings must not wake reconciliation"
+        );
+
+        std::fs::write(&path, "changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_missing_parents_and_file_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("outer/inner/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
+            std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                    .await
+                    .is_err(),
+                "unrelated ancestor mutations must not wake reconciliation"
+            );
+            std::fs::create_dir(&parent).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("the next missing parent must wake reconciliation");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_ok()
+            {}
+        }
+
+        std::fs::write(&path, "created").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("creating the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, "replacement").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "staging a replacement beside the target must stay quiet"
+        );
+        std::fs::rename(&replacement, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("replacing the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "replacement"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::write(&path, "replacement changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the replacement's subsequent mutations must remain watched");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_refresh_when_the_target_path_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.txt");
+        let second = root.path().join("second.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch("file/node:gate", &first).unwrap();
+        reconciler.ensure_file_watch("file/node:gate", &second).unwrap();
+        std::fs::write(&first, "old target changed").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "the old target must no longer wake reconciliation"
+        );
+        std::fs::write(&second, "new target changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the new target must wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_resolve_symlinked_parent_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let path = alias.join("missing/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        std::fs::write(actual.join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::create_dir(actual.join("missing")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("canonical ancestor creation must wake an aliased file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(actual.join("missing/gate.txt"), "ready").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the file under an aliased parent must remain watched");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_symlink_referent_writes_and_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let referents = tempfile::tempdir().unwrap();
+        let first = referents.path().join("first.txt");
+        let second = referents.path().join("second.txt");
+        let path = root.path().join("gate.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        std::os::unix::fs::symlink(&first, &path).unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+
+        for content in ["written", "replaced"] {
+            if content == "written" {
+                std::fs::write(&first, content).unwrap();
+            } else {
+                let replacement = referents.path().join("replacement");
+                std::fs::write(&replacement, content).unwrap();
+                std::fs::rename(&replacement, &first).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("referent writes and replacements must wake the file gate");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert_eq!(
+                reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+                content
+            );
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await.is_ok()
+            {}
+        }
+
+        let replacement_link = root.path().join("replacement-link");
+        std::os::unix::fs::symlink(&second, &replacement_link).unwrap();
+        std::fs::rename(&replacement_link, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("retargeting the symlink must wake the file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "second"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(&first, "old referent").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::write(&second, "new referent").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the newly resolved referent must remain watched");
     }
 
     #[test]

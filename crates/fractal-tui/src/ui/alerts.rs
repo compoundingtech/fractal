@@ -839,7 +839,7 @@ mod tests {
     }
 
     fn with_alerts(items: Vec<Attention>) -> Ui {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         world.attention = Load::Ready(items);
         Ui::new(world)
     }

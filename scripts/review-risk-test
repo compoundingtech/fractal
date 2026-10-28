@@ -124,10 +124,12 @@ class ReviewRisk(unittest.TestCase):
         self.assertEqual(self.risk()["level"], "high")
 
     def test_trust_files_in_both_layouts_are_high_and_other_config_stays_medium(self):
-        for name in (f"{layout}/{file}" for layout in (".st", ".fractal") for file in (
+        names = [f"{layout}/{file}" for layout in (".st", ".fractal") for file in (
                 "evidence-keys", "evidence-log-key", "evidence-authors.json", "evidence-skip-policy.json",
                 "evidence-policy.json", "required-lanes.json", "review-risk.json", "risky-classes.json",
-                "review-verdict.schema.json", "review-harness.json")):
+                "review-verdict.schema.json", "review-harness.json")]
+        names += ["scripts/review-risk", "scripts/review-validate", "scripts/classify-risk", "scripts/review"]
+        for name in names:
             with self.subTest(name):
                 self.git("checkout", "-q", "-B", "change", "main")
                 self.write(name, "x\n")
@@ -241,6 +243,15 @@ class ReviewRisk(unittest.TestCase):
         self.assertEqual(self.rules(result)["release-notes"], "high")
         self.assertEqual(result["level"], "high")
         self.assertTrue(any("no level for this class" in line for reason in result["reasons"] for line in reason["lines"]))
+
+    def test_the_checkout_rules_flag_is_refused_when_the_base_holds_the_rules(self):
+        self.write("docs/readme.md", "z\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "z")
+        done = subprocess.run([sys.executable, str(HERE / "review-risk"), "main", "change", "--repo", str(self.repo), "--rules-from-checkout"],
+                              text=True, capture_output=True)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertIn("holds .st/review-risk.json", done.stderr)
 
 
 if __name__ == "__main__":

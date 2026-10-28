@@ -375,6 +375,40 @@
     "Timestamp": { "x-st-codec": "timestamp", "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.", "examples": ["2026-10-01T10:00:00.000Z"], "type": "string", "format": "date-time" },
     "Cursor": { "x-st-brand": "Cursor", "description": "Opaque, snapshot-bound page/event cursor.", "type": "string", "minLength": 8, "maxLength": 2048 },
     "Revision": { "x-st-brand": "Revision", "description": "Opaque per-subject revision; compare for equality, echo in fences.", "type": "string", "minLength": 1, "maxLength": 256 },
+    "AgentsStatusWatermark": {
+      "description": "Node-local graph cut and roster-relevant local activity frontier. These numbers are not comparable across nodes or epochs.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_index", "local_frontier"],
+      "properties": {
+        "store_index": { "type": "integer", "minimum": 0 },
+        "local_frontier": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "AgentsPublicationMetadata": {
+      "description": "Identity and source cut of one immutable complete current agents publication. This definition does not add fields to legacy HTTP responses or collection frames.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_epoch", "revision", "status_watermark", "materialized_at_ms"],
+      "properties": {
+        "node_epoch": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "description": "Opaque UUID for the publication owner's epoch. Restart, full projection reset or revision exhaustion starts a new epoch." },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Increasing JSON-safe publication number within one node epoch. Gaps are allowed; this is not a replay cursor." },
+        "status_watermark": { "$ref": "#/$defs/AgentsStatusWatermark" },
+        "materialized_at_ms": { "type": "integer", "minimum": 0, "description": "Server-captured presentation time in Unix milliseconds, not producer observation time or evidence receipt time." }
+      }
+    },
+    "AgentsPublication": {
+      "description": "Complete immutable current agents view. Order contains each item ID once in presentation order. No core row-count or encoded-byte limit applies. This transport-neutral definition does not change legacy response shapes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publication", "items", "order", "has_more"],
+      "properties": {
+        "publication": { "$ref": "#/$defs/AgentsPublicationMetadata" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/Agent" } },
+        "order": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "uniqueItems": true },
+        "has_more": { "const": false }
+      }
+    },
     "PrivateNotesUri": { "x-st-brand": "PrivateNotesUri", "type": "string", "pattern": "^dev\\.schickling\\.agent-private-notes://[^/]+/[^/]+$", "description": "Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile." },
     "PrivateNotesFence": {
       "type": "object", "additionalProperties": false, "required": ["carrier_generation", "revision"],
@@ -3943,6 +3977,20 @@
         }
       ]
     },
+    "StreamSync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "description": "This host's replication as a stream frame states it: level, or catching up with or diverged from the peers named. Unlike a page's SyncNotice it is explicit when level, so that its absence on a stream means unknown. A state this client does not know reads as unknown, never level.",
+      "properties": {
+        "state": { "anyOf": [{ "enum": ["level", "catching-up", "diverged"] }, { "type": "string" }], "description": "level; diverged when any peer has diverged; else catching-up." },
+        "peers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/SyncPeer" }, "description": "The peers this host is behind or diverged from: present exactly when the state is not level." }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "level" } } }, "then": { "properties": { "peers": { "type": "array", "maxItems": 0 } } } },
+        { "if": { "properties": { "state": { "enum": ["catching-up", "diverged"] } } }, "then": { "required": ["peers"] } }
+      ]
+    },
     "HarnessInventoryQuery": {
       "type": "object", "additionalProperties": false,
       "required": ["owner_host_id", "session_id", "native_session_id", "runtime_incarnation", "collection"],
@@ -4044,7 +4092,8 @@
             "snapshot": { "$ref": "#/$defs/Snapshot" },
             "items": { "type": "array", "items": { "$ref": "#/$defs/Resource" } },
             "order": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
-            "has_more": { "type": "boolean" }
+            "has_more": { "type": "boolean" },
+            "sync": { "$ref": "#/$defs/StreamSync", "description": "This host's replication, taken when this frame was built. A daemon that sends it sends it on every snapshot of the collections that carry it (attention). Absent means unknown (an older daemon), never level." }
           }
         },
         {
@@ -4059,7 +4108,8 @@
             "upserts": { "type": "array", "items": { "$ref": "#/$defs/Resource" } },
             "removes": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
             "order": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
-            "has_more": { "type": "boolean" }
+            "has_more": { "type": "boolean" },
+            "sync": { "$ref": "#/$defs/StreamSync", "description": "Present only when this host's replication changed since the last frame of this subscription (its state, or which peers are ahead), including back to level. Absent means it did not change." }
           }
         },
         {
