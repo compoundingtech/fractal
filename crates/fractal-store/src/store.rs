@@ -43,6 +43,8 @@ pub mod arrangements_tests;
 pub mod authored_pull_requests_tests;
 #[cfg(test)]
 pub mod schedule_active_run_tests;
+#[cfg(test)]
+pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -17438,6 +17440,15 @@ pub fn seat_queue_joins_query() -> String {
     )
 }
 
+/// When seat `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
+/// run's status. `+step_runs.assignee` keeps SQLite on the run's own steps (`step_runs_run_index`):
+/// through the assignee index it read every step the seat was ever assigned, once per named run,
+/// and a seat that has moved its queue often names a hundred runs on every claim.
+pub const SEAT_QUEUE_NAMED_RUN_QUERY: &str =
+    "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
+     FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
+     WHERE +step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0";
+
 /// [`work_at_snapshot_query`] for one named actor `?1`. The reconciler reads each running seat's
 /// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
@@ -17567,11 +17578,7 @@ pub fn seat_queue_inputs_of_tx(
     }
     drop(statement);
 
-    let mut statement = connection.prepare(
-        "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
-         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-         WHERE step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0",
-    )?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hefdad4fbcd1d owner=fractal_store::store TODO=trace-statement-and-value-representation */ SEAT_QUEUE_NAMED_RUN_QUERY)?;
     if let Some(only) = only {
         seats.retain(|seat, _| only.contains(seat));
     }
