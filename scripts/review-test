@@ -74,9 +74,10 @@ class Review(unittest.TestCase):
         self.git("config", "user.email", "t@example.com")
         self.git("config", "user.name", "t")
         for name in ("risky-classes.json", "review-risk.json"):
-            self.write(f".st/{name}", (ROOT / ".st" / name).read_text())
-        for name in ("scripts/classify-risk", "scripts/review-risk", "scripts/review-validate", ".st/review-verdict.schema.json"):
+            self.write(f".st/{name}", _module.config_path(ROOT, f".st/{name}").read_text())
+        for name in ("scripts/classify-risk", "scripts/review-risk", "scripts/review-validate"):
             self.write(name, (ROOT / name).read_text())
+        self.write(".st/review-verdict.schema.json", _module.config_path(ROOT, ".st/review-verdict.schema.json").read_text())
         self.write(".st/review-harness.json", json.dumps({"version": 1, "structure_only": ["**/*.lock"]}))
         self.write("docs/review.md", "# The review standard\n\nA fixture standing in for docs/review.md.\n")
         self.write("src/a.txt", "one\n")
@@ -317,8 +318,119 @@ class Review(unittest.TestCase):
         self.assertEqual(verdict["read"]["structure"], [])
         self.assertIn("+changed", self.prompts()[0])
 
+    def base_layout(self, *, keep_old=False):
+        self.git("checkout", "-q", "main")
+        for path in sorted((self.repo / ".st").iterdir()):
+            self.write(f".fractal/{path.name}", path.read_text())
+            if not keep_old:
+                self.git("rm", "-q", f".st/{path.name}")
+        self.commit("base config layout")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+
+    def test_new_only_base_config_is_used_by_the_extracted_tools(self):
+        self.base_layout()
+        self.write("deps/x.lock", "generated\n")
+        self.commit("lock")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["read"]["structure"], ["deps/x.lock"])
+        self.assertNotIn("no-rules-at-base", {r["rule"] for r in verdict["risk"]["deterministic"]["reasons"]})
+
+    def test_both_layouts_prefer_the_pinned_new_base_not_candidate_config(self):
+        self.base_layout(keep_old=True)
+        self.git("checkout", "-q", "main")
+        self.write(".fractal/review-harness.json", '{"version": 1, "structure_only": []}')
+        self.commit("new base reads every file")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+        self.write(".fractal/review-harness.json", '{"version": 1, "structure_only": ["**"]}')
+        self.write("deps/x.lock", "must be read\n")
+        self.commit("candidate hides files")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["read"]["structure"], [])
+        self.assertIn("+must be read", self.prompts()[0])
+
+    def test_both_layouts_ignore_malformed_legacy_configs_when_new_configs_exist(self):
+        self.base_layout(keep_old=True)
+        self.git("checkout", "-q", "main")
+        for path in sorted((self.repo / ".st").iterdir()):
+            path.write_text("{broken legacy config")
+        self.commit("legacy configs cannot override new ones")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["verdict"], "GO")
+
+    def test_each_malformed_preferred_base_config_fails_without_legacy_or_checkout_fallback(self):
+        for name in ("review-harness.json", "review-verdict.schema.json", "review-risk.json", "risky-classes.json"):
+            with self.subTest(config=name):
+                self.git("checkout", "-q", "main")
+                self.write(f".fractal/{name}", "{broken")
+                self.commit(f"malformed {name}")
+                base = self.git("rev-parse", "HEAD")
+                self.git("checkout", "-q", "change")
+                done, verdict = self.review(base=base)
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertIsNone(verdict)
+                self.git("checkout", "-q", "main")
+                self.git("rm", "-q", f".fractal/{name}")
+                self.commit(f"remove malformed {name}")
+                self.git("checkout", "-q", "change")
+
+    def test_selected_missing_blob_fails_instead_of_reading_the_legacy_base(self):
+        self.git("checkout", "-q", "main")
+        self.write(".fractal/review-harness.json", '{"version": 1, "structure_only": ["unique-missing-blob"]}')
+        self.commit("new config blob")
+        oid = self.git("rev-parse", "HEAD:.fractal/review-harness.json")
+        self.git("checkout", "-q", "change")
+        object_path = self.repo / ".git/objects" / oid[:2] / oid[2:]
+        object_path.unlink()
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertIsNone(verdict)
+        self.assertIn("cat-file blob", done.stderr)
+
+    def test_base_config_lookup_is_root_relative_from_a_subdirectory(self):
+        self.base_layout()
+        pinned = self.git("rev-parse", "main")
+        expected = _module.base_config_text(self.repo, pinned, ".st/review-harness.json")
+        actual = _module.base_config_text(self.repo / "src", pinned, ".st/review-harness.json")
+        self.assertEqual(json.loads(actual), json.loads(expected))
+        with self.assertRaises(_module.Failed):
+            _module.base_config_text(self.repo / "src", "missing-base", ".st/review-harness.json")
+
+    def test_genuinely_absent_base_config_keeps_the_explicit_bootstrap_defaults(self):
+        self.git("checkout", "-q", "main")
+        self.git("rm", "-q", ".st/review-harness.json", ".st/review-verdict.schema.json")
+        self.commit("historical base without harness or schema")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+        self.write("deps/x.lock", "read in full\n")
+        self.commit("lock")
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["read"]["structure"], [])
+        self.assertIn("+read in full", self.prompts()[0])
+
+    def test_checkout_bridge_prefers_new_and_never_falls_back_from_a_broken_entry(self):
+        self.write(".st/local-harness.json", self.config.read_text())
+        old = _module.config_path(self.repo, ".st/local-harness.json")
+        self.assertEqual(old, self.repo / ".st/local-harness.json")
+        self.write(".fractal/local-harness.json", "{broken")
+        preferred = _module.config_path(self.repo, ".st/local-harness.json")
+        self.assertEqual(preferred, self.repo / ".fractal/local-harness.json")
+        with self.assertRaises(ValueError):
+            _module.harness_config(preferred)
+        preferred.unlink()
+        preferred.symlink_to("missing-target")
+        with self.assertRaises(FileNotFoundError):
+            _module.harness_config(_module.config_path(self.repo, ".st/local-harness.json"))
+
     def test_every_configured_harness_is_read_only(self):
-        config = json.loads((ROOT / ".st/review-harness.json").read_text())
+        config = _module.harness_config(_module.config_path(ROOT, ".st/review-harness.json"))
         self.assertTrue(config["harnesses"])
         for name, settings in config["harnesses"].items():
             self.assertIsNone(restriction_problem(settings["command"]), name)
@@ -344,7 +456,7 @@ class Review(unittest.TestCase):
             self.assertIsNotNone(restriction_problem(command), command)
 
     def test_no_configured_harness_can_run_a_shell_or_git(self):
-        config = json.loads((ROOT / ".st/review-harness.json").read_text())
+        config = _module.harness_config(_module.config_path(ROOT, ".st/review-harness.json"))
         for name, settings in config["harnesses"].items():
             self.assertNotIn("Bash", " ".join(settings["command"]), name)
 

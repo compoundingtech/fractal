@@ -16,6 +16,11 @@ at the same pinned revision (or the same checkout root for checkout tools).
 An unreadable or malformed new file, missing Git object, or transport failure
 does not permit falling back to the old file or to candidate trust data. If both
 files exist, the new one wins; writers update only the selected layout.
+The `scripts/review` orchestrator also applies the bridge to accepted-base
+harness configuration, verdict schema and risk-file presence probes. Its
+historical bootstrap applies only to genuinely absent configuration, never to
+a selected file's read or parse failure.
+
 
 The configuration remains in `.st/` in this expand stage. Both directories are
 protected equally and included in the script-test projection. The paired `.st`
