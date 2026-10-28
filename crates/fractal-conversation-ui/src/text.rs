@@ -241,13 +241,16 @@ fn with_bg(style: Style, fill: Option<Color>) -> Style {
     }
 }
 
+/// Each link drawn while `markdown_with_links` draws, in order: its address, and the underline
+/// colour its runs had before they were marked with their place here.
+type Recording = Vec<(String, Option<Color>)>;
+
 thread_local! {
     /// The address behind each markdown link's text, so a client can open what it drew.
     static LINKS: std::cell::RefCell<std::collections::HashMap<String, String>> =
         std::cell::RefCell::new(std::collections::HashMap::new());
-    /// The address of each link drawn while `markdown_with_links` draws, in order, with the
-    /// underline colour its runs had before they were marked with their place here.
-    static RECORDING: std::cell::RefCell<Option<Vec<(String, Option<Color>)>>> = const { std::cell::RefCell::new(None) };
+    /// The links drawn so far while `markdown_with_links` draws.
+    static RECORDING: std::cell::RefCell<Option<Recording>> = const { std::cell::RefCell::new(None) };
 }
 
 /// The address of a markdown link drawn with this text, once it has been drawn.
