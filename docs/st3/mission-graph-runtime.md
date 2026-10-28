@@ -1027,7 +1027,8 @@ use `--new-run NAME`; claimed work must name `--step`. Repeated keys return the 
 With `[asks] deadlines` on, every ask has a deadline, so no ask holds its asker forever. The
 option is off by default: deadlines add fields to the replicated `work.person-asked` and
 `work.person-done` claims, which a member on an older build keeps as retryable and does not show
-until it upgrades, so an operator turns it on once every member runs a build that reads them.
+until it upgrades, and an older web client refuses `daemon/runtime` as an answer's respondent, so an
+operator turns it on once every member and the web client run a build that reads them.
 While it is off, no ask records a deadline, an ask that names `--deadline` or `--default` is
 refused with `ask-deadlines-off`, and no ask resolves by itself. `--deadline 4h` (or
 `deadline_ms` on the client `work.ask` action) names one between 1m and 30d. Without it the fleet default

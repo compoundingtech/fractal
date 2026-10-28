@@ -3099,10 +3099,10 @@ export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonAnswer = typeof PersonAnswer.Type
 export type PersonAnswerEncoded = typeof PersonAnswer.Encoded
 
-/** Message sender, including an authorized external assistant principal. Not a recipient or actor. */
-export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef", description: "Message sender, including an authorized external assistant principal. Not a recipient or actor." }))()
-export type SenderRef = typeof SenderRef.Type
-export type SenderRefEncoded = typeof SenderRef.Encoded
+/** Who resolved a person ask: a sender, or daemon/runtime when its deadline or its requester ending resolved it. */
+export const RespondentRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|daemon|person|step)/[^\\s]+$", "u"), "agent", "assistant", "daemon", "person", "step").annotate({ identifier: "RespondentRef", description: "Who resolved a person ask: a sender, or daemon/runtime when its deadline or its requester ending resolved it." }))()
+export type RespondentRef = typeof RespondentRef.Type
+export type RespondentRefEncoded = typeof RespondentRef.Encoded
 
 export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   /** The person whose prior instruction the agent respondent recorded. */
@@ -3119,8 +3119,8 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   "evidence": optionalKey(Schema.Array(Id)),
   /** The ask resolved by itself at its deadline, not by the person. */
   "resolved_by": optionalKey(Schema.Literals(["deadline"])).annotate({ description: "The ask resolved by itself at its deadline, not by the person." }),
-  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. */
-  "respondent": SenderRef,
+  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it. */
+  "respondent": RespondentRef,
   /** External assistant attribution when the response was submitted through an assistant grant. */
   "sender_class": optionalKey(Schema.String).annotate({ description: "External assistant attribution when the response was submitted through an assistant grant." }),
   "status": Schema.Literals(["completed","cancelled"]),
@@ -3800,6 +3800,11 @@ export const MessageProvenance = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "MessageProvenance", description: "Who signed a message a person wrote, and whether the signature checks. Only messages whose sender is a person carry it; an agent's message does not." }))()
 export type MessageProvenance = typeof MessageProvenance.Type
 export type MessageProvenanceEncoded = typeof MessageProvenance.Encoded
+
+/** Message sender, including an authorized external assistant principal. Not a recipient or actor. */
+export const SenderRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "SenderRef", description: "Message sender, including an authorized external assistant principal. Not a recipient or actor." }))()
+export type SenderRef = typeof SenderRef.Type
+export type SenderRefEncoded = typeof SenderRef.Encoded
 
 /** Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority. */
 export const TimelineRecipientRef = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:agent|assistant|person|step)/[^\\s]+$", "u"), "agent", "assistant", "person", "step").annotate({ identifier: "TimelineRecipientRef", description: "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority." }))()

@@ -220,6 +220,7 @@
     "ActorRef": {"type": "string", "pattern": "^(?:agent|daemon|person)/[^\\s]+$", "x-st-ref": ["agent", "daemon", "person"]},
     "ParticipantRef": {"type": "string", "pattern": "^(?:agent|person|step)/[^\\s]+$", "x-st-ref": ["agent", "person", "step"]},
     "SenderRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Message sender, including an authorized external assistant principal. Not a recipient or actor."},
+    "RespondentRef": {"type": "string", "pattern": "^(?:agent|assistant|daemon|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "daemon", "person", "step"], "description": "Who resolved a person ask: a sender, or daemon/runtime when its deadline or its requester ending resolved it."},
     "TimelineRecipientRef": {"type": "string", "pattern": "^(?:agent|assistant|person|step)/[^\\s]+$", "x-st-ref": ["agent", "assistant", "person", "step"], "description": "Read-side timeline recipient, including an assistant principal receiving a native reply. Does not grant message.send authority."},
     "MissionState": {"anyOf": [{"enum": [
       "draft",
@@ -2965,7 +2966,7 @@
         "ask": {"$ref": "#/$defs/Id"},
         "status": {"enum": ["completed", "cancelled"]},
         "summary": {"type": "string"},
-        "respondent": {"$ref": "#/$defs/SenderRef", "description": "The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner."},
+        "respondent": {"$ref": "#/$defs/RespondentRef", "description": "The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it."},
         "acted_for": {"$ref": "#/$defs/Id", "description": "The person whose prior instruction the agent respondent recorded."},
         "sender_class": {"type": "string", "description": "External assistant attribution when the response was submitted through an assistant grant."},
         "assistant_grant_id": {"$ref": "#/$defs/Id", "description": "The assistant grant that authorized the response."},

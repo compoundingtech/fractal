@@ -2383,7 +2383,7 @@ export type PersonAnswerRecord = {
   assistant_session_actor?: string;
   evidence?: Array<Id>;
   resolved_by?: "deadline";
-  respondent: SenderRef;
+  respondent: RespondentRef;
   sender_class?: string;
   status: "completed" | "cancelled";
   summary: string;
@@ -2642,6 +2642,8 @@ export type ResourcesPage = {
   page: PageInfo;
   sync?: SyncNotice;
 };
+
+export type RespondentRef = string;
 
 export type Revision = string;
 
