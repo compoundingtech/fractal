@@ -81,7 +81,7 @@ impl Newcomer {
     }
 
     fn command(root: &Path) -> Command {
-        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
         command
             .env_clear()
             .env("PATH", Self::path(root))

@@ -18,6 +18,8 @@ import textwrap
 import time
 import unittest
 
+from release_delivery import ios_env
+
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
 BUNDLE_ID = "com.compoundingtech.fractal"
@@ -163,6 +165,29 @@ raise AssertionError((name, args))
 '''
 
 
+class IosEnvironmentTests(unittest.TestCase):
+    def test_fractal_values_win_and_empty_values_mask_legacy(self):
+        for suffix in ("REF", "EXPECTED_ORIGIN", "TRUSTED_COMMIT", "DEVICE", "TEAM",
+                       "NOTIFY_FROM", "NOTIFY_TO", "MAX_DEFERRAL", "BUILD_BACKOFF", "BUILD_ONLY"):
+            for legacy, fractal, expected in (
+                (None, None, "default"),
+                ("legacy", None, "legacy"),
+                (None, "fractal", "fractal"),
+                ("same", "same", "same"),
+                ("legacy", "fractal", "fractal"),
+                ("legacy", "", ""),
+                ("", None, ""),
+                (None, "", ""),
+            ):
+                with self.subTest(suffix=suffix, legacy=legacy, fractal=fractal):
+                    environment = {}
+                    if legacy is not None:
+                        environment["ST_IOS_" + suffix] = legacy
+                    if fractal is not None:
+                        environment["FRACTAL_IOS_" + suffix] = fractal
+                    self.assertEqual(ios_env(suffix, "default", environment), expected)
+
+
 class ReleaseDeliveryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="release-delivery-tests-")
@@ -183,7 +208,8 @@ class ReleaseDeliveryTests(unittest.TestCase):
         git = shutil.which("git")
         self.assertIsNotNone(git, "Git is required for the delivery fixtures")
         git_bin = Path(git).parent
-        self.env = dict(os.environ)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("FRACTAL_IOS_", "ST_IOS_"))}
         self.env.update({
             "PATH": os.pathsep.join((str(self.tools), str(git_bin), "/usr/bin", "/bin")),
             "DELIVERY_FIXTURE_ROOT": str(self.root),
@@ -304,6 +330,31 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def assert_installed(self, commit):
         self.assertEqual(self.saved_state().get("installed"), commit)
         self.assertFalse(self.saved_state().get("pending"))
+
+    def test_fractal_environment_configures_delivery_without_legacy_values_winning(self):
+        preferred = {
+            "REF": "origin/main",
+            "EXPECTED_ORIGIN": str(self.origin),
+            "TRUSTED_COMMIT": self.initial_commit,
+            "DEVICE": "TEST-DEVICE",
+            "TEAM": "TESTTEAM",
+            "NOTIFY_FROM": "",
+            "NOTIFY_TO": "",
+            "MAX_DEFERRAL": "0",
+            "BUILD_BACKOFF": "0",
+            "BUILD_ONLY": "1",
+        }
+        for suffix, value in preferred.items():
+            self.env["ST_IOS_" + suffix] = "invalid-legacy"
+            self.env["FRACTAL_IOS_" + suffix] = value
+        self.env["DEVELOPER_DIR"] = str(self.root / "Xcode.app" / "Contents" / "Developer")
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "--repo", str(self.source), "--state", str(self.state),
+        ], cwd=self.root, env=self.env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("built", self.outcomes())
+        self.assertFalse(self.device_commands("install"))
+        self.assertFalse(self.notifications())
 
     def test_app_and_recursive_local_packages_trigger_delivery(self):
         self.reconcile()
