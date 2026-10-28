@@ -59,6 +59,7 @@ const ConversationThreadPane = ({
   visible = true,
   interest: shellInterest,
   readOnly = false,
+  onOpenTerminal,
 }: {
   readonly agentRef: string
   /** Roster display name: the composition header and assistant sender captions. */
@@ -73,6 +74,7 @@ const ConversationThreadPane = ({
   /** Already acquired by the shell before this module loaded; standalone panes acquire their own. */
   readonly interest?: Atom.Atom<void>
   readonly readOnly?: boolean
+  readonly onOpenTerminal?: () => void
 }) => {
   const source = useDataSource()
   const showSystemEvents = useAtomValue(systemEventsPreference)
@@ -250,7 +252,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     />}
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
-    {!readOnly && <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />}
+    {!readOnly && <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} onOpenTerminal={onOpenTerminal} />}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
