@@ -76,14 +76,23 @@ st fleet invites revoke fleet-invite/ID --reason TEXT
 
 The optional name pins the joiner's name. Expiry defaults to 10 minutes and accepts
 10 seconds to 24 hours; an invitation carrying Fabric pairing is capped at 10
-minutes. `auto` includes advertised endpoints; `--via` selects a transport. A
+minutes. `auto` includes advertised endpoints; `--via` selects a transport.
+Without `st-fabric-adapter`, `auto` leaves Fabric out and uses the member's
+Tailscale (or loopback) endpoints; an invitation only Fabric could carry fails
+with the setup it needs, before any invite exists. An invite that is created but
+not delivered (by `--code-file` or `--send-fabric`) is revoked, and the command
+exits non-zero. A
 sponsor must already be a fleet member with a listener. Invites are person
 operations; an agent seat must provide an explicit `--as person/NAME` where the
 command permits it.
 
 Prefer the no-echo prompt, a pipe, `--code-file` or `--send-fabric` to a code in argv or a transcript.
-The Fabric form creates a private temporary code file, sends it and deletes the local copy;
-`st fleet join --fabric-inbox` reads and removes the matching inbox file.
+`--code-file PATH` writes a new 0600 file and leaves its directory's mode alone.
+`--send-fabric` sends to NAME as Fabric knows it: a peer name or NodeID listed by
+`fabric peers` on the sponsor. It creates a private temporary code file, sends it,
+deletes the local copy, and reports success only after Fabric confirms the file
+arrived. `st fleet join --fabric-inbox` waits up to ten minutes for the matching
+inbox file, then reads and removes it.
 
 ### Expiry and single use
 

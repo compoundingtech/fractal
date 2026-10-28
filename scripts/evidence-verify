@@ -87,7 +87,7 @@ CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
 MAX_INPUTS = 300
 KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level', 'input_order', 'shard_inputs'}
-SHARD_KEYS = {'count', 'results', 'pull_request_count'}
+SHARD_KEYS = {'count', 'results', 'pull_request_count', 'index'}
 LEVEL_KEYS = {'command', 'required_inputs', 'bind_inputs', 'events', 'lane'}
 EVENTS = ('pull_request', 'merge_group')
 
@@ -110,7 +110,8 @@ def checked_value_rules(rule, where):
     `input_order` maps an input to its values from strongest to weakest: a note covers a run only when its value ranks at or above the
     run's own value (passed with --run-input KEY=VALUE). A run that did not say its value is never covered.
     `shard_inputs` names a sharded job's inputs: `count` (1 to 16) and `results` (`0=success,1=success,...`, every shard, all success);
-    `pull_request_count`, when given, is the only count a note from a pull_request run may carry."""
+    `pull_request_count`, when given, is the only count a note from a pull_request run may carry. `index`, when given, names the input
+    that only one shard's own record carries: that record is a part of a run, not its verdict (shard_part)."""
     order = rule.get('input_order', {})
     if not (isinstance(order, dict) and all(isinstance(k, str) and k and isinstance(v, list) and len(v) >= 2 and len(set(v)) == len(v)
                                             and all(isinstance(x, str) and x for x in v) for k, v in order.items())):
@@ -119,10 +120,10 @@ def checked_value_rules(rule, where):
     if shards is not None:
         count = shards.get('pull_request_count') if isinstance(shards, dict) else None
         if not (isinstance(shards, dict) and set(shards) - SHARD_KEYS == set() and {'count', 'results'} <= set(shards)
-                and all(isinstance(shards[k], str) and shards[k] for k in ('count', 'results'))
+                and all(isinstance(shards[k], str) and shards[k] for k in ('count', 'results') + (('index',) if 'index' in shards else ()))
                 and (count is None or (not isinstance(count, bool) and isinstance(count, int) and 1 <= count <= 16))):
-            raise Failure('error', f'skip policy for {where}: shard_inputs needs count and results input names, and an optional '
-                          'pull_request_count from 1 to 16')
+            raise Failure('error', f'skip policy for {where}: shard_inputs needs count and results input names, an optional '
+                          'pull_request_count from 1 to 16 and an optional index input name')
     return {key: list(values) for key, values in order.items()}, (dict(shards) if shards is not None else None)
 
 
@@ -388,6 +389,17 @@ def project(repo, tree, paths):
         git(repo, 'update-index', '-z', '--index-info', stdin=b''.join(entries), env=env)
         # --missing-ok: a tree id does not depend on its blobs being here, and in a partial clone checking them fetches them.
         return git(repo, 'write-tree', '--missing-ok', env=env).decode().strip()
+
+
+def shard_part(rules, statement):
+    """Whether a record is one shard's own (its kind's shard_inputs.index input is set): a part of a run, never the record that judges
+    the whole run."""
+    if rules is None:
+        return False
+    observed = statement['predicate']['observed']
+    kind = kind_of(observed.get('runner', ''))
+    shards = (rules['kinds'].get(kind) or {}).get('shard_inputs') if kind else None
+    return bool(shards and shards.get('index')) and bool(observed.get('inputs', {}).get(shards['index']))
 
 
 def kind_of(runner):
@@ -782,6 +794,14 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
     def dated(entry):
         return parse_time(entry[1]['predicate']['observed_at'])
 
+    # A passing shard part never decides: a merge queue signs each shard of fractal-web under the same input key as the record for the
+    # whole run, and the newest part would otherwise shadow that record and be refused for the inputs only the whole run carries. A
+    # failing part still decides, as the failure it is, so leaving parts out can never hide one.
+    parts = [c for c in with_check if not failed(c) and shard_part(rules, c[1])]
+    if parts:
+        with_check = [c for c in with_check if c not in parts]
+        if not with_check:
+            raise Failure('no_record', f'check {check} has only passing shard parts, no record for the whole run', attempts=len(parts))
     chosen = max(with_check, key=lambda c: (dated(c), failed(c)))
     if not failed(chosen):
         shadowing = [c for c in with_check if failed(c) and dated(c) >= dated(chosen) - FUTURE_SKEW]
@@ -792,6 +812,8 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
     observed = predicate['observed']
     result = observed['checks'][check]
     attempts = len(with_check)
+    if failed(chosen) and shard_part(rules, statement):
+        raise Failure('check_failed', f'a shard of the latest run of check {check} exited {result["exit_code"]}', attempts=attempts)
     if predicate['tier'] != 'full':
         raise Failure('untrusted_tier', f'latest record has tier {predicate["tier"]}, not full', attempts=attempts)
     kind = kind_of(observed['runner'])

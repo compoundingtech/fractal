@@ -173,7 +173,9 @@ def toolchain_digest(override):
 def run_command(command):
     digest = hashlib.sha256()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    for chunk in iter(lambda: process.stdout.read(65536), b''):
+    # read1, not read: read(65536) waits for a full 64 KiB, so a caller reading this output as it comes (fractal-test's limit, which starts
+    # when ci-local says it has, and stops a check silent too long) would see it only in late bursts. The digest is of the same bytes.
+    for chunk in iter(lambda: process.stdout.read1(65536), b''):
         digest.update(chunk)
         sys.stdout.buffer.write(chunk)
         sys.stdout.buffer.flush()
