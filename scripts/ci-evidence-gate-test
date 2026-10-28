@@ -854,6 +854,19 @@ class EndToEnd(unittest.TestCase):
                 fields = self.assertRuns(s['base'], 'merge group ' + path, HEAD_SHA=s['merge'])
                 self.assertEqual((fields['event'], fields['outcome']), ('merge_group', 'satisfied'))
 
+    def test_a_newer_ci_pass_does_not_hide_our_hosts_note_on_a_branch_that_edits_a_protected_file(self):
+        self.host = self.f.key('host', 'host/box')
+        s = self.pull_request(head_files={'scripts/ci-evidence-gate': (ROOT / 'scripts/ci-evidence-gate').read_text() + '\n# edited\n'},
+                              policy=skip_policy(trust_levels=['fleet', 'host']))
+        mine = self.note(s['head'], s['head_tree'], key=self.host, signer='host/box', seconds=1)
+        self.note(s['head'], s['head_tree'], seconds=600)  # CI signed the same tree later (a run on another pull request's inputs)
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((fields['decision'], fields['trust_level'], outputs['record']), ('skip', 'host', mine), fields)
+        # A failure after our host's pass still decides: the check runs.
+        self.note(s['head'], s['head_tree'], seconds=900, exit_code=1)
+        fields = self.assertRuns(s['base'], 'a failure after the host pass', **self.pr_env(s))
+        self.assertEqual(fields['outcome'], 'rejected')
+
     def test_main_changing_a_protected_file_after_the_branch_point_falls_back(self):
         s = self.pull_request(main_files={'.st/evidence-skip-policy.json': skip_policy(trust_levels=['fleet']) + '\n'})
         self.note(s['head'], s['head_tree'], seconds=1)

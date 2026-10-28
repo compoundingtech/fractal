@@ -944,6 +944,13 @@ satisfied the verifier but cannot be used is usually a change to a file that dec
 signer made for the same inputs. That run needs this tree signed on our own host, which `st-test` does not redo for a check it
 finds covered, so that refusal says `scripts/st-test --all --rerun --push origin`.
 
+A host note is not hidden by a newer one from CI. CI keeps signing the same inputs for other pull requests (every run of
+`typescript-client` whose inputs did not change carries the same key), and the latest record for a check decides. So on a branch that
+edits a protected file, CI's later pass used to shadow the host's note, and the check ran: #4138 itself ran `typescript-client` that
+way. When only our hosts' notes can cover the run (a `pull_request` run whose branch edits a protected file, compared in head-tree
+mode), the gate asks the base's verifier with `--prefer-levels host`. The newest passing host record then decides, unless a failing
+record is dated after it; a newer failure still decides, and every other rule applies to the record chosen.
+
 The check jobs act on it:
 
 - A job wired with the skip (`typescript-client`, `genie-freshness`, `ci-script-tests`) runs only its checkout. Every other step is

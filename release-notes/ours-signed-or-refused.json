@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Our pull requests no longer run CI's heavy jobs: an enforced check with no valid signature for a listed opener's pull request fails at its gate with 'sign it with scripts/st-test --all --push origin'",
+  "summary": "Our pull requests no longer run CI's heavy jobs: an enforced check with no valid signature for a listed opener's pull request fails at its gate with 'sign it with scripts/st-test --all --push origin'; on a branch that edits a protected file, a newer CI pass for the same inputs no longer hides our host's note",
   "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
   "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."},
   "rules": {"status": "none", "detail": "No checkpoint rules or digest changes; no coordinated member upgrade required."},

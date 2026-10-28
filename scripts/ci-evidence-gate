@@ -267,8 +267,9 @@ def fetch_state(done):
     return 'none' if done.returncode == 1 and not done.stderr.strip() else 'failed'
 
 
-def observe(context, revision='HEAD'):
-    """(outcome, result dict or None, detail, verifier sha256) without ever raising."""
+def observe(context, revision='HEAD', protected=None):
+    """(outcome, result dict or None, detail, verifier sha256) without ever raising. `protected` is the branch's own protected edits
+    when choose_tree compared them (head-tree mode)."""
     base, check, repository = context['base'], context['check'], context['repository']
     if not base:
         return 'unavailable', None, 'no accepted base commit for this event', None
@@ -332,8 +333,13 @@ def observe(context, revision='HEAD'):
             members = ['--members']
         else:
             fetch_input_notes(path, base, check, repository, revision)
+        # Our pull request that edits a protected file can skip only on our own hosts' note (own_pull_request): ask the base's verifier,
+        # once it takes it, for the newest passing note from those levels, so a pass CI signed later for the same inputs (any other pull
+        # request's typescript-client run) does not hide it. A newer failure still decides.
+        prefer = ['--prefer-levels', ','.join(OWN_LEVELS)] if isinstance(protected, list) and protected and not members \
+            and context.get('event') == 'pull_request' and b'--prefer-levels' in script.stdout else []
         done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check, *members,
-                   '--policy-from', base, '--repository', repository, *keys, *log, *values, *lane_base, timeout=VERIFIER_TIMEOUT)
+                   '--policy-from', base, '--repository', repository, *keys, *log, *values, *lane_base, *prefer, timeout=VERIFIER_TIMEOUT)
     try:
         result = json.loads(done.stdout)
     except ValueError:  # includes output that is not valid UTF-8
@@ -611,7 +617,7 @@ def main():
             if tree is None:
                 detail = 'could not read this run\'s tree'
             else:
-                outcome, result, detail, verifier_sha = observe(context, revision)
+                outcome, result, detail, verifier_sha = observe(context, revision, protected)
     except Exception as error:  # the gate must never fail the job
         outcome, result, detail = 'unavailable', None, f'{type(error).__name__}: {error}'
     try:
