@@ -306,9 +306,10 @@ impl Store {
             .filter(|recorder| recorder != observer))
     }
 
-    /// The cursor in `observer`'s newest `observer.observed` claim. Builds before the GitHub
-    /// plugin database wrote one there; this build writes none, so a claim it wrote has none.
-    pub fn legacy_observer_cursor(&self, observer: &str) -> Result<Option<String>> {
+    /// The cursor in `observer`'s newest `observer.observed` claim. A build before the GitHub
+    /// plugin database wrote the whole cursor there; for a repository observer this build writes
+    /// only how far it has read, which every member keeps.
+    pub fn claimed_observer_cursor(&self, observer: &str) -> Result<Option<String>> {
         Ok(self
             .latest_claim(observer, Some("observer.observed"))?
             .and_then(|claim| {

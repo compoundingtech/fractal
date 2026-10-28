@@ -1,7 +1,7 @@
 //! The GitHub plugin's own database, `<state>/plugins/github/github.sqlite3`: the poll cursor of
-//! each observer this member polls. It never syncs and is not in the graph's backup. GitHub
-//! rebuilds what it holds: a member without a cursor reads the repository in full once, and
-//! delivers only what differs from the facts the graph already recorded.
+//! each observer this member polls. It never syncs and is not in the graph's backup. It is a cache:
+//! each observer's claim keeps how far it has read, so a member without a row reads on from there
+//! and delivers only what differs from the facts the graph already recorded.
 
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
@@ -17,14 +17,47 @@ pub struct GithubPluginStore {
 }
 
 impl GithubPluginStore {
-    /// The database beneath `state_dir`, created on first use.
+    /// The database beneath `state_dir`, created on first use. A file this build cannot use,
+    /// damaged or from a newer build, is set aside beside it and replaced by an empty one, since
+    /// the claims rebuild what it held. Only a directory that cannot be made is an error.
     pub fn open(state_dir: &Path) -> Result<Self> {
         let directory = state_dir.join("plugins").join("github");
         std::fs::create_dir_all(&directory)
             .with_context(|| format!("create {}", directory.display()))?;
         let path = directory.join("github.sqlite3");
+        match Self::open_at(&path) {
+            Ok(store) => Ok(store),
+            Err(error) => {
+                let at = super::now_ms();
+                let aside = (0..)
+                    .map(|n| directory.join(format!("github.sqlite3.set-aside-{at}-{n}")))
+                    .find(|aside| !aside.exists())
+                    .expect("an unused name");
+                for suffix in ["", "-wal", "-shm"] {
+                    let from = directory.join(format!("github.sqlite3{suffix}"));
+                    if from.exists() {
+                        let to = aside.with_file_name(format!(
+                            "{}{suffix}",
+                            aside.file_name().unwrap_or_default().to_string_lossy()
+                        ));
+                        std::fs::rename(&from, &to).with_context(|| {
+                            format!("set aside {} after: {error:#}", from.display())
+                        })?;
+                    }
+                }
+                tracing::warn!(
+                    path = %path.display(),
+                    aside = %aside.display(),
+                    "the GitHub plugin database could not be used and was set aside; observers read on from their claims: {error:#}"
+                );
+                Self::open_at(&path)
+            }
+        }
+    }
+
+    fn open_at(path: &Path) -> Result<Self> {
         let connection =
-            Connection::open(&path).with_context(|| format!("open {}", path.display()))?;
+            Connection::open(path).with_context(|| format!("open {}", path.display()))?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         Self::migrate(connection)
@@ -90,6 +123,24 @@ impl GithubPluginStore {
         Ok(())
     }
 
+    /// Drop `observer`'s row, once this member no longer polls it: it stopped, or another member
+    /// declares it. Polling here again reads on from the observer's claim.
+    pub fn forget(&self, observer: &str) -> Result<()> {
+        let connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
+        let known = connection
+            .query_row("SELECT 1 FROM observer_cursors WHERE observer=?1", [observer], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if known {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-hf4c868e4e1e9 owner=fractal_reconcile::reconcile::github_plugin_store TODO=bound-or-reference-values-and-reclamation */
+                "DELETE FROM observer_cursors WHERE observer=?1",
+                [observer],
+            )?;
+        }
+        Ok(())
+    }
+
     /// Refuse every later write, as a full disk or a read-only file does, or accept them again.
     #[cfg(test)]
     pub(crate) fn refuse_writes(&self, refuse: bool) {
@@ -129,6 +180,9 @@ mod tests {
         assert_eq!(reopened.cursor("observer/github/acme/other").unwrap(), None);
         reopened.set_cursor("observer/github/acme/garden", "resource/github/acme/garden", None).unwrap();
         assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap(), Some(None));
+        reopened.forget("observer/github/acme/garden").unwrap();
+        reopened.forget("observer/github/acme/other").unwrap();
+        assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap(), None);
     }
 
     #[test]
@@ -139,13 +193,32 @@ mod tests {
         assert!(GithubPluginStore::open(state.path()).is_err());
     }
 
+    /// A newer build's file and a damaged one are each set aside, not read, and the member
+    /// starts with an empty database instead of refusing to start.
     #[test]
-    fn a_newer_database_is_refused() {
+    fn a_newer_or_damaged_database_is_set_aside() {
         let state = tempfile::tempdir().unwrap();
-        drop(GithubPluginStore::open(state.path()).unwrap());
-        let path = state.path().join("plugins/github/github.sqlite3");
+        let directory = state.path().join("plugins/github");
+        let path = directory.join("github.sqlite3");
+        let set_aside = || std::fs::read_dir(&directory).unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("github.sqlite3.set-aside-") && !name.ends_with("-wal") && !name.ends_with("-shm"))
+            .count();
+        let first = GithubPluginStore::open(state.path()).unwrap();
+        first.set_cursor("observer/github/acme/garden", "resource/github/acme/garden", Some("c1")).unwrap();
+        drop(first);
         Connection::open(&path).unwrap().pragma_update(None, "user_version", 2).unwrap();
-        let error = GithubPluginStore::open(state.path()).err().unwrap();
-        assert!(error.to_string().contains("version 2"), "{error}");
+        let reopened = GithubPluginStore::open(state.path()).unwrap();
+        assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap(), None);
+        assert_eq!(set_aside(), 1);
+        drop(reopened);
+        std::fs::write(&path, b"not a database").unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(directory.join(format!("github.sqlite3{suffix}")));
+        }
+        let rebuilt = GithubPluginStore::open(state.path()).unwrap();
+        rebuilt.set_cursor("observer/github/acme/garden", "resource/github/acme/garden", Some("c2")).unwrap();
+        assert_eq!(rebuilt.cursor("observer/github/acme/garden").unwrap(), Some(Some("c2".into())));
+        assert_eq!(set_aside(), 2);
     }
 }

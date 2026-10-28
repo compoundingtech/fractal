@@ -6736,7 +6736,6 @@ impl MissionsStore for Store {
             )>,
         ) -> Result<Option<(ResourceObservationOutcome, bool)>, St3Error> {
         let facts = canonical_json_value(facts);
-        // The cursor still names the operation, though no claim carries it.
         let operation_hash = canonical_hash(&(
             observer,
             desired_revision,
@@ -6843,11 +6842,12 @@ impl MissionsStore for Store {
                         .map_err(internal)?
                         .into_iter()
                         .collect::<Vec<_>>();
-                    // The cursor stays in the polling member's GitHub plugin database: it is
-                    // most of an observation's bytes, and no other member reads it.
                     let mut observer_fields = json!({
                         "status": "healthy",
                         "revision": desired_revision,
+                        // For a repository observer, only how far it has read: its version maps
+                        // stay in the polling member's GitHub plugin database.
+                        "cursor": cursor,
                         "changed": changed,
                     });
                     if let Some(attempt) = attempt {
