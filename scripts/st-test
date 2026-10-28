@@ -851,7 +851,7 @@ def acquire_tree(root, size, rank=None):
     queue.mkdir(exist_ok=True)
     ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
     ticket.touch()
-    waited = False
+    waited, told = False, set()
     try:
         while True:
             order = tree_queue(queue, time.time_ns())
@@ -862,9 +862,19 @@ def acquire_tree(root, size, rank=None):
                     lock = open(root / f'tree-{n}.lock', 'w')
                     try:
                         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        return n, lock
                     except BlockingIOError:
                         lock.close()
+                        continue
+                    # A lease ends with the run that held it, not with every process it started (2026-10-28: a seat restart killed runs
+                    # whose children went on). A free tree that still has processes at work in it is busy: never two writers in one tree.
+                    users = tree_users(root / f'tree-{n}')
+                    if not users:
+                        return n, lock
+                    lock.close()
+                    if n not in told:
+                        told.add(n)
+                        print(f'fractal-test: pool tree tree-{n} is free, but processes {", ".join(map(str, users))} still work in it (left by '
+                              'a run that lost the tree); it is skipped until they end', file=sys.stderr)
             if not waited:
                 print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
                 waited = True
@@ -872,6 +882,40 @@ def acquire_tree(root, size, rank=None):
     finally:
         with contextlib.suppress(OSError):
             ticket.unlink()
+
+
+def tree_users(directory):
+    """The live processes other than this one whose working directory is in the pool tree `directory`: work a run left there when it lost
+    the tree's lease (its children, a lane's build in a scope of its own). Read from /proc; where there is none, nothing can be seen."""
+    base = os.path.realpath(directory)
+    found = []
+    with contextlib.suppress(OSError):
+        for entry in os.scandir('/proc'):
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
+            try:
+                cwd = os.readlink(f'/proc/{entry.name}/cwd')
+            except OSError:
+                continue  # gone, or not ours to read
+            if cwd == base or cwd.startswith(base + os.sep):
+                found.append(int(entry.name))
+    return sorted(found)
+
+
+def clear_stale_index_lock(directory):
+    """Remove the index.lock a run left in the pool tree `directory` when it died while git wrote the index (2026-10-28: a seat restart killed
+    a run in its checkout of tree-2, and the next five runs given the tree failed on the lock). The caller holds the tree's lease and no
+    process is left in the tree, so no git can be writing it. Logged; with a process still in the tree it is left alone and the run fails."""
+    path = text(git('rev-parse', '--path-format=absolute', '--git-path', 'index.lock', cwd=directory, check=False))
+    lock = Path(path) if path else None
+    if lock is None or lock.name != 'index.lock' or not lock.exists():
+        return
+    users = tree_users(directory)
+    if users:
+        raise Failure(f'pool tree {directory} has an index.lock and processes {", ".join(map(str, users))} still in it: not taking it')
+    lock.unlink(missing_ok=True)
+    print(f'fractal-test: removed a stale {lock} (git was killed while writing it; no process is left in the tree)', file=sys.stderr,
+          flush=True)
 
 
 def is_pool_tree(directory):
@@ -915,6 +959,7 @@ def prepare_tree(root, n, commit):
         os.rename(directory, kept)
     git('worktree', 'prune', check=False)
     if directory.exists():
+        clear_stale_index_lock(directory)
         # Forced detached checkout replaces both index and tracked files, even after an interrupted run.
         # A separate reset --hard is redundant and is refused by agent git policies.
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)

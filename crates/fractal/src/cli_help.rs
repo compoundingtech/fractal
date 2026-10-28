@@ -330,7 +330,7 @@ mod tests {
             for line in help.lines() {
                 // These describe real installed compatibility aliases, not product prose.
                 if line.contains(
-                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty)",
+                    "Keep the installed Fractal executables (fractal, st3, st, fractal-migrate, and pty)",
                 ) || line.contains("Install Fractal (st3 and the st link) and pty")
                 {
                     continue;

@@ -575,7 +575,7 @@ struct Node(Vec<Child>);
 impl Node {
     fn start(dir: &Path, path_dir: &Path) -> Self {
         let spawn = |args: &[&str], log: &str| {
-            fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"))
+            fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"))
                 .args(args)
                 .arg("--config")
                 .arg(dir.join("config.toml"))
