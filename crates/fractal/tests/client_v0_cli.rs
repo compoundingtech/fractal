@@ -17,22 +17,19 @@ use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "client-v0-cli".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec!["offline-peer".into()],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "client-v0-cli".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec!["offline-peer".into()],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 #[tokio::test]
@@ -1843,7 +1840,7 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn attention_discuss_sends_the_message_stui_chat_about_this_sends() {
+async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = test_state(root.path());

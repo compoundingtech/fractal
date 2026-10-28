@@ -25,7 +25,7 @@ export interface PromptAnswerPort {
 }
 
 /**
- * One fresh fence and one submission, fenced on the alert's own revision. A prompt st says is
+ * One fresh fence and one submission, fenced on the alert's own revision. A prompt Fractal says is
  * gone or answered only in its terminal is never sent again, and neither is any other refusal: the
  * person sees why and answers again if it still waits.
  */

@@ -12,37 +12,53 @@ import { ThemePortal } from '../taste/ThemePortal'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 const storyNow = Date.UTC(2026, 9, 8, 12, 0, 0)
-/** Fully reported synthetic identity; every optional fact the card can render is present. */
+/** Fully reported synthetic identity; every optional fact the card can render is present, including Claude's explicit (empty) subagent list. */
 const knownRow: Row = {
   ref: 'agent/sample', id: 'sample', title: 'Sample session', description: 'Reviews the selection model',
-  status: 'working', statusLabel: 'Working', host: 'host-1', harness: 'seat-1', model: 'glm-5',
+  status: 'working', statusLabel: 'Working', host: 'host-1', harness: 'claude', model: 'glm-5',
   statusSince: storyNow - 90_000, lastActivityAt: storyNow - 30_000, needsMe: true, unread: 2, freshness: 'live',
   usage: { _tag: 'Known', scope: '24h-root-and-subagents', usd: 1.84, tokens: 412_000 },
   duration: { _tag: 'Known', scope: '24h-activity-span', ms: 3_600_000 },
   lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 300_000 },
   branch: 'feat/rows', worktree: '~/rows',
   pullRequest: { ref: 'agent/sample/pr', title: 'Align row cohort', number: 42, state: 'open' },
+  subagentCount: 0, subagentObservation: { _tag: 'Reported' },
   children: [],
 }
-/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted. */
-const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined }
-/** Synthetic cohort: every second row carries no last-turn fact, so its time slot renders empty while the shared metric track keeps every title aligned. */
+/** Same identity, nothing reported beyond title, status, host and counts; every optional fact is omitted, and without a known driver the missing subagent roster is conservatively not reported by the harness. */
+const unreportedRow: Row = { ...knownRow, ref: 'agent/unreported', id: 'unreported', title: 'Unreported session', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, description: undefined, model: undefined, harness: undefined, pullRequest: undefined, branch: undefined, worktree: undefined, terminal: undefined, mission: undefined, statusSince: undefined, lastActivityAt: undefined, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } }
+/** Child rows never carry their own subagent report on the wire, so each is explicitly not reported by its harness. */
+const childObservation = { subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } } } as const satisfies Partial<Row>
+/**
+ * Synthetic cohort: every second row carries no last-turn fact, so its time slot renders empty while the shared metric
+ * track keeps every title aligned. The cohort also carries each subagent cause: Claude reports (zero), a running Codex
+ * session on an older daemon omits the field, an OpenCode session is not reported by its harness, a starting OMP
+ * session awaits its first report, and a child row is not reported by its harness.
+ */
 const cohortRows: readonly Row[] = [
   { ...knownRow, ref: 'agent/first', id: 'first', title: 'First session' },
-  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0 },
+  { ...knownRow, ref: 'agent/second', id: 'second', title: 'Second session', harness: 'codex', lastTurn: { _tag: 'Unknown' }, needsMe: false, unread: 0, subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'DaemonVersion' } } },
   { ...knownRow, ref: 'agent/third', id: 'third', title: 'Third session', status: 'waiting', statusLabel: 'Needs you' },
-  { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
-  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session' },
-  { ...knownRow, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
+  { ...knownRow, ref: 'agent/fourth', id: 'fourth', title: 'Fourth session', harness: 'opencode', subagentCount: undefined, subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, lastTurn: { _tag: 'Unknown' }, usage: { _tag: 'Unknown' } },
+  { ...unreportedRow, ref: 'agent/fifth', id: 'fifth', title: 'Fifth session', harness: 'omp', status: 'pending', statusLabel: 'Pending', subagentObservation: { _tag: 'Unavailable' } },
+  { ...knownRow, ...childObservation, ref: 'agent/sample/subagent/child', id: 'sample', parentRef: 'agent/sample', title: 'Check output', lastTurn: { _tag: 'Unknown' }, unread: undefined, description: undefined },
 ]
 /** Synthetic parent with two subagents, for collapsed and expanded child rows. */
-const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, children: [
-  { ...knownRow, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
-  { ...unreportedRow, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
+const parentRow: Row = { ...knownRow, ref: 'agent/parent', id: 'parent', title: 'Parent session', needsMe: false, subagentCount: 2, children: [
+  { ...knownRow, ...childObservation, ref: 'agent/parent/subagent/one', id: 'parent', parentRef: 'agent/parent', title: 'Subagent one', needsMe: undefined, children: [] },
+  { ...unreportedRow, ...childObservation, ref: 'agent/parent/subagent/two', id: 'parent', parentRef: 'agent/parent', title: 'Subagent two', children: [] },
 ] }
 /** Phone fixtures: a title too long for the narrowed title track, and a desktop copy of the parent for the dense control. */
 const longRow: Row = { ...cohortRows[2]!, ref: 'agent/long', id: 'long', title: 'Long session title that has to truncate before the touch columns' }
 const desktopParentRow: Row = { ...parentRow, ref: 'agent/parent/desktop' }
+/** The exact subagent sentence each fixture's description carries just before its ID, by title: every cause appears. */
+const subagentFacts: Readonly<Record<string, string>> = {
+  'Sample session': 'Subagents: 0', 'Unreported session': 'Not reported by this harness',
+  'First session': 'Subagents: 0', 'Second session': 'Not reported by this daemon version', 'Third session': 'Subagents: 0',
+  'Fourth session': 'Not reported by this harness', 'Fifth session': 'Not reported yet', 'Check output': 'Not reported by this harness',
+  'Parent session': 'Subagents: 2', 'Subagent one': 'Not reported by this harness', 'Subagent two': 'Not reported by this harness',
+  [longRow.title]: 'Subagents: 0',
+}
 
 function CardPair({ row }: { readonly row: Row }) {
   return <div {...stylex.props(styles.spread)}>
@@ -92,6 +108,9 @@ async function assertRowNames(canvasElement: HTMLElement) {
     await expect(described).not.toBeNull()
     await expect(row.contains(described)).toBe(true)
     await expect(described!.textContent).toBe(sidebarRowDescription(fixture))
+    const subagentFact = subagentFacts[fixture.title]
+    await expect(subagentFact, `${fixture.title}: no expected subagent fact`).toBeDefined()
+    await expect(described!.textContent).toContain(`. ${subagentFact}. ID: ${fixture.ref}.`)
     await expect(row.parentElement!.querySelectorAll('[title]')).toHaveLength(0)
     await expect(row.parentElement!.querySelectorAll('[aria-description]')).toHaveLength(0)
   }

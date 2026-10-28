@@ -1,7 +1,7 @@
 // Agent conversations projected from the fixture world (`src/fixtures/world.ts`): every agent,
 // session, repo, PR, CI run, message and timestamp below comes from (or is derived from) it.
 //
-// Each transcript is authored once as a step script and emitted in both source shapes: an st3
+// Each transcript is authored once as a step script and emitted in both source shapes: a Fractal
 // conversation follow (`TimelineEntry` JSON frames) and agent-session-ingest `NormalizedRecord`s.
 // Rendering both through their adapters is the parity check: whatever differs on screen is a real
 // difference between the sources.
@@ -877,6 +877,7 @@ const toTimeline = ({
         timestamp: raw.timestamp,
         rawType: type,
         raw,
+        issue: 'Fixture citation intentionally rejected by the entry schema',
       }
     }
     return type === 'reasoning'
@@ -1100,7 +1101,7 @@ const single = ({
   readonly hasMore?: boolean
 }): ReadonlyArray<FixtureConversationChunk> => [{ replace: true, entries: items, hasMore }]
 
-/** Workbench-shell follow as st emits it today: final answer still streaming, no reasoning entries. */
+/** Workbench-shell follow as Fractal emits it today: final answer still streaming, no reasoning entries. */
 export const stLiveFrames = single({
   items: toTimeline({ script: workbenchShellScript(true), reasoning: false }),
   hasMore: true,
@@ -1207,7 +1208,7 @@ export const allStates: ReadonlyArray<StateFixture> = [
   },
   {
     id: 'answer-streaming',
-    label: 'Streaming — final answer (st today)',
+    label: 'Streaming — final answer (Fractal today)',
     agentName: workbenchShell.name,
     frames: stLiveFrames,
   },

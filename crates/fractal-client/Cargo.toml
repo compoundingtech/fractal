@@ -12,6 +12,7 @@ trace-propagation = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
 anyhow = "1"
 base64 = "0.22"
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 ciborium = "0.2"
 crossterm = "0.29"
 futures-util = "0.3"
@@ -19,6 +20,7 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 iroh-base = { version = "=1.0.2", default-features = false, features = ["key"] }
+jsonschema = { version = "0.33", default-features = false }
 libc = "0.2"
 opentelemetry = { version = "0.30", optional = true }
 ring = "0.17"

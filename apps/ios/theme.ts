@@ -1,4 +1,4 @@
-// One palette, named by meaning, the same one stui uses (crates/fractal-tui/src/ui/theme.rs): Catppuccin
+// One palette, named by meaning, the same one the Fractal terminal UI uses (crates/fractal-tui/src/ui/theme.rs): Catppuccin
 // Mocha. Mauve is reserved for "a person is needed" and nothing else uses it.
 export const palette = {
   base: '#1e1e2e',
@@ -25,7 +25,7 @@ export const palette = {
 
 type Palette = Record<keyof typeof palette, string>;
 
-// The light counterpart for stui-drawn screens that follow the system appearance: Catppuccin
+// The light counterpart for Fractal terminal UI-drawn screens that follow the system appearance: Catppuccin
 // Latte's surfaces, with every text and accent colour darkened until it reads at WCAG AA
 // (at least 4.5:1) on base, mantle, surface0 and the user and tool fills. The ramp keeps Mocha's
 // order, text darkest and overlay0 lightest, so dim stays dim.
@@ -54,7 +54,7 @@ export const lightPalette: Palette = {
 
 /** Fills the palette does not name: the person's own messages, and tool calls by outcome. */
 type Fills = { userBg: string; toolBg: string; toolOkBg: string; toolErrBg: string };
-/** The stui palette by meaning, in either appearance. */
+/** The Fractal terminal UI palette by meaning, in either appearance. */
 export type Theme = Palette & Fills & {
   /** Focus, the selected tab, links. */
   accent: string;
@@ -109,7 +109,7 @@ export const systemColors = {
   dark: { background: '#000000', grouped: '#1c1c1e', text: '#ffffff', secondary: '#b5b5bd', separator: '#48484a', action: '#64aaff', attention: '#ffb15c', fault: '#ff6961', success: '#72d88a' },
 } as const;
 
-// stui colours each harness the same way everywhere.
+// Fractal terminal UI colours each harness the same way everywhere.
 export function harnessColor(harness: string): string {
   switch (harness) {
     case 'claude': return palette.peach;

@@ -67,14 +67,9 @@ let roster = try scenarios.loadSlice(
     slice: "roster",
     now: Date(timeIntervalSince1970: 1_893_499_200)
 )
-struct RosterState: Decodable {
-    let agents: [AgentResource]
-    let machines: [MachineResource]
-    let runtimes: [RuntimeResource]
-    let arrangements: [ArrangementResource]?
-    let order: [String]
-}
-let agents = try roster.decodeState(RosterState.self).agents
+let state = try roster.decodeState(ScenarioRosterState.self)
+let sessions = state.sessions
+let devices = state.devices
 ```
 
 `loadSlice(at:nowMilliseconds:)` accepts an exact integer epoch-millisecond clock; the `Date`
@@ -89,8 +84,11 @@ precision, truncate to milliseconds **before** shifting, and emit exactly three 
 affected location. Content, ids, durations, timeline `at_ms`, cast offsets, and diagnostic
 `unknown.known_value` witnesses remain untouched.
 
-`ScenarioSlice.state` and `.timeline` retain their kit envelopes; use `decodeState` and
-`decodeTimeline` with your own small envelope structs containing the real client wire models.
+`ScenarioSlice.state` and `.timeline` retain their kit envelopes. `ScenarioRosterState` and
+`ScenarioDetailsState` are Codable envelopes with required, typed session/device and
+launch/launch-variant inventories, including explicitly empty inventories. Both preserve optional
+`resources`; roster also preserves `recorded_history` as original JSON changes envelopes.
+Other envelopes can use `decodeState` and `decodeTimeline` with small structs containing the real wire models.
 For conversation thread `items`, use `ScenarioConversationEntry`: `.known(TimelineEntry)` for
 recognized types and `.unknown(JSONValue)` for genuinely future types. Recognized-but-malformed
 entries throw; future entries remain opaque rather than being replaced by diagnostic witnesses.
@@ -103,7 +101,9 @@ committed slice JSON file, checks index coverage, and decodes state and timeline
 New slice/event shapes and undeclared future resource/entry kinds fail instead of being skipped.
 Strict slices additionally validate their complete state/timeline root once, checking wire
 object keys and known enum cases against the committed client schema. This includes standalone
-timeline, server-failure and resync error codes; no decoded-type switch can omit a field.
+timeline, server-failure and resync error codes, valid RFC 3339 timestamp instants, safe-integer
+duration bounds, and the year-9999 upper bound for epoch milliseconds. Composed presentation
+fields remain valid; no decoded-type switch can omit a field.
 Permissive Codable decoding alone is not strict validation. Deliberately tolerant slices
 continue to decode their original contaminated values.
 Run `swift test --package-path clients/swift/FractalClient --filter ScenariosTests` from the

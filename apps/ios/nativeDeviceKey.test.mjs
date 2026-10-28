@@ -15,7 +15,7 @@ registerHooks({
 let imports = 0;
 async function adapter(native) {
   globalThis.testDeviceKeyNative = native;
-  return import(`./modules/st-device-key/index.ts?native=${++imports}`);
+  return import(`./modules/fractal-device-key/index.ts?native=${++imports}`);
 }
 
 test('existing pairings retain the old native argument counts', async () => {

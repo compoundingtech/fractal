@@ -18,7 +18,7 @@ const hydrated = decodeProjectionCache(encoded, gateway, now + 1000);
 assert.equal(hydrated?.actor, 'person/one');
 assert.equal(hydrated?.storeIndex, 42);
 assert.equal(hydrated?.data.sessions[0].id, 'session/1');
-// Rows keep what st joined into them, so the cached Resources lists draws without a work list.
+// Rows keep what Fractal joined into them, so the cached Resources lists draws without a work list.
 assert.equal(hydrated?.data.missions[0].run_details[0].steps[0].path, 'build');
 assert.equal(hydrated?.data.agents[0].next_work.path, 'ship');
 assert.equal(hydrateProjectionForPairedDevice(encoded, gateway, false, now), null);

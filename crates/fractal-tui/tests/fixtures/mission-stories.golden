@@ -1,4 +1,4 @@
-mission/fleet/atlas/store-move width=40 open=false sha256=7667310ce56b8eb43724acc0f8dcffb72c1086fb81c8b6aecdb6e5f5bcc9dac4
+mission/fleet/atlas/store-move width=40 open=false sha256=6fe7d88fd3d755b8f0b24499fe49a80c4374d96375c2774df44eee004cf514fb
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -15,14 +15,14 @@ mission/fleet/atlas/store-move width=40 open=false sha256=7667310ce56b8eb43724ac
 │   snapshot → convert → compare →     │
 │   cut-over → cleanup                 │
 │                                      │
-│ ▸ ▰ snapshot done       Atlas Builder     3h │
-│ ▸ ▰ convert  done       Atlas Builder     2h │
+│ ▸ ▰ snapshot done       Atlas Builder 3h │
+│ ▸ ▰ convert  done       Atlas Builder 2h │
 │       conversion check passed        │
-│ ▸ ▰ compare  done       Atlas Builder     41m │
+│ ▸ ▰ compare  done       Atlas Builder 41m │
 │       0 mismatches in 1,204,881 rows │
-│ ▸ ◆ cut-over needs you  nobody            33m │
+│ ▸ ◆ cut-over needs you  nobody        33m │
 │       waiting for your review        │
-│ ▸ ▱ cleanup  later      Atlas Builder      │
+│ ▸ ▱ cleanup  later      Atlas Builder  │
 │ click a step to open it              │
 ╰──────────────────────────────────────╯
 ╭─ AGENTS · 1 ─────────────────────────╮
@@ -32,7 +32,7 @@ mission/fleet/atlas/store-move width=40 open=false sha256=7667310ce56b8eb43724ac
 │ ~/src/atlas--store-move  on harbor   │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/store-move width=40 open=true sha256=c800b261c03c9af3e31bd503681897310143001c8783bc7f40ea9b62d6f78aba
+mission/fleet/atlas/store-move width=40 open=true sha256=d41d13ba0302c7b399020b62e78b5de83d86cd132c61cd958be093d05dda45fe
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -49,7 +49,7 @@ mission/fleet/atlas/store-move width=40 open=true sha256=c800b261c03c9af3e31bd50
 │   snapshot → convert → compare →     │
 │   cut-over → cleanup                 │
 │                                      │
-│ ▾ ▰ snapshot done       Atlas Builder     3h │
+│ ▾ ▰ snapshot done       Atlas Builder 3h │
 │       goal        Finish the         │
 │                   snapshot step and  │
 │                   record what it     │
@@ -58,7 +58,7 @@ mission/fleet/atlas/store-move width=40 open=true sha256=c800b261c03c9af3e31bd50
 │                   old store.         │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▰ convert  done       Atlas Builder     2h │
+│ ▾ ▰ convert  done       Atlas Builder 2h │
 │       conversion check passed        │
 │       goal        Finish the convert │
 │                   step and record    │
@@ -72,7 +72,7 @@ mission/fleet/atlas/store-move width=40 open=true sha256=c800b261c03c9af3e31bd50
 │       after       snapshot           │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▰ compare  done       Atlas Builder     41m │
+│ ▾ ▰ compare  done       Atlas Builder 41m │
 │       0 mismatches in 1,204,881 rows │
 │       goal        Finish the compare │
 │                   step and record    │
@@ -82,7 +82,7 @@ mission/fleet/atlas/store-move width=40 open=true sha256=c800b261c03c9af3e31bd50
 │       after       convert            │
 │       attempt     1                  │
 │                                      │
-│ ▾ ◆ cut-over needs you  nobody            33m │
+│ ▾ ◆ cut-over needs you  nobody        33m │
 │       waiting for your review        │
 │       goal        Switch reads and   │
 │                   writes to the new  │
@@ -98,7 +98,7 @@ mission/fleet/atlas/store-move width=40 open=true sha256=c800b261c03c9af3e31bd50
 │       after       compare            │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▱ cleanup  later      Atlas Builder      │
+│ ▾ ▱ cleanup  later      Atlas Builder  │
 │       goal        Finish the cleanup │
 │                   step and record    │
 │                   what it produced.  │
@@ -116,7 +116,7 @@ mission/fleet/atlas/store-move width=40 open=true sha256=c800b261c03c9af3e31bd50
 │ ~/src/atlas--store-move  on harbor   │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/store-move width=80 open=false sha256=98b6b520940946e1c6b4faf98c3e8fff2a8b15bbf603cc00e16ef2f50f6b700d
+mission/fleet/atlas/store-move width=80 open=false sha256=e96780f14e6021665fdb6bd838fa007e917e2ea25ce9892d522f6260e2152464
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -129,12 +129,12 @@ mission/fleet/atlas/store-move width=80 open=false sha256=98b6b520940946e1c6b4fa
 │ ████████████          3/5 done                                               │
 │   snapshot → convert → compare → cut-over → cleanup                          │
 │                                                                              │
-│ ▸ ▰ snapshot done       Atlas Builder     3h                                 │
-│ ▸ ▰ convert  done       Atlas Builder     2h                                 │
+│ ▸ ▰ snapshot done       Atlas Builder 3h                                     │
+│ ▸ ▰ convert  done       Atlas Builder 2h                                     │
 │       conversion check passed                                                │
-│ ▸ ▰ compare  done       Atlas Builder     41m                                │
+│ ▸ ▰ compare  done       Atlas Builder 41m                                    │
 │       0 mismatches in 1,204,881 rows                                         │
-│ ▸ ◆ cut-over needs you  nobody            33m                                │
+│ ▸ ◆ cut-over needs you  nobody        33m                                    │
 │       waiting for your review                                                │
 │ ▸ ▱ cleanup  later      Atlas Builder                                        │
 │ click a step to open it                                                      │
@@ -146,7 +146,7 @@ mission/fleet/atlas/store-move width=80 open=false sha256=98b6b520940946e1c6b4fa
 │ ~/src/atlas--store-move  on harbor                                           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/store-move width=80 open=true sha256=9110ef9f1c0a1d6b093e12a00778146d1584fa0a5779430c325628e33b67de78
+mission/fleet/atlas/store-move width=80 open=true sha256=cfd8734bc5303b218add09b5985f9237f61aabc8c4ce9ac112467f769872a346
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -159,12 +159,12 @@ mission/fleet/atlas/store-move width=80 open=true sha256=9110ef9f1c0a1d6b093e12a
 │ ████████████          3/5 done                                               │
 │   snapshot → convert → compare → cut-over → cleanup                          │
 │                                                                              │
-│ ▾ ▰ snapshot done       Atlas Builder     3h                                 │
+│ ▾ ▰ snapshot done       Atlas Builder 3h                                     │
 │       goal        Finish the snapshot step and record what it produced.      │
 │       constraint  Never write to the old store.                              │
 │       attempt     1                                                          │
 │                                                                              │
-│ ▾ ▰ convert  done       Atlas Builder     2h                                 │
+│ ▾ ▰ convert  done       Atlas Builder 2h                                     │
 │       conversion check passed                                                │
 │       goal        Finish the convert step and record what it produced.       │
 │       constraint  Never write to the old store.                              │
@@ -172,14 +172,14 @@ mission/fleet/atlas/store-move width=80 open=true sha256=9110ef9f1c0a1d6b093e12a
 │       after       snapshot                                                   │
 │       attempt     1                                                          │
 │                                                                              │
-│ ▾ ▰ compare  done       Atlas Builder     41m                                │
+│ ▾ ▰ compare  done       Atlas Builder 41m                                    │
 │       0 mismatches in 1,204,881 rows                                         │
 │       goal        Finish the compare step and record what it produced.       │
 │       constraint  Never write to the old store.                              │
 │       after       convert                                                    │
 │       attempt     1                                                          │
 │                                                                              │
-│ ▾ ◆ cut-over needs you  nobody            33m                                │
+│ ▾ ◆ cut-over needs you  nobody        33m                                    │
 │       waiting for your review                                                │
 │       goal        Switch reads and writes to the new store once a person     │
 │                   approves.                                                  │
@@ -204,7 +204,7 @@ mission/fleet/atlas/store-move width=80 open=true sha256=9110ef9f1c0a1d6b093e12a
 │ ~/src/atlas--store-move  on harbor                                           │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/store-move width=120 open=false sha256=c8f463498874305b11fc3725d7eeacd599f20f738315ed8ad1263bc7627efaf0
+mission/fleet/atlas/store-move width=120 open=false sha256=96798ca350f241c6ad13478c28ebe703f2fca5cdd760f22ac9d32be54b53974f
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -217,12 +217,12 @@ mission/fleet/atlas/store-move width=120 open=false sha256=c8f463498874305b11fc3
 │ ████████████          3/5 done                                                                                       │
 │   snapshot → convert → compare → cut-over → cleanup                                                                  │
 │                                                                                                                      │
-│ ▸ ▰ snapshot done       Atlas Builder     3h                                                                         │
-│ ▸ ▰ convert  done       Atlas Builder     2h                                                                         │
+│ ▸ ▰ snapshot done       Atlas Builder 3h                                                                             │
+│ ▸ ▰ convert  done       Atlas Builder 2h                                                                             │
 │       conversion check passed                                                                                        │
-│ ▸ ▰ compare  done       Atlas Builder     41m                                                                        │
+│ ▸ ▰ compare  done       Atlas Builder 41m                                                                            │
 │       0 mismatches in 1,204,881 rows                                                                                 │
-│ ▸ ◆ cut-over needs you  nobody            33m                                                                        │
+│ ▸ ◆ cut-over needs you  nobody        33m                                                                            │
 │       waiting for your review                                                                                        │
 │ ▸ ▱ cleanup  later      Atlas Builder                                                                                │
 │ click a step to open it                                                                                              │
@@ -234,7 +234,7 @@ mission/fleet/atlas/store-move width=120 open=false sha256=c8f463498874305b11fc3
 │ ~/src/atlas--store-move  on harbor                                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/store-move width=120 open=true sha256=2937d6b42738ffbda5e21848642037eb9a5a6459bb883ee2cc6b144098fb304b
+mission/fleet/atlas/store-move width=120 open=true sha256=679d7fb9347a8f66c752c2e6bbc590bffb9a87fe9e64f3e8a779d317a7ee9321
  ◆ needs you   Move the atlas store   on harbor · 33m
  mission/fleet/atlas/store-move  ·  a step is waiting for your answer
 
@@ -247,12 +247,12 @@ mission/fleet/atlas/store-move width=120 open=true sha256=2937d6b42738ffbda5e218
 │ ████████████          3/5 done                                                                                       │
 │   snapshot → convert → compare → cut-over → cleanup                                                                  │
 │                                                                                                                      │
-│ ▾ ▰ snapshot done       Atlas Builder     3h                                                                         │
+│ ▾ ▰ snapshot done       Atlas Builder 3h                                                                             │
 │       goal        Finish the snapshot step and record what it produced.                                              │
 │       constraint  Never write to the old store.                                                                      │
 │       attempt     1                                                                                                  │
 │                                                                                                                      │
-│ ▾ ▰ convert  done       Atlas Builder     2h                                                                         │
+│ ▾ ▰ convert  done       Atlas Builder 2h                                                                             │
 │       conversion check passed                                                                                        │
 │       goal        Finish the convert step and record what it produced.                                               │
 │       constraint  Never write to the old store.                                                                      │
@@ -260,14 +260,14 @@ mission/fleet/atlas/store-move width=120 open=true sha256=2937d6b42738ffbda5e218
 │       after       snapshot                                                                                           │
 │       attempt     1                                                                                                  │
 │                                                                                                                      │
-│ ▾ ▰ compare  done       Atlas Builder     41m                                                                        │
+│ ▾ ▰ compare  done       Atlas Builder 41m                                                                            │
 │       0 mismatches in 1,204,881 rows                                                                                 │
 │       goal        Finish the compare step and record what it produced.                                               │
 │       constraint  Never write to the old store.                                                                      │
 │       after       convert                                                                                            │
 │       attempt     1                                                                                                  │
 │                                                                                                                      │
-│ ▾ ◆ cut-over needs you  nobody            33m                                                                        │
+│ ▾ ◆ cut-over needs you  nobody        33m                                                                            │
 │       waiting for your review                                                                                        │
 │       goal        Switch reads and writes to the new store once a person approves.                                   │
 │       constraint  Never write to the old store.                                                                      │
@@ -290,7 +290,7 @@ mission/fleet/atlas/store-move width=120 open=true sha256=2937d6b42738ffbda5e218
 │ ~/src/atlas--store-move  on harbor                                                                                   │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/site/pricing-page width=40 open=false sha256=3d3b08ee398c59025131f1914d164a6d713c4ffcce7dce14f5658bf58ec982ea
+mission/fleet/site/pricing-page width=40 open=false sha256=4df76768e651d0f3cf17159b10bc3caa5a518fafa60e86351252a3a7aaaa6b54
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -302,9 +302,9 @@ mission/fleet/site/pricing-page width=40 open=false sha256=3d3b08ee398c59025131f
 │                       0/2 done       │
 │   draft → publish                    │
 │                                      │
-│ ▸ ◆ draft    needs you  Docs Writer       12m │
+│ ▸ ◆ draft    needs you  Docs Writer 12m │
 │       asked for your feedback        │
-│ ▸ ▱ publish  later      Docs Writer        │
+│ ▸ ▱ publish  later      Docs Writer  │
 │ click a step to open it              │
 ╰──────────────────────────────────────╯
 ╭─ AGENTS · 1 ─────────────────────────╮
@@ -314,7 +314,7 @@ mission/fleet/site/pricing-page width=40 open=false sha256=3d3b08ee398c59025131f
 │ ~/src/site--pricing  on harbor       │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/site/pricing-page width=40 open=true sha256=0403dd2420ff5d93d6248b65ce0dd219a6d2403f341545ec4930f0e4bf8045aa
+mission/fleet/site/pricing-page width=40 open=true sha256=50c76bf9f57fcb7b568f3a7f9ba1469c421bffe1e2b333c82ab9c38055b1a477
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -326,7 +326,7 @@ mission/fleet/site/pricing-page width=40 open=true sha256=0403dd2420ff5d93d6248b
 │                       0/2 done       │
 │   draft → publish                    │
 │                                      │
-│ ▾ ◆ draft    needs you  Docs Writer       12m │
+│ ▾ ◆ draft    needs you  Docs Writer 12m │
 │       asked for your feedback        │
 │       goal        Finish the draft   │
 │                   step and record    │
@@ -335,7 +335,7 @@ mission/fleet/site/pricing-page width=40 open=true sha256=0403dd2420ff5d93d6248b
 │                   old store.         │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▱ publish  later      Docs Writer        │
+│ ▾ ▱ publish  later      Docs Writer  │
 │       goal        Finish the publish │
 │                   step and record    │
 │                   what it produced.  │
@@ -353,7 +353,7 @@ mission/fleet/site/pricing-page width=40 open=true sha256=0403dd2420ff5d93d6248b
 │ ~/src/site--pricing  on harbor       │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/site/pricing-page width=80 open=false sha256=ff0a9d2a1ad9cc046d15621f0cd65a60c03427b6175472c5b80f51603e7b49f8
+mission/fleet/site/pricing-page width=80 open=false sha256=2aedf4148cd80144e8fc88ac85b40e88f8b42e4d725b989a02f57eaed89e092f
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -364,7 +364,7 @@ mission/fleet/site/pricing-page width=80 open=false sha256=ff0a9d2a1ad9cc046d156
 │                       0/2 done                                               │
 │   draft → publish                                                            │
 │                                                                              │
-│ ▸ ◆ draft    needs you  Docs Writer       12m                                │
+│ ▸ ◆ draft    needs you  Docs Writer 12m                                      │
 │       asked for your feedback                                                │
 │ ▸ ▱ publish  later      Docs Writer                                          │
 │ click a step to open it                                                      │
@@ -376,7 +376,7 @@ mission/fleet/site/pricing-page width=80 open=false sha256=ff0a9d2a1ad9cc046d156
 │ ~/src/site--pricing  on harbor                                               │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/site/pricing-page width=80 open=true sha256=7590388c8a9376a852019bbb55ecce9d6338aed28c527d49dce1a592e7246329
+mission/fleet/site/pricing-page width=80 open=true sha256=c921384ca2e80a32f77bcda56a97619f270a20622b7edf7e632384a9ee853d84
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -387,7 +387,7 @@ mission/fleet/site/pricing-page width=80 open=true sha256=7590388c8a9376a852019b
 │                       0/2 done                                               │
 │   draft → publish                                                            │
 │                                                                              │
-│ ▾ ◆ draft    needs you  Docs Writer       12m                                │
+│ ▾ ◆ draft    needs you  Docs Writer 12m                                      │
 │       asked for your feedback                                                │
 │       goal        Finish the draft step and record what it produced.         │
 │       constraint  Never write to the old store.                              │
@@ -408,7 +408,7 @@ mission/fleet/site/pricing-page width=80 open=true sha256=7590388c8a9376a852019b
 │ ~/src/site--pricing  on harbor                                               │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/site/pricing-page width=120 open=false sha256=ccc4e2b80c589c9f98818b4ece6180a7ff766461826d60349509366a7f7fbb7f
+mission/fleet/site/pricing-page width=120 open=false sha256=3d22bfcc27f6aac8ddd0f1c772f3cfbc8613d7613c42af4374249d5ebb06924c
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -419,7 +419,7 @@ mission/fleet/site/pricing-page width=120 open=false sha256=ccc4e2b80c589c9f9881
 │                       0/2 done                                                                                       │
 │   draft → publish                                                                                                    │
 │                                                                                                                      │
-│ ▸ ◆ draft    needs you  Docs Writer       12m                                                                        │
+│ ▸ ◆ draft    needs you  Docs Writer 12m                                                                              │
 │       asked for your feedback                                                                                        │
 │ ▸ ▱ publish  later      Docs Writer                                                                                  │
 │ click a step to open it                                                                                              │
@@ -431,7 +431,7 @@ mission/fleet/site/pricing-page width=120 open=false sha256=ccc4e2b80c589c9f9881
 │ ~/src/site--pricing  on harbor                                                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/site/pricing-page width=120 open=true sha256=ec11ffb5a55c712e9450bd0f8bba312924c1aac2a217a472f999284eebb8e4d7
+mission/fleet/site/pricing-page width=120 open=true sha256=9306f3b8322efa812d0a959e9d75d7982d42ca5a79cdeb8090a2bf99018c2a59
  ◆ needs you   A new pricing page   on harbor · 12m
  mission/fleet/site/pricing-page  ·  a step is waiting for your answer
 
@@ -442,7 +442,7 @@ mission/fleet/site/pricing-page width=120 open=true sha256=ec11ffb5a55c712e9450b
 │                       0/2 done                                                                                       │
 │   draft → publish                                                                                                    │
 │                                                                                                                      │
-│ ▾ ◆ draft    needs you  Docs Writer       12m                                                                        │
+│ ▾ ◆ draft    needs you  Docs Writer 12m                                                                              │
 │       asked for your feedback                                                                                        │
 │       goal        Finish the draft step and record what it produced.                                                 │
 │       constraint  Never write to the old store.                                                                      │
@@ -463,7 +463,7 @@ mission/fleet/site/pricing-page width=120 open=true sha256=ec11ffb5a55c712e9450b
 │ ~/src/site--pricing  on harbor                                                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/release/weekly width=40 open=false sha256=487d47d15a26356db30787ee52eb77ab5acdfc0ee70a0e21ab01546f86ed2759
+mission/fleet/release/weekly width=40 open=false sha256=0ee060048dea30126cb5c1d4100a113239440bf1bff1b59de29079f62b3feb1a
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -488,10 +488,10 @@ mission/fleet/release/weekly width=40 open=false sha256=487d47d15a26356db30787ee
 │ ██████▋               1/3 done       │
 │   changelog → tag → publish          │
 │                                      │
-│ ▸ ▰ changelog done       Release Captain   1h │
-│ ▸ ✕ tag       failed     Release Captain   8m │
+│ ▸ ▰ changelog done       Release Captain 1h │
+│ ▸ ✕ tag       failed     Release Captain 8m │
 │       seat keeps restarting          │
-│ ▸ ▱ publish   later      Release Captain    │
+│ ▸ ▱ publish   later      Release Captain  │
 │ click a step to open it              │
 ╰──────────────────────────────────────╯
 ╭─ AGENTS · 1 ─────────────────────────╮
@@ -501,7 +501,7 @@ mission/fleet/release/weekly width=40 open=false sha256=487d47d15a26356db30787ee
 │ ~/src/atlas  on harbor               │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/release/weekly width=40 open=true sha256=35ef3758370258cbfa3c123305bcc36f8c681d2425c46b83b58b08a853b5362c
+mission/fleet/release/weekly width=40 open=true sha256=7face27b74aada806158af09c9d9e16f78f5ec7552c772ad688b2f001b570287
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -526,7 +526,7 @@ mission/fleet/release/weekly width=40 open=true sha256=35ef3758370258cbfa3c12330
 │ ██████▋               1/3 done       │
 │   changelog → tag → publish          │
 │                                      │
-│ ▾ ▰ changelog done       Release Captain   1h │
+│ ▾ ▰ changelog done       Release Captain 1h │
 │       goal        Finish the         │
 │                   changelog step and │
 │                   record what it     │
@@ -535,7 +535,7 @@ mission/fleet/release/weekly width=40 open=true sha256=35ef3758370258cbfa3c12330
 │                   old store.         │
 │       attempt     1                  │
 │                                      │
-│ ▾ ✕ tag       failed     Release Captain   8m │
+│ ▾ ✕ tag       failed     Release Captain 8m │
 │       seat keeps restarting          │
 │       goal        Finish the tag     │
 │                   step and record    │
@@ -549,7 +549,7 @@ mission/fleet/release/weekly width=40 open=true sha256=35ef3758370258cbfa3c12330
 │       after       changelog          │
 │       attempt     4                  │
 │                                      │
-│ ▾ ▱ publish   later      Release Captain    │
+│ ▾ ▱ publish   later      Release Captain  │
 │       goal        Finish the publish │
 │                   step and record    │
 │                   what it produced.  │
@@ -567,7 +567,7 @@ mission/fleet/release/weekly width=40 open=true sha256=35ef3758370258cbfa3c12330
 │ ~/src/atlas  on harbor               │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/release/weekly width=80 open=false sha256=42800e6409092b3caf93a8de5244a07d540b09161582266ee990c5b07c53b7a6
+mission/fleet/release/weekly width=80 open=false sha256=ac0979709127767b166efe6402cb06d3efe6e87b1d8a36ae14f499deead5abc9
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -589,8 +589,8 @@ mission/fleet/release/weekly width=80 open=false sha256=42800e6409092b3caf93a8de
 │ ██████▋               1/3 done                                               │
 │   changelog → tag → publish                                                  │
 │                                                                              │
-│ ▸ ▰ changelog done       Release Captain   1h                                │
-│ ▸ ✕ tag       failed     Release Captain   8m                                │
+│ ▸ ▰ changelog done       Release Captain 1h                                  │
+│ ▸ ✕ tag       failed     Release Captain 8m                                  │
 │       seat keeps restarting                                                  │
 │ ▸ ▱ publish   later      Release Captain                                     │
 │ click a step to open it                                                      │
@@ -602,7 +602,7 @@ mission/fleet/release/weekly width=80 open=false sha256=42800e6409092b3caf93a8de
 │ ~/src/atlas  on harbor                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/release/weekly width=80 open=true sha256=8f0ba96fc5eb32a1978df1a012144390244ff676d2fc38b0992e7fedcb596cc1
+mission/fleet/release/weekly width=80 open=true sha256=2ce7d14168d8285a41e292f25db1b8e146c6ba26885c748882e14bf022893e5a
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -624,12 +624,12 @@ mission/fleet/release/weekly width=80 open=true sha256=8f0ba96fc5eb32a1978df1a01
 │ ██████▋               1/3 done                                               │
 │   changelog → tag → publish                                                  │
 │                                                                              │
-│ ▾ ▰ changelog done       Release Captain   1h                                │
+│ ▾ ▰ changelog done       Release Captain 1h                                  │
 │       goal        Finish the changelog step and record what it produced.     │
 │       constraint  Never write to the old store.                              │
 │       attempt     1                                                          │
 │                                                                              │
-│ ▾ ✕ tag       failed     Release Captain   8m                                │
+│ ▾ ✕ tag       failed     Release Captain 8m                                  │
 │       seat keeps restarting                                                  │
 │       goal        Finish the tag step and record what it produced.           │
 │       constraint  Never write to the old store.                              │
@@ -652,7 +652,7 @@ mission/fleet/release/weekly width=80 open=true sha256=8f0ba96fc5eb32a1978df1a01
 │ ~/src/atlas  on harbor                                                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/release/weekly width=120 open=false sha256=9868a2b466bf6188b3f847dd56cf037c17fda6b334ea5a8c4e5287bf5f423665
+mission/fleet/release/weekly width=120 open=false sha256=e26f4f0c3d7046889f2e3d8d19425502c37df6417c2aafc5309856d7d2e9e7cb
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -674,8 +674,8 @@ mission/fleet/release/weekly width=120 open=false sha256=9868a2b466bf6188b3f847d
 │ ██████▋               1/3 done                                                                                       │
 │   changelog → tag → publish                                                                                          │
 │                                                                                                                      │
-│ ▸ ▰ changelog done       Release Captain   1h                                                                        │
-│ ▸ ✕ tag       failed     Release Captain   8m                                                                        │
+│ ▸ ▰ changelog done       Release Captain 1h                                                                          │
+│ ▸ ✕ tag       failed     Release Captain 8m                                                                          │
 │       seat keeps restarting                                                                                          │
 │ ▸ ▱ publish   later      Release Captain                                                                             │
 │ click a step to open it                                                                                              │
@@ -687,7 +687,7 @@ mission/fleet/release/weekly width=120 open=false sha256=9868a2b466bf6188b3f847d
 │ ~/src/atlas  on harbor                                                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/release/weekly width=120 open=true sha256=54b669e9f406e1120fa2f4e5c3d422fb8a8de5ef4339959a33f9e6716e5f9c16
+mission/fleet/release/weekly width=120 open=true sha256=b0fbcb1139ac75102ead29d65d63c90610f43457193e5767fb412752efbfd55c
  ▲ stalled   Weekly release   on harbor · 8m
  mission/fleet/release/weekly  ·  a step has an owner who is not moving
 
@@ -709,12 +709,12 @@ mission/fleet/release/weekly width=120 open=true sha256=54b669e9f406e1120fa2f4e5
 │ ██████▋               1/3 done                                                                                       │
 │   changelog → tag → publish                                                                                          │
 │                                                                                                                      │
-│ ▾ ▰ changelog done       Release Captain   1h                                                                        │
+│ ▾ ▰ changelog done       Release Captain 1h                                                                          │
 │       goal        Finish the changelog step and record what it produced.                                             │
 │       constraint  Never write to the old store.                                                                      │
 │       attempt     1                                                                                                  │
 │                                                                                                                      │
-│ ▾ ✕ tag       failed     Release Captain   8m                                                                        │
+│ ▾ ✕ tag       failed     Release Captain 8m                                                                          │
 │       seat keeps restarting                                                                                          │
 │       goal        Finish the tag step and record what it produced.                                                   │
 │       constraint  Never write to the old store.                                                                      │
@@ -737,7 +737,7 @@ mission/fleet/release/weekly width=120 open=true sha256=54b669e9f406e1120fa2f4e5
 │ ~/src/atlas  on harbor                                                                                               │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/harbor/pull-request-review width=40 open=false sha256=e50f42ee028b3b9fb641938ad18921b4e1373c89d4ca0259d133599aed15a6b8
+mission/fleet/harbor/pull-request-review width=40 open=false sha256=ee056595ca3a992a7dacf0506a1562369190e9b7230edd461ed4f65234b34ece
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an agent is doing a step now
 
@@ -749,8 +749,8 @@ mission/fleet/harbor/pull-request-review width=40 open=false sha256=e50f42ee028b
 │                       0/2 done       │
 │   review → route                     │
 │                                      │
-│ ▸ ⠋ review   working    Harbor Reviewer   4m │
-│ ▸ ▱ route    later      Harbor Reviewer    │
+│ ▸ ⠋ review   working    Harbor Reviewer 4m │
+│ ▸ ▱ route    later      Harbor Reviewer  │
 │ click a step to open it              │
 ╰──────────────────────────────────────╯
 ╭─ AGENTS · 1 ─────────────────────────╮
@@ -760,7 +760,7 @@ mission/fleet/harbor/pull-request-review width=40 open=false sha256=e50f42ee028b
 │ ~/src/harbor--review-218  on harbor  │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/harbor/pull-request-review width=40 open=true sha256=2dda9b2ec4d1088e470c84e0686311a42b8dde18b4ef2a084e1216bb12d1c7f0
+mission/fleet/harbor/pull-request-review width=40 open=true sha256=4d7041ae34eedb12e488ad531aeca712caa3c5542f4e1b3778dc99f3acd97c81
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an agent is doing a step now
 
@@ -772,7 +772,7 @@ mission/fleet/harbor/pull-request-review width=40 open=true sha256=2dda9b2ec4d10
 │                       0/2 done       │
 │   review → route                     │
 │                                      │
-│ ▾ ⠋ review   working    Harbor Reviewer   4m │
+│ ▾ ⠋ review   working    Harbor Reviewer 4m │
 │       goal        Finish the review  │
 │                   step and record    │
 │                   what it produced.  │
@@ -780,7 +780,7 @@ mission/fleet/harbor/pull-request-review width=40 open=true sha256=2dda9b2ec4d10
 │                   old store.         │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▱ route    later      Harbor Reviewer    │
+│ ▾ ▱ route    later      Harbor Reviewer  │
 │       goal        Finish the route   │
 │                   step and record    │
 │                   what it produced.  │
@@ -798,7 +798,7 @@ mission/fleet/harbor/pull-request-review width=40 open=true sha256=2dda9b2ec4d10
 │ ~/src/harbor--review-218  on harbor  │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/harbor/pull-request-review width=80 open=false sha256=78c7c33fdaac194c8c708d2f5e48f983ffb0c58de680700fc8c8a6c0a95a447b
+mission/fleet/harbor/pull-request-review width=80 open=false sha256=ffb6de09e370f4098da4a9f4ef1a794d37ab8bfe977197c8658e8d761d236830
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an agent is doing a step now
 
@@ -809,7 +809,7 @@ mission/fleet/harbor/pull-request-review width=80 open=false sha256=78c7c33fdaac
 │                       0/2 done                                               │
 │   review → route                                                             │
 │                                                                              │
-│ ▸ ⠋ review   working    Harbor Reviewer   4m                                 │
+│ ▸ ⠋ review   working    Harbor Reviewer 4m                                   │
 │ ▸ ▱ route    later      Harbor Reviewer                                      │
 │ click a step to open it                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -820,7 +820,7 @@ mission/fleet/harbor/pull-request-review width=80 open=false sha256=78c7c33fdaac
 │ ~/src/harbor--review-218  on harbor                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/harbor/pull-request-review width=80 open=true sha256=7054cabc0354aa075ce309ad4bcae33edb97ff47760229564eb105e71306d214
+mission/fleet/harbor/pull-request-review width=80 open=true sha256=4dc7bafa03570e18ec9da7ef7dd6c15f827dd60b8a78393edfd57daa4a984248
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an agent is doing a step now
 
@@ -831,7 +831,7 @@ mission/fleet/harbor/pull-request-review width=80 open=true sha256=7054cabc0354a
 │                       0/2 done                                               │
 │   review → route                                                             │
 │                                                                              │
-│ ▾ ⠋ review   working    Harbor Reviewer   4m                                 │
+│ ▾ ⠋ review   working    Harbor Reviewer 4m                                   │
 │       goal        Finish the review step and record what it produced.        │
 │       constraint  Never write to the old store.                              │
 │       attempt     1                                                          │
@@ -851,7 +851,7 @@ mission/fleet/harbor/pull-request-review width=80 open=true sha256=7054cabc0354a
 │ ~/src/harbor--review-218  on harbor                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/harbor/pull-request-review width=120 open=false sha256=56ffa4ce3b5d2647d1612a4ad7b85dbe242e0534513eaa6ec06d5797d6309590
+mission/fleet/harbor/pull-request-review width=120 open=false sha256=9875a3793a3da5f2378099d294c0333aea13b745a35edb1959e5c8acd777fc1b
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an agent is doing a step now
 
@@ -862,7 +862,7 @@ mission/fleet/harbor/pull-request-review width=120 open=false sha256=56ffa4ce3b5
 │                       0/2 done                                                                                       │
 │   review → route                                                                                                     │
 │                                                                                                                      │
-│ ▸ ⠋ review   working    Harbor Reviewer   4m                                                                         │
+│ ▸ ⠋ review   working    Harbor Reviewer 4m                                                                           │
 │ ▸ ▱ route    later      Harbor Reviewer                                                                              │
 │ click a step to open it                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -873,7 +873,7 @@ mission/fleet/harbor/pull-request-review width=120 open=false sha256=56ffa4ce3b5
 │ ~/src/harbor--review-218  on harbor                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/harbor/pull-request-review width=120 open=true sha256=4406f3dc0bf0f6c6030f75429bfc162fc9370521f2dae10a9ed642a9d95f8148
+mission/fleet/harbor/pull-request-review width=120 open=true sha256=5ef3c1a68e9589b8c959c4aa07290537f2f7ba27d5f24fa731c6591375130d9c
  ⠋ working   Review harbor #218   on harbor · 1m
  mission/fleet/harbor/pull-request-review  ·  an agent is doing a step now
 
@@ -884,7 +884,7 @@ mission/fleet/harbor/pull-request-review width=120 open=true sha256=4406f3dc0bf0
 │                       0/2 done                                                                                       │
 │   review → route                                                                                                     │
 │                                                                                                                      │
-│ ▾ ⠋ review   working    Harbor Reviewer   4m                                                                         │
+│ ▾ ⠋ review   working    Harbor Reviewer 4m                                                                           │
 │       goal        Finish the review step and record what it produced.                                                │
 │       constraint  Never write to the old store.                                                                      │
 │       attempt     1                                                                                                  │
@@ -904,7 +904,7 @@ mission/fleet/harbor/pull-request-review width=120 open=true sha256=4406f3dc0bf0
 │ ~/src/harbor--review-218  on harbor                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/rekey width=40 open=false sha256=f68d0b825b94017f5728c6c98d5b0e2018f6e3481ff88b180e053cd64a87266b
+mission/fleet/rekey width=40 open=false sha256=7908251c645ed29a0a31671f7d217df75ba77d5324abef83a74cc7d739b7c682
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -925,11 +925,11 @@ mission/fleet/rekey width=40 open=false sha256=f68d0b825b94017f5728c6c98d5b0e201
 │ ██████▋               1/3 done       │
 │   inventory → rotate → report        │
 │                                      │
-│ ▸ ▰ inventory done       Rekey Worker      1h │
-│ ▸ ▱ rotate    ready      nobody            19m │
+│ ▸ ▰ inventory done       Rekey Worker 1h │
+│ ▸ ▱ rotate    ready      nobody       19m │
 │       queued for Rekey Worker, which │
 │       finishes harbor/nightly first  │
-│ ▸ ▱ report    later      Rekey Worker       │
+│ ▸ ▱ report    later      Rekey Worker  │
 │ click a step to open it              │
 ╰──────────────────────────────────────╯
 ╭─ AGENTS · 1 ─────────────────────────╮
@@ -939,7 +939,7 @@ mission/fleet/rekey width=40 open=false sha256=f68d0b825b94017f5728c6c98d5b0e201
 │ ~/src/harbor  on harbor              │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/rekey width=40 open=true sha256=229ea9000f1e3f4f9d28baef04d2bb9eb386b9baee9a08d66c1adcb21229bc87
+mission/fleet/rekey width=40 open=true sha256=7b5ec7bdee183ed461a3227375344e42783275964468cbbb515b6281244e1af6
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -960,7 +960,7 @@ mission/fleet/rekey width=40 open=true sha256=229ea9000f1e3f4f9d28baef04d2bb9eb3
 │ ██████▋               1/3 done       │
 │   inventory → rotate → report        │
 │                                      │
-│ ▾ ▰ inventory done       Rekey Worker      1h │
+│ ▾ ▰ inventory done       Rekey Worker 1h │
 │       goal        Finish the         │
 │                   inventory step and │
 │                   record what it     │
@@ -969,7 +969,7 @@ mission/fleet/rekey width=40 open=true sha256=229ea9000f1e3f4f9d28baef04d2bb9eb3
 │                   old store.         │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▱ rotate    ready      nobody            19m │
+│ ▾ ▱ rotate    ready      nobody       19m │
 │       queued for Rekey Worker, which │
 │       finishes harbor/nightly first  │
 │       goal        Finish the rotate  │
@@ -980,7 +980,7 @@ mission/fleet/rekey width=40 open=true sha256=229ea9000f1e3f4f9d28baef04d2bb9eb3
 │       after       inventory          │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▱ report    later      Rekey Worker       │
+│ ▾ ▱ report    later      Rekey Worker  │
 │       goal        Finish the report  │
 │                   step and record    │
 │                   what it produced.  │
@@ -998,7 +998,7 @@ mission/fleet/rekey width=40 open=true sha256=229ea9000f1e3f4f9d28baef04d2bb9eb3
 │ ~/src/harbor  on harbor              │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/rekey width=80 open=false sha256=4f241f9a272a60108c2c10921421156d6739bff7e0fbd1c31880d5647b59bbaf
+mission/fleet/rekey width=80 open=false sha256=e6f51a740d21ea4ef0685b3b9e0d3dc9cbafb000f7a11c4afb6d7ea67d3ab7e5
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1016,8 +1016,8 @@ mission/fleet/rekey width=80 open=false sha256=4f241f9a272a60108c2c10921421156d6
 │ ██████▋               1/3 done                                               │
 │   inventory → rotate → report                                                │
 │                                                                              │
-│ ▸ ▰ inventory done       Rekey Worker      1h                                │
-│ ▸ ▱ rotate    ready      nobody            19m                               │
+│ ▸ ▰ inventory done       Rekey Worker 1h                                     │
+│ ▸ ▱ rotate    ready      nobody       19m                                    │
 │       queued for Rekey Worker, which finishes harbor/nightly first           │
 │ ▸ ▱ report    later      Rekey Worker                                        │
 │ click a step to open it                                                      │
@@ -1029,7 +1029,7 @@ mission/fleet/rekey width=80 open=false sha256=4f241f9a272a60108c2c10921421156d6
 │ ~/src/harbor  on harbor                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/rekey width=80 open=true sha256=9052920b7aa675ee69f7cd1dc79d89d152cea98809917662c942ac41192b1480
+mission/fleet/rekey width=80 open=true sha256=1ee85f8bd493e40522f8e5aea363f9453dc5caa1e191c344c180501e94cd31b4
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1047,12 +1047,12 @@ mission/fleet/rekey width=80 open=true sha256=9052920b7aa675ee69f7cd1dc79d89d152
 │ ██████▋               1/3 done                                               │
 │   inventory → rotate → report                                                │
 │                                                                              │
-│ ▾ ▰ inventory done       Rekey Worker      1h                                │
+│ ▾ ▰ inventory done       Rekey Worker 1h                                     │
 │       goal        Finish the inventory step and record what it produced.     │
 │       constraint  Never write to the old store.                              │
 │       attempt     1                                                          │
 │                                                                              │
-│ ▾ ▱ rotate    ready      nobody            19m                               │
+│ ▾ ▱ rotate    ready      nobody       19m                                    │
 │       queued for Rekey Worker, which finishes harbor/nightly first           │
 │       goal        Finish the rotate step and record what it produced.        │
 │       constraint  Never write to the old store.                              │
@@ -1074,7 +1074,7 @@ mission/fleet/rekey width=80 open=true sha256=9052920b7aa675ee69f7cd1dc79d89d152
 │ ~/src/harbor  on harbor                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/rekey width=120 open=false sha256=d09b69889ab03d293195e38b2aa518d7091b454c42bc4bd0493a4fffd80f4de1
+mission/fleet/rekey width=120 open=false sha256=9137bfd9dc43ec5b1c6be03702fc939eb3ac9f95b652d58e158ce5a8992b89dc
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1092,8 +1092,8 @@ mission/fleet/rekey width=120 open=false sha256=d09b69889ab03d293195e38b2aa518d7
 │ ██████▋               1/3 done                                                                                       │
 │   inventory → rotate → report                                                                                        │
 │                                                                                                                      │
-│ ▸ ▰ inventory done       Rekey Worker      1h                                                                        │
-│ ▸ ▱ rotate    ready      nobody            19m                                                                       │
+│ ▸ ▰ inventory done       Rekey Worker 1h                                                                             │
+│ ▸ ▱ rotate    ready      nobody       19m                                                                            │
 │       queued for Rekey Worker, which finishes harbor/nightly first                                                   │
 │ ▸ ▱ report    later      Rekey Worker                                                                                │
 │ click a step to open it                                                                                              │
@@ -1105,7 +1105,7 @@ mission/fleet/rekey width=120 open=false sha256=d09b69889ab03d293195e38b2aa518d7
 │ ~/src/harbor  on harbor                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/rekey width=120 open=true sha256=18d877b2789903ab63cd6824b0548bfa04376d155a81730f6d80f97901b0cd43
+mission/fleet/rekey width=120 open=true sha256=d445e3c7d1b4848c0b917cee613ffabda863ac9efa37722d158e90a6f2d20086
  ◌ queued   Rotate harbor's signing keys   on harbor · 19m
  mission/fleet/rekey  ·  a step is waiting its turn on a busy agent; nothing to do
 
@@ -1123,12 +1123,12 @@ mission/fleet/rekey width=120 open=true sha256=18d877b2789903ab63cd6824b0548bfa0
 │ ██████▋               1/3 done                                                                                       │
 │   inventory → rotate → report                                                                                        │
 │                                                                                                                      │
-│ ▾ ▰ inventory done       Rekey Worker      1h                                                                        │
+│ ▾ ▰ inventory done       Rekey Worker 1h                                                                             │
 │       goal        Finish the inventory step and record what it produced.                                             │
 │       constraint  Never write to the old store.                                                                      │
 │       attempt     1                                                                                                  │
 │                                                                                                                      │
-│ ▾ ▱ rotate    ready      nobody            19m                                                                       │
+│ ▾ ▱ rotate    ready      nobody       19m                                                                            │
 │       queued for Rekey Worker, which finishes harbor/nightly first                                                   │
 │       goal        Finish the rotate step and record what it produced.                                                │
 │       constraint  Never write to the old store.                                                                      │
@@ -1150,7 +1150,7 @@ mission/fleet/rekey width=120 open=true sha256=18d877b2789903ab63cd6824b0548bfa0
 │ ~/src/harbor  on harbor                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/docs/handbook width=40 open=false sha256=96c150365ed671c1e88020f0d847325eb0c14328f1be08c6bd4cc708d00b3c13
+mission/fleet/docs/handbook width=40 open=false sha256=ae3d60b80920068df127e62c83eff9b95650ec3db647aa37a7f2e10588f0e612
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1161,7 +1161,7 @@ mission/fleet/docs/handbook width=40 open=false sha256=96c150365ed671c1e88020f0d
 ╭─ STEPS ──────────────────────────────╮
 │                       0/1 done       │
 │                                      │
-│ ▸ ◐ watch    waiting    Docs Writer       2h │
+│ ▸ ◐ watch    waiting    Docs Writer 2h │
 │       standing; wakes on merged      │
 │       changes                        │
 │ click a step to open it              │
@@ -1170,7 +1170,7 @@ mission/fleet/docs/handbook width=40 open=false sha256=96c150365ed671c1e88020f0d
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/docs/handbook width=40 open=true sha256=c33c0bfdfcf33a371a1b4d8af0785e933a31684a5018f83545f09027ed63548e
+mission/fleet/docs/handbook width=40 open=true sha256=8b090ff258c89b1e9d3fe8f408470066f091aeaf6878b662f5c4b933d15cd363
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1181,7 +1181,7 @@ mission/fleet/docs/handbook width=40 open=true sha256=c33c0bfdfcf33a371a1b4d8af0
 ╭─ STEPS ──────────────────────────────╮
 │                       0/1 done       │
 │                                      │
-│ ▾ ◐ watch    waiting    Docs Writer       2h │
+│ ▾ ◐ watch    waiting    Docs Writer 2h │
 │       standing; wakes on merged      │
 │       changes                        │
 │       goal        Finish the watch   │
@@ -1197,7 +1197,7 @@ mission/fleet/docs/handbook width=40 open=true sha256=c33c0bfdfcf33a371a1b4d8af0
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/docs/handbook width=80 open=false sha256=ec249c173b1acb1a5ab2987fc286304c29df383c815e3e64c18523bbca060aa0
+mission/fleet/docs/handbook width=80 open=false sha256=dcb830e51f0de0762704f32bb576f3b5120c720854e2c20da423722282f9465c
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1207,7 +1207,7 @@ mission/fleet/docs/handbook width=80 open=false sha256=ec249c173b1acb1a5ab2987fc
 ╭─ STEPS ──────────────────────────────────────────────────────────────────────╮
 │                       0/1 done                                               │
 │                                                                              │
-│ ▸ ◐ watch    waiting    Docs Writer       2h                                 │
+│ ▸ ◐ watch    waiting    Docs Writer 2h                                       │
 │       standing; wakes on merged changes                                      │
 │ click a step to open it                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
@@ -1215,7 +1215,7 @@ mission/fleet/docs/handbook width=80 open=false sha256=ec249c173b1acb1a5ab2987fc
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/docs/handbook width=80 open=true sha256=7b3bba95d6ac33c2a6a211b517d34490a33a118ee2e9d21f2c5d2d7915aadf64
+mission/fleet/docs/handbook width=80 open=true sha256=ee203314c8c37f37f67d588ddbd714db51d3761fe31971a9d47759dbe0782db6
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1225,7 +1225,7 @@ mission/fleet/docs/handbook width=80 open=true sha256=7b3bba95d6ac33c2a6a211b517
 ╭─ STEPS ──────────────────────────────────────────────────────────────────────╮
 │                       0/1 done                                               │
 │                                                                              │
-│ ▾ ◐ watch    waiting    Docs Writer       2h                                 │
+│ ▾ ◐ watch    waiting    Docs Writer 2h                                       │
 │       standing; wakes on merged changes                                      │
 │       goal        Finish the watch step and record what it produced.         │
 │       constraint  Never write to the old store.                              │
@@ -1237,7 +1237,7 @@ mission/fleet/docs/handbook width=80 open=true sha256=7b3bba95d6ac33c2a6a211b517
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/docs/handbook width=120 open=false sha256=42cb1ef3ebda4b757fc569880c1be45bfb9b4c21838d72b78f07855535eb07d3
+mission/fleet/docs/handbook width=120 open=false sha256=63d84323a271105e5e6ff5b03d93238a3c4655c421536ad522471f1c04fc0443
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1247,7 +1247,7 @@ mission/fleet/docs/handbook width=120 open=false sha256=42cb1ef3ebda4b757fc56988
 ╭─ STEPS ──────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                       0/1 done                                                                                       │
 │                                                                                                                      │
-│ ▸ ◐ watch    waiting    Docs Writer       2h                                                                         │
+│ ▸ ◐ watch    waiting    Docs Writer 2h                                                                               │
 │       standing; wakes on merged changes                                                                              │
 │ click a step to open it                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -1255,7 +1255,7 @@ mission/fleet/docs/handbook width=120 open=false sha256=42cb1ef3ebda4b757fc56988
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/docs/handbook width=120 open=true sha256=d5ea49fc79e4cffc50b40aeb647d0b392d260b8a1f24ea01d8127b26943592f1
+mission/fleet/docs/handbook width=120 open=true sha256=32a8c92bb9e7e801e914d85cbf7999ca4f84bcf07859254fed989ef6f42260a3
  ● idle   Keep the handbook current   on harbor · 2h
  mission/fleet/docs/handbook  ·  running, with nothing ready
 
@@ -1265,7 +1265,7 @@ mission/fleet/docs/handbook width=120 open=true sha256=d5ea49fc79e4cffc50b40aeb6
 ╭─ STEPS ──────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │                       0/1 done                                                                                       │
 │                                                                                                                      │
-│ ▾ ◐ watch    waiting    Docs Writer       2h                                                                         │
+│ ▾ ◐ watch    waiting    Docs Writer 2h                                                                               │
 │       standing; wakes on merged changes                                                                              │
 │       goal        Finish the watch step and record what it produced.                                                 │
 │       constraint  Never write to the old store.                                                                      │
@@ -1277,7 +1277,7 @@ mission/fleet/docs/handbook width=120 open=true sha256=d5ea49fc79e4cffc50b40aeb6
 │ ◆ Docs Writer        needs you  claude  on harbor · 12m                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/nightly width=40 open=false sha256=1f04e0646e3242d165d77d829d276786d67a92f290c2fc73650d07e34491de8d
+mission/fleet/atlas/nightly width=40 open=false sha256=15c8b5a32fba2534ac63656ec5fe5066b1b692be28dfbea49fc9bc02ab43d5a5
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1288,15 +1288,15 @@ mission/fleet/atlas/nightly width=40 open=false sha256=1f04e0646e3242d165d77d829
 │ ████████████████████  2/2 done       │
 │   build → test                       │
 │                                      │
-│ ▸ ▰ build    done       Atlas Indexer     6h │
-│ ▸ ▰ test     done       Atlas Indexer     6h │
+│ ▸ ▰ build    done       Atlas Indexer 6h │
+│ ▸ ▰ test     done       Atlas Indexer 6h │
 │ click a step to open it              │
 ╰──────────────────────────────────────╯
 ╭─ AGENTS · 0 ─────────────────────────╮
 │ No agents right now.                 │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/nightly width=40 open=true sha256=f40a184c9b494376331a5510a33d27666128a0a818ff7d5ad98b0e90d466aca9
+mission/fleet/atlas/nightly width=40 open=true sha256=c0c2b814d29d0cf823d04c27d3daa3f201740e456ea3ecb967b496791eeb0178
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1307,7 +1307,7 @@ mission/fleet/atlas/nightly width=40 open=true sha256=f40a184c9b494376331a5510a3
 │ ████████████████████  2/2 done       │
 │   build → test                       │
 │                                      │
-│ ▾ ▰ build    done       Atlas Indexer     6h │
+│ ▾ ▰ build    done       Atlas Indexer 6h │
 │       goal        Finish the build   │
 │                   step and record    │
 │                   what it produced.  │
@@ -1315,7 +1315,7 @@ mission/fleet/atlas/nightly width=40 open=true sha256=f40a184c9b494376331a5510a3
 │                   old store.         │
 │       attempt     1                  │
 │                                      │
-│ ▾ ▰ test     done       Atlas Indexer     6h │
+│ ▾ ▰ test     done       Atlas Indexer 6h │
 │       goal        Finish the test    │
 │                   step and record    │
 │                   what it produced.  │
@@ -1330,7 +1330,7 @@ mission/fleet/atlas/nightly width=40 open=true sha256=f40a184c9b494376331a5510a3
 │ No agents right now.                 │
 ╰──────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/nightly width=80 open=false sha256=6f2cf1fc1c2b524ff5fe1bab8a938c84243ab13a03a76943c403b08a03eb47a3
+mission/fleet/atlas/nightly width=80 open=false sha256=c762e0e553acf3a5c3890b962e350a35cfd0636c7b42f1facee5769afed1d0d7
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1341,15 +1341,15 @@ mission/fleet/atlas/nightly width=80 open=false sha256=6f2cf1fc1c2b524ff5fe1bab8
 │ ████████████████████  2/2 done                                               │
 │   build → test                                                               │
 │                                                                              │
-│ ▸ ▰ build    done       Atlas Indexer     6h                                 │
-│ ▸ ▰ test     done       Atlas Indexer     6h                                 │
+│ ▸ ▰ build    done       Atlas Indexer 6h                                     │
+│ ▸ ▰ test     done       Atlas Indexer 6h                                     │
 │ click a step to open it                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ AGENTS · 0 ─────────────────────────────────────────────────────────────────╮
 │ No agents right now.                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/nightly width=80 open=true sha256=eacdbaf539c33e648f8ca503b0f9bcdfce9efda6fd971202a40a1789b4056e4a
+mission/fleet/atlas/nightly width=80 open=true sha256=a1af63e0af988899d49075e416de0859756c3bfc4d2d2739fcf421e7da200866
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1360,12 +1360,12 @@ mission/fleet/atlas/nightly width=80 open=true sha256=eacdbaf539c33e648f8ca503b0
 │ ████████████████████  2/2 done                                               │
 │   build → test                                                               │
 │                                                                              │
-│ ▾ ▰ build    done       Atlas Indexer     6h                                 │
+│ ▾ ▰ build    done       Atlas Indexer 6h                                     │
 │       goal        Finish the build step and record what it produced.         │
 │       constraint  Never write to the old store.                              │
 │       attempt     1                                                          │
 │                                                                              │
-│ ▾ ▰ test     done       Atlas Indexer     6h                                 │
+│ ▾ ▰ test     done       Atlas Indexer 6h                                     │
 │       goal        Finish the test step and record what it produced.          │
 │       constraint  Never write to the old store.                              │
 │       after       build                                                      │
@@ -1377,7 +1377,7 @@ mission/fleet/atlas/nightly width=80 open=true sha256=eacdbaf539c33e648f8ca503b0
 │ No agents right now.                                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/nightly width=120 open=false sha256=d0a3a25c7c090941b9f24c7691934271566d91d04db378e3ffdc3bcfca08a5ca
+mission/fleet/atlas/nightly width=120 open=false sha256=ba4dfee98791c8cd3af020aa7d9c0d58a94128b801eefc0e571ec76fc17856d8
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1388,15 +1388,15 @@ mission/fleet/atlas/nightly width=120 open=false sha256=d0a3a25c7c090941b9f24c76
 │ ████████████████████  2/2 done                                                                                       │
 │   build → test                                                                                                       │
 │                                                                                                                      │
-│ ▸ ▰ build    done       Atlas Indexer     6h                                                                         │
-│ ▸ ▰ test     done       Atlas Indexer     6h                                                                         │
+│ ▸ ▰ build    done       Atlas Indexer 6h                                                                             │
+│ ▸ ▰ test     done       Atlas Indexer 6h                                                                             │
 │ click a step to open it                                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ AGENTS · 0 ─────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ No agents right now.                                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
  k The whole declaration 
-mission/fleet/atlas/nightly width=120 open=true sha256=2fdc40c236e4bf908458b19267b12bf9e09c9a4d6487dcca349007e57e5faab8
+mission/fleet/atlas/nightly width=120 open=true sha256=3ef5202866362762769d0ee7d691c99820abb84632ac1c9690840e31b9dfa42e
  ✓ done   Atlas nightly build   on harbor · 6h
  mission/fleet/atlas/nightly  ·  every step finished
 
@@ -1407,12 +1407,12 @@ mission/fleet/atlas/nightly width=120 open=true sha256=2fdc40c236e4bf908458b1926
 │ ████████████████████  2/2 done                                                                                       │
 │   build → test                                                                                                       │
 │                                                                                                                      │
-│ ▾ ▰ build    done       Atlas Indexer     6h                                                                         │
+│ ▾ ▰ build    done       Atlas Indexer 6h                                                                             │
 │       goal        Finish the build step and record what it produced.                                                 │
 │       constraint  Never write to the old store.                                                                      │
 │       attempt     1                                                                                                  │
 │                                                                                                                      │
-│ ▾ ▰ test     done       Atlas Indexer     6h                                                                         │
+│ ▾ ▰ test     done       Atlas Indexer 6h                                                                             │
 │       goal        Finish the test step and record what it produced.                                                  │
 │       constraint  Never write to the old store.                                                                      │
 │       after       build                                                                                              │

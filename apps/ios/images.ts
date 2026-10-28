@@ -1,5 +1,5 @@
 // Images a person attaches to a message on the phone: picked from the photo library or pasted.
-// st takes PNG, JPEG, GIF and WebP up to 10 MiB each, four to a message
+// Fractal takes PNG, JPEG, GIF and WebP up to 10 MiB each, four to a message
 // (docs/st3/attachments.md); anything else is refused here, in words, before it is uploaded.
 
 export type ImageType = 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp';
@@ -20,7 +20,7 @@ export function decodeBase64(base64: string): Uint8Array {
   return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
-/** The type the data itself says, by its first bytes, as st checks it on upload. */
+/** The type the data itself says, by its first bytes, as Fractal checks it on upload. */
 export function sniff(base64: string): ImageType | null {
   if (base64.startsWith('iVBORw0KGgo')) return 'image/png';
   if (base64.startsWith('/9j/')) return 'image/jpeg';
@@ -35,7 +35,7 @@ export function encodeBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-/** An image from base64 data and its type, or why st would not take it. The data's own type wins
+/** An image from base64 data and its type, or why Fractal would not take it. The data's own type wins
  * over the one given: the photo picker hands back JPEG data for what may have been a PNG. */
 export function picked(base64: string, mediaType: string, name?: string): Picked | string {
   const type = sniff(base64) ?? (mediaType.toLowerCase() === 'image/jpg' ? 'image/jpeg' : mediaType.toLowerCase());

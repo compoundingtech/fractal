@@ -11,6 +11,7 @@ pub mod glasses;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
+pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
 pub mod review;
@@ -465,19 +466,25 @@ impl Registry {
 
     pub fn markdown(&self) -> String {
         let mut output = format!(
-            "# st3 schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
+            "# Fractal schema registry\n\nThis file is generated from `fractal-schema`.\n\nSchema: `{}`\nStorage version: `{}`\nStorage digest: `{}`\n\n",
             self.name,
             STORAGE_VERSION,
             storage_digest()
         );
         output.push_str("## Subject families\n\n| Family | Pattern | Client writable | Description |\n|---|---|---:|---|\n");
         for spec in self.subjects.values() {
+            // Registry descriptions are hashed compatibility data; branding belongs in this view.
+            let description = match spec.description.as_str() {
+                "An st3 daemon." => "A Fractal daemon.",
+                "A Small Talk message." => "A Fractal message.",
+                description => description,
+            };
             output.push_str(&format!(
                 "| `{}` | `{}` | {} | {} |\n",
                 spec.family,
                 spec.pattern,
                 if spec.client_writable { "yes" } else { "no" },
-                markdown_cell(&spec.description)
+                markdown_cell(description)
             ));
         }
         output.push_str("\nCustom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE.NAME`.\n\n");
@@ -707,6 +714,7 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
         if kind == directive_notes::KIND {
@@ -781,6 +789,12 @@ impl Registry {
                 validate_value(kind, name, value, field)?;
                 self.validate_reference(kind, name, value, field)?;
             }
+        }
+        if kind == "uri.reference"
+            && let Some(uri) = facts.get("uri").and_then(Value::as_str)
+            && private_notes::claims(uri)
+        {
+            private_notes::PrivateNotesUri::parse(uri)?;
         }
         Ok(spec)
     }
@@ -1202,6 +1216,14 @@ fn build_registry() -> Registry {
 fn resource_specs() -> BTreeMap<String, ResourceSpec> {
     let mut resources = BTreeMap::new();
     resources.insert("arrangement".into(), resource("arrangement", "A person-owned per-register arrangement.", &[("owner", FieldSpec { immutable: true, ..required_reference_to(&["person"]) }), ("body", object())]));
+    resources.insert(
+        "uri.reference".into(),
+        resource(
+            "uri.reference",
+            "An external resource addressed by an opaque absolute URI.",
+            &[("uri", immutable_string())],
+        ),
+    );
     resources.insert(
         "vcs.repository".into(),
         resource(
@@ -4714,6 +4736,7 @@ mod tests {
 
     #[test]
 
+
     fn registry_rejects_the_removed_plan_names() {
         let registry = registry();
         for subject in ["plan/example", "plan-run/example"] {
@@ -5037,6 +5060,19 @@ mod tests {
             include_str!("../../../docs/st3/schema.md"),
             registry().markdown()
         );
+    }
+
+    #[test]
+    fn markdown_brands_subjects_without_changing_registry_descriptions() {
+        let registry = registry();
+        assert_eq!(registry.subjects["daemon"].description, "An st3 daemon.");
+        assert_eq!(registry.subjects["message"].description, "A Small Talk message.");
+        let markdown = registry.markdown();
+        assert!(markdown.starts_with("# Fractal schema registry\n"));
+        assert!(markdown.contains("A Fractal daemon."));
+        assert!(markdown.contains("A Fractal message."));
+        assert!(!markdown.contains("An st3 daemon."));
+        assert!(!markdown.contains("A Small Talk message."));
     }
 
     #[test]

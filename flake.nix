@@ -15,7 +15,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/4e87aab8bc8dbab8b05040c3c23558c3e34d4773";
+      "github:overengineeringstudio/effect-utils/e5e22238a4586676e4f762b078da50ada9838074";
   };
 
   outputs =
@@ -105,7 +105,7 @@
                 person = "person/ada";
                 socket = "/tmp/fractal-test.sock";
                 ptyPackage = ptyPackage;
-                declarations.seats = [ ./examples/st3/seats/claude.kdl ];
+                declarations.seats = [ ./examples/fractal/seats/claude.kdl ];
               } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" "homeFiles" "configFiles" ];
             })
           ];
@@ -253,7 +253,7 @@
           "fractal-pty-stats-component"
           "--exclude"
           "fractal-vista-component"
-          # `checks.st3` gates these crates with the runtime inputs their tests need.
+          # The Fractal check (`checks.st3`) gates these crates with the runtime inputs their tests need.
           "--exclude"
           "smallclaims"
           "--exclude"
@@ -327,8 +327,8 @@
 
           inherit cargoDeps;
 
-          # The workspace default members include the st3 crates. This package ships only st2;
-          # st3, `st`, and st3-migrate come from the fractal package, so each has one build.
+          # The workspace default members include the Fractal crates. This package ships only st2;
+          # the current runtime, CLI aliases and migration tool come from the fractal package.
           cargoBuildFlags = [
             "-p"
             "fractal-legacy-runner"
@@ -338,7 +338,7 @@
           # over the LocalStamp `build.rs` bakes from git (which is empty here
           # anyway — a flake source carries no `.git`). Reaches rustc as a plain
           # env var, captured at compile time by `option_env!` (see
-          # crates/st-build-stamp). A derivation env var change rebuilds the crate.
+          # crates/fractal-build-stamp). A derivation env var change rebuilds the crate.
           CLI_BUILD_STAMP = buildStamp;
           ST2_EXECUTOR_BUILD_IDENTITY = buildStamp;
           AGENT_SPEC_REVISION = agentSpecRevision;
@@ -442,21 +442,21 @@
           };
         };
 
-        # Tests that checks.st3 leaves out because the Nix build sandbox cannot give them what they
+        # Tests that the Fractal check leaves out because the Nix build sandbox cannot give them what they
         # need. One named list, a reason and an owner per entry; central CI and the wrapper path
         # still run every one of them. The check fails if an entry no longer names exactly one
         # test, and any test not listed here must pass.
         st3Exclusions =
           let
-            list = (builtins.fromJSON (builtins.readFile ./nix/st3-check-exclusions.json)).exclusions;
+            list = (builtins.fromJSON (builtins.readFile ./nix/fractal-check-exclusions.json)).exclusions;
             key = e: "${e.package}/${e.binary}/${e.test}";
           in
-          assert pkgs.lib.assertMsg (list != [ ]) "nix/st3-check-exclusions.json lists no exclusion";
+          assert pkgs.lib.assertMsg (list != [ ]) "nix/fractal-check-exclusions.json lists no exclusion";
           assert pkgs.lib.assertMsg (builtins.all (e: e.reason != "" && e.owner != "") list)
-            "every st3 check exclusion needs a reason and an owner";
+            "every Fractal check exclusion needs a reason and an owner";
           assert pkgs.lib.assertMsg (
             builtins.length (pkgs.lib.unique (map key list)) == builtins.length list
-          ) "st3 check exclusions must be unique";
+          ) "Fractal check exclusions must be unique";
           list;
         st3ExcludedFilter = pkgs.lib.concatMapStringsSep " | " (
           e: "(package(=${e.package}) & binary(=${e.binary}) & test(=${e.test}))"
@@ -490,7 +490,7 @@
               fi
             done
           '';
-          # Stamp st3 from this declared flake source; it hands the stamp to its libraries at startup.
+          # Stamp Fractal from this declared flake source; it hands the stamp to its libraries at startup.
           CLI_BUILD_STAMP = buildStamp;
           # A declared immutable input, captured by option_env! in fractal-schema.
           # Empty means no packaged policy: verification refuses all requests.
@@ -585,7 +585,7 @@
               --message-format json -E ${pkgs.lib.escapeShellArg st3ExcludedFilter} > excluded-tests.json
             matched=$(jq '[.["rust-suites"][].testcases | to_entries[] | select(.value["filter-match"].status == "matches")] | length' excluded-tests.json)
             if [ "$matched" -ne ${toString (builtins.length st3Exclusions)} ]; then
-              echo "nix/st3-check-exclusions.json lists ${toString (builtins.length st3Exclusions)} tests but $matched match; remove or fix the stale entries" >&2
+              echo "nix/fractal-check-exclusions.json lists ${toString (builtins.length st3Exclusions)} tests but $matched match; remove or fix the stale entries" >&2
               exit 1
             fi
             cargo nextest run --release --offline --target ${rustHostTarget} \
@@ -1131,7 +1131,7 @@
         # Keep derivation-path assertions lazy until the check's builder is evaluated:
         # flake discovery must not force package inputs (including the installation hash guard).
         checks.st3-runtime-inputs = pkgs.runCommand "st3-runtime-inputs" { } (
-          assert import ./nix/st3-runtime-input-tests.nix {
+          assert import ./nix/fractal-runtime-input-tests.nix {
             inherit self system;
             baseline = messagingCompat;
             inputs = { inherit nixpkgs flake-utils fenix pty effect-utils; };
@@ -1915,7 +1915,7 @@
           '';
         };
         # The web workspace's toolchain comes from effect-utils' own nixpkgs pin, not the root
-        # Rust nixpkgs: pnpm 12.7.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
+        # Rust nixpkgs: pnpm 12.15.0 (`mkPnpm`), Node 24.20, Bun 1.4.2, Corepack 0.36 and Buck2.
         # The Buck root mirrors `mkConsumerBuckRoot`; its rules and capabilities cells are linked
         # into `.buck2/` from the store, and `scripts/ci-fractal-web` fails if the checked-in
         # `.buckconfig`, `BUCK` or `buck2/toolchains/BUCK` drift from it.

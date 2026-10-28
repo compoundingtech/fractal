@@ -10,7 +10,7 @@ import { Banner, Button, T, useTextAppearance } from './ui';
 // What every screen's content shares: the connection, problems worth reading, and pull to refresh.
 // The navigation bar and tab bar above and below are native and styled only through their options.
 
-/** `● live example-linux · person/alex`, as stui's top-right corner says it. The first line of a list. */
+/** `● live example-linux · person/alex`, as the Fractal terminal UI's top-right corner says it. The first line of a list. */
 /** How long ago, as a person says it: 40s, 12m, 5h. */
 function ageOf(ms: number): string | null {
   if (!Number.isFinite(ms)) return null;
@@ -21,7 +21,7 @@ function ageOf(ms: number): string | null {
 export function StatusLine() {
   const { status, hasSynced, gatewayHost, caps, snapshot, data, cachedAt } = useStore();
   const appearance = useTextAppearance();
-  // Not live, what is shown is st's last snapshot: say how old it is.
+  // Not live, what is shown is Fractal's last snapshot: say how old it is.
   const age = snapshot ? ageOf(Date.now() - Date.parse(snapshot.created_at)) : cachedAt ? ageOf(Date.now() - cachedAt) : null;
   const shown = age ? `showing data from ${age} ago` : 'showing last data';
   const [glyph, color, word] = status === 'online' ? ['●', theme.idle, 'live']

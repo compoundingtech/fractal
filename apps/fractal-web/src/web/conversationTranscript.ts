@@ -12,6 +12,7 @@ import { ConversationItem, type RunStatus, type SendState } from '../conversatio
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
+import { toolKindFor } from '../conversation/toolClassification.ts'
 
 /** Unknown protocol events are hidden by default; mixed messages retain an explicit body disclosure. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
@@ -52,23 +53,25 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
 
 const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent' && item.mixedContent !== true
 
-/** The host owns work-log classification: how a tool reads, runs or edits. */
-const toolKindFor = (name: string): WorkKind => {
-  const tool = name.toLowerCase()
-  if (/(?:^|[/_.-])(?:bash|sh|shell|exec|execute|run|command|eval|task|infra)(?:$|[/_.-])/.test(tool)) return 'run'
-  return /(?:edit|write|patch|apply)/.test(tool) ? 'edit' : 'read'
+
+/** Fallback titles when the call records no human intent; read/run/edit keep their established wording. */
+const kindTitles: Readonly<Record<Exclude<WorkKind, 'unknown'>, string>> = {
+  read: 'Reading information', run: 'Running a command', edit: 'Updating a file', search: 'Searching',
+  subagent: 'Delegating work', web: 'Browsing the web', decision: 'Asking for a decision', todo: 'Updating the plan',
+  wait: 'Waiting', message: 'Sending a message', schedule: 'Scheduling work', 'terminal-input': 'Sending terminal input', skill: 'Using a skill',
 }
 
 /** Human intent belongs in the header; raw paths and commands remain on the source tool item. */
 const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): string => {
+  if (item.skipped) return 'Skipped'
   const input = typeof item.input === 'object' && item.input !== null ? item.input : {}
   for (const key of ['i', 'title', 'description']) {
     const value = key in input ? Reflect.get(input, key) : undefined
     if (typeof value === 'string' && value.trim().length > 0 && !/(?:[a-z]+:\/\/|\/[\w.-]+\/)/i.test(value))
       return value.trim().replace(/\s+/g, ' ').slice(0, 100)
   }
-  return toolKindFor(item.name) === 'run' ? 'Running a command'
-    : toolKindFor(item.name) === 'edit' ? 'Updating a file' : 'Reading information'
+  const kind = toolKindFor(item)
+  return kind === 'unknown' ? item.name : kindTitles[kind]
 }
 
 const activeRunStatuses: Record<RunStatus, boolean> = { queued: true, running: true, waiting: true, completed: false, failed: false, cancelled: false }
@@ -137,7 +140,7 @@ export const prepareTranscriptTurns = (
       if (caption !== undefined) senderCaptions[item.id] = caption
     }
     const work = workLogTurnFromItems(prompt === undefined ? turnItems : [prompt, ...turnItems], {
-      kindFor: toolKindFor,
+      kindFor: (name, call) => toolKindFor(call ?? name),
       ...workFactsFor(first.at ?? '', turnItems),
       ...(first.at === undefined ? {} : { startedAt: first.at }),
       ...(turns.length === 0 && !options.firstTurnComplete ? { completeHistory: false } : {}),
@@ -156,6 +159,7 @@ export const prepareTranscriptTurns = (
     turnItems = []
   }
   for (const sourceItem of items) {
+    // Unsupported is always retained: F2 markers are not a system-events preference.
     if (!options.showSystemEvents && isOmittedItem(sourceItem)) continue
     // Only mixed messages carry their full body to the kit's opt-in disclosure.
     // Other unknown protocol rows remain payload-free notices under explicit inspection.
@@ -203,13 +207,14 @@ export type ConversationTranscriptState =
     }
 
 /** Why the pane cannot show a conversation; `not-found` comes from the read error's code, never its message. */
-export type UnavailableClassification = 'ungranted' | 'unsupported' | 'not-found' | 'failed'
+export type UnavailableClassification = 'ungranted' | 'unsupported' | 'peer-too-old' | 'not-found' | 'failed'
 
 /** Fixed copy only: feed.detail carries source diagnostics and never reaches rendered or accessible text. */
 const unavailableCopy: Readonly<Record<UnavailableClassification, { readonly reason: string; readonly detail: string }>> = {
   ungranted: { reason: 'Conversation access not granted', detail: 'Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
   unsupported: { reason: 'Conversation not supported', detail: 'This gateway does not support this surface. Choose another surface; your saved work is unchanged.' },
   'not-found': { reason: 'Conversation not found', detail: 'There is no conversation for this agent right now. Ask the gateway owner to grant access to this surface. Your saved work is unchanged.' },
+  'peer-too-old': { reason: 'Host update required', detail: 'This host runs an older Fractal version; update it to open subagent conversations. Your draft is unchanged.' },
   failed: { reason: 'Conversation unavailable', detail: 'The gateway could not load this conversation. Your draft is unchanged.' },
 }
 
@@ -224,7 +229,8 @@ export const mapConversationFeed = (
     case 'Waiting':
       return { _tag: 'Waiting' }
     case 'Unavailable': {
-      const classification: UnavailableClassification = feed.reason === 'failed' && feed.code === 'not-found' ? 'not-found' : feed.reason
+      const classification: UnavailableClassification = feed.code === 'peer-too-old' ? 'peer-too-old'
+        : feed.reason === 'failed' && feed.code === 'not-found' ? 'not-found' : feed.reason
       const code = feed.code !== undefined && diagnosticCode.test(feed.code) ? feed.code : undefined
       return { _tag: 'Unavailable', classification, code, availability: { _tag: 'Unavailable', ...unavailableCopy[classification] } }
     }

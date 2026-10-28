@@ -146,6 +146,9 @@ pub enum ClientReadOperation {
         limit: usize,
         cursor: Option<String>,
     },
+    SessionDetail {
+        session_id: String,
+    },
     TerminalScreen {
         terminal_id: String,
         /// Ask the owner for its best-effort session facts too.
@@ -779,13 +782,25 @@ impl ClientRelay {
         peer: &PeerConfig,
         request: &ClientReadRequest,
     ) -> Result<serde_json::Value> {
-        if matches!(request.request, ClientReadOperation::Messages { messages_paging: true, .. }) {
+        let required = match &request.request {
+            ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
+            ClientReadOperation::Timeline { session_id, .. }
+            | ClientReadOperation::ConversationContent { session_id, .. }
+            | ClientReadOperation::ConversationChanges { session_id, .. }
+                if session_id.starts_with("session/external-child-") =>
+            {
+                Some(("session-detail-child-id", 1))
+            }
+            ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            _ => None,
+        };
+        if let Some((id, version)) = required {
             let capabilities = self.send_http(peer, request, true).await?;
             if !capabilities["capabilities"].as_array().is_some_and(|items| {
-                items.iter().any(|item| item["id"] == "messages-paging"
-                    && item["version"] == 2 && item["state"] == "granted")
+                items.iter().any(|item| item["id"] == id
+                    && item["version"] == version && item["state"] == "granted")
             }) {
-                return Err(messages_paging_unsupported().into());
+                return Err(client_read_unsupported(&request.request).into());
             }
         }
         self.send_http(peer, request, false).await
@@ -871,9 +886,12 @@ impl ClientRelay {
         if let Some(trace) = relay_trace::current() {
             trace.http_status(status.as_u16());
         }
-        // Old workers expose only POST here. Never probe them with a new operation or flag.
+        // Pre-discovery workers expose only POST; Axum's 404/405 has no fleet signature.
+        // Classify that absence without probing their closed decoder. A plain-HTTP
+        // intermediary can forge this refusal, but already can deny service; it can only
+        // change the explanation, never grant a capability or authorize an operation.
         if inspect_capabilities && matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
-            return Err(messages_paging_unsupported().into());
+            return Err(client_read_unsupported(&request.request).into());
         }
         if status == StatusCode::UNAUTHORIZED {
             return Err(ClientReadRejected::unreachable(
@@ -940,6 +958,12 @@ impl ClientRelay {
                     "the peer client read protocol differs"
                 );
                 Ok(envelope)
+            }).map_err(|error| {
+                if inspect_capabilities && status.is_success() {
+                    client_read_unsupported(&request.request).into()
+                } else {
+                    error
+                }
             })?;
         if !status.is_success() {
             return Err(ClientReadRejected {
@@ -1242,6 +1266,20 @@ async fn forward_client_read(
         })
 }
 
+fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejected {
+    if matches!(operation, ClientReadOperation::Messages { .. }) {
+        return messages_paging_unsupported();
+    }
+    let mut rejected = ClientReadRejected::new(
+        "peer-too-old",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "This host runs an older Fractal version; update it to open subagent conversations.",
+    );
+    rejected.details.insert("capability".into(), "session-detail-child-id".into());
+    rejected.details.insert("version".into(), 1.into());
+    rejected
+}
+
 fn messages_paging_unsupported() -> ClientReadRejected {
     ClientReadRejected::new(
         "unsupported-capability",
@@ -1262,7 +1300,10 @@ async fn client_read_capabilities(
     };
     signed_response_for(
         &state, CLIENT_READ_PATH, &FleetAuth::body_digest(&[]), 0,
-        serde_json::json!({"capabilities":[{"id":"messages-paging","version":2,"state":"granted"}]}),
+        serde_json::json!({"capabilities":[
+            {"id":"messages-paging","version":2,"state":"granted"},
+            {"id":"session-detail-child-id","version":1,"state":"granted"}
+        ]}),
     ).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
@@ -1362,6 +1403,9 @@ async fn receive_client_read(
                 let value = answer?.value;
                 relay_trace::result(Phase::Envelope, || Ok(serde_json::to_value(value)?))
             }
+            ClientReadOperation::SessionDetail { session_id } => {
+                Ok(serde_json::to_value(client.sessions_get(&session_id).await?.value)?)
+            }
             ClientReadOperation::TerminalScreen { terminal_id, facts } => {
                 let value = if facts {
                     client.terminal_screen_with_facts(&terminal_id).await?.value
@@ -1421,6 +1465,7 @@ async fn receive_client_read(
                     runtime_desired_revision: None,
                     terminal_sequence: Some(expected_sequence),
                     preview_token: None,
+                    private_notes: None,
                 };
                 let result = match action_type.as_str() {
                     "terminal.input" => {
@@ -1708,7 +1753,12 @@ fn started_at_unix_ms() -> u64 {
 impl Backend for MainBackend {
     async fn ready(&self) {
         loop {
-            if self.client.get::<serde_json::Value>("/v1/health").await.is_ok() {
+            if let Ok(health) = self.client.get::<serde_json::Value>("/v1/health").await {
+                if let Some(warning) = crate::replication_worker_build::startup_warning(
+                    health.get("build").and_then(|build| build.get("commit")).and_then(Value::as_str),
+                ) {
+                    eprintln!("st replication-worker: WARNING: {warning}");
+                }
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1951,6 +2001,9 @@ pub async fn conversation_gateway_relay(
 /// Run the replication worker: sync this node's store, through its daemon, with the fleet.
 pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     config.validate()?;
+    if let Err(error) = crate::replication_worker_build::record(&config.state_dir) {
+        eprintln!("st replication-worker: WARNING: cannot report worker build: {error:#}");
+    }
     let worker = WorkerConfig {
         node: config.node.clone(),
         fleet_id: config

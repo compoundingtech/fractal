@@ -67,6 +67,10 @@ pub struct FractalRuntime {
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub agent_roster_requested_at: std::sync::atomic::AtomicU64,
+    /// Serializes request capture/restoration with projection-generation reset.
+    pub agent_roster_request_generation: parking_lot::Mutex<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub agent_roster_restore_checked: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Bit 0: a refresh is in flight. Bit 1: the last attempt failed.
     pub agent_roster_attempt: std::sync::atomic::AtomicU8,
     /// Fault retries due in this fold, and deadlines deferred to the next refresh.
@@ -85,6 +89,9 @@ pub struct FractalRuntime {
     /// Counts complete current roster publications, same graph index or not, so collection
     /// streams that read an earlier one reread the newer.
     pub agent_roster_published: tokio::sync::watch::Sender<u64>,
+    /// Complete presented current rosters share the existing generation-fenced list owner.
+    pub presented_agents: published_list::PublishedList<agents_publication::PresentedAgents>,
+    pub presented_agents_epoch: agents_publication::NodeEpoch,
     /// Every other collection's published view revisions, for the same rereads.
     pub published_views: published_views::PublishedViews,
     /// The attention list a daemon's refresher publishes for collection windows.
@@ -172,6 +179,14 @@ impl Store {
 impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
+        resource_references::create_schema(connection)?;
+        // Legacy run stamps are projection metadata, not ownership of a shared URI.
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h379d33768384 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run=NULL, owner_generation=NULL, owner_step=NULL
+             WHERE kind='resource' AND subject LIKE 'resource/uri/%'
+               AND (owner_run IS NOT NULL OR owner_generation IS NOT NULL OR owner_step IS NOT NULL)",
+            [],
+        )?;
         push_registrations::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5484380b8507 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
@@ -345,6 +360,7 @@ impl Runtime for FractalRuntime {
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
         projectors::run_hooks(projectors::OPEN, transaction)?;
+        resource_references::open(transaction, shared_memory)?;
         if shared_memory {
             rebuild_operations_tx(transaction)?;
             rebuild_planning_tx(transaction)?;
@@ -502,6 +518,13 @@ impl Runtime for FractalRuntime {
     }
 
     fn forget_views(&self) {
+        // Pending work names the discarded projection generation. A recent reader or a
+        // live subscriber below can request a new-generation publication after invalidation.
+        {
+            let _generation = self.agent_roster_request_generation.lock();
+            self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
+            self.presented_agents.forget();
+        }
         self.forget_reductions();
         *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
@@ -622,7 +645,7 @@ impl Runtime for FractalRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.slo-breach-episodes.v1";
+    "st3.shared-projections.slo-breach-episodes-declared-resource-edges.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {
@@ -693,11 +716,23 @@ impl FractalRuntime {
     /// store. Where agents lists are being read, start it here rather than when the next read
     /// finds no roster and waits for it. A node nobody reads keeps folding only on demand, so a
     /// long catch-up or trim that forgets once per chunk does not refold it once per chunk.
-    fn wake_read_roster(&self) {
+    pub fn agents_publication_demand(&self) -> bool {
         let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
-        let read_lately = read_at != 0
-            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64;
-        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| read_lately) {
+        self.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire) != 0
+            || self.presented_agents.has_subscribers() || (read_at != 0
+                && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64)
+    }
+
+    pub fn wake_read_roster(&self) {
+        if self.agents_publication_demand() {
+            self.request_roster_refresh();
+        }
+    }
+
+    /// A queued startup, explicit-read or local-activity request remains demand until answered.
+    pub fn request_roster_refresh(&self) {
+        if let Some(wake) = self.agent_roster_refresh.get() {
+            let _generation = self.agent_roster_request_generation.lock();
             let _ = self.agent_roster_requested_at.compare_exchange(
                 0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
                 std::sync::atomic::Ordering::Relaxed,

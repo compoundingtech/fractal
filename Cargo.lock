@@ -1617,6 +1617,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "inotify",
  "jsonschema",
  "kdl",
  "libc",
@@ -1731,6 +1732,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bytes",
+ "chrono",
  "ciborium",
  "crossterm",
  "fractal-schema",
@@ -1740,6 +1742,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "iroh-base",
+ "jsonschema",
  "libc",
  "opentelemetry",
  "opentelemetry_sdk",
@@ -1953,6 +1956,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
  "tracing-opentelemetry",
@@ -2479,6 +2483,7 @@ version = "0.1.0"
 name = "fractal-store"
 version = "0.1.0"
 dependencies = [
+ "agent-spec",
  "anyhow",
  "axum",
  "base64 0.22.1",
@@ -2509,6 +2514,7 @@ dependencies = [
  "notify",
  "opentelemetry",
  "opentelemetry_sdk",
+ "parking_lot",
  "proptest",
  "pty-client",
  "pty-core",
@@ -3332,8 +3338,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cc00ea907cab49550b7da656f80ebb97be1b997d931fbcd28d39734e17ce592"
 dependencies = [
  "bitflags 2.13.1",
+ "futures-util",
  "inotify-sys",
  "libc",
+ "tokio",
 ]
 
 [[package]]

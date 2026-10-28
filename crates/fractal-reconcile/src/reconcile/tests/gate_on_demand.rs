@@ -9,7 +9,7 @@ mission "orchid" state="ready" {
     round {
       completion { when "all-steps-exhausted" }
       agent "builder" { workspace "/tmp"; command "true"; restart "never" }
-      agent "gate" { workspace "/tmp"; command "true"; restart "never" }
+      agent "gate" { workspace "/tmp"; command "true"; restart "never"; resource "review" uri="urn:example:gate-review" }
       agent "helper" { workspace "/tmp"; command "true"; restart "never" }
       step "build" { assigned-to "agent/${ST_MISSION_RUN}/builder" }
       step "gate" {
@@ -215,6 +215,15 @@ fn gate_on_demand_waits_for_builder_then_starts_once_and_receives_work() {
     assert_eq!(fixture.step("gate").status, "ready");
     assert_eq!(fixture.gate_starts(), 1);
     let gate = format!("agent/{}/gate", fixture.round.id);
+    let (_, desired) = fixture.store.agent_declaration(&gate, None).unwrap().unwrap();
+    let references = crate::graph::declared_resources(&desired);
+    let uris = fixture.store.declared_resource_uris(&references).unwrap();
+    assert_eq!(uris[&references[0].subject], "urn:example:gate-review");
+    let target = fixture.store.desired_subjects_named(&[references[0].subject.clone()])
+        .unwrap().remove(0);
+    assert!(target.owner_run.is_none());
+    assert!(target.owner_generation.is_none());
+    assert!(target.owner_step.is_none());
     let readiness = fixture
         .store
         .claims_for(&fixture.step("gate").subject, Some("step-run.state"))
