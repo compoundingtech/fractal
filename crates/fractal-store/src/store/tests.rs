@@ -8179,6 +8179,79 @@ fn a_resting_re_stamp_after_work_activity_replicates_so_readers_see_the_seat_res
     assert_eq!(observed(&store), 2, "a re-stamp with nothing newer stays local");
 }
 
+/// The fold orders work activity and observations canonically, not by arrival: a replicated
+/// observation can arrive after a work claim it canonically precedes. The re-stamp after it still
+/// replicates, or readers would fold the seat working until its state next changed.
+#[test]
+fn a_resting_re_stamp_after_work_that_arrived_earlier_but_is_canonically_newer_replicates() {
+    let minute = 60_000_u128;
+    let store = Store::open_memory("node").unwrap();
+    let peer = Store::open_memory("peer").unwrap();
+    let subject = "agent/node.worker";
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(subject.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("incarnation_id".into(), json!("inc-1")),
+            ]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    let start = now_ms();
+    let state = |store: &Store| {
+        current_harness_at(&store.readers.get(), subject, None).unwrap().map(|harness| harness.state)
+    };
+    let observed = |store: &Store| store.claims_for(subject, Some("harness.observed")).unwrap().len();
+    // The peer observes the seat idle first ...
+    append_latest_observation_publication(
+        &peer.graph, &harness_state(subject, "idle", start as u64), start, None,
+    )
+    .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    // ... then the seat reports work here, before the peer's observation arrives.
+    {
+        let mut connection = store.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction,
+            &store.origin,
+            "step-run/bench/work",
+            "work.progress",
+            Some(subject),
+            &json!({"fields": {
+                "attempt": 1,
+                "status": "working",
+                "worker_reported": true,
+                "claimant": subject,
+                "claim_incarnation": "inc-1",
+                "claim_expires_at_unix_ms": start.saturating_add(60 * minute),
+                "readiness_epoch": 1,
+            }}),
+            &[],
+            None,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+    }
+    receive_and_project(&store, "peer", &exchange_from(&peer, &ReplicationInventory::default()));
+    assert_eq!(observed(&store), 1);
+    assert_eq!(state(&store).as_deref(), Some("working"), "the work claim is canonically newer");
+    append_latest_observation_publication(
+        &store.graph,
+        &harness_state(subject, "idle", (start + 5 * minute) as u64),
+        start + 5 * minute,
+        Some("inc-1"),
+    )
+    .unwrap();
+    assert_eq!(observed(&store), 2, "the re-stamp after it replicates");
+    assert_eq!(state(&store).as_deref(), Some("idle"));
+}
+
 #[test]
 fn harness_usage_replicates_on_a_schedule_while_working_and_at_once_when_it_stops() {
     let store = Store::open_memory("node").unwrap();

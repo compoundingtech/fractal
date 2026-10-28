@@ -8771,8 +8771,10 @@ fn latest_harness_of_incarnation_tx(
 }
 
 /// Whether readers fold the seat's harness to `latest` itself: no other observation of the
-/// seat is newer, and this incarnation has claimed or reported no work since it, which the
-/// harness fold reads as working until a newer observation replicates.
+/// seat is newer, and this incarnation has claimed or reported no work canonically after it,
+/// which the harness fold reads as working until a newer observation replicates. Both use the
+/// fold's canonical order, not arrival order: a replicated work claim can arrive before an
+/// observation it canonically follows.
 fn harness_view_rests_on_tx(
     transaction: &Transaction<'_>,
     subject: &str,
@@ -8784,16 +8786,32 @@ fn harness_view_rests_on_tx(
     {
         return Ok(false);
     }
-    let worked: bool = transaction
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_actor_work_activity_index
+    // A canonical key leads with the accepted time, so only work accepted no earlier than the
+    // observation can follow it.
+    let accepted = latest.accepted_at_unix_ms.to_string();
+    let candidates = transaction
+        .prepare(
+            "SELECT id FROM claims INDEXED BY claims_actor_work_activity_index
              WHERE actor=?1 AND json_extract(body, '$.fields.claim_incarnation')=?2
-               AND store_index>?3 AND kind IN ('work.claimed','work.progress'))",
-            params![subject, incarnation, latest.store_index],
-            |row| row.get(0),
+               AND kind IN ('work.claimed','work.progress')
+               AND (length(accepted_at_unix_ms)>length(?3)
+                    OR (length(accepted_at_unix_ms)=length(?3) AND accepted_at_unix_ms>=?3))",
         )
+        .map_err(internal)?
+        .query_map(params![subject, incarnation, accepted], |row| row.get::<_, String>(0))
+        .map_err(internal)?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(internal)?;
-    Ok(!worked)
+    if candidates.is_empty() {
+        return Ok(true);
+    }
+    let latest_key = canonical::claim_key(transaction, &latest.id).map_err(internal)?;
+    for work in candidates {
+        if canonical::claim_key(transaction, &work).map_err(internal)? > latest_key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Publish a harness observation when any field other than its observation time differs
