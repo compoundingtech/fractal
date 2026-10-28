@@ -525,6 +525,20 @@ def shared_target(tree_target=None):
     return target, lock
 
 
+# The slices whose every cgroup is capped: a seat lane's (docs/st3/seat-lanes.md) and the host build slice.
+CAPPED_SLICES = ('app-lanes.slice', 'builds.slice')
+
+
+def own_cap(cgroup_file='/proc/self/cgroup'):
+    """The capped slice this process runs in (CAPPED_SLICES), or None: read from its own cgroup v2 path."""
+    try:
+        text = Path(cgroup_file).read_text()
+    except OSError:
+        return None
+    path = next((line[3:] for line in text.splitlines() if line.startswith('0::')), '')
+    return next((part for part in path.split('/') if part in CAPPED_SLICES), None)
+
+
 def governed(argv, name):
     """`argv` (evidence-wrap and the check under it) as the host's build cap governs a check that builds: a builds.slice scope around
     everything it starts, so compiles a test runner starts without the shim (cargo-nextest, sccache) still get the slice's CPU, IO and
@@ -536,12 +550,13 @@ def governed(argv, name):
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
     evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too.
 
-    A caller that already runs under a cap (BUILDS_SLICE_ACTIVE, as the cargo shim and the test runner read it) runs the check in
-    place: a seat with a lane (docs/st3/seat-lanes.md) builds inside its own lane, never in builds.slice beside it."""
+    A caller whose own cgroup is already under a cap runs the check in place: a seat with a lane (docs/st3/seat-lanes.md) builds
+    inside its own lane, never in builds.slice beside it. The cgroup decides, never an environment variable a caller could set."""
     if os.environ.get('ST_EVIDENCE_GOVERN') == 'off':
         return argv
-    if os.environ.get('BUILDS_SLICE_ACTIVE'):
-        print(f'fractal-test: {name} runs in the caller\'s own cap (BUILDS_SLICE_ACTIVE: a seat lane or builds.slice)', file=sys.stderr)
+    cap = own_cap()
+    if cap:
+        print(f'fractal-test: {name} runs in the caller\'s own cap ({cap})', file=sys.stderr)
         return argv
     runtime = os.environ.get('XDG_RUNTIME_DIR')
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's

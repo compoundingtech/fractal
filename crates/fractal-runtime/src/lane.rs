@@ -188,7 +188,7 @@ pub(crate) fn applied(capacity: Option<Capacity>, unit: &str, systemd_254: bool)
 
 /// What a laned task's environment adds so its builds stay in the lane. The cargo shim and the
 /// test runner on the build hosts run in place under `BUILDS_SLICE_ACTIVE` instead of moving into
-/// `builds.slice`, and `scripts/st-test` follows the same rule. The managed sccache server compiles
+/// `builds.slice` (`scripts/st-test` reads its own cgroup instead: [`LANES_SLICE`]). The managed sccache server compiles
 /// in `builds.slice`, so a lane names a server socket of its own and the client starts that server
 /// inside the lane, on the same on-disk cache. A seat that names its own sccache server keeps it.
 pub(crate) fn environment(

@@ -48,8 +48,8 @@ new scope elsewhere. Today three do:
 3. `scripts/st-test` `governed()` wraps each building check in a `builds.slice` scope.
 
 The first two already run in place when `BUILDS_SLICE_ACTIVE` is set, so a lane's environment sets
-it, and `governed()` now follows the same rule (the variable survives the seat scrub and
-`ci-local`, which drop `ST_*` and `FRACTAL_*`). The host's sccache server runs in `builds.slice`, so
+it. `governed()` signs checks, so it does not take a variable's word: it runs a check in place only
+when its own cgroup is inside `app-lanes.slice` or `builds.slice`. The host's sccache server runs in `builds.slice`, so
 compiles sent to it would leave the lane: a lane sets `SCCACHE_SERVER_UDS` to a socket of its own,
 and the client starts that server inside the lane, on the same on-disk cache. A seat that names its
 own server keeps it. The build admission queue (slots, load and memory checks) still applies to a

@@ -106,6 +106,41 @@ class PoolTreeTest(unittest.TestCase):
                 git(repo, 'worktree', 'remove', '--force', str(tree))
 
 
+own_cap = st_test.own_cap  # the real reader, before a test replaces it
+
+
+class GovernedTest(unittest.TestCase):
+    """A building check runs in builds.slice unless its caller's own cgroup is already capped (a seat lane or builds.slice)."""
+
+    def governed_in(self, cgroup, environment=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'bus').touch()
+            Path(tmp, 'cgroup').write_text(cgroup)
+            with mock.patch.dict(os.environ, dict(environment or {}, XDG_RUNTIME_DIR=tmp), clear=True), \
+                    mock.patch.object(st_test, 'own_cap', lambda: own_cap(Path(tmp, 'cgroup'))), \
+                    mock.patch.object(st_test.shutil, 'which', return_value='/usr/bin/systemd-run'), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                return st_test.governed(['check'], 'linux-gate')
+
+    def test_a_laned_or_slice_bound_caller_runs_in_place(self):
+        for cgroup in ('0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/st3-seat-1-0.scope\n',
+                       '0::/user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope\n'):
+            self.assertEqual(self.governed_in(cgroup), ['check'], cgroup)
+
+    def test_an_uncapped_caller_is_scoped_whatever_its_environment_says(self):
+        cgroup = '0::/user.slice/user-1000.slice/user@1000.service/app.slice/st3-seat-1-0.scope\n'
+        for environment in ({}, {'BUILDS_SLICE_ACTIVE': '1'}):
+            governed = self.governed_in(cgroup, environment)
+            self.assertIn('--slice=builds.slice', governed, environment)
+            self.assertEqual(governed[-1], 'check')
+
+    def test_an_unreadable_cgroup_is_no_cap(self):
+        self.assertIsNone(own_cap(Path('/nonexistent/cgroup')))
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'cgroup').write_text('0::/user.slice/app-lanes.slice-not/x.scope\n')
+            self.assertIsNone(own_cap(Path(tmp, 'cgroup')))
+
+
 class StTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

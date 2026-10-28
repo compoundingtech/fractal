@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Seat lanes, step 1: an agent (top-level or in a mission) may declare `capacity cores=N memory=\"SIZE\"`. On a Linux host whose config sets `lanes = \"on\"`, that seat's scope starts in app.slice/app-lanes.slice with CPUQuota, MemoryMax, MemorySwapMax (a quarter of the memory), OOMPolicy=continue and TasksMax, and its builds stay inside it (BUILDS_SLICE_ACTIVE and a lane-private sccache socket; scripts/st-test's builds.slice wrapper honors BUILDS_SLICE_ACTIVE). Seats without a declaration, and every seat on a host with the switch off, run as before.",
+  "summary": "Seat lanes, step 1: an agent (top-level or in a mission) may declare `capacity cores=N memory=\"SIZE\"`. On a Linux host whose config sets `lanes = \"on\"`, that seat's scope starts in app.slice/app-lanes.slice with CPUQuota, MemoryMax, MemorySwapMax (a quarter of the memory), OOMPolicy=continue and TasksMax, and its builds stay inside it (BUILDS_SLICE_ACTIVE and a lane-private sccache socket; scripts/st-test's builds.slice wrapper runs a check in place when its own cgroup is in app-lanes.slice or builds.slice). Seats without a declaration, and every seat on a host with the switch off, run as before.",
   "replay": {
     "status": "none",
     "detail": "No claim, event or replay change; the member record gains an optional field."
