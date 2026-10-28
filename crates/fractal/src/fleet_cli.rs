@@ -149,10 +149,10 @@ fn invite_via(requested: &str, endpoints: &[Value], pairing: bool) -> Result<Str
     if pairing || !matches!(requested, "auto" | "fabric") || !advertises("fabric") {
         return Ok(requested.to_owned());
     }
-    if requested == "auto" {
-        if let Some(other) = ["tailscale", "loopback"].into_iter().find(|transport| advertises(transport)) {
-            return Ok(other.to_owned());
-        }
+    if requested == "auto"
+        && let Some(other) = ["tailscale", "loopback"].into_iter().find(|transport| advertises(transport))
+    {
+        return Ok(other.to_owned());
     }
     anyhow::bail!(FABRIC_PAIRING_UNAVAILABLE)
 }
@@ -276,38 +276,119 @@ fn write_code_file(path: &std::path::Path, code: &[u8]) -> Result<()> {
 /// How long `--fabric-inbox` waits for a code: the longest a Fabric invitation lives.
 const FABRIC_INBOX_WAIT: Duration = Duration::from_secs(600);
 
-/// The one `st-fleet-join-*.code` file in this machine's Fabric inbox, waiting up to `wait`
-/// for `fractal fleet invite --send-fabric` on the sponsor to deliver it.
-fn wait_for_fabric_inbox_code(wait: Duration, json_output: bool) -> Result<PathBuf> {
-    let deadline = std::time::Instant::now() + wait;
-    let mut announced = false;
-    loop {
-        match fabric_inbox_code() {
-            Ok(Some(path)) => return Ok(path),
-            Ok(None) if std::time::Instant::now() < deadline => {}
-            Ok(None) => anyhow::bail!(
-                "no join code arrived in the Fabric inbox within {}s; on the sponsor run \
-                 fractal fleet invite NAME --send-fabric",
-                wait.as_secs()
-            ),
-            Err(error) => return Err(error),
-        }
-        if !announced && !json_output {
-            eprintln!("Waiting for a join code in this machine's Fabric inbox…");
-            announced = true;
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
-/// The one `st-fleet-join-*.code` file in this machine's Fabric inbox, if one has arrived.
-fn fabric_inbox_code() -> Result<Option<PathBuf>> {
-    let home = std::env::var_os("FABRIC_HOME")
+/// This machine's Fabric home, which holds its inbox.
+fn fabric_home() -> Result<PathBuf> {
+    std::env::var_os("FABRIC_HOME")
         .map(PathBuf::from)
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/fabric"))
         })
-        .context("HOME is not set")?;
+        .context("HOME is not set")
+}
+
+/// The one `st-fleet-join-*.code` file in `home`'s Fabric inbox, waiting up to `wait` for
+/// `fractal fleet invite --send-fabric` on the sponsor to deliver it. Fabric renames a
+/// finished transfer into `inbox/SENDER/`, so a watch on each directory along that path
+/// wakes this when the code lands.
+fn wait_for_fabric_inbox_code(
+    home: &std::path::Path,
+    wait: Duration,
+    json_output: bool,
+) -> Result<PathBuf> {
+    use notify::Watcher as _;
+    let deadline = std::time::Instant::now() + wait;
+    let (events, woken) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(events)?;
+    let mut watched = BTreeMap::new();
+    let mut announced = false;
+    loop {
+        // Watch before looking, so a directory or code that appears after the look raises an
+        // event. A directory made while its parent's watch began raises none, so list again
+        // until no new directory appears.
+        loop {
+            let mut added = false;
+            for (directory, inode) in fabric_inbox_directories(home)? {
+                if watched.get(&directory) == Some(&inode) {
+                    continue;
+                }
+                let _ = watcher.unwatch(&directory);
+                match watcher.watch(&directory, notify::RecursiveMode::NonRecursive) {
+                    // Gone again: its parent's watch reports what replaces it.
+                    Err(error) if matches!(error.kind, notify::ErrorKind::PathNotFound) => {}
+                    watching => {
+                        watching.with_context(|| format!("watch {}", directory.display()))?
+                    }
+                }
+                watched.insert(directory, inode);
+                added = true;
+            }
+            if !added {
+                break;
+            }
+        }
+        if let Some(path) = fabric_inbox_code(home)? {
+            return Ok(path);
+        }
+        let Some(remaining) = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+        else {
+            anyhow::bail!(
+                "no join code arrived in the Fabric inbox within {}s; on the sponsor run \
+                 fractal fleet invite NAME --send-fabric",
+                wait.as_secs()
+            );
+        };
+        if !announced && !json_output {
+            eprintln!("Waiting for a join code in this machine's Fabric inbox…");
+            announced = true;
+        }
+        // Any event, or the deadline, means look again.
+        if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = woken.recv_timeout(remaining)
+        {
+            anyhow::bail!("the watch on the Fabric inbox stopped");
+        }
+        while woken.try_recv().is_ok() {}
+    }
+}
+
+/// The directories a delivered code passes through, with their inodes so a recreated one is
+/// watched again: the Fabric home, its inbox once Fabric has made it, and each sender's
+/// directory in the inbox.
+fn fabric_inbox_directories(home: &std::path::Path) -> Result<Vec<(PathBuf, u64)>> {
+    fn inode(path: &std::path::Path) -> Result<Option<u64>> {
+        use std::os::unix::fs::MetadataExt as _;
+        match fs::metadata(path) {
+            Ok(metadata) => Ok(metadata.is_dir().then(|| metadata.ino())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+        }
+    }
+    let home_inode = inode(home)?.with_context(|| {
+        format!(
+            "no Fabric home at {}; set FABRIC_HOME if Fabric keeps it elsewhere",
+            home.display()
+        )
+    })?;
+    let mut directories = vec![(home.to_path_buf(), home_inode)];
+    let inbox = home.join("inbox");
+    let Some(inbox_inode) = inode(&inbox)? else {
+        return Ok(directories);
+    };
+    directories.push((inbox.clone(), inbox_inode));
+    for sender in fs::read_dir(&inbox)
+        .with_context(|| format!("read the Fabric inbox {}", inbox.display()))?
+    {
+        let sender = sender?.path();
+        if let Some(sender_inode) = inode(&sender)? {
+            directories.push((sender, sender_inode));
+        }
+    }
+    Ok(directories)
+}
+
+/// The one `st-fleet-join-*.code` file in `home`'s Fabric inbox, if one has arrived.
+fn fabric_inbox_code(home: &std::path::Path) -> Result<Option<PathBuf>> {
     let inbox = home.join("inbox");
     let senders = match fs::read_dir(&inbox) {
         Ok(senders) => senders,
@@ -631,7 +712,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
         },
         FleetCommand::Join(args) => {
             let (code, code_path) = if args.fabric_inbox {
-                let path = wait_for_fabric_inbox_code(FABRIC_INBOX_WAIT, json_output)?;
+                let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
                 (fs::read_to_string(&path)?, Some(path))
             } else if let Some(path) = &args.code_file {
                 (fs::read_to_string(path)?, Some(path.clone()))
@@ -1307,7 +1388,7 @@ async fn run_fleet_migrate(client: &Client, config: &Config, args: FleetMigrateA
         );
     } else {
         let (code, code_path) = if args.fabric_inbox {
-            let path = wait_for_fabric_inbox_code(FABRIC_INBOX_WAIT, json_output)?;
+            let path = wait_for_fabric_inbox_code(&fabric_home()?, FABRIC_INBOX_WAIT, json_output)?;
             (fs::read_to_string(&path)?, Some(path))
         } else if let Some(path) = &args.code_file {
             (fs::read_to_string(path)?, Some(path.clone()))
@@ -1604,5 +1685,40 @@ mod invite_route_tests {
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1, "no temporary file remains");
         let missing = root.path().join("missing").join("invite.code");
         assert!(write_code_file(&missing, b"code").is_err());
+    }
+
+    #[test]
+    fn fabric_inbox_wakes_for_a_code_delivered_after_it_began_waiting() {
+        let home = tempfile::tempdir().unwrap();
+        let sender = home.path().join("inbox").join("sponsor-id");
+        let code = sender.join("st-fleet-join-1.code");
+        let delivery = std::thread::spawn({
+            let code = code.clone();
+            move || {
+                std::thread::sleep(Duration::from_millis(200));
+                // As Fabric receives: the sender's directory, a partial file, then the rename.
+                fs::create_dir_all(&sender).unwrap();
+                let partial = code.with_extension("fabric-partial");
+                fs::write(&partial, "code").unwrap();
+                fs::rename(&partial, &code).unwrap();
+            }
+        });
+        let began = std::time::Instant::now();
+        let found = wait_for_fabric_inbox_code(home.path(), Duration::from_secs(60), true).unwrap();
+        delivery.join().unwrap();
+        assert_eq!(found, code);
+        assert!(began.elapsed() < Duration::from_secs(30), "woken by the deadline, not the watch");
+    }
+
+    #[test]
+    fn fabric_inbox_wait_ends_at_its_deadline() {
+        let home = tempfile::tempdir().unwrap();
+        let error = wait_for_fabric_inbox_code(home.path(), Duration::from_millis(100), true)
+            .unwrap_err();
+        assert!(error.to_string().contains("no join code arrived"), "{error:#}");
+
+        let missing = home.path().join("missing");
+        let error = wait_for_fabric_inbox_code(&missing, Duration::from_secs(60), true).unwrap_err();
+        assert!(error.to_string().contains("no Fabric home"), "{error:#}");
     }
 }
