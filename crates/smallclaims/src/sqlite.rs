@@ -615,14 +615,14 @@ impl WriterConnection {
         }.expect("the writer thread runs while the store is open");
     }
 
-    /// Borrow the foreground writer. Foreground jobs retain their arrival order and can
-    /// overtake explicitly background loans. Nothing preempts a loan already in progress.
-    /// A panic rolls back its open transaction while its guard returns the connection.
     /// The thread the writer runs on, where each of its holds begins and ends; `None` once closed.
     pub fn writer_thread(&self) -> Option<std::thread::ThreadId> {
         self.thread.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|thread| thread.thread().id())
     }
 
+    /// Borrow the foreground writer. Foreground jobs retain their arrival order and can
+    /// overtake explicitly background loans. Nothing preempts a loan already in progress.
+    /// A panic rolls back its open transaction while its guard returns the connection.
     #[track_caller]
     pub fn write(&self) -> WriterGuard<'_> {
         self.lend_writer(writer_queue::LoanClass::Foreground)
