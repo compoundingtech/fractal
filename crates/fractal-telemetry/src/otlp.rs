@@ -108,6 +108,9 @@ impl OtlpExporter {
         if let Some(metrics) = otlp_usage_metrics(&self.node, &batch) {
             self.send(&self.metrics_url, &metrics).await?;
         }
+        if let Some(metrics) = otlp_limits_metrics(&self.node, &batch) {
+            self.send(&self.metrics_url, &metrics).await?;
+        }
         if let Some(traces) = otlp_hook_traces(&self.node, &batch) {
             self.send(&self.traces_url, &traces).await?;
         }
@@ -416,6 +419,49 @@ fn otlp_usage_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
             ],
         }]}]}),
     )
+}
+
+/// Account limits as a bounded gauge: the newest reading of each driver, account and limit
+/// window. The full series, every reading with its subject and incarnation, is the batch's log
+/// records; the graph keeps only current values.
+fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
+    let text = |fields: &Value, key: &str| fields[key].as_str().unwrap_or("unknown").to_owned();
+    let mut limits = BTreeMap::<(String, String, &str), (u128, f64)>::new();
+    for observation in batch.iter().filter(|observation| observation.kind == "harness.limits") {
+        let fields = &observation.body["fields"];
+        let measured = fields["measured_at_unix_ms"]
+            .as_u64()
+            .map_or(observation.accepted_at_unix_ms, u128::from);
+        for (window, field) in [("five_hour", "five_hour_percent"), ("weekly", "weekly_percent")] {
+            if let Some(percent) = fields[field].as_f64() {
+                let key = (text(fields, "driver"), text(fields, "account"), window);
+                limits.insert(key, (measured, percent));
+            }
+        }
+    }
+    if limits.is_empty() {
+        return None;
+    }
+    let points = limits
+        .iter()
+        .map(|((driver, account, window), (measured, percent))| {
+            let attributes = [("driver", driver.as_str()), ("account", account), ("window", window)]
+                .iter()
+                .map(|(key, value)| attribute(key, json!({ "stringValue": value })))
+                .collect::<Vec<_>>();
+            json!({
+                "timeUnixNano": (measured * 1_000_000).to_string(), "asDouble": percent,
+                "attributes": attributes,
+            })
+        })
+        .collect::<Vec<_>>();
+    Some(json!({"resourceMetrics": [{"resource": resource(node, DAEMON_SERVICE), "scopeMetrics": [{
+        "scope": {"name": "st"}, "metrics": [{
+            "name": "st_account_limit_used_percent", "unit": "%",
+            "description": "Share of a paying account's usage window used, by driver, account and window (five_hour or weekly)",
+            "gauge": {"dataPoints": points},
+        }],
+    }]}]}))
 }
 
 /// The exporter runs inside the daemon process, so observation logs and usage

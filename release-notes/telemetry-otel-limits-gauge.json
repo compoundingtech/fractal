@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The observations OTLP exporter also sends account limits as a bounded gauge, and the docs name the observation log as the full harness telemetry series",
+  "replay": {
+    "status": "none",
+    "detail": "No claim is written, read or replayed differently; the exporter reads the local observation log as before."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint rules and digests are unchanged."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "A node with [observations.otlp] configured also posts st_account_limit_used_percent (gauge; driver, account, window) to the collector's /v1/metrics in the same batches as the log records. A batch's cursor still moves only when every signal is accepted. Without [observations.otlp] nothing runs, as before. No claim kind, field, wire or CLI contract changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart beyond the normal upgrade; no migration or backfill."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No data recovery is needed. Reverting stops the gauge; the log records are unchanged."
+  }
+}
