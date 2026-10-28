@@ -133,8 +133,8 @@ and a stale pass is reused. Four controls, in order of when they bite:
 
 ## 8. As built in step 3 (policy, lane, verifier)
 
-- `.st/evidence-skip-policy.json`: `rust-tests` (shadow: `enforce` false, `pull_request` only, `sample_one_in` 5, no `inputs`: the keys are
-  per crate). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
+- `.st/evidence-skip-policy.json`: `rust-tests` (`pull_request` only, `sample_one_in` 1, no `inputs`: the keys are per crate; shadow with
+  `enforce` false until 2026-10-28, enforced since: a pull request skips rust-tests on per-crate notes). Fleet level: the wrapper command; host and agent levels: `python3 scripts/ci-rust-test-result`, lane-bound, requiring `crate`,
   `source_inputs`, `tests_run`, `tests_ignored`, `test_list_sha256`, `ignored_list_sha256`, `filterset` and `run_command_sha256`.
 - `.st/required-lanes.json` (since narrowed to what the lane's commands execute plus its verdict data, without `.st/rust-test-inputs.json`,
   which only the base's copy keys a note: docs/st3/gate-evidence.md, "Definition paths are what the lane executes, plus its verdict data"): the `rust-tests` lane (the test-stage scripts through `scripts`, `.config/nextest.toml`, the filterset, the
