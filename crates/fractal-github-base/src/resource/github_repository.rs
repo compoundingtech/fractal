@@ -181,9 +181,10 @@ struct ItemIdentity {
 /// The part of a repository cursor that rides in the observer's `observer.observed` claim: how
 /// far the observer has read items and comments. Every member keeps it, so a member that takes
 /// over polling, or lost its plugin database, reads on from there and misses nothing; what it
-/// reads again equals the recorded facts and delivers nothing. The version maps, which are most
-/// of a cursor's bytes, stay with the member that polled. `None` when the observer has read
-/// nothing yet.
+/// reads again equals the recorded facts and delivers nothing; its first poll also reads the open
+/// listing once, for the identities of open items. The version maps, which are most of a
+/// cursor's bytes, stay with the member that polled. `None` when the observer has read nothing
+/// yet.
 pub fn replicated_cursor(cursor: &str) -> Option<String> {
     let cursor = RepositoryCursor::parse(Some(cursor));
     let position = RepositoryCursor {
@@ -1374,6 +1375,9 @@ pub async fn observe_at(
     // How far the observer had read before this poll. Without one, this poll reads every open
     // item once; from then on it reads only what changed.
     let watermark = cursor.items_since.clone();
+    // A read position with nothing else is how far another member read, from the observer's
+    // claim: that member kept the identities. This poll learns them from the open listing once.
+    let resuming = watermark.is_some() && cursor.seen.is_empty() && cursor.identities.is_empty();
     let mut items = BTreeMap::<u64, Item>::new();
     let mut more = false;
     let mut changed_open_pull = false;
@@ -1487,6 +1491,31 @@ pub async fn observe_at(
         more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing);
         if cursor.items_scan.is_none() {
             retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
+        }
+        // Without them, an item that is open but unchanged since the position is unknown here:
+        // the detail reads would not ask about it, and a transfer would go unseen until it
+        // changes again.
+        if resuming && (fields.contains("pull_requests") || fields.contains("issues")) {
+            let open = github_listing(
+                &client,
+                format!("{base}/issues?state=open&per_page=100"),
+                token,
+                cache_for,
+                LISTING_PAGES,
+                false,
+            )
+            .await?;
+            for issue in &open.values {
+                if let (Some(id), Some(number)) = (
+                    issue.get("node_id").and_then(Value::as_str),
+                    issue.get("number").and_then(Value::as_u64),
+                ) {
+                    cursor.identities.entry(id.into()).or_insert(ItemIdentity {
+                        number,
+                        pull: issue.get("pull_request").is_some(),
+                    });
+                }
+            }
         }
 
         // A reaction changes no `updated_at`, so reactions on open items come from the open
@@ -3090,6 +3119,45 @@ mod tests {
         );
     }
 
+    /// A member that resumes from another member's read position, as a claim carries it, learns
+    /// the open items' identities from the open listing once. An issue that was open and
+    /// unchanged since that position, then transferred, is reported moved on the first poll; the
+    /// poll after it does not read the open listing again.
+    #[tokio::test]
+    async fn resuming_from_a_read_position_learns_open_identities_once() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        github.route(
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            json!([]),
+        );
+        github.route(
+            "/repos/acme/garden/issues?state=open&per_page=100",
+            json!([issue(5, "2026-09-01T00:00:00Z", json!({"node_id": "I_fern"}))]),
+        );
+        github.open_pull_requests(json!([]));
+        github.resolved_nodes(json!([{"id": "I_fern", "state": "OPEN", "number": 77,
+            "url": "https://github.com/acme/greenhouse/issues/77"}]));
+        let position = replicated_cursor(
+            &json!({"items_since": "2026-09-10T00:00:00Z", "seen": {"items": "elsewhere"}}).to_string(),
+        )
+        .unwrap();
+        let first = observe_at(request(&["issues"], Some(&position), None), &base, Some(&GithubAuth::test("test")))
+            .await
+            .unwrap();
+        assert_eq!(item(&first.facts, "issues", 5)["moved_to"], "resource/github/acme/greenhouse/issue/77");
+        assert!(github.take_requests().iter().any(|request| request.contains("/issues?state=open&")));
+
+        age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
+        observe_at(request(&["issues"], first.cursor.as_deref(), Some(first.facts)), &base, Some(&GithubAuth::test("test")))
+            .await
+            .unwrap();
+        assert!(
+            !github.take_requests().iter().any(|request| request.contains("/issues?state=open&")),
+            "the open listing is read once"
+        );
+    }
+
     #[tokio::test]
     async fn open_pull_request_execution_pages_keep_all_items_and_the_total_bound() {
         let (github, base) = FakeGithub::start().await;
@@ -3515,6 +3583,8 @@ mod tests {
     async fn continuously_changing_sweeps_fall_back_to_normal_polling_without_committing() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let at = "2026-09-10T00:00:00Z";
         let start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
         for page in 1..=11 {
@@ -3789,6 +3859,8 @@ mod tests {
                  "created_at": "2026-09-10T05:00:00Z", "updated_at": "2026-09-10T05:00:00Z"},
             ]),
         );
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let cursor = serde_json::to_string(&RepositoryCursor {
             items_since: Some(since.into()),
             comments_since: Some(comments_since.into()),
@@ -3858,6 +3930,8 @@ mod tests {
     async fn every_comment_and_review_is_one_recent_entry_without_its_body() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
+        // A bare read position also reads the open listing once, for open items' identities.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", json!([]));
         let since = "2026-09-10T00:00:00Z";
         github.route(
             &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),

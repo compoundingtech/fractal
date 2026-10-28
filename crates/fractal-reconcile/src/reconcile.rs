@@ -39993,6 +39993,9 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
 
         // Member A: the first poll records the baseline, which wakes nobody.
         let (issues, comments) = since("2026-09-09T23:59:59Z");
+        // Resuming from the claim's bare position, a poll also reads the open listing once.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100",
+            serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&issues, serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&comments, serde_json::json!([]));
         let member_a = Arc::new(github_plugin_store::GithubPluginStore::memory());
@@ -40006,8 +40009,8 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         let before = vec![delivery("comments", "open", 91), delivery("issues", "open", 91)];
         assert_eq!(delivered(), before);
 
-        // In the gap the issue closes and a second comment lands. Nothing reads the open listing
-        // any more, so it would not show the closure.
+        // In the gap the issue closes and a second comment lands. The open listing no longer
+        // names it, so only reading on from the claim's position shows the closure.
         let (issues, comments) = since("2026-09-10T23:59:59Z");
         github.route("/repos/acme/garden/issues?state=open&per_page=100", serde_json::json!([]));
         github.route(&issues, serde_json::json!([issue("closed", "2026-09-12T00:00:00Z", 2)]));

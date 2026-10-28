@@ -3,6 +3,7 @@
 //! each observer's claim keeps how far it has read, so a member without a row reads on from there
 //! and delivers only what differs from the facts the graph already recorded.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 
@@ -14,12 +15,16 @@ const SCHEMA_VERSION: i64 = 1;
 
 pub struct GithubPluginStore {
     connection: Mutex<Connection>,
+    /// Observers this process knows have no row, so forgetting them again reads nothing.
+    absent: Mutex<HashSet<String>>,
 }
 
 impl GithubPluginStore {
     /// The database beneath `state_dir`, created on first use. A file this build cannot use,
     /// damaged or from a newer build, is set aside beside it and replaced by an empty one, since
-    /// the claims rebuild what it held. Only a directory that cannot be made is an error.
+    /// the claims rebuild what it held. It is an error, and the daemon does not start, only when
+    /// the directory cannot be made, the file cannot be moved aside, or no database opens in its
+    /// place.
     pub fn open(state_dir: &Path) -> Result<Self> {
         let directory = state_dir.join("plugins").join("github");
         std::fs::create_dir_all(&directory)
@@ -87,7 +92,7 @@ impl GithubPluginStore {
                  PRAGMA user_version = 1;",
             )?;
         }
-        Ok(Self { connection: Mutex::new(connection) })
+        Ok(Self { connection: Mutex::new(connection), absent: Mutex::default() })
     }
 
     /// Where `observer` last polled to on this member: `None` when it never polled here (or
@@ -108,6 +113,7 @@ impl GithubPluginStore {
     /// Record where `observer` polled `resource` to. The row stays when the cursor is gone, so
     /// this member reads its own state from then on, never a cursor in a claim.
     pub fn set_cursor(&self, observer: &str, resource: &str, cursor: Option<&str>) -> Result<()> {
+        self.absent.lock().unwrap_or_else(PoisonError::into_inner).remove(observer);
         self.connection
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -124,8 +130,12 @@ impl GithubPluginStore {
     }
 
     /// Drop `observer`'s row, once this member no longer polls it: it stopped, or another member
-    /// declares it. Polling here again reads on from the observer's claim.
+    /// declares it. Polling here again reads on from the observer's claim. Every pass asks for
+    /// each such observer, so one already gone costs nothing after the first.
     pub fn forget(&self, observer: &str) -> Result<()> {
+        if self.absent.lock().unwrap_or_else(PoisonError::into_inner).contains(observer) {
+            return Ok(());
+        }
         let connection = self.connection.lock().unwrap_or_else(PoisonError::into_inner);
         let known = connection
             .query_row("SELECT 1 FROM observer_cursors WHERE observer=?1", [observer], |_| Ok(()))
@@ -138,6 +148,7 @@ impl GithubPluginStore {
                 [observer],
             )?;
         }
+        self.absent.lock().unwrap_or_else(PoisonError::into_inner).insert(observer.to_owned());
         Ok(())
     }
 
@@ -183,6 +194,24 @@ mod tests {
         reopened.forget("observer/github/acme/garden").unwrap();
         reopened.forget("observer/github/acme/other").unwrap();
         assert_eq!(reopened.cursor("observer/github/acme/garden").unwrap(), None);
+    }
+
+    /// Once an observer is forgotten, forgetting it again touches no table, even one that can no
+    /// longer be read; a cursor written for it makes the next forget ask again.
+    #[test]
+    fn forgetting_an_observer_twice_reads_once() {
+        let store = GithubPluginStore::memory();
+        store.set_cursor("observer/github/acme/garden", "resource/github/acme/garden", Some("c1")).unwrap();
+        store.forget("observer/github/acme/garden").unwrap();
+        store.fail_reads(true);
+        store.forget("observer/github/acme/garden").unwrap();
+        store.fail_reads(false);
+        store.set_cursor("observer/github/acme/garden", "resource/github/acme/garden", Some("c2")).unwrap();
+        store.fail_reads(true);
+        assert!(store.forget("observer/github/acme/garden").is_err(), "a written cursor is forgotten again");
+        store.fail_reads(false);
+        store.forget("observer/github/acme/garden").unwrap();
+        assert_eq!(store.cursor("observer/github/acme/garden").unwrap(), None);
     }
 
     #[test]
