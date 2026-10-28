@@ -214,7 +214,7 @@ fn seat_driver(root: &Path, socket: &Path, index: usize) -> Child {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
     let (runtime_id, _) = seat(index);
-    fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         // Its own process group, so stopping the seat also stops the stand-in provider.
         .process_group(0)
         .current_dir(root.join("workspace"))

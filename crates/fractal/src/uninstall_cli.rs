@@ -119,7 +119,7 @@ pub(super) async fn run_uninstall(endpoint: &Endpoint, args: UninstallArgs, json
                 instance.name()
             );
         } else {
-            println!("remove\tthe st3 user services, if installed");
+            println!("remove\tthe Fractal user services, if installed");
             println!("remove\tst's Claude plugin and marketplace registration, if installed");
         }
         if instance.is_none() && manifest.is_none() && !args.keep_binaries {

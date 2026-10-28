@@ -611,13 +611,15 @@ class StTest(unittest.TestCase):
 
     def test_a_ci_local_check_s_time_limit_counts_from_when_ci_local_starts(self):
         self.commit('b.txt', 'two')
-        # 3 s of waiting (its dev shell's admission, say) before ci-local starts, then 1 s of running: within a 2 s limit.
-        late = 'sleep 3; echo "ci-local: stage logs in /x"; sleep 1'
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', command=['sh', '-c', late, 'scripts/ci-local'])
+        # 12 s of waiting (its dev shell's admission, say) before ci-local starts, then almost nothing: within a 10 s limit. The limit
+        # also covers what the wrapper does after the command (sign, verify), so it is set well above that even on a loaded host
+        # (2026-10-28: 2 s, under three parallel suites and a signing run, timed the passing case out).
+        late = 'sleep 12; echo "ci-local: stage logs in /x"'
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '10', command=['sh', '-c', late, 'scripts/ci-local'])
         self.assertEqual(code, 0, out + err)
-        self.assertRegex(out, r'waited [2-4]s before ci-local started \(admission, dev shell\) \(not counted against --time-limit\)')
+        self.assertRegex(out, r'waited 1[1-9]s before ci-local started \(admission, dev shell\) \(not counted against --time-limit\)')
         statement, = self.statements()
-        self.assertRegex(json.dumps(statement), r'"pre_start_s": "[2-4]"')  # the note records the wait
+        self.assertRegex(json.dumps(statement), r'"pre_start_s": "1[1-9]"')  # the note records the wait
         # Once ci-local has started the limit holds as before: 3 s of running is over it.
         code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun',
                                           command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 3', 'scripts/ci-local'])

@@ -831,11 +831,12 @@ def members_log_view(repo, log_keys, tree, check, member_records, now=None, max_
 
 
 def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None, run_inputs=None, crate_key=None):
+           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None, run_inputs=None, crate_key=None,
+           prefer_levels=None):
     """verified(...) and, with log_keys, the evidence log's shadow view of the same decision (docs/st3/gate-evidence.md)."""
     if not log_keys:
         return verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
-                        run_inputs, crate_key)
+                        run_inputs, crate_key, prefer_levels)
     input_key = crate_key[1] if crate_key else None
     if crate_key is None and rules is not None and rules.get('inputs') is not None:
         try:
@@ -844,7 +845,7 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
             input_key = None
     try:
         result = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
-                        run_inputs, crate_key)
+                        run_inputs, crate_key, prefer_levels)
     except Failure as failure:
         failure.extra.update(log_view(repo, log_keys, tree, check, input_key, None, now))
         raise
@@ -881,13 +882,18 @@ def zero_test_crates(repo, policy_base):
 
 
 def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-             trust_levels=None, now=None, rules=None, lane=None, level_lane=None, run_inputs=None, crate_key=None):
+             trust_levels=None, now=None, rules=None, lane=None, level_lane=None, run_inputs=None, crate_key=None, prefer_levels=None):
     """`level_lane`, when given, is a callable returning the lane check at the policy's base; it is used only for a signer level
     whose by_level rule says `lane: true`, so the cost and any lane-file error fall on those records alone.
 
     `crate_key` is (crate, key[, needs_tests]) for a per-crate check (docs/per-crate-test-signing.md): the key is the crate's own input key rather than a
     projection of the policy's declared paths, and a record counts only if it signed that crate AND that key, whichever tree it is for
-    (the several records of one tree, one per crate, are told apart by the signed `crate`)."""
+    (the several records of one tree, one per crate, are told apart by the signed `crate`).
+
+    `prefer_levels`, when given, names signer levels whose newest passing record decides instead of a newer pass from another level, as
+    long as no failing record is dated after it (within FUTURE_SKEW): a newer failure still decides, and every other rule applies to the
+    record chosen. The gate asks for it when only those levels can cover the run (our pull request editing a protected file), so a pass
+    that CI signed later for the same inputs does not hide the host's own note."""
     with tempfile.NamedTemporaryFile() as revocations:
         everything = legacy_refs(repo, len(tree))  # the first layout, until the GC has removed it
         hits = with_note_for(repo, list(dict.fromkeys(tree_refs(repo, tree) + everything)), tree)  # commits that carry a note named by the tree
@@ -962,6 +968,12 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
         shadowing = [c for c in with_check if failed(c) and dated(c) >= dated(chosen) - FUTURE_SKEW]
         if shadowing:
             chosen = max(shadowing, key=dated)
+    if prefer_levels and not failed(chosen):
+        preferred = [c for c in with_check if not failed(c) and c[2].split('/', 1)[0] in prefer_levels]
+        if preferred:
+            best = max(preferred, key=dated)
+            if not any(failed(c) and dated(c) >= dated(best) - FUTURE_SKEW for c in with_check):
+                chosen = best
     commit, statement, principal = chosen
     predicate = statement['predicate']
     observed = predicate['observed']
@@ -1337,6 +1349,9 @@ def main(argv):
                         help='reject a record observed longer ago than this, or claiming a future time')
     parser.add_argument('--runner-prefix', help='the record runner must start with this (e.g. github:org/repo/)')
     parser.add_argument('--trust-levels', help='comma-separated signer trust levels this check accepts')
+    parser.add_argument('--prefer-levels', metavar='LEVELS',
+                        help='comma-separated signer levels whose newest passing record decides instead of a newer pass from another '
+                             'level, unless a failing record is dated after it; every other rule still applies')
     parser.add_argument('--bind-input', action='append', default=[], metavar='KEY=PATH',
                         help="require the record's input KEY to equal the sha256 of PATH in the verified tree")
     try:
@@ -1390,6 +1405,12 @@ def main(argv):
     if args.max_age is not None and args.max_age <= 0:
         print('--max-age must be a positive number of seconds', file=sys.stderr)
         return 2
+    prefer_levels = None
+    if args.prefer_levels is not None:
+        prefer_levels = tuple(level for level in args.prefer_levels.split(',') if level)
+        if not prefer_levels or args.members or args.require_all:
+            print('--prefer-levels must name at least one level, and is not used with --members or --require-all', file=sys.stderr)
+            return 2
     trust_levels = None
     if args.trust_levels is not None:
         trust_levels = tuple(level for level in args.trust_levels.split(',') if level)
@@ -1487,7 +1508,7 @@ def main(argv):
             return 0
         result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
                         trust_levels, crate_key=crate_key, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check, args.lane_base),
-                        level_lane=level_lane, log_keys=log_keys, run_inputs=run_inputs)
+                        level_lane=level_lane, log_keys=log_keys, run_inputs=run_inputs, prefer_levels=prefer_levels)
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:

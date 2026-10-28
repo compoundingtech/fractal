@@ -28,7 +28,7 @@ evidence, not an installed-build or runtime test receipt.
   `ST_AGENT` or send a person actor to evade this check.
 * [fixture.rs](../../crates/fractal/src/fixture.rs), [test_support.rs](../../crates/fractal-store/src/test_support.rs)
   and [Cargo.toml](../../crates/fractal/Cargo.toml) provide a separate, non-installed
-  `st3-fixture` executable requiring `test-support`. It initializes test state that disables
+  `fractal-fixture` executable requiring `test-support`. It initializes test state that disables
   ancestry binding in its server and clears seat environment in fixture subprocess helpers.
   That mechanism is for repository tests. Its existence does not certify an isolated fleet,
   restrict a copied production store or provide a supported agent bootstrap command.

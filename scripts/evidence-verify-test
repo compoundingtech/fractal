@@ -2166,6 +2166,26 @@ class InputKeyed(unittest.TestCase):
         _, fourth = self.commit_files({'docs/readme.txt': 'and again'})
         self.assertEqual(self.check(fourth)[0], 0)
 
+    def test_preferred_levels_take_the_hosts_own_pass_over_a_newer_ci_pass_but_not_over_a_failure_after_it(self):
+        rules = evidence_verify.policy_rules(policy_text(inputs=self.PATHS, trust_levels=['machine', 'host']), 'unit', 'org/repo')
+        host = self.f.key('host', 'host/box')
+        key = self.key(self.tree)
+        mine = self.f.note(self.commit, self.tree, host, 'host/box', runner=OBSERVED, inputs={'source_inputs': key}, seconds=-900,
+                           command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
+        ci = self.observed(later, other, key, seconds=-600)  # CI ran the same inputs for someone else after the host signed
+        code, result = self.f.verify(self.tree, rules=rules)
+        self.assertEqual((code, result['record'], result['trust_level']), (0, ci, 'machine'))  # the latest record decides, as before
+        code, result = self.f.verify(self.tree, rules=rules, prefer_levels=('host',))
+        self.assertEqual((code, result['record'], result['signer']), (0, mine, 'host/box'))
+        # A failure dated after the host's pass is not passed over, even when a still newer pass decides without the preference.
+        self.observed(later, other, key, exit_code=1, seconds=-400)
+        newest = self.observed(later, other, key, seconds=0)
+        code, result = self.f.verify(self.tree, rules=rules, prefer_levels=('host',))
+        self.assertEqual((code, result['record'], result['trust_level']), (0, newest, 'machine'))
+        self.assertEqual(self.f.cli('--check', 'unit', '--revision', 'HEAD', '--members', '--prefer-levels', 'host',
+                                    '--keys', str(self.f.keys))[0], 2)
+
     def test_the_policy_validates_inputs_and_sampling(self):
         def reason(**overrides):
             try:

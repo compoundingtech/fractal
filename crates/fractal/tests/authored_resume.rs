@@ -137,7 +137,7 @@ agent "garden/worker" {{
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let hooks = fractal_daemon::hooks::ensure_installed(&root.path().join("hooks")).unwrap();
-    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     let stop = root.path().join("provider-stop");
     command
         .env_clear()
