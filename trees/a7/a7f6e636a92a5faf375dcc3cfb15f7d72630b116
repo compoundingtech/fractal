@@ -2,3 +2,8 @@ record bbf45013a385543684ffcaf7b4a6305c3cb5b97b genie-freshness 0 host/anvil 202
 record 66c5b427cb7c80e2689445406a96074d7f5a3af8 ci-script-tests 0 host/anvil 2026-10-28T06:22:08Z
 record 5b2a7b1d55049831385aac9cb858765406cbe5a7 rust-tests 0 host/anvil 2026-10-28T06:30:57Z
 record 67a28b12f45e1ecac04337a2448eea5d587865b8 linux-gate 0 host/anvil 2026-10-28T06:30:38Z
+record 154aeb4855ce29e076651b50b9247ec25413c736 linux-tests 0 fleet/ci 2026-10-28T06:31:21Z
+record 19eb88f1d667c07dc9065020e15cb43f860518d6 linux-clippy 0 fleet/ci 2026-10-28T06:25:00Z
+record 44067c1cb6c81aa59da469ee9c51cc6fcac57719 linux-tests-shard-2 0 fleet/ci 2026-10-28T06:32:33Z
+record 4fd9c9c899a37dd3ed59453d371293a921089ca3 linux-fleet-compat 0 fleet/ci 2026-10-28T06:25:16Z
+record 544ae4d943c049c5a40063faa8ab239bf3217623 linux-gate 0 fleet/ci 2026-10-28T06:33:46Z
