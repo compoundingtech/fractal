@@ -39,6 +39,9 @@ permissions must not prevent extraction cleanup, upgrades, or rollback.
 
 ### Offline web embed
 
+The Fractal website owns the embed release job and the downstream version/checksum
+pin. Fractal release maintainers retain ownership of the native release pipeline.
+
 The release workflow also builds `fractal-web-embed-<full-source-SHA>.tar.gz`
 and its `.sha256` sidecar. The archive root contains `embed.html`, all assets,
 four `poster-{light,dark}-{wide,narrow}.webp` images, and `provenance.json`.
