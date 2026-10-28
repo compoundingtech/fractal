@@ -1,9 +1,9 @@
 import type { ConversationContentRef, TimelineEntry } from '@fractal/client';
 import { contentReferences } from './conversationContent.ts';
 
-// A conversation drawn the way stui draws it (crates/fractal-tui/src/ui/adapt.rs conversation and
+// A conversation drawn the way the Fractal terminal UI draws it (crates/fractal-tui/src/ui/adapt.rs conversation and
 // from_harness, conversation.rs): the person's turns as tinted blocks, replies as markdown, tool
-// calls as small boxes tinted by outcome, Small Talk in the same stream with a bar, and graph
+// calls as small boxes tinted by outcome, Fractal in the same stream with a bar, and graph
 // events and diagnostics as one dim line. Anything unexpected is shown as what it is, not dropped
 // and not allowed to break the rest.
 
@@ -93,13 +93,13 @@ function stripInternalMarkup(input: string, markup = true): string {
   return text;
 }
 
-/** What a message says once the markup harnesses and st add for the model is gone. */
+/** What a message says once the markup harnesses and Fractal add for the model is gone. */
 export type DisplayFilter = 'harness-markup' | 'context-blocks' | 'control-characters' | 'internal-blocks' | 'excerpts' | 'bookkeeping';
 export const DEFAULT_FILTERS: readonly DisplayFilter[] = ['harness-markup', 'context-blocks', 'control-characters', 'internal-blocks', 'excerpts', 'bookkeeping'];
 export const SHOW_EVERYTHING: readonly DisplayFilter[] = [];
 
-// Said once at the start of a conversation st read only the newest part of.
-const NATIVE_PREFIX_NOTE = "Earlier history is not shown: st reads only the newest part of this agent's transcript";
+// Said once at the start of a conversation Fractal read only the newest part of.
+const NATIVE_PREFIX_NOTE = "Earlier history is not shown: Fractal reads only the newest part of this agent's transcript";
 
 // Harness records that carry no conversation: the transcript's own titles and modes. Unknown
 // records stay visible.
@@ -114,7 +114,7 @@ const BOOKKEEPING_RECORDS = [
 // A record Claude writes about its own session, in kinds that keep appearing (instructions, session
 // context, prompt snapshots, deferred tools, hook summaries): an attachment, system record or entry
 // no renderer knows by name. Claude's own screen shows none as conversation, so they are
-// bookkeeping as a class (as in st3-conversation-ui).
+// bookkeeping as a class (as in fractal-conversation-ui).
 const claudeContextRecord = (text: string) => /^\[unrecognized claude (attachment|system|entry) `/.test(text);
 
 // A reasoning step whose text the model did not share is bookkeeping too.
@@ -199,9 +199,30 @@ function attribute(head: string, name: string): string | undefined {
   const value = new RegExp(` ${name}="([^"]*)"`).exec(head)?.[1];
   return value === undefined ? undefined : unescapeXml(value);
 }
-/** Undo the XML escaping st applies to a delivery's attributes and body. */
+/** Undo the XML escaping Fractal applies to a delivery's attributes and body. */
 function unescapeXml(text: string): string {
   return text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&amp;/g, '&');
+}
+/**
+ * The images a delivery names, `<attachment path="…/<sha256>.png" media_type="image/png" bytes="…"
+ * name="…"/>`, as the message's own images: read from Fractal by the message, never by the seat's path,
+ * which stays private. What is left is the delivery's text; an image past its retention
+ * (`unavailable="expired"`) says so in it. As Fractal TUI reads them (fractal-conversation-ui `delivered_images`).
+ */
+export function deliveredImages(block: string, message: string | undefined): { text: string; images: MailImage[] } {
+  const images: MailImage[] = [];
+  const text = block.replace(/<attachment\s[^>]*?\/>/g, element => {
+    const name = attribute(element, 'name'), mediaType = attribute(element, 'media_type') ?? '';
+    const leaf = (attribute(element, 'path') ?? '').split(/[\\/]/).pop()?.split('.')[0] ?? '';
+    if (/^[0-9a-f]{64}$/i.test(leaf) && mediaType.startsWith('image/') && message?.startsWith('message/')) {
+      const bytes = Number(attribute(element, 'bytes'));
+      images.push({ sha256: leaf, message, mediaType, ...(name ? { name } : {}), size: Number.isFinite(bytes) ? bytes : 0 });
+      return '';
+    }
+    const why = attribute(element, 'unavailable') === 'expired' ? 'expired' : mediaType || 'not available here';
+    return `[${name ?? 'attachment'} · ${why}]`;
+  });
+  return { text: text.trimEnd(), images };
 }
 function field(block: string, tag: string): string | undefined {
   return takeBlocks({ value: block }, tag)[0]?.trim();
@@ -224,7 +245,7 @@ function pingId(text: string): string | undefined {
 /**
  * How a message's signature reads beside its sender: the device that signed it and whether that
  * checks ("✓ example phone (secure enclave)"). A message with no signature is usually just old, so it
- * says nothing. The same words as stui's `signature_mark`.
+ * says nothing. The same words as the Fractal terminal UI's `signature_mark`.
  */
 export function signatureMark(provenance: unknown): string | undefined {
   if (!provenance || typeof provenance !== 'object') return undefined;
@@ -238,8 +259,8 @@ export function signatureMark(provenance: unknown): string | undefined {
   }
 }
 
-/** The lines st adds beside a delivery for the agent (st-drivers `ding`). */
-const ST_DELIVERY_NOTES = [
+/** The lines Fractal adds beside a delivery for the agent (fractal-drivers `ding`). */
+const FRACTAL_DELIVERY_NOTES = [
   'Answer the person in this conversation; people have no inbox, so do not reply with st.',
   "The person reads replies in st, not in the agent's session.",
   '(dictated by voice; it may contain transcription mistakes)',
@@ -247,7 +268,7 @@ const ST_DELIVERY_NOTES = [
 
 export function fromHarness(isUser: boolean, raw: string, shown: ReadonlySet<string> = new Set(), delivered: Set<string> = new Set(), filters: readonly DisplayFilter[] = DEFAULT_FILTERS): Body[] {
   // A harness that ran out of context continues from a summary written as the person's turn: the
-  // agent's own notes, kilobytes long. One folded line that opens like a tool call, as stui shows it.
+  // agent's own notes, kilobytes long. One folded line that opens like a tool call, as the Fractal terminal UI shows it.
   if (isUser && raw.includes('This session is being continued from a previous conversation')) {
     const output = raw.replace(/\r\n/g, '\n').split('\n').filter(line => !/^\s*<[A-Za-z0-9_-]+\/>\s*$/.test(line));
     return [{ kind: 'tool', title: 'context summary · the conversation was compacted', state: 'ok', output }];
@@ -257,7 +278,7 @@ export function fromHarness(isUser: boolean, raw: string, shown: ReadonlySet<str
   for (const block of takeBlocks(text, 'task-notification')) {
     bodies.push({ kind: 'event', tone: 'quiet', text: `background task ${field(block, 'status') ?? 'update'}: ${shorten(field(block, 'summary') ?? '', 90)}` });
   }
-  // st's own envelope, as Codex and the pi family receive it: the mail, or a delivery of mail the
+  // Fractal's own envelope, as Codex and the pi family receive it: the mail, or a delivery of mail the
   // stream already shows (Nathan, 2026-10-03: raw XML in a Codex seat's conversation).
   const enveloped = new Set<string>();
   const envelopeHeads = [...text.value.matchAll(/<smalltalk-message\b[^>]*>/g)].map(match => match[0]);
@@ -266,12 +287,13 @@ export function fromHarness(isUser: boolean, raw: string, shown: ReadonlySet<str
     const graph = attribute(head, 'graph');
     if (graph) enveloped.add(graph);
     if (graph && shown.has(graph)) { delivered.add(graph); return; }
-    bodies.push({ kind: 'mail', from: attribute(head, 'from') ?? 'someone', to: attribute(head, 'to') ?? '', subject: attribute(head, 'subject') ?? '', text: cleanMessageText(unescapeXml(block), filters).trim() });
+    const { text: said, images } = deliveredImages(block, graph);
+    bodies.push({ kind: 'mail', from: attribute(head, 'from') ?? 'someone', to: attribute(head, 'to') ?? '', subject: attribute(head, 'subject') ?? '', text: cleanMessageText(unescapeXml(said), filters).trim(), ...(images.length ? { images } : {}) });
   });
   const channelHeads = [...text.value.matchAll(/<channel\b[^>]*>/g)].map(match => match[0]);
   const senders = channelHeads.map(head => attribute(head, 'from') ?? 'someone');
   takeBlocks(text, 'channel').forEach((block, index) => {
-    // The delivered message: its PING line, the message the channel names, or the st envelope
+    // The delivered message: its PING line, the message the channel names, or the Fractal envelope
     // it carries. One the stream shows is marked delivered, never announced again.
     const envelope = /<smalltalk-message\b[^>]*>/.exec(block)?.[0];
     const id = pingId(block) ?? attribute(channelHeads[index] ?? '', 'messageId') ?? (envelope ? attribute(envelope, 'graph') : undefined);
@@ -281,15 +303,15 @@ export function fromHarness(isUser: boolean, raw: string, shown: ReadonlySet<str
     // Mail the stream does not show reads as that mail, never as the delivery's other lines
     // (Nathan, 2026-10-03: "delivered to the agent: The person reads replies in st…").
     if (envelope) {
-      const inner = takeBlocks({ value: block }, 'smalltalk-message')[0] ?? '';
-      bodies.push({ kind: 'mail', from: attribute(envelope, 'from') ?? senders[index] ?? 'someone', to: attribute(envelope, 'to') ?? '', subject: attribute(envelope, 'subject') ?? '', text: cleanMessageText(unescapeXml(inner), filters).trim() });
+      const { text: inner, images } = deliveredImages(takeBlocks({ value: block }, 'smalltalk-message')[0] ?? '', id);
+      bodies.push({ kind: 'mail', from: attribute(envelope, 'from') ?? senders[index] ?? 'someone', to: attribute(envelope, 'to') ?? '', subject: attribute(envelope, 'subject') ?? '', text: cleanMessageText(unescapeXml(inner), filters).trim(), ...(images.length ? { images } : {}) });
       return;
     }
     const subject = block.split('\n').map(line => line.trim()).find(line => line.startsWith('Subject:'))?.slice('Subject:'.length).trim() ?? shorten(cleanMessageText(block, filters), 70);
     bodies.push({ kind: 'event', tone: 'quiet', text: `delivered to the agent: ${shorten(subject, 80)} · from ${senders[index] ?? 'someone'}` });
   });
   // `[PING from st3] message/ID from SENDER: TITLE` announces mail on its own line: mail the
-  // stream shows is marked delivered; otherwise it is one quiet line, as in stui.
+  // stream shows is marked delivered; otherwise it is one quiet line, as in the Fractal terminal UI.
   const pings: Body[] = [];
   text.value = text.value.split('\n').filter(line => {
     const id = pingId(line);
@@ -316,8 +338,8 @@ export function fromHarness(isUser: boolean, raw: string, shown: ReadonlySet<str
     if (answers.length) bodies.push({ kind: 'user', text: answers.join('\n') });
   }
   if (raw.includes("<command-name")) takeBlocks(text, "command-args"); // displayed with the parsed command
-  // st's own notes beside a delivery tell the agent something; the person never typed them.
-  text.value = text.value.split('\n').filter(line => !ST_DELIVERY_NOTES.includes(line.trim())).join('\n');
+  // Fractal's own notes beside a delivery tell the agent something; the person never typed them.
+  text.value = text.value.split('\n').filter(line => !FRACTAL_DELIVERY_NOTES.includes(line.trim())).join('\n');
   if (filters.includes('context-blocks')) filterContextBlocks(text);
   const rest = cleanMessageText(text.value, filters);
   if (rest) {
@@ -339,7 +361,7 @@ export function toolTitle(name: string, args: unknown): string {
   return ['Bash', 'bash', 'shell', 'exec_command'].includes(name) ? `$ ${first}` : `${name} ${first}`;
 }
 
-// Keep this line budget and marker in sync with st3-conversation-ui's tool_output.
+// Keep this line budget and marker in sync with fractal-conversation-ui's tool_output.
 const PREVIEW_LINES = 400;
 
 export function toolOutput(content: unknown, full = false): string[] {
@@ -348,7 +370,7 @@ export function toolOutput(content: unknown, full = false): string[] {
   else if (Array.isArray(content)) text = content.map(item => str(record(item).text) ?? str(item)).filter((part): part is string => part !== undefined).join('\n');
   else if (content == null) text = '';
   else text = str(record(content).text) ?? JSON.stringify(content);
-  // As st3-conversation-ui: no blank lines around the output.
+  // As fractal-conversation-ui: no blank lines around the output.
   const lines = text ? text.split('\n') : [];
   while (lines.length && !lines[0]?.trim()) lines.shift();
   while (lines.length && !lines[lines.length - 1]?.trim()) lines.pop();
@@ -365,8 +387,8 @@ function contentText(body: unknown): string {
 }
 
 // ------------------------------------------------------------ typed rows (OMP parity)
-// The rows a typed view becomes, mirroring st3-conversation-ui exactly: same titles, same
-// lines, so the phone and stui read one conversation the same way (fixtures/clients/transcripts).
+// The rows a typed view becomes, mirroring fractal-conversation-ui exactly: same titles, same
+// lines, so the phone and the Fractal terminal UI read one conversation the same way (fixtures/clients/transcripts).
 
 /** The title of a tool call its typed view names: `$ command`, `edit path`, `write path · N bytes`,
  * `read path:range`, `engine pattern query path`, `todo op`, `ask`, `task · N agents`,
@@ -604,14 +626,21 @@ function headerAge(asOf: string, now: string): string | undefined {
   return hours < 24 ? `${hours}h` : `${Math.floor((seconds + 43200) / 86400)}d`;
 }
 
+/** Older daemons name this product `st` or `older st`. Grouping still uses the raw source. */
+function headerSourceLabel(source: string): string {
+  if (source === 'older st') return 'older Fractal';
+  if (source === 'st') return 'Fractal';
+  return source;
+}
+
 /** Every present field in fixed order, with shared provenance once and minority sources
- * marked individually. The shared age is the oldest field from that source, as in stui. */
+ * marked individually. The shared age is the oldest field from that source, as in the Fractal terminal UI. */
 export function headerLine(header: ConversationHeader | undefined, now: string): string | null {
   if (!header) return null;
   const fields: HeaderField[] = [];
   const marker = (field: HeaderField): string => {
     const age = headerAge(field.as_of, now);
-    return `${field.source}${age ? ` · ${age} ago` : ''}`;
+    return `${headerSourceLabel(field.source)}${age ? ` · ${age} ago` : ''}`;
   };
   const marked = (label: string, field: HeaderField): string | undefined => {
     if (field === undefined) return undefined;
@@ -683,10 +712,10 @@ function diagnosticTone(body: Record<string, unknown>): 'quiet' | 'warning' | 'f
 }
 
 /**
- * Why a conversation cannot be shown whole: st could not read the harness's transcript, and sent
- * only the Small Talk around it. Half a conversation reads as the agent ignoring the person, so
+ * Why a conversation cannot be shown whole: Fractal could not read the harness's transcript, and sent
+ * only the Fractal around it. Half a conversation reads as the agent ignoring the person, so
  * neither half shows; this says why, with the transcript's path so it can be reported (Nathan,
- * 2026-10-01). As stui's `unreadable_transcript`.
+ * 2026-10-01). As the Fractal terminal UI's `unreadable_transcript`.
  */
 export function unreadableTranscript(timeline: Entry[]): string | null {
   for (const entry of [...timeline].reverse()) {
@@ -703,13 +732,13 @@ export function unreadableTranscript(timeline: Entry[]): string | null {
 }
 
 /**
- * One conversation as st joined it: the harness's turns and the agent's Small Talk, in time
+ * One conversation as Fractal joined it: the harness's turns and the agent's Fractal messages, in time
  * order. `names` maps graph ids to what a person calls them; the viewer is `you`.
  */
-/** A long message shows only its start; the whole text (`bytes` long, in UTF-8) is read from st by `message`. */
+/** A long message shows only its start; the whole text (`bytes` long, in UTF-8) is read from Fractal by `message`. */
 export type WholeText = { message: string; bytes: number };
 
-/** An image a message carries; its bytes are read from st by `sha256`, naming `message`. */
+/** An image a message carries; its bytes are read from Fractal by `sha256`, naming `message`. */
 export type MailImage = { sha256: string; message: string; mediaType: string; name?: string; size: number };
 
 function mailImages(message: Record<string, unknown>): MailImage[] {
@@ -738,7 +767,7 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     const body = {...record(entry.body)};
     if (filters.includes('internal-blocks') && Array.isArray(body.blocks)) body.blocks = body.blocks.filter(block => !['internal', 'hidden-by-harness'].includes(str(record(block).visibility) ?? ''));
     // #1574 exposes native data as blocks (reasoning text, raw JSON, tool output); where it does,
-    // the text is that data and the markup cleanup must not eat it. stui cleans the same nothing.
+    // the text is that data and the markup cleanup must not eat it. The Fractal terminal UI also leaves it intact.
     const native = Array.isArray(body.blocks) && body.blocks.some(block => record(block).kind !== 'text');
     if (typeof body.text === 'string') {
       const text = {value: body.text};
@@ -754,7 +783,7 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     }
     return {...entry, body} as Entry;
   });
-  const name = (id: string): string => names.get(id) ?? (id === 'daemon/runtime' ? 'st' : id.startsWith('person/') ? id.slice('person/'.length) : short(id));
+  const name = (id: string): string => names.get(id) ?? (id === 'daemon/runtime' ? 'Fractal' : id.startsWith('person/') ? id.slice('person/'.length) : short(id));
   const stamped: ConversationEntry[] = [];
   const tools = new Map<string, number>();
   const callSources = new Map<string, Entry>();
@@ -765,14 +794,14 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     const content = contentReferences(entry.body);
     stamped.push({ id, at: clock(entry.timestamp), timestamp: entry.timestamp, body, ...(content.length ? { content, contentSources: [entry] } : {}) });
   };
-  // Entries arrive in st's order (applyConversation keeps them by time, then sequence).
+  // Entries arrive in Fractal's order (applyConversation keeps them by time, then sequence).
   for (const entry of timeline) {
     if (!mail && isBookkeeping(entry, filters)) continue;
     const body = record(entry.body);
     if (entry.type === 'message') {
       if (Array.isArray(body.blocks)) for (const block of body.blocks.filter(block => record(block).kind === 'raw_text')) push(entry, str(record(block).id) ?? entry.id, {kind:'event',tone:'quiet',text:`[unreadable message]\n${cleanMessageText(str(record(record(block).payload).text) ?? '', filters)}`});
-      // A Small Talk message is two entries: who wrote to whom, then what they wrote. Only a
-      // graph message, `message/…`, is Small Talk; a transcript heads its own turns this way too.
+      // A Fractal message is two entries: who wrote to whom, then what they wrote. Only a
+      // graph message, `message/…`, is Fractal; a transcript heads its own turns this way too.
       mail = (str(body.message_id) ?? '').startsWith('message/') ? body : undefined;
       continue;
     }
@@ -809,7 +838,12 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
     mail = undefined;
     switch (entry.type) {
       case 'content': {
-        const raw = contentText(entry.body) || (contentReferences(entry.body).length ? '[content available on demand]' : '');
+        // An image alone in a turn is its image view; the text Fractal writes in its place
+        // (`[image · load from owner]`) is not the person's or the agent's words (as in the Fractal terminal UI).
+        const imageOnly = Array.isArray(body.blocks) && body.blocks.some(block => record(block).kind === 'image')
+          && body.blocks.every(block => ['image', 'source_record'].includes(str(record(block).kind) ?? ''))
+          && ['', '[image]', '[image · load from owner]'].includes(contentText(entry.body).trim());
+        const raw = imageOnly ? '' : contentText(entry.body) || (contentReferences(entry.body).length ? '[content available on demand]' : '');
         const nativeBlocks = Array.isArray(body.blocks) && body.blocks.some(block => record(block).kind !== 'text');
         // Typed extension blocks (irc, job, status) replace the entry's text fallback, role
         // aside; `tool_start` belongs to its call and is never drawn alone.
@@ -819,12 +853,14 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
           extension.forEach((part, index) => push(entry, extension.length === 1 ? entry.id : `${entry.id}#${index}`, part));
           break;
         }
-        if ((entry.role === 'user' || entry.role === 'system') && (nativeBlocks || raw.startsWith('[unrecognized '))) {
+        if (imageOnly) {
+          push(entry, entry.id, entry.role === 'assistant' ? { kind: 'assistant', text: '' } : { kind: 'user', text: '' });
+        } else if ((entry.role === 'user' || entry.role === 'system') && (nativeBlocks || raw.startsWith('[unrecognized '))) {
           // A native entry's text is data #1574 exposed; it is shown as it arrived.
           const shown = nativeBlocks ? raw : cleanMessageText(raw, filters);
           push(entry, entry.id, entry.role === 'user' ? {kind:'user',text:shown} : {kind:'event',tone:'quiet',text:shown});
         } else if (entry.role === 'user' || entry.role === 'system') {
-          // Mail read from a delivery is named as the stream names it, as stui does.
+          // Mail read from a delivery is named as the stream names it, as the Fractal terminal UI does.
           fromHarness(entry.role === 'user', raw, shown, delivered, filters).forEach((part, index) => push(entry, `${entry.id}#${index}`, part.kind === 'mail' ? { ...part, from: name(part.from), to: name(part.to) } : part));
         } else if (entry.role === 'tool') {
           const lines = raw.split('\n');
@@ -873,12 +909,12 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
           break;
         }
         const tone = diagnosticTone(body);
-        const message = str(body.message) ?? str(body.code) ?? 'st reported a problem';
+        const message = str(body.message) ?? str(body.code) ?? 'Fractal reported a problem';
         push(entry, entry.id, { kind: 'event', tone, text: tone === 'fault' ? `error: ${message}` : message });
         break;
       }
       case 'redaction': push(entry, entry.id, { kind: 'event', tone: 'quiet', text: `withheld: ${str(body.reason) ?? 'redacted'}` }); break;
-      // Older entries were left out: it heads the conversation whatever time st stamped it with
+      // Older entries were left out: it heads the conversation whatever time Fractal stamped it with
       // (the time it was read, which sorted it among the newest).
       case 'truncation': stamped.push({ id: entry.id, at: '', timestamp: '', body: { kind: 'event', tone: 'quiet', text: (str(body.reason) ?? '').includes('native transcript prefix') ? NATIVE_PREFIX_NOTE + ((str(body.reason) ?? '').includes('not fetchable') ? '; earlier history is not fetchable through this read' : '') : (str(body.reason) ?? '').includes('not fetchable') ? 'older entries are not shown; not fetchable through this read' : 'older entries are not shown' } }); break;
       case 'status':
@@ -919,7 +955,7 @@ export function entryText(entry: ConversationEntry): string {
 }
 
 /**
- * A delivery that paused while st restarted and then recovered says nothing a person needs:
+ * A delivery that paused while Fractal restarted and then recovered says nothing a person needs:
  * each such pair becomes one quiet line, and a run of them one line with a count.
  */
 export function foldDeliveryFlaps(entries: ConversationEntry[]): ConversationEntry[] {
@@ -933,13 +969,13 @@ export function foldDeliveryFlaps(entries: ConversationEntry[]): ConversationEnt
     const last = run.at(-1)!;
     const recovered = last.body.kind === 'event' && last.body.text.includes('recovered');
     const pauses = run.filter(entry => entry.body.kind === 'event' && !entry.body.text.includes('recovered')).length;
-    out.push({ ...last, id: `${run[0]!.id}…${last.id}`, body: { kind: 'event', tone: recovered ? 'quiet' : 'warning', text: recovered ? `message delivery paused ${pauses === 1 ? 'once' : `${pauses} times`} while st restarted · recovered` : 'message delivery is paused; st will retry' } });
+    out.push({ ...last, id: `${run[0]!.id}…${last.id}`, body: { kind: 'event', tone: recovered ? 'quiet' : 'warning', text: recovered ? `message delivery paused ${pauses === 1 ? 'once' : `${pauses} times`} while Fractal restarted · recovered` : 'message delivery is paused; Fractal will retry' } });
   }
   return out;
 }
 
-/** The most lines a tool call shows until opened, failed ones too, as in stui. */
-/** As in stui's conversation-style rules (`tool.collapsed_rows`); a test holds them equal. */
+/** The most lines a tool call shows until opened, failed ones too, as in the Fractal terminal UI. */
+/** As in the Fractal terminal UI's conversation-style rules (`tool.collapsed_rows`); a test holds them equal. */
 export const COLLAPSED_TOOL_LINES = 6;
 
 /** Whether an entry folds until opened: tool calls, and mail the person is not part of. */
@@ -955,7 +991,7 @@ export function shownToolLines(body: Extract<Body, { kind: 'tool' }>, open: bool
 }
 
 /** What a problem means for what is shown: how old it is and that the phone keeps trying, or,
- * once st refused for good (`stopped`), that nothing retries until the person asks again. */
+ * once Fractal refused for good (`stopped`), that nothing retries until the person asks again. */
 export function staleLine(issue: string, loaded: boolean, lastFrame: number | null, now: number, stopped = false): string {
   if (stopped) return `Could not load this conversation: ${issue} · tap to try again`;
   if (!loaded) return `Not loaded yet: ${issue}. Trying again.`;
@@ -965,23 +1001,23 @@ export function staleLine(issue: string, loaded: boolean, lastFrame: number | nu
   return `${issue} · shown as of ${age} ago · trying again`;
 }
 
-/** How old a conversation's last news from st is, as stui writes it: "4s", "3m", "2h". */
+/** How old a conversation's last news from Fractal is, as the Fractal terminal UI writes it: "4s", "3m", "2h". */
 export function updatedAge(lastFrame: number, now: number): string {
   const seconds = Math.max(0, Math.round((now - lastFrame) / 1000));
   return seconds < 60 ? `${seconds}s` : seconds < 3600 ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
 }
 
 /**
- * The line under a conversation's header that says how fresh it is, as stui's does ("live ·
+ * The line under a conversation's header that says how fresh it is, as the Fractal terminal UI's does ("live ·
  * updated 1m ago"), and shows that the phone is asking again: `refreshing` is true from the moment
- * it starts following the conversation until st sends it. `tone` is how to colour it.
+ * it starts following the conversation until Fractal sends it. `tone` is how to colour it.
  */
 export function freshnessLine(o: { issue: string; loaded: boolean; refreshing: boolean; lastFrame: number | null; now: number }): { text: string; tone: 'live' | 'refreshing' | 'warn' } {
   const updated = o.lastFrame === null ? '' : ` · updated ${updatedAge(o.lastFrame, o.now)} ago`;
   if (o.issue) return { text: `⚠ retrying${updated}`, tone: 'warn' };
   if (!o.loaded) return { text: '↻ loading…', tone: 'refreshing' };
   if (o.refreshing) return { text: `↻ refreshing…${updated}`, tone: 'refreshing' };
-  if (o.lastFrame === null) return { text: '● live · waiting for st', tone: 'live' };
+  if (o.lastFrame === null) return { text: '● live · waiting for Fractal', tone: 'live' };
   return { text: `● live${updated}`, tone: 'live' };
 }
 

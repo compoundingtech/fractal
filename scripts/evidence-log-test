@@ -136,7 +136,8 @@ class EvidenceLog(unittest.TestCase):
         index = f'refs/tags/evidence/input/unit/{"e" * 40}/{old}'
         self.assertEqual(self.pull()[0], 0)
         plan = self.f.root / 'plan.json'
-        plan.write_text(json.dumps({'trees': [self.tree], 'keys': [['unit', 'e' * 40]], 'plan_sha256': 'f' * 64}))
+        plan.write_text(json.dumps({'trees': [self.tree], 'keys': [['unit', 'e' * 40]], 'plan_sha256': 'f' * 64,
+                                    'delete': [f'refs/tags/evidence/{self.tree}/{old}']}))
         code, result, error = self.pull('--plan', str(plan), mode='gc')
         self.assertEqual((code, result['gc_paths'], result['copies_dropped']), (0, 2, 1), (result, error))
         subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', f'refs/tags/evidence/{self.tree}/{old}'], check=True)  # GC deletes
@@ -150,6 +151,55 @@ class EvidenceLog(unittest.TestCase):
         lines = self.lines(f'trees/{self.tree[:2]}/{self.tree}')
         self.assertEqual([line.split()[:2] for line in lines], [['record', old], ['gc', lines[1].split()[1]], ['record', again]])
         self.assertTrue(index)
+
+    def gc_plan(self, records):
+        plan = self.f.root / 'plan.json'
+        plan.write_text(json.dumps({'trees': [self.tree], 'keys': [], 'plan_sha256': 'f' * 64,
+                                    'delete': [f'refs/tags/evidence/{self.tree}/{r}' for r in records]}))
+        return plan
+
+    def test_a_pull_between_gc_s_lines_and_its_deletions_does_not_log_the_doomed_records_again(self):
+        passed = self.record()
+        failed = self.record(exit_code=1, seconds=10)
+        self.assertEqual(self.pull()[0], 0)
+        self.assertEqual(self.pull('--plan', str(self.gc_plan([passed, failed])), mode='gc')[0], 0)
+        # Before GC deletes anything a pull runs (the timer every 2 minutes): the doomed records are still on the remote, and their
+        # copies were dropped. Logging them again after the gc line would make their deletion an alarm, and --restore undo it.
+        code, result, _ = self.pull('--restore')
+        self.assertEqual((code, result['added'], result['gc_pending']), (0, 0, 2), result)
+        path = f'trees/{self.tree[:2]}/{self.tree}'
+        self.assertEqual([line.split()[0] for line in self.lines(path)], ['record', 'record', 'gc'])
+        for record in (passed, failed):
+            subprocess.run(['git', '-C', str(self.remote), 'update-ref', '-d', f'refs/tags/evidence/{self.tree}/{record}'], check=True)
+        code, result, _ = self.pull('--restore')
+        self.assertEqual((code, result['missing'], result['gc_pending'], 'restored' in result), (0, [], 0, False), result)
+        self.assertFalse(self.remote_refs('refs/tags/evidence'), 'nothing GC deleted came back')
+        self.assertEqual(json.loads((self.host / 'evidence-log.gc-pending.json').read_text()), {})
+
+    def test_a_pending_deletion_gc_never_made_is_logged_again_after_a_day(self):
+        passed = self.record()
+        self.assertEqual(self.pull()[0], 0)
+        self.assertEqual(self.pull('--plan', str(self.gc_plan([passed])), mode='gc')[0], 0)
+        path = f'trees/{self.tree[:2]}/{self.tree}'
+        self.now += 23 * 3600
+        self.assertEqual(self.pull()[1]['gc_pending'], 1)
+        self.now += 3600
+        code, result, _ = self.pull()
+        self.assertEqual((code, result['added'], result['gc_pending']), (0, 1, 0), result)
+        self.assertEqual([line.split()[:2] for line in self.lines(path)][-1], ['record', passed], 'it counts again, after the gc line')
+
+    def test_gc_publishes_its_lines_at_once_and_a_plan_without_its_deletions_is_refused(self):
+        passed = self.record()
+        self.assertEqual(self.pull()[0], 0)
+        code, result, error = self.pull('--publish', '--plan', str(self.gc_plan([passed])), mode='gc')
+        self.assertEqual((code, result['published']), (0, True), error)
+        published = subprocess.run(['git', '-C', str(self.remote), 'rev-parse', 'refs/evidence-log/main'], capture_output=True, text=True).stdout.strip()
+        self.assertEqual(published, result['head'])
+        plan = self.f.root / 'old-plan.json'
+        plan.write_text(json.dumps({'trees': [self.tree], 'keys': [], 'plan_sha256': 'f' * 64}))
+        code, _, error = self.pull('--plan', str(plan), mode='gc')
+        self.assertEqual(code, 2, error)
+        self.assertIn('delete', error)
 
     def test_an_input_index_ref_is_logged_under_its_key_only_when_the_record_carries_that_key(self):
         key = 'e' * 40

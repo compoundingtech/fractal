@@ -37,7 +37,7 @@ const CONTENT_DOMAIN: &str = "smallclaims.claim-content.v1";
 pub enum Role {
     /// A person's own key, from which their device keys descend. A node vouches for it.
     Root,
-    /// One device of a person: a CLI, stui, a phone, a browser. Issued by the person.
+    /// One device of a person: a CLI, Fractal TUI, a phone, a browser. Issued by the person.
     Device,
     /// An agent's key, minted by the node that runs it.
     Agent,

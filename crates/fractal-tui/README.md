@@ -1,11 +1,37 @@
 # Fractal terminal client
 
 `st` in a terminal opens spaces on the live graph: splits with their own tabs, each showing a conversation,
-a mission, a terminal, Now or usage. `st ui --space NAME` opens a named space. `st ui --demo`
-shows them on invented data and sends nothing. `st ui --classic` keeps the layout from before
-spaces for now; it is going away ([#1166](https://github.com/compoundingtech/smalltalk/issues/1166)).
+a mission, a terminal, Inbox or usage. `st ui --space NAME` opens a named space. `st ui --demo`
+shows the kit's generated `fleet-mid-refactor` world and sends nothing. Spaces are the Fractal terminal UI's only layout: the layout from
+before them is gone ([#1166](https://github.com/compoundingtech/fractal/issues/1166)), and
+`st ui --classic` refuses with what to run instead. `tui` is an alias of `ui`, including after global options such as `st --endpoint URL tui`.
 The screens follow [docs/clients/ui-contract.md](../../docs/clients/ui-contract.md), shared with the
 iOS app.
+
+Demo data flows from the six committed `fixtures/scenarios/fleet-mid-refactor/*.json`
+slices (embedded in the binary), through `fractal_client::scenarios` strict decoding
+and timestamp rebasing to now, into the ordinary `ui/adapt.rs` model adapter and screens.
+It includes the generated roster, sessions, machines, devices, mission and work,
+attention, conversations and recorded terminal screen. Launches and variants are
+decoded with the details inventory and supply available launch previews; the TUI
+does not have a standalone launch inventory screen. A bad slice stops demo startup
+before terminal raw mode, naming the slice and failing wire-value pointer.
+
+The demo renders the slices' initial state only: timeline updates and recorded history
+are validated but not played back. Tolerant-decode slices are rejected, not silently
+accepted. The selected identity is fixed to `person/robin`, with `host/meadow` as the
+snapshot host; roster and inventory rows themselves come from the slices. Worktrees
+are explicitly unavailable because the kit does not model them (the live graph also
+has no worktree collection). Clients and Usage remain loading: these screens do not
+yet have a scenario-backed projection.
+
+`fixtures/clients/demo-world.json` is only a derived client contract, not demo input.
+Regenerate it and the text capture `tests/fixtures/scenario-demo.golden` with
+`STUI_UPDATE_CONTRACT=1 cargo test --locked -p fractal-tui contract`.
+The contract uses the kit anchor clock and omits local conversation clock labels;
+normal demo mode rebases to the current clock. Without the update flag, contract
+and rendered-frame tests fail on scenario/adapter drift. Invented per-feature inputs
+remain test-only fixtures, never a second runtime demo world.
 
 The TUI library connects through the generated Rust `st3.client.v0` client, the same typed data boundary
 used by the CLI. Its subscriptions, reconnects, snapshot model and cache come from
@@ -14,52 +40,71 @@ mission and fleet details without blocking keys. A private, actor-and-endpoint-s
 cache keeps the last snapshot visible while reconnecting. Actions still need a live connection
 and fresh fences; there is no offline mutation queue.
 
-Install the repo's `.#st3` Nix package and run `ST3_PERSON=person/<your-id> st` in a terminal
-with a running st3 daemon. For source development, use
+Install the repo's `.#fractal` Nix package and run `ST3_PERSON=person/<your-id> fractal` in a terminal
+with a running Fractal daemon. For source development, use
 `ST3_PERSON=person/<your-id> cargo run -p fractal --locked -- ui`. `ST3_ENDPOINT` can override the discovered Unix socket. When `ST3_PERSON` is unset,
 the TUI uses `person` from `~/.config/st3/config.toml` (or `$XDG_CONFIG_HOME/st3/config.toml`).
-A concrete person identity is required so Now and devices show the right data.
+A concrete person identity is required so Inbox and devices show the right data.
 
-For a laptop without a daemon, run `st devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
-single-use code, then run `st`. The paired member supplies the person identity. See
+For a laptop without a daemon, run `fractal devices complete MEMBER_URL PAIRING_ID --fingerprint SHA256` and enter the member's
+single-use code, then run `fractal`. The paired member supplies the person identity. See
 [client-only setup](../../docs/st3/client-only.md) for gateway setup, multiple members, private
 credentials, offline cache, and automatic reconnect. `--client` requires a saved pairing;
 `--local` selects the local daemon even when a pairing exists. While offline, the terminal UI keeps its last
 display, shows the last connection time, queues no mutations, and offers `r` to retry now.
 
-Keys (`?` shows them all): `Ctrl+K` opens anything (agents, missions, machines, spaces, and what
-was said in conversations); `Tab` and `Shift+Tab` move between a split's tabs; `Alt+arrows` move
+Keys (`?` shows them all): `Ctrl+K` opens anything (agents, missions, machines, spaces, what
+was said in conversations, Inbox, Usage and the Fleet list); `Tab` and `Shift+Tab` move between a split's tabs; `Alt+arrows` move
 between splits; `Ctrl+T`, `Ctrl+V`, `Ctrl+X` and `Ctrl+W` open a tab, split right or below, and
-close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens Now over the space; `Ctrl+Q` quits.
+close a tab; `Ctrl+S` shows the sidebar and `Ctrl+H` opens or focuses the Inbox tab; `Ctrl+Q` quits.
 Middle-click a tab to close it: press and release over the same tab. This uses the same
 close action as `Ctrl+W` and the tab's right-click menu.
+
+Tab prefixes identify **A**gent (including its terminal), **M**ission, and **I**nbox/alert
+cards. Agent activity follows the type: `>` working/compacting, `-` idle, `x`
+down/stopped/retired, `◆` waiting on a person or a login, `!` fault, `~` starting/unknown.
+`◆N` counts open alerts for the subject (zero is quiet; `◆?` means not loaded).
+The existing standalone `◆` stays immediately before the agent or mission name when
+its reported state needs a person; the alert count is separate and does not replace it.
+A separate `?` marks a current question prompt from live attention, including questions
+that can only be answered in the terminal or whose client-answer window expired.
+Question identity comes from the native question kind or the exact named question
+tool call; cached calls without an open live prompt cannot set it. Mission tabs
+aggregate their agents' current question prompts; Inbox aggregates all of them.
+Counts drop first in a narrow strip; type, activity and question markers precede the
+truncated name. Overflow markers still reach hidden tabs.
+
 In a conversation, letters type into its message box and commands are chords: `Ctrl+F` finds,
 `Ctrl+E` expands tool output, `Ctrl+P` simplifies, `Ctrl+D` shows the agent's details, `Ctrl+]`
 attaches the agent's terminal. `Ctrl+\` is the leader: it lists what to press next (`c` the conversation, `t` a new tab, `v`/`x` splits, `q` quit, `Ctrl+\` again closes the tab, `Esc` puts the list away), in a terminal too. A drag selects text in one pane and copies
 it on release.
 
 Opening an agent attaches its terminal once its tab stays in front for a moment; `Ctrl+\` then `c` shows its
-conversation. An agent without a terminal (a session st did not start, a harness without one) opens
+conversation. An agent without a terminal (a session Fractal did not start, a harness without one) opens
 its conversation. **Conversation first**, in `Ctrl+K`, makes this device open agents on their
 conversation instead; it is kept in `$XDG_STATE_HOME/st3/stui/prefs.json` and never synced. A
 device that saved the older `terminal_first` keeps attaching. An alert for the agent shows on top
 of its attached terminal: click it to show it, click an answer to send it, or click
-"open in Now". Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
+"open in Inbox". A request's recommended answer comes first among its at most three answer buttons,
+green and starred (`★`), under a single `★ recommended: <reason>` line. Long reasons end in `…`;
+the full reason and answers needing your words stay in Inbox. Keys always go to the terminal (`Ctrl+K` and `Ctrl+\` aside), so typing never
 answers an alert. When the link to the
 terminal drops, its status line says `reconnecting`, why, the next try and `Ctrl+\ c conversation`;
-it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Now cards show
-their own keys; `y` confirms what a card asks, and Enter never does.
+it attaches again by itself, waiting 1, 2, 4… up to 32 seconds between tries. Scrolling to the top of a conversation loads the page before it. Inbox cards show
+their own keys; `y` confirms what a card asks, and Enter never does. Inbox keeps its list and
+selected card in a regular, closable tab. Opening it again focuses the existing tab in this
+space. Move it into a split with the tab menu or by dragging; Esc does not close it.
 
 A seat can ask the interface to show something with `st ui open agent/NAME` (also `mission/NAME`,
 `mission-run/NAME/RUN` and `machine/NAME`), `--split` and `--below` for a split, `--keep-focus` to leave
 the person where they are. The command writes a small file into the configured person's private state
 directory (`st3/stui/requests-KEY`) and waits for a terminal interface of that person on the same machine
 to answer: opened, not found, or nobody answered, when nothing is left queued. A pane never takes the
-focus from a message being typed, and a subject st has not listed yet is waited for a few seconds, so an
+focus from a message being typed, and a subject Fractal has not listed yet is waited for a few seconds, so an
 agent made a moment ago can be opened. A paired device does not read the directory. The
 mission view stays on its mission from step to step; between steps its card says what is up next.
 
-The [terminal tab input reference](../../docs/stui-terminal-tab.md) records the measured
+The [terminal tab input reference](../../docs/fractal-terminal-tab.md) records the measured
 input modes, query replies, and remaining gaps, including the headless PTY probe.
 
 Verification:
@@ -72,7 +117,10 @@ cargo build -p fractal --locked
 ST3_PERSON=person/<your-id> python3 crates/fractal-tui/tests/pty_smoke.py target/debug/st3 --ui
 ```
 
-The PTY smoke test runs with or without a local daemon or st config. It checks first-frame and key-to-redraw
+After an intended mission-rendering change, regenerate its text, style and target golden with
+`STUI_UPDATE_GOLDEN=1 cargo test -p fractal-tui --locked mission_golden`, review the fixture diff,
+then run the same test without `STUI_UPDATE_GOLDEN`.
+The PTY smoke test runs with or without a local daemon or Fractal config. It checks first-frame and key-to-redraw
 latency, also against a deliberately stalled getter, plus alternate-screen restoration after
 normal exit, SIGTERM, a long-running PTY hangup, and a debug panic. For a packaged release
 binary, pass its path followed by `--ui --no-panic`; the release build has no debug panic hook. The two
@@ -92,7 +140,7 @@ both unset for ordinary use. The selector only observes the UI: it does not open
 change the actor/endpoint, attach a terminal or alter subscriptions. An existing file is
 never appended to or overwritten; a new file is mode 0600 on Unix.
 
-Start the installed `st` once, using the person's ordinary pairing/configuration and
+Start the installed `fractal` once, using the person's ordinary pairing/configuration and
 space. Either restore a space with that conversation in front, or open it normally with
 Ctrl+K and Enter. Preserve caches, preferences and daemon state. Do not use Ctrl+] (terminal
 attachment), `--demo`, or a headless test client as a conversation-render measurement.
@@ -127,7 +175,7 @@ Every image in a conversation is a line saying what it is before it loads: a mes
 card. Click the line, or press Ctrl+U on the focused row (Ctrl+↑/↓ move the focus), to load it
 inline; again to hide it. Where the terminal draws images (kitty, iTerm2, a sixel terminal,
 also through tmux) the first image on screen loads by itself; elsewhere it draws in half
-blocks. stui asks the terminal itself, once at start, and asks only a terminal that answered
+blocks. the Fractal terminal UI asks the terminal itself, once at start, and asks only a terminal that answered
 a status report, so one that answers nothing gets half blocks and no stray bytes.
 
 An image is read, decoded and scaled to at most 1600 pixels on a worker; its terminal
@@ -158,7 +206,6 @@ Fresh workspaces show the host and `Ctrl+K: New terminal`, with a welcome row. A
 existing device's explicit sidebar visibility choice is kept. Older daemons lacking
 sixteen-subscription capacity keep the three live conversations and terminal; their
 sidebar shows grouped resources until the daemon supports the optional window.
-The classic layout keeps its existing tabbed lists.
 
 With the sidebar focused, `n` names a new folder, `m` on a resource chooses its folder,
 `r` renames the selected folder, `d` asks to delete it, and `+` on a folder opens the
@@ -195,5 +242,15 @@ Older members read inventories when their relevant view opens or its period
 changes; Fleet says these inventories are read, not followed. Read errors and
 partial windows stay visible. Connection generations fence legacy results, so a
 late read cannot replace a newer member's streamed rows. The actual-binary idle
-transport test runs `scripts/stui-test-client --classic` with `STUI_TIMING_LOG`
-on a private daemon, holding Fleet and Usage idle beyond every old read interval.
+transport test runs `scripts/fractal-ui-test-client` with `STUI_TIMING_LOG` on a private
+daemon, opening the Fleet list and Usage from Ctrl+K and holding them idle beyond every old
+read interval.
+
+Usage also lists budgets and objectives under the accounts. A budget is an allowance that
+resets (an account's weekly or 5-hour limit); an objective is a target over a window with an error
+budget. A row is red when its objective is missed or its budget has 10% or less left, and selecting
+a row shows its target, current reading, the daemon's plain-language explanation and a chart of the
+budget left over the period. The rows come from `slo.list` and the chart from `slo.history`, both
+read from this member's daemon: the list is read when Usage is shown and again when a limits reading
+changes, never on a timer, and the chart once for each selected row and period. A member without
+the routes shows that its daemon needs an update.

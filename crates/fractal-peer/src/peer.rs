@@ -1,4 +1,4 @@
-//! The peer listener as smalltalk runs it: the sync worker from `smallclaims::sync`, reaching the
+//! The peer listener as Fractal runs it: the sync worker from `smallclaims::sync`, reaching the
 //! store through this node's daemon, with the client-read relay and raw terminal routes beside
 //! the sync routes.
 
@@ -145,6 +145,9 @@ pub enum ClientReadOperation {
         session_id: String,
         limit: usize,
         cursor: Option<String>,
+    },
+    SessionDetail {
+        session_id: String,
     },
     TerminalScreen {
         terminal_id: String,
@@ -322,6 +325,8 @@ pub struct ClientRelay {
     /// Reuse sealed membership across per-item reachability checks for the same short TTL.
     pub membership: Arc<std::sync::Mutex<Option<ObservedMembership>>>,
     pub fabric: Option<Fabric>,
+    /// Ordered local transport policy; absent for a legacy config-only fleet.
+    transports: Option<Vec<String>>,
     legacy: bool,
     /// When each owner last refused this node's reads as stale, for provenance.
     fence_conflicts:
@@ -433,6 +438,25 @@ impl ClientRelay {
     /// peer, then the peers with the shortest observed path to it. With no observation of the
     /// target at all, every peer is worth a try. Nodes the read already passed are never chosen.
     pub fn next_hops(&self, target: &str, visited: &[String]) -> Vec<PeerConfig> {
+        self.next_hops_with_transports(
+            target,
+            visited,
+            LocalTransports {
+                fabric: self.fabric.is_some(),
+                tailscale: local_addresses()
+                    .iter()
+                    .any(crate::fleet::transport::is_tailnet_address),
+                ..LocalTransports::default()
+            },
+        )
+    }
+
+    fn next_hops_with_transports(
+        &self,
+        target: &str,
+        visited: &[String],
+        available: LocalTransports,
+    ) -> Vec<PeerConfig> {
         let view = self.fleet_view();
         // Sync from a dial-out member supplies no reverse owner-RPC or PTY transport.
         // In particular, dropping its old links must not enable the unseen-owner fallback.
@@ -441,12 +465,11 @@ impl ClientRelay {
         }) {
             return Vec::new();
         }
-        let local = LocalTransports {
-            fabric: self.fabric.is_some(),
-            tailscale: local_addresses()
-                .iter()
-                .any(crate::fleet::transport::is_tailnet_address),
-        };
+        let local = LocalTransports::configured(
+            self.transports.as_deref(),
+            available.tailscale,
+            available.fabric,
+        );
         let dialable = dial_targets(&view, &self.node, &self.peers, local);
         let names = dialable
             .keys()
@@ -512,14 +535,21 @@ impl ClientRelay {
             observed: Arc::default(),
             membership: Arc::default(),
             fence_conflicts: Arc::default(),
-            fabric: resolve_tool(
-                config
-                    .fleet
-                    .as_ref()
-                    .and_then(|file| file.fabric.as_deref()),
-                "fabric",
-            )
-            .map(Fabric::new),
+            transports: config.fleet.as_ref().map(|file| file.transports.clone()),
+            fabric: if config
+                .fleet
+                .as_ref()
+                .is_none_or(|file| file.transports.iter().any(|name| name == "fabric"))
+                || config.peers.iter().any(|peer| peer.url.starts_with("fabric://"))
+            {
+                resolve_tool(
+                    config.fleet.as_ref().and_then(|file| file.fabric.as_deref()),
+                    "fabric",
+                )
+                .map(Fabric::new)
+            } else {
+                None
+            },
         }))
     }
 
@@ -752,13 +782,25 @@ impl ClientRelay {
         peer: &PeerConfig,
         request: &ClientReadRequest,
     ) -> Result<serde_json::Value> {
-        if matches!(request.request, ClientReadOperation::Messages { messages_paging: true, .. }) {
+        let required = match &request.request {
+            ClientReadOperation::SessionDetail { .. } => Some(("session-detail-child-id", 1)),
+            ClientReadOperation::Timeline { session_id, .. }
+            | ClientReadOperation::ConversationContent { session_id, .. }
+            | ClientReadOperation::ConversationChanges { session_id, .. }
+                if session_id.starts_with("session/external-child-") =>
+            {
+                Some(("session-detail-child-id", 1))
+            }
+            ClientReadOperation::Messages { messages_paging: true, .. } => Some(("messages-paging", 2)),
+            _ => None,
+        };
+        if let Some((id, version)) = required {
             let capabilities = self.send_http(peer, request, true).await?;
             if !capabilities["capabilities"].as_array().is_some_and(|items| {
-                items.iter().any(|item| item["id"] == "messages-paging"
-                    && item["version"] == 2 && item["state"] == "granted")
+                items.iter().any(|item| item["id"] == id
+                    && item["version"] == version && item["state"] == "granted")
             }) {
-                return Err(messages_paging_unsupported().into());
+                return Err(client_read_unsupported(&request.request).into());
             }
         }
         self.send_http(peer, request, false).await
@@ -844,9 +886,12 @@ impl ClientRelay {
         if let Some(trace) = relay_trace::current() {
             trace.http_status(status.as_u16());
         }
-        // Old workers expose only POST here. Never probe them with a new operation or flag.
+        // Pre-discovery workers expose only POST; Axum's 404/405 has no fleet signature.
+        // Classify that absence without probing their closed decoder. A plain-HTTP
+        // intermediary can forge this refusal, but already can deny service; it can only
+        // change the explanation, never grant a capability or authorize an operation.
         if inspect_capabilities && matches!(status, StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED) {
-            return Err(messages_paging_unsupported().into());
+            return Err(client_read_unsupported(&request.request).into());
         }
         if status == StatusCode::UNAUTHORIZED {
             return Err(ClientReadRejected::unreachable(
@@ -913,6 +958,12 @@ impl ClientRelay {
                     "the peer client read protocol differs"
                 );
                 Ok(envelope)
+            }).map_err(|error| {
+                if inspect_capabilities && status.is_success() {
+                    client_read_unsupported(&request.request).into()
+                } else {
+                    error
+                }
             })?;
         if !status.is_success() {
             return Err(ClientReadRejected {
@@ -1215,6 +1266,20 @@ async fn forward_client_read(
         })
 }
 
+fn client_read_unsupported(operation: &ClientReadOperation) -> ClientReadRejected {
+    if matches!(operation, ClientReadOperation::Messages { .. }) {
+        return messages_paging_unsupported();
+    }
+    let mut rejected = ClientReadRejected::new(
+        "peer-too-old",
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "This host runs an older Fractal version; update it to open subagent conversations.",
+    );
+    rejected.details.insert("capability".into(), "session-detail-child-id".into());
+    rejected.details.insert("version".into(), 1.into());
+    rejected
+}
+
 fn messages_paging_unsupported() -> ClientReadRejected {
     ClientReadRejected::new(
         "unsupported-capability",
@@ -1235,7 +1300,10 @@ async fn client_read_capabilities(
     };
     signed_response_for(
         &state, CLIENT_READ_PATH, &FleetAuth::body_digest(&[]), 0,
-        serde_json::json!({"capabilities":[{"id":"messages-paging","version":2,"state":"granted"}]}),
+        serde_json::json!({"capabilities":[
+            {"id":"messages-paging","version":2,"state":"granted"},
+            {"id":"session-detail-child-id","version":1,"state":"granted"}
+        ]}),
     ).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
@@ -1335,6 +1403,9 @@ async fn receive_client_read(
                 let value = answer?.value;
                 relay_trace::result(Phase::Envelope, || Ok(serde_json::to_value(value)?))
             }
+            ClientReadOperation::SessionDetail { session_id } => {
+                Ok(serde_json::to_value(client.sessions_get(&session_id).await?.value)?)
+            }
             ClientReadOperation::TerminalScreen { terminal_id, facts } => {
                 let value = if facts {
                     client.terminal_screen_with_facts(&terminal_id).await?.value
@@ -1394,6 +1465,7 @@ async fn receive_client_read(
                     runtime_desired_revision: None,
                     terminal_sequence: Some(expected_sequence),
                     preview_token: None,
+                    private_notes: None,
                 };
                 let result = match action_type.as_str() {
                     "terminal.input" => {
@@ -1641,10 +1713,52 @@ impl MainBackend {
     }
 }
 
+impl MainBackend {
+    /// Send this worker's process CPU to the daemon every `WORKER_REPORT`, for the member's CPU
+    /// targets, until the process stops. An older daemon refuses the report; nothing retries it.
+    async fn report_process_cpu(self) {
+        let process = |cpu_ns| smallclaims::replication::ReplicationWorkerProcess {
+            pid: std::process::id(),
+            started_at_unix_ms: started_at_unix_ms(),
+            cpu_ns,
+        };
+        let mut interval = tokio::time::interval(smallclaims::windows::cpu_minutes::WORKER_REPORT);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let request = smallclaims::replication::ReplicationWorkerStatusRequest {
+                peer: String::new(),
+                worker: None,
+                process: Some(process(smallclaims::windows::process_cpu_ns())),
+            };
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                self.client.post::<_, Value>("/v1/internal/replication/worker-status", &request),
+            )
+            .await;
+        }
+    }
+}
+
+/// When this process started, in Unix milliseconds, read once.
+fn started_at_unix_ms() -> u64 {
+    static STARTED: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_millis() as u64)
+    })
+}
+
 impl Backend for MainBackend {
     async fn ready(&self) {
         loop {
-            if self.client.get::<serde_json::Value>("/v1/health").await.is_ok() {
+            if let Ok(health) = self.client.get::<serde_json::Value>("/v1/health").await {
+                if let Some(warning) = crate::replication_worker_build::startup_warning(
+                    health.get("build").and_then(|build| build.get("commit")).and_then(Value::as_str),
+                ) {
+                    eprintln!("st replication-worker: WARNING: {warning}");
+                }
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1667,6 +1781,7 @@ impl Backend for MainBackend {
                     inventory: inventory.clone(),
                     summary_only,
                     authority_guard: false,
+                    authority_digest_only: false,
                     signature_requests: signature_requests.to_vec(),
                 },
             )
@@ -1686,10 +1801,31 @@ impl Backend for MainBackend {
                     inventory: ReplicationInventory::default(),
                     summary_only: true,
                     authority_guard: true,
+                    authority_digest_only: false,
                     signature_requests: Vec::new(),
                 },
             )
             .await
+    }
+
+    async fn authority_digest(&self, fleet_id: &str) -> Result<String> {
+        // New daemons omit only the unused buckets. An old daemon ignores the additive
+        // option and returns its full response; consume its digest from this same call.
+        let response: ReplicationExportResponse = self
+            .client
+            .post(
+                "/v1/internal/replication/export",
+                &ReplicationExportRequest {
+                    fleet_id: fleet_id.to_owned(),
+                    inventory: ReplicationInventory::default(),
+                    summary_only: true,
+                    authority_guard: true,
+                    authority_digest_only: true,
+                    signature_requests: Vec::new(),
+                },
+            )
+            .await?;
+        Ok(response.exchange.authority_digest)
     }
 
     async fn receive(
@@ -1774,7 +1910,8 @@ impl Backend for MainBackend {
                 "/v1/internal/replication/worker-status",
                 &smallclaims::replication::ReplicationWorkerStatusRequest {
                     peer: peer.to_owned(),
-                    worker,
+                    worker: Some(worker),
+                    process: None,
                 },
             )
             .await?;
@@ -1816,8 +1953,8 @@ impl Backend for MainBackend {
     }
 }
 
-/// The routes smalltalk serves beside the sync routes on the peer listener.
-pub fn smalltalk_routes(splice: RawSplice) -> Router<PeerState> {
+/// The routes Fractal serves beside the sync routes on the peer listener.
+pub fn fractal_routes(splice: RawSplice) -> Router<PeerState> {
     relay_trace::init();
     Router::new()
         .route(
@@ -1845,7 +1982,7 @@ pub async fn conversation_gateway_relay(
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, peer_router(peer, smalltalk_routes(splice))).await });
+    tokio::spawn(async move { axum::serve(listener, peer_router(peer, fractal_routes(splice))).await });
     let secret = root.join("fleet-secret");
     fs::write(&secret, [7_u8; 32])?;
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600))?;
@@ -1864,6 +2001,9 @@ pub async fn conversation_gateway_relay(
 /// Run the replication worker: sync this node's store, through its daemon, with the fleet.
 pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
     config.validate()?;
+    if let Err(error) = crate::replication_worker_build::record(&config.state_dir) {
+        eprintln!("st replication-worker: WARNING: cannot report worker build: {error:#}");
+    }
     let worker = WorkerConfig {
         node: config.node.clone(),
         fleet_id: config
@@ -1893,11 +2033,13 @@ pub async fn run_worker(config: Config, splice: RawSplice) -> Result<()> {
             }
         })?;
     database_watcher.watch(&wake_file, notify::RecursiveMode::NonRecursive)?;
+    started_at_unix_ms();
+    tokio::spawn(MainBackend::new(config.socket.clone()).report_process_cpu());
     smallclaims::sync::run(
         worker,
         MainBackend::new(config.socket.clone()),
         wake,
-        smalltalk_routes(splice),
+        fractal_routes(splice),
     )
     .await
 }
@@ -1940,7 +2082,7 @@ mod tests {
             &error, ReplicationFailurePhase::FollowUpExport, Duration::from_millis(123), None,
         );
         assert_eq!(contextual.phase, ReplicationFailurePhase::FollowUpExport);
-        assert_eq!(contextual.elapsed_ms, 123);
+        assert_eq!(contextual.elapsed_ms, failure.elapsed_ms);
         assert_eq!(contextual.http_status, Some(500));
     }
 
@@ -2033,6 +2175,114 @@ mod tests {
     use tokio::net::TcpListener;
 
 
+
+    #[test]
+    fn relay_next_hops_follow_local_transport_order_and_removal_with_legacy_peers() {
+        use serde_json::json;
+
+        let view: FleetView = serde_json::from_value(json!({
+            "members": [{
+                "name": "owner",
+                "member_key": "owner-key",
+                "state": "current",
+                "mode": "listening",
+                "start": 1,
+                // Old peers advertise endpoints without an ordering or preference field.
+                "endpoints": [
+                    {"transport": "loopback", "address": "127.0.0.1:4000"},
+                    {"transport": "tailscale", "address": "100.101.102.103:4000"},
+                    {"transport": "fabric", "node": "owner-node", "protocol": "st3-peer-v1"}
+                ]
+            }]
+        })).unwrap();
+        let mut relay = ClientRelay {
+            node: "gateway".into(),
+            peers: Vec::new(),
+            auth: FleetAuth::test("fleet-test", &[7; 32]),
+            http: reqwest::Client::new(),
+            links: Some(Arc::new(Store::open_memory("gateway").unwrap())),
+            observed: Arc::default(),
+            membership: Arc::new(std::sync::Mutex::new(Some((
+                std::time::Instant::now(),
+                Arc::new(view),
+            )))),
+            fabric: None,
+            transports: None,
+            legacy: false,
+            fence_conflicts: Arc::default(),
+        };
+        let available = LocalTransports {
+            tailscale: true,
+            fabric: true,
+            ..LocalTransports::default()
+        };
+        let tailscale = "http://100.101.102.103:4000";
+        let fabric = "fabric://owner-node/st3-peer-v1";
+        let loopback = "http://127.0.0.1:4000";
+        for (policy, expected) in [
+            (None, vec![tailscale, fabric, loopback]),
+            (Some(vec!["tailscale", "fabric"]), vec![tailscale, fabric, loopback]),
+            (Some(vec!["fabric", "tailscale"]), vec![fabric, tailscale, loopback]),
+            (Some(vec!["fabric"]), vec![fabric, loopback]),
+            (Some(vec!["tailscale"]), vec![tailscale, loopback]),
+            (Some(Vec::new()), vec![loopback]),
+        ] {
+            relay.transports = policy.map(|names| names.into_iter().map(str::to_owned).collect());
+            assert_eq!(
+                relay.next_hops_with_transports("owner", &[], available)
+                    .into_iter()
+                    .map(|peer| peer.url)
+                    .collect::<Vec<_>>(),
+                expected,
+                "{:?}",
+                relay.transports,
+            );
+        }
+        // A daemon restart reconstructs the relay from the saved fleet file. Preference
+        // and removal must affect real next hops, not just the serialized setting.
+        let root = tempfile::tempdir().unwrap();
+        let secret = root.path().join("fleet-secret");
+        fs::write(&secret, [7_u8; 32]).unwrap();
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        let key = root.path().join("node.key");
+        MemberKey::load_or_create(&key).unwrap();
+        let mut file = smallclaims::fleet::FleetFile {
+            fleet_id: "1f91ca65-7793-48cc-866e-ac15690130e1".into(),
+            node_key_file: key,
+            ..Default::default()
+        };
+        for (policy, expected) in [
+            (vec!["tailscale", "fabric"], vec![tailscale, fabric, loopback]),
+            (vec!["fabric", "tailscale"], vec![fabric, tailscale, loopback]),
+            (vec!["tailscale"], vec![tailscale, loopback]),
+        ] {
+            file.transports = policy.into_iter().map(str::to_owned).collect();
+            file.save(root.path()).unwrap();
+            let restarted = ClientRelay::from_config(&Config {
+                node: "gateway".into(),
+                fleet_id: Some(file.fleet_id.clone()),
+                shared_secret_file: Some(secret.clone()),
+                fleet: smallclaims::fleet::FleetFile::load(root.path()).unwrap(),
+                state_dir: root.path().into(),
+                ..Default::default()
+            }).unwrap().unwrap().with_links(relay.links.as_ref().unwrap().clone());
+            *restarted.membership.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((
+                std::time::Instant::now(),
+                relay.fleet_view(),
+            ));
+            assert_eq!(
+                restarted.next_hops_with_transports("owner", &[], available)
+                    .into_iter().map(|peer| peer.url).collect::<Vec<_>>(),
+                expected,
+            );
+        }
+        // Explicit config routes retain their precedence for mixed config/member fleets.
+        relay.peers.push(PeerConfig {
+            name: "owner".into(),
+            url: fabric.into(),
+        });
+        assert_eq!(relay.next_hops_with_transports("owner", &[], available)[0].url, fabric);
+    }
 
     #[test]
     fn next_hops_prefer_the_owner_then_the_nearest_peer_that_reaches_it() {

@@ -1,13 +1,22 @@
-//! smalltalk as a runtime on the graph: the claim kinds it knows, the tables it projects them
+//! Fractal as a runtime on the graph: the claim kinds it knows, the tables it projects them
 //! into, its checkpoint rules, and the caches of its projections. `smallclaims` reaches all of
 //! these only through [`smallclaims::store::Runtime`].
 
 use super::*;
 
-/// smalltalk's half of the store. The graph holds it as its runtime, and `Store` keeps it beside
+/// The newest complete roster in each history mode, and the page order of the current one.
+#[derive(Default)]
+pub struct PreviousRoster {
+    pub resources: Vec<AgentResourcesEntry>,
+    pub page_refs: Option<AgentResourcesEntry>,
+}
+
+/// Fractal's half of the store. The graph holds it as its runtime, and `Store` keeps it beside
 /// the graph for the caches its reads use.
 #[derive(Default)]
-pub struct SmalltalkRuntime {
+pub struct FractalRuntime {
+    /// Source-owned observation fencing only; no canonical sample log or timer.
+    pub(super) slo_source: Mutex<slo_breaches::SourceState>,
     /// Committed launch-source invalidation, independent of append frontiers.
     pub publication_cache_epoch: Mutex<Option<(i64, bool)>>,
     pub publication_cache_observer: Mutex<Option<smallclaims::sqlite::CommitObserver>>,
@@ -45,6 +54,10 @@ pub struct SmalltalkRuntime {
     pub usage_folds: Mutex<UsageFolds>,
     /// Ordering and queue metadata for lazy HTTP pages, shared at the same graph cuts.
     pub agent_page_refs_cache: Mutex<VecDeque<AgentResourcesEntry>>,
+    /// The roster readers had when a projection catching up last projected more admitted
+    /// claims: readers serve it, under its own cut, until the roster refolds. A fold never
+    /// starts from it, and a forget drops it.
+    pub agent_roster_previous: Mutex<PreviousRoster>,
     /// Acquire before opening a SQLite snapshot, never while pinning a WAL read mark.
     pub agent_resources_admission: Arc<tokio::sync::Mutex<()>>,
     pub agent_resources_admission_state: Mutex<roster_admission::AdmissionState>,
@@ -54,6 +67,10 @@ pub struct SmalltalkRuntime {
     /// When the oldest refresh request no refresh has answered yet was made, in Unix ms; 0
     /// when none waits. A refresh clears it only once it publishes.
     pub agent_roster_requested_at: std::sync::atomic::AtomicU64,
+    /// Serializes request capture/restoration with projection-generation reset.
+    pub agent_roster_request_generation: parking_lot::Mutex<()>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub agent_roster_restore_checked: parking_lot::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// Bit 0: a refresh is in flight. Bit 1: the last attempt failed.
     pub agent_roster_attempt: std::sync::atomic::AtomicU8,
     /// Fault retries due in this fold, and deadlines deferred to the next refresh.
@@ -72,6 +89,9 @@ pub struct SmalltalkRuntime {
     /// Counts complete current roster publications, same graph index or not, so collection
     /// streams that read an earlier one reread the newer.
     pub agent_roster_published: tokio::sync::watch::Sender<u64>,
+    /// Complete presented current rosters share the existing generation-fenced list owner.
+    pub presented_agents: published_list::PublishedList<agents_publication::PresentedAgents>,
+    pub presented_agents_epoch: agents_publication::NodeEpoch,
     /// Every other collection's published view revisions, for the same rereads.
     pub published_views: published_views::PublishedViews,
     /// The attention list a daemon's refresher publishes for collection windows.
@@ -152,13 +172,21 @@ pub struct AgentResourcesEntry {
 impl Store {
     /// The domain state of type `T` kept on this store, created empty on first use.
     pub fn extension<T: std::any::Any + Send + Sync + Default>(&self) -> Arc<T> {
-        self.smalltalk.extensions.get::<T>()
+        self.fractal.extensions.get::<T>()
     }
 }
 
-impl SmalltalkRuntime {
+impl FractalRuntime {
     fn finish_schema(&self, connection: &Connection, fresh: bool) -> Result<()> {
         runtime_starts::create_schema(connection)?;
+        resource_references::create_schema(connection)?;
+        // Legacy run stamps are projection metadata, not ownership of a shared URI.
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h379d33768384 owner=fractal_store::store::runtime TODO=bound-or-reference-values-and-reclamation */ "UPDATE desired SET owner_run=NULL, owner_generation=NULL, owner_step=NULL
+             WHERE kind='resource' AND subject LIKE 'resource/uri/%'
+               AND (owner_run IS NOT NULL OR owner_generation IS NOT NULL OR owner_step IS NOT NULL)",
+            [],
+        )?;
         push_registrations::create_schema(connection)?;
         migrate_mission_run_deadlines(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h5484380b8507 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ git_change_tables::SCHEMA)?;
@@ -177,6 +205,7 @@ impl SmalltalkRuntime {
             None
         };
         resources::create_schema(connection)?;
+        slo_breaches::create_schema(connection)?;
         custom::create_schema(connection)?;
         agent_messages::create_schema(connection)?;
         client_messages::create_schema(connection)?;
@@ -215,7 +244,7 @@ impl SmalltalkRuntime {
     }
 }
 
-impl Runtime for SmalltalkRuntime {
+impl Runtime for FractalRuntime {
     fn writer_observer(&self) -> Option<Arc<dyn smallclaims::sqlite::WriterObserver>> {
         Some(self.observer_actuals.clone())
     }
@@ -331,6 +360,7 @@ impl Runtime for SmalltalkRuntime {
             smallclaims::ivm::events::install(transaction, 4096)?;
         }
         projectors::run_hooks(projectors::OPEN, transaction)?;
+        resource_references::open(transaction, shared_memory)?;
         if shared_memory {
             rebuild_operations_tx(transaction)?;
             rebuild_planning_tx(transaction)?;
@@ -364,7 +394,6 @@ impl Runtime for SmalltalkRuntime {
             let _ = rebuilt;
         }
         migrate_occurrence_creation_projections_tx(transaction)?;
-        mission_projection_upgrade::migrate(transaction)?;
         Ok(())
     }
 
@@ -384,12 +413,7 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn projection_versions(&self) -> BTreeMap<String, u64> {
-        BTreeMap::from([
-            ("mission_run_deadlines".into(), 3),
-            ("mission_runs".into(), 2),
-            ("run_generations".into(), 2),
-            ("step_runs".into(), 2),
-        ])
+        BTreeMap::from([("mission_run_deadlines".into(), 3)])
     }
 
     fn classify_replicated_claim(
@@ -424,7 +448,8 @@ impl Runtime for SmalltalkRuntime {
         repaired: &str,
         replacement: &str,
     ) -> Result<()> {
-        select_desired_repair_tx(transaction, repaired, replacement)
+        select_desired_repair_tx(transaction, repaired, replacement)?;
+        slo_breaches::repair(transaction, repaired)
     }
 
     fn append_claim_tx(
@@ -477,6 +502,11 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn before_commit(&self, transaction: &Transaction<'_>) -> Result<()> {
+        // Replication admission/import, repair and pruning can dirty preparation
+        // without running APPEND (or can do so after its last claim projector).
+        // The native connection signal makes the no-work boundary SQL-free.
+        resources::flush_preparation(transaction)?;
+        completion_state::flush(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -488,35 +518,15 @@ impl Runtime for SmalltalkRuntime {
     }
 
     fn forget_views(&self) {
-        self.observer_actuals.invalidate();
-        let mut cache = self
-            .subject_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        cache.views.clear();
-        cache.statuses.clear();
-        cache.summary_statuses.clear();
-        cache.runtime_statuses.clear();
-        cache.card_statuses.clear();
-        drop(cache);
-        let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
-        self.conversation_owner_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        owners.clear();
-        drop(owners);
-        self.agent_status_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.agent_resources_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        self.exact_agent_resources_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
-        self.agent_roster_published.send_modify(|revision| *revision += 1);
+        // Pending work names the discarded projection generation. A recent reader or a
+        // live subscriber below can request a new-generation publication after invalidation.
+        {
+            let _generation = self.agent_roster_request_generation.lock();
+            self.agent_roster_requested_at.store(0, std::sync::atomic::Ordering::Release);
+            self.presented_agents.forget();
+        }
+        self.forget_reductions();
+        *self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner) = PreviousRoster::default();
         self.attention_list.forget();
         self.glass_list.forget();
         self.arrangement_list.forget();
@@ -527,23 +537,42 @@ impl Runtime for SmalltalkRuntime {
         self.published_work.forget();
         self.published_runtimes.forget();
         self.published_views.invalidate();
-        self.agent_page_refs_cache
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-        // Nothing is published now, and a refold from the log takes seconds on a large store.
-        // Where agents lists are being read, start it here rather than when the next read finds
-        // no roster and waits for it. A node nobody reads keeps folding only on demand, so a
-        // long catch-up or trim that forgets once per chunk does not refold it once per chunk.
-        let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
-        let read_lately = read_at != 0
-            && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64;
-        if let Some(wake) = self.agent_roster_refresh.get().filter(|_| read_lately) {
-            let _ = self.agent_roster_requested_at.compare_exchange(
-                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            wake.notify_one();
+        self.wake_read_roster();
+    }
+
+    fn projection_advanced(&self, caught_up: bool) {
+        // Readers keep the roster they had while it refolds from nothing: keep it before the
+        // caches it lives in are cleared.
+        {
+            let resources = self.agent_resources_cache.lock().unwrap_or_else(PoisonError::into_inner);
+            let refs = self.agent_page_refs_cache.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut previous = self.agent_roster_previous.lock().unwrap_or_else(PoisonError::into_inner);
+            for history in [false, true] {
+                if let Some(entry) = resources.iter()
+                    .filter(|entry| entry.history == history && entry.covered.is_none())
+                    .max_by_key(|entry| (entry.index, entry.local))
+                {
+                    previous.resources.retain(|kept| kept.history != history);
+                    previous.resources.push(entry.clone());
+                }
+            }
+            if let Some(entry) = refs.iter().filter(|entry| !entry.history).max_by_key(|entry| entry.index) {
+                previous.page_refs = Some(entry.clone());
+            }
+        }
+        // Reductions keyed by graph cut alone would answer from the prefix projected before:
+        // the cut did not move. They go, as on a forget.
+        self.forget_reductions();
+        // The missions, work, attention, glasses and arrangements lists read the projection
+        // frontier and refold what it newly covers on their own; they keep serving meanwhile.
+        self.summary_list.forget();
+        self.published_views.invalidate();
+        // The runtimes list and the roster fold from nothing, which takes seconds on a large
+        // store. Folding them after every chunk of a long backlog kept a busy node folding the
+        // whole time; readers keep the rows they had until the backlog is in, then one refold.
+        if caught_up {
+            self.published_runtimes.refold();
+            self.wake_read_roster();
         }
     }
 
@@ -609,14 +638,14 @@ impl Runtime for SmalltalkRuntime {
     }
 }
 
-/// The version of smalltalk's shared projection layout, beside the claim vocabulary. Nodes whose
+/// The version of Fractal's shared projection layout, beside the claim vocabulary. Nodes whose
 /// layouts differ keep exchanging claim authority but do not compare projection maps.
 /// How recently an agents list read must have asked for the roster for a forget to refold it
 /// at once rather than on the next read.
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.person-directive-notes.forward-compat.v1";
+    "st3.shared-projections.slo-breach-episodes-declared-resource-edges.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {
@@ -631,14 +660,86 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hb3dfbeff57db owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h7ee7e690f1e7 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ identities::SCHEMA)?;
     }
     Ok(())
+}
+
+
+impl FractalRuntime {
+    /// Drop every reduction kept by graph cut: statuses, views, conversation owners, agent
+    /// cards and the roster built from them, usage folds and agent page order.
+    fn forget_reductions(&self) {
+        self.observer_actuals.invalidate();
+        let mut cache = self
+            .subject_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        cache.views.clear();
+        cache.statuses.clear();
+        cache.summary_statuses.clear();
+        cache.runtime_statuses.clear();
+        cache.card_statuses.clear();
+        drop(cache);
+        let mut owners = self.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner);
+        self.conversation_owner_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        owners.clear();
+        drop(owners);
+        self.agent_status_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.agent_resources_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.exact_agent_resources_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        *self.usage_folds.lock().unwrap_or_else(PoisonError::into_inner) = UsageFolds::default();
+        self.agent_roster_published.send_modify(|revision| *revision += 1);
+        self.agent_page_refs_cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
+    /// The roster's caches were cleared, and a refold from the log takes seconds on a large
+    /// store. Where agents lists are being read, start it here rather than when the next read
+    /// finds no roster and waits for it. A node nobody reads keeps folding only on demand, so a
+    /// long catch-up or trim that forgets once per chunk does not refold it once per chunk.
+    pub fn agents_publication_demand(&self) -> bool {
+        let read_at = self.agent_roster_read_at.load(std::sync::atomic::Ordering::Acquire);
+        self.agent_roster_requested_at.load(std::sync::atomic::Ordering::Acquire) != 0
+            || self.presented_agents.has_subscribers() || (read_at != 0
+                && (now_ms() as u64).saturating_sub(read_at) < AGENT_ROSTER_READ_LATELY.as_millis() as u64)
+    }
+
+    pub fn wake_read_roster(&self) {
+        if self.agents_publication_demand() {
+            self.request_roster_refresh();
+        }
+    }
+
+    /// A queued startup, explicit-read or local-activity request remains demand until answered.
+    pub fn request_roster_refresh(&self) {
+        if let Some(wake) = self.agent_roster_refresh.get() {
+            let _generation = self.agent_roster_request_generation.lock();
+            let _ = self.agent_roster_requested_at.compare_exchange(
+                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            wake.notify_one();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -670,7 +771,7 @@ mod schema_install_tests {
             .unwrap();
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('preserved');").unwrap();
         assert!(
-            SmalltalkRuntime::default()
+            FractalRuntime::default()
                 .create_schema(&connection)
                 .is_err()
         );
@@ -693,7 +794,7 @@ mod schema_install_tests {
             .unwrap();
         // This damaged table fails after the runtime's early claim indexes were created.
         connection.execute_batch("CREATE TABLE mission_runs(id TEXT PRIMARY KEY); INSERT INTO mission_runs VALUES('existing');").unwrap();
-        let error = SmalltalkRuntime::default()
+        let error = FractalRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap_err();
         assert!(error.to_string().contains("mission_id"), "{error:#}");
@@ -731,7 +832,7 @@ mod schema_install_tests {
     fn failed_late_fresh_install_rolls_back_only_its_chunk() {
         use rusqlite::hooks::{AuthContext, Authorization};
         let (connection, reached) = late_install_error_fixture();
-        SmalltalkRuntime::default()
+        FractalRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap_err();
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
@@ -751,6 +852,10 @@ mod schema_install_tests {
         assert!(connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='claims_owned_set_subject_index')", [], |row| row.get::<_, bool>(0)).unwrap(), "the earlier committed initial chunk must survive");
         for name in [
             "resource_observations",
+            "local_resource_preparation",
+            "local_resource_preparation_claims",
+            "local_resource_preparation_pending",
+            "local_resource_preparation_dirty",
             "custom_registrations",
             "local_custom_dirty",
         ] {
@@ -771,7 +876,7 @@ mod schema_install_tests {
     fn failed_late_populated_install_keeps_completed_ddl() {
         use rusqlite::hooks::{AuthContext, Authorization};
         let (connection, reached) = late_install_error_fixture();
-        SmalltalkRuntime::default()
+        FractalRuntime::default()
             .create_schema(&connection)
             .unwrap_err();
         connection.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
@@ -790,6 +895,10 @@ mod schema_install_tests {
         );
         for name in [
             "resource_observations",
+            "local_resource_preparation",
+            "local_resource_preparation_claims",
+            "local_resource_preparation_pending",
+            "local_resource_preparation_dirty",
             "custom_registrations",
             "local_custom_dirty",
         ] {
@@ -839,7 +948,7 @@ mod schema_install_tests {
             }
             Authorization::Allow
         }));
-        SmalltalkRuntime::default()
+        FractalRuntime::default()
             .create_schema_for_fresh_store(&connection)
             .unwrap();
         // SQLite silently ignores this connection change within a transaction. The
@@ -1002,11 +1111,53 @@ mod schema_install_tests {
                 .execute_batch(smallclaims::store::FRESH_SCHEMA)
                 .unwrap();
         } else {
-            SmalltalkRuntime::default()
+            FractalRuntime::default()
                 .create_schema_for_fresh_store(&connection)
                 .unwrap();
         }
         panic!("the crash point was not reached");
+    }
+
+    #[test]
+    fn a_fresh_open_cut_after_any_commit_reopens_to_the_store_a_whole_open_makes() {
+        // The runtime's tables commit after the graph's first tables and their schema version,
+        // so a cut first open reopens as a current store and the existing-store path finishes it
+        // (#3777). Without the version it would be refused as an old store at version 0.
+        use smallclaims::store::contents::{differences, each_in_parallel, scratch_root, stored};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let directory = tempfile::tempdir_in(scratch_root()).unwrap();
+        let whole = directory.path().join("whole.sqlite");
+        let commits = Arc::new(AtomicUsize::new(0));
+        let counted = commits.clone();
+        drop(
+            crate::store::GraphStore::open_for_initialization_test(&whole, "node", Arc::new(FractalRuntime::default()), true, move |connection| {
+                connection.commit_hook(Some(move || {
+                    counted.fetch_add(1, Ordering::Relaxed);
+                    false
+                }));
+            })
+            .unwrap(),
+        );
+        let commits = commits.load(Ordering::Relaxed);
+        drop(Store::open(&whole, "node").unwrap());
+        let expected = stored(&whole);
+        each_in_parallel(commits, |kept| {
+            // Each cut's store goes once it is checked, so the scratch holds a few at a time.
+            let cut = tempfile::tempdir_in(directory.path()).unwrap();
+            let path = cut.path().join("cut.sqlite");
+            let seen = Arc::new(AtomicUsize::new(0));
+            // Every commit after the first `kept` rolls back, as if the process stopped there.
+            let opened = crate::store::GraphStore::open_for_initialization_test(&path, "node", Arc::new(FractalRuntime::default()), true, move |connection| {
+                connection.commit_hook(Some(move || seen.fetch_add(1, Ordering::Relaxed) >= kept));
+            });
+            assert!(opened.is_err(), "the open cut after {kept} of {commits} commits still succeeded");
+            drop(opened);
+            let reopened = Store::open(&path, "node")
+                .unwrap_or_else(|error| panic!("cut after {kept} of {commits}: {error:#}"));
+            drop(reopened);
+            let difference = differences(&stored(&path), &expected);
+            assert!(difference.is_empty(), "cut after {kept} of {commits}: {difference:#?}");
+        });
     }
 }
 

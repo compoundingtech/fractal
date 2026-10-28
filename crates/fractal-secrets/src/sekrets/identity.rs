@@ -26,6 +26,8 @@ pub struct Statement {
     /// The node whose daemon signed, `host/NAME`.
     pub node: String,
     pub person: String,
+    /// Immutable storage/authority identity, not its current public canonical name.
+    /// Rename must not change the principal evaluated against gateway grant patterns.
     pub agent: String,
     /// The declaration revision the seat runs, when the daemon knows it.
     #[serde(default)]
@@ -131,6 +133,8 @@ pub fn check_statement(
 
 /// Whether `principal` matches a grant pattern: `*` matches within one path segment and `**`
 /// matches any number of segments.
+/// `principal` is the authenticated immutable authority subject. Public canonical
+/// names and aliases are addressing metadata, never alternate grant principals.
 pub fn principal_matches(pattern: &str, principal: &str) -> bool {
     fn segments(pattern: &[&str], principal: &[&str]) -> bool {
         match (pattern.first(), principal.first()) {

@@ -12,6 +12,10 @@ fn native_peer_process() -> std::process::Child {
         .env_remove(fractal_drivers::driver_paths::AGENT_DIR_ENV)
         .env_remove(fractal_drivers::driver_paths::SESSION_DIR_ENV)
         .env_remove(fractal_drivers::driver_paths::IDENTITY_ENV)
+        .env_remove("FRACTAL_DRIVER_ROOT")
+        .env_remove("FRACTAL_DRIVER_AGENT_DIR")
+        .env_remove("FRACTAL_DRIVER_SESSION_DIR")
+        .env_remove("FRACTAL_DRIVER_IDENTITY")
         .spawn().unwrap()
 }
 
@@ -22,6 +26,7 @@ struct NativeReplay {
     peer: NativeDeliveryPeer,
     agent_dir: std::path::PathBuf,
     process: std::process::Child,
+    _listener: std::os::unix::net::UnixListener,
 }
 
 impl NativeReplay {
@@ -41,13 +46,19 @@ impl NativeReplay {
         let pid = process.id();
         let stamp = "2026-10-12T00:00:00.000Z";
         let incarnation = format!("{pid}:{stamp}");
+        let process_token = fractal_runtime::process_start_token(pid).unwrap();
+        let daemon_start_token = pty_core::registry::read_process_start_token(pid as i32).unwrap();
+        let boot_id = pty_core::boot::read_boot_identity().unwrap();
         // A registry entry for the isolated live process exercises production
         // ancestry, process birth and provider admission without a PTY launch.
         std::fs::create_dir_all(&state.pty_root).unwrap();
         std::fs::write(state.pty_root.join(format!("{}.pid", member.runtime_id)), pid.to_string()).unwrap();
-        std::fs::write(state.pty_root.join(format!("{}.sock", member.runtime_id)), "").unwrap();
+        let _listener = std::os::unix::net::UnixListener::bind(
+            state.pty_root.join(format!("{}.sock", member.runtime_id)),
+        ).unwrap();
         std::fs::write(state.pty_root.join(format!("{}.json", member.runtime_id)),
-            json!({"createdAt":stamp,"tags":{"st3.subject":subject}}).to_string()).unwrap();
+            json!({"daemonPid":pid,"daemonStartToken":daemon_start_token,"daemonBootId":boot_id,
+                "createdAt":stamp,"tags":{"st3.subject":subject}}).to_string()).unwrap();
         state.store.append_claim(&ClaimInput {
             subject: subject.clone(), kind: "runtime.observed".into(), actor: Some(subject.clone()),
             fields: serde_json::from_value(json!({"status":"running","host":"node",
@@ -59,11 +70,11 @@ impl NativeReplay {
         let sequence = harness_state::claim(&agent_dir, name, "codex", "replay-session").unwrap();
         let peer = NativeDeliveryPeer { agent: subject.clone(), transport: "app-server", pid, archives_inbox: false };
         let owner = crate::mailbox::Authority { provider: "codex".into(), session: "replay-session".into(),
-            sequence, pid, process_token: fractal_runtime::process_start_token(pid).unwrap() };
+            sequence, pid, process_token };
         let fence = state.store.bind_mailbox_with_lease(
             &Fence::new(&subject, &incarnation, "delivery"), Some(&owner),
         ).unwrap();
-        Self { root, state, fence, peer, agent_dir, process }
+        Self { root, state, fence, peer, agent_dir, process, _listener }
     }
 
     async fn stream(&self) -> ControlledStream {
@@ -91,7 +102,19 @@ impl NativeReplay {
         };
         self.send_report(stream, &nonce, 1).await;
         let inputs = authority::replay_proof_inputs(&self.state, &self.fence, &self.peer).unwrap();
-        assert!(inputs.failure.is_none(), "consuming replay must repair the pending loss");
+        if inputs.failure.is_some() {
+            let error = authority::repair_proven(
+                &self.state,
+                &self.fence,
+                &self.peer,
+                &self.report(Some(&nonce)),
+            )
+            .unwrap_err();
+            panic!(
+                "consuming replay must repair the pending loss: {:?}; repair error {}: {}",
+                inputs.failure, error.code, error
+            );
+        }
         (nonce, inputs)
     }
 
@@ -229,4 +252,43 @@ async fn consumed_replay_does_not_authorize_a_changed_epoch_or_replaced_peer() {
     assert_eq!(fixture.state.store.index().unwrap(), index, "the retired stream cannot recover its loss");
     assert!(authority::replay_proof_inputs(&fixture.state, &successor, &successor_peer)
         .unwrap().failure.is_some());
+}
+
+fn request_restart(fixture: &NativeReplay, incarnation: &str) -> String {
+    fixture.state.store.append_claim(&ClaimInput {
+        subject: fixture.fence.subject.clone(), kind: "runtime.action.requested".into(),
+        actor: Some("agent/example/watchdog".into()),
+        fields: serde_json::from_value(json!({"action":"restart","incarnation_id":incarnation})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap().id
+}
+
+#[tokio::test]
+async fn a_drop_during_the_incarnations_own_requested_restart_raises_no_channel_fault() {
+    let fixture = NativeReplay::new("eval.restart-drop");
+    let incarnation = fixture.fence.incarnation.clone();
+    request_restart(&fixture, &incarnation);
+    authority::loss_if_current(&fixture.state, &fixture.fence, &fixture.peer).unwrap();
+    assert!(
+        authority::replay_proof_inputs(&fixture.state, &fixture.fence, &fixture.peer).unwrap().failure.is_none(),
+        "the planned stop of a restart is not a lost channel"
+    );
+}
+
+#[tokio::test]
+async fn a_drop_after_a_restart_of_another_incarnation_or_a_finished_one_still_raises_the_fault() {
+    let other = NativeReplay::new("eval.restart-other");
+    request_restart(&other, "4242:2026-10-12T00:00:00.000Z");
+    assert!(!other.loss().is_empty());
+    let finished = NativeReplay::new("eval.restart-finished");
+    let incarnation = finished.fence.incarnation.clone();
+    let request = request_restart(&finished, &incarnation);
+    finished.state.store.append_claim(&ClaimInput {
+        subject: finished.fence.subject.clone(), kind: "runtime.action.succeeded".into(),
+        actor: Some("agent/example/watchdog".into()),
+        fields: serde_json::from_value(json!({"action":"restart","incarnation_id":incarnation})).unwrap(),
+        evidence: vec![request.clone()], expected_subject: None,
+        idempotency_key: Some(format!("agent-restart-completed:{request}")),
+    }).unwrap();
+    assert!(!finished.loss().is_empty());
 }

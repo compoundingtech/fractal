@@ -14,8 +14,8 @@ export const empty: WorldDefinition = {
     const metadata = { variant: 'default', source: { _tag: 'synthetic' as const, seed: 21 }, decode: 'strict' as const, loading: false, timeline: [] }
     const conversation = { ...metadata, kind: 'conversation' as const, state: { threads: [] } }
     return {
-      roster: { ...metadata, kind: 'roster', state: { agents: [], runtimes: [], machines: [], order: [] } },
-      details: { ...metadata, kind: 'details', state: { missions: [], work: [] } },
+      roster: { ...metadata, kind: 'roster', state: { sessions: [], devices: [], agents: [], runtimes: [], machines: [], order: [] } },
+      details: { ...metadata, kind: 'details', state: { launches: [], launch_variants: [], missions: [], work: [] } },
       attention: { ...metadata, kind: 'attention', state: { attention: [], messages: [] } },
       conversation,
       terminal: { ...metadata, kind: 'terminal', state: { terminals: [] } },

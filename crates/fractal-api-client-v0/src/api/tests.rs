@@ -13,25 +13,34 @@ use fractal_api_core::api::tests_shared_client_v0_tests::{checked_agent_cache, g
 #[tokio::test]
 async fn bound_actor_refusals_decode_as_client_api_errors() {
     fn own_seat(_pid: u32) -> Option<String> {
-        Some("agent/own".into())
+        Some("agent/example-own/worker".into())
     }
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("api.sock");
     let server_socket = socket.clone();
+    let state = state(root.path());
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-own/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        state.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), state.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    state.store.apply(&intent, &expected, "bound-declare").unwrap();
     // Reaching the handler would succeed. The listener must reject the foreign actor first.
     let app = Router::new().route(
         "/v1/client/glasses/{id}",
         axum::routing::put(|| async { Json(json!({})) }),
     );
     let server = tokio::spawn(async move {
-        serve_unix_with_ancestor(&server_socket, None, app, true, own_seat).await
+        serve_unix_with_ancestor(&server_socket, None, app, Some(state.store), own_seat).await
     });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while !socket.exists() {
         assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let error = fractal_client::Client::unix_as(&socket, "person/alex")
+    let error = fractal_client::Client::unix_as(&socket, "person/other")
         .put_glass(
             "0194b2e0-1234-7000-8000-000000000001",
             &fractal_client::GlassPut {
@@ -66,6 +75,8 @@ async fn bound_actor_refusals_decode_as_client_api_errors() {
 
 #[tokio::test]
 async fn a_bound_harness_cannot_act_as_another_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
     for path in [
         "/v1/agent-queue-moves",
         "/v1/agents/rename",
@@ -82,6 +93,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         "/v1/mission-runs/example%2Fdemo%2F1/revision",
         "/v1/missions/example%2Fdemo/retire",
         "/v1/subscription-requests/release/subscription-request%2Fexample",
+        "/v1/persons/rename",
         "/v1/reviews/step-run/example",
         "/v1/schema/registrations",
         "/v1/custom/reply",
@@ -94,7 +106,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
                     json!({"actor": actor, "agent": "agent/worker"}).to_string(),
                 ))
                 .unwrap();
-            let error = match guard_bound_request(request, Some("agent/own")).await {
+            let error = match guard_bound_request(request, Some("agent/own"), &state.store).await {
                 Ok(_) => panic!("bound harness acted as {actor} at {path}"),
                 Err(error) => error,
             };
@@ -109,7 +121,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
             .header(client_v0::LOCAL_PERSON_HEADER, person)
             .body(Body::from("{}"))
             .unwrap();
-        let error = guard_bound_request(request, Some("agent/own"))
+        let error = guard_bound_request(request, Some("agent/own"), &state.store)
             .await
             .expect_err("a bound harness acted as another client-v0 actor");
         assert_eq!(error.code, "foreign-agent-actor", "{person}");
@@ -121,7 +133,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         .body(Body::from("{}"))
         .unwrap();
     assert!(
-        guard_bound_request(request, Some("agent/own"))
+        guard_bound_request(request, Some("agent/own"), &state.store)
             .await
             .is_ok()
     );
@@ -131,7 +143,7 @@ async fn a_bound_harness_cannot_act_as_another_actor() {
         .body(Body::from(json!({"actor": "agent/own"}).to_string()))
         .unwrap();
     assert!(
-        guard_bound_request(request, Some("agent/own"))
+        guard_bound_request(request, Some("agent/own"), &state.store)
             .await
             .is_ok()
     );
@@ -651,6 +663,7 @@ version 2
 
   mission "planned/work" state="ready" {
     goal "Publish the planned result."
+    resource "tracker" uri="urn:example:planning"
     step "inspect" { goal "Inspect the source." }
     step "change" {
       goal "Make the approved change."
@@ -781,6 +794,7 @@ version 2
 
   mission "planned/work" state="ready" {
     goal "Publish the planned and verified result."
+    resource "tracker" uri="urn:example:planning"
     step "inspect" { goal "Inspect the source." }
     step "change" {
       goal "Make the approved change."
@@ -897,7 +911,8 @@ version 2
             .as_array()
             .unwrap()
             .len(),
-        1
+        2,
+        "the mission and its shared URI target are both declared"
     );
 
     let (status, decision) = json_request(
@@ -1016,7 +1031,9 @@ version 2
         approved["published_revision"],
         approved["candidate"]["mission_revision"]
     );
-    assert!(store.mission_spec("planned/work", None).unwrap().is_some());
+    let published = store.mission_spec("planned/work", None).unwrap().unwrap();
+    let uris = store.declared_resource_uris(&published.resources).unwrap();
+    assert_eq!(uris[&published.resources[0].subject], "urn:example:planning");
     // The planner is a durable top-level seat, not a synthetic standing
     // mission. Approval removes that seat directly and leaves no planner
     // mission run behind to clean up.
@@ -1234,6 +1251,108 @@ mission "plain" state="ready" {
         .collect::<BTreeMap<_, _>>();
     assert_eq!(system["mission/observer"], true);
     assert_eq!(system["mission/plain"], false);
+}
+
+#[test]
+fn agents_show_their_declared_resources_until_a_declaration_drops_them() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let workspace = root.path().display().to_string();
+    let publish = |key: &str, resources: &str| {
+        let source = format!(
+            "version 2\nagent \"ada/seat\" {{\n  workspace {workspace:?}\n  command \"true\"\n{resources}}}\n"
+        );
+        let intent = crate::graph::parse_test_intent(&source, "node").unwrap();
+        let planned = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply(&intent, &planned.subject_tokens, key)
+            .unwrap();
+    };
+    let goal = "urn:example:seat-goal";
+    let worktree = "urn:example:worktree";
+    publish(
+        "declare",
+        &format!(
+            "  resource \"goal\" uri=\"{goal}\" reason=\"seat goal\"\n  resource \"worktree\" uri=\"{worktree}\"\n"
+        ),
+    );
+    let subject = |uri: &str| format!("resource/uri/{}", hex::encode(Sha256::digest(uri)));
+    let read = || {
+        let agents =
+            client_agent_resources(&state.store, false, "now", state.store.index().unwrap())
+                .unwrap();
+        agents
+            .into_iter()
+            .find(|agent| agent["id"] == "agent/ada/seat")
+            .unwrap()
+    };
+    let agent = read();
+    assert_eq!(
+        agent["resources"],
+        json!([
+            { "name": "goal", "subject": subject(goal), "kind": "uri", "resolution": "resolved", "uri": goal, "reason": "seat goal" },
+            { "name": "worktree", "subject": subject(worktree), "kind": "uri", "resolution": "resolved", "uri": worktree, "reason": null },
+        ])
+    );
+    let typed: fractal_client::Resource = serde_json::from_value(agent).unwrap();
+    let fractal_client::Resource::Agent(typed) = typed else {
+        panic!("an agent resource");
+    };
+    assert_eq!(typed.resources[0].uri.as_deref(), Some(goal));
+
+    // The declaration read writes the edges back as the KDL that declared them.
+    let (_, tree) = state
+        .store
+        .agent_declaration("agent/ada/seat", None)
+        .unwrap()
+        .unwrap();
+    let uris = state
+        .store
+        .declared_resource_uris(&crate::graph::declared_resources(&tree))
+        .unwrap();
+    let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).unwrap();
+    let reparsed = crate::graph::parse_test_intent(&kdl, "node").unwrap();
+    assert_eq!(reparsed.subjects["agent/ada/seat"].desired, tree);
+    let unresolved = client_declared_resources(
+        &crate::graph::declared_resources(&tree), &BTreeMap::new(),
+    );
+    assert_eq!(unresolved[0]["kind"], "uri");
+    assert_eq!(unresolved[0]["resolution"], "unresolved");
+    assert_eq!(unresolved[0]["subject"], subject(goal));
+    assert!(unresolved[0].get("uri").is_none());
+
+    publish("subject", "  resource \"tracker\" subject=\"resource/github/example/issue/1\" reason=\"tracking\"\n");
+    assert_eq!(
+        read()["resources"],
+        json!([{"name": "tracker", "subject": "resource/github/example/issue/1", "kind": "subject", "resolution": "not-applicable", "reason": "tracking"}]),
+    );
+
+    publish("drop", &format!("  resource \"goal\" uri=\"{goal}\" reason=\"seat goal\"\n"));
+    assert_eq!(
+        read()["resources"],
+        json!([{ "name": "goal", "subject": subject(goal), "kind": "uri", "resolution": "resolved", "uri": goal, "reason": "seat goal" }])
+    );
+    assert_eq!(
+        state
+            .store
+            .selected_desired_kind(&subject(worktree))
+            .unwrap()
+            .as_deref(),
+        Some("resource"),
+        "omission leaves the resource subject in the graph"
+    );
+    publish("none", "");
+    assert_eq!(read()["resources"], json!([]));
 }
 
 #[test]
@@ -1608,4 +1727,139 @@ mission "{name}" state="ready" {{
         }
         assert_eq!(received, expected, "{collection}");
     }
+}
+
+/// The per-PR contract for fleet::members_with_the_same_envelopes_but_different_claims_report_
+/// divergence: a peer whose graph has differed at the same envelopes for the divergence window
+/// fails the doctor's replication check by name and turns the machines page's sync to
+/// diverged. The fleet test waits that window out between real daemons; here it is backdated.
+#[tokio::test]
+async fn doctor_fails_and_machines_say_diverged_for_a_diverged_peer() {
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    state.fleet_id = Some("94cd11ba-c582-4558-9c84-c3bda922eb6d".into());
+    state.configured_peers = vec!["birch".into()];
+    for diverged in [false, true] {
+        let now = client_now_ms();
+        let mut progress = smallclaims::store::PeerSyncProgress::default();
+        progress.observe(0, Some((9_000, 0)), now);
+        if diverged {
+            progress.graph_differs_since_unix_ms =
+                Some(now - smallclaims::store::REPLICATION_DIVERGED_AFTER_MS);
+            progress.graph_compared_at_unix_ms = Some(now);
+        }
+        state
+            .store
+            .replication_sync
+            .lock()
+            .unwrap()
+            .insert("birch".into(), progress);
+        let app = router(state.clone());
+        let (status, doctor) = get_request(app.clone(), "/v1/doctor").await;
+        assert_eq!(status, StatusCode::OK, "{doctor}");
+        let check = doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "replication")
+            .cloned()
+            .unwrap();
+        let message = check["message"].as_str().unwrap();
+        let (status, page) = get_request(app, "/v1/client/machines").await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        if diverged {
+            assert_eq!(check["status"], "fail", "{check}");
+            assert!(message.contains("graph diverged from birch"), "{check}");
+            assert_eq!(page["sync"]["state"], "diverged", "{page}");
+            assert_eq!(page["sync"]["peers"][0]["host_id"], "host/birch", "{page}");
+            assert!(page["sync"]["peers"][0]["diverged_since"].is_string(), "{page}");
+        } else {
+            assert!(!message.contains("graph diverged"), "{check}");
+            assert_eq!(page["sync"]["state"], "catching-up", "{page}");
+            assert!(page["sync"]["peers"][0]["diverged_since"].is_null(), "{page}");
+        }
+    }
+}
+
+/// The per-PR contract for fleet::a_frozen_member_is_not_reported_up: a
+/// listening member whose exchanges stopped and then failed makes the doctor warn that it has
+/// not exchanged for that long; a dial-out member, which may sleep for hours, is named the same
+/// way without a warning. The fleet test freezes a real daemon; here the last exchange is aged.
+#[tokio::test]
+async fn doctor_warns_that_a_frozen_listening_member_has_not_exchanged() {
+    use smallclaims::fleet::MemberKey;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = state(root.path());
+    let fleet = "94cd11ba-c582-4558-9c84-c3bda922eb6d";
+    state.fleet_id = Some(fleet.into());
+    let own = Arc::new(MemberKey::generate().unwrap().0);
+    state.store.bind_fleet(fleet).unwrap();
+    state.store.pin_fleet_anchor(own.public()).unwrap();
+    state.store.set_member_key(Some(own.clone())).unwrap();
+    state
+        .store
+        .admit_fleet_anchor(fleet, own.public(), "listening")
+        .unwrap();
+    for (name, mode) in [("birch", "listening"), ("cedar", "dial-out")] {
+        let key = MemberKey::generate().unwrap().0;
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: format!("host/{name}"),
+                kind: "fleet.member-admitted".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({
+                    "fleet_id": fleet, "member_key": key.public(), "via": "invite",
+                    "mode": mode, "sponsor": "host/node"
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+    }
+    // Both exchange with this daemon, then cedar's last exchange is aged a day.
+    for peer in ["birch", "cedar"] {
+        let source = smallclaims::store::Store::open_memory(
+            peer,
+            Arc::new(smallclaims::store::runtime::Plain),
+        )
+        .unwrap();
+        let summary = source.export_replication_summary(fleet).unwrap();
+        state
+            .store
+            .receive_replication_exchange(peer, fleet, &summary)
+            .unwrap();
+    }
+    state.store.age_replication_peer_for_test("cedar");
+    let replication = || async {
+        let (status, doctor) = get_request(router(state.clone()), "/v1/doctor").await;
+        assert_eq!(status, StatusCode::OK, "{doctor}");
+        doctor["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "replication")
+            .cloned()
+            .unwrap()
+    };
+    // The dial-out member is away, which is no warning.
+    let check = replication().await;
+    let message = check["message"].as_str().unwrap();
+    assert!(message.contains("cedar has not exchanged for 1d"), "{check}");
+    assert!(!message.contains("birch has not exchanged"), "{check}");
+    assert_eq!(check["status"], "pass", "{check}");
+    // The listening member stops too and its next attempt fails: it should answer, so its
+    // absence warns.
+    state.store.age_replication_peer_for_test("birch");
+    state
+        .store
+        .record_peer_failure("birch", "down", "exchange timed out")
+        .unwrap();
+    let check = replication().await;
+    let message = check["message"].as_str().unwrap();
+    assert!(message.contains("birch has not exchanged for 1d"), "{check}");
+    assert!(message.contains("(last attempt: exchange timed out)"), "{check}");
+    assert_eq!(check["status"], "warn", "{check}");
 }

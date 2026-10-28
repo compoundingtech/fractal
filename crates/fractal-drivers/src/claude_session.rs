@@ -167,6 +167,15 @@ pub fn run_controlled_paths(
     runtime_id: String,
     claude_argv: Vec<String>,
 ) -> Result<()> {
+    run_controlled_paths_with_primary_ownership(paths, identity, runtime_id, claude_argv, false)
+}
+
+/// A native control plane supplies its explicit install choice, sampled once at fresh claim.
+/// Existing callers remain default-off; adopting a driver never reclaims or changes its choice.
+pub fn run_controlled_paths_with_primary_ownership(
+    paths: &crate::driver_paths::Paths, identity: String, runtime_id: String,
+    claude_argv: Vec<String>, primary_ownership: bool,
+) -> Result<()> {
     anyhow::ensure!(
         !claude_argv.is_empty(),
         "Claude driver '{runtime_id}' has no provider argv"
@@ -174,11 +183,11 @@ pub fn run_controlled_paths(
     let workspace = std::env::current_dir().context("reading the Claude driver workspace")?;
     let claude_argv =
         managed_claude_argv(crate::access::AccessMode::from_environment()?, &workspace, claude_argv);
-    let claude_argv = prepare_st3_channel_argv(&paths.root, &identity, claude_argv)?;
+    let claude_argv = prepare_fractal_channel_argv(&paths.root, &identity, claude_argv)?;
     crate::pretrust::pretrust_claude(std::slice::from_ref(&workspace))
         .with_context(|| format!("admitting Claude driver workspace {}", workspace.display()))?;
     install_signal_handler();
-    let observer = SessionObserver::new(&paths.agent_dir, &identity, "claude", &runtime_id)?;
+    let observer = SessionObserver::new_claude_with_primary_ownership(&paths.agent_dir, &identity, &runtime_id, primary_ownership)?;
     let mut env = vec![
         (CONTROLLED_DISABLE_AUTOUPDATER.0.into(), CONTROLLED_DISABLE_AUTOUPDATER.1.into()),
         (RUNTIME_ID_ENV.to_string(), runtime_id.clone()),
@@ -244,25 +253,25 @@ fn requires_st2_channel(argv: &[String]) -> bool {
         .any(|pair| pair[0] == "--channels" && pair[1] == crate::claude_channel::CHANNEL)
 }
 
-fn requires_st3_channel(argv: &[String]) -> bool {
+fn requires_fractal_channel(argv: &[String]) -> bool {
     argv.windows(2)
-        .any(|pair| pair[0] == "--channels" && pair[1] == crate::claude_channel::ST3_CHANNEL)
+        .any(|pair| pair[0] == "--channels" && pair[1] == crate::claude_channel::FRACTAL_CHANNEL)
 }
 
-fn prepare_st3_channel_argv(
+fn prepare_fractal_channel_argv(
     catalog_root: &Path,
     identity: &str,
     argv: Vec<String>,
 ) -> Result<Vec<String>> {
-    let argv = merge_claude_json_settings(bind_st3_mcp_config_values(argv)?)?;
-    if !requires_st3_channel(&argv) {
+    let argv = merge_claude_json_settings(bind_fractal_mcp_config_values(argv)?)?;
+    if !requires_fractal_channel(&argv) {
         return Ok(argv);
     }
-    match crate::claude_channel::verify_st3_plugin() {
+    match crate::claude_channel::verify_fractal_plugin() {
         Ok(()) => {
-            let approved = crate::claude_channel::st3_policy_available();
-            let argv = select_st3_channel_plugin(argv, true)?;
-            Ok(st3_plugin_admission_argv(argv, approved))
+            let approved = crate::claude_channel::fractal_policy_available();
+            let argv = select_fractal_channel_plugin(argv, true)?;
+            Ok(fractal_plugin_admission_argv(argv, approved))
         }
         Err(error) => {
             eprintln!(
@@ -271,16 +280,16 @@ fn prepare_st3_channel_argv(
             );
             let executable = std::env::current_exe()
                 .context("resolving the st3 executable for the Claude development channel")?;
-            let argv = select_st3_channel_plugin(argv, false)?;
-            development_st3_channel_argv(argv, &executable, catalog_root, identity)
+            let argv = select_fractal_channel_plugin(argv, false)?;
+            development_fractal_channel_argv(argv, &executable, catalog_root, identity)
         }
     }
 }
 
-fn st3_plugin_admission_argv(mut argv: Vec<String>, approved: bool) -> Vec<String> {
+fn fractal_plugin_admission_argv(mut argv: Vec<String>, approved: bool) -> Vec<String> {
     if !approved {
         for index in 0..argv.len().saturating_sub(1) {
-            if argv[index] == "--channels" && argv[index + 1] == crate::claude_channel::ST3_CHANNEL
+            if argv[index] == "--channels" && argv[index + 1] == crate::claude_channel::FRACTAL_CHANNEL
             {
                 argv[index] = "--dangerously-load-development-channels".into();
             }
@@ -292,13 +301,14 @@ fn st3_plugin_admission_argv(mut argv: Vec<String>, approved: bool) -> Vec<Strin
 
 /// Only the selected channel may own this seat's mailbox fence. User/project settings and
 /// older fleet declarations can still enable the previous st3 plugins after an upgrade.
-fn select_st3_channel_plugin(mut argv: Vec<String>, packaged: bool) -> Result<Vec<String>> {
+fn select_fractal_channel_plugin(mut argv: Vec<String>, packaged: bool) -> Result<Vec<String>> {
     argv.extend([
         "--settings".into(),
         serde_json::json!({"enabledPlugins": {
             "st-channel@st": packaged,
             "st3-channel@st3": false,
-            "st3-channel@st2": false
+            "st3-channel@st2": false,
+            "st2-channel@st2": false
         }})
         .to_string(),
     ]);
@@ -370,7 +380,7 @@ fn merge_settings_value(base: &mut serde_json::Value, later: serde_json::Value) 
 /// Bind each authored MCP config to its option so Claude's variadic parser cannot consume the
 /// positional boot prompt as another config path. The joined spelling is accepted by Claude's
 /// option parser and is equivalent for one config; applying this function twice is a no-op.
-fn bind_st3_mcp_config_values(argv: Vec<String>) -> Result<Vec<String>> {
+fn bind_fractal_mcp_config_values(argv: Vec<String>) -> Result<Vec<String>> {
     let mut output = Vec::with_capacity(argv.len());
     let mut index = 0;
     while index < argv.len() {
@@ -388,13 +398,13 @@ fn bind_st3_mcp_config_values(argv: Vec<String>) -> Result<Vec<String>> {
     Ok(output)
 }
 
-fn development_st3_channel_argv(
+fn development_fractal_channel_argv(
     argv: Vec<String>,
     executable: &Path,
     _catalog_root: &Path,
     identity: &str,
 ) -> Result<Vec<String>> {
-    let argv = bind_st3_mcp_config_values(argv)?;
+    let argv = bind_fractal_mcp_config_values(argv)?;
     let subject = format!("agent/{identity}");
     let st3_server = serde_json::json!({
         "type": "stdio",
@@ -454,7 +464,7 @@ fn development_st3_channel_argv(
 
     let channel_count = argv
         .windows(2)
-        .filter(|pair| pair[0] == "--channels" && pair[1] == crate::claude_channel::ST3_CHANNEL)
+        .filter(|pair| pair[0] == "--channels" && pair[1] == crate::claude_channel::FRACTAL_CHANNEL)
         .count();
     anyhow::ensure!(
         channel_count == 1,
@@ -465,7 +475,7 @@ fn development_st3_channel_argv(
     index = 0;
     while index < argv.len() {
         if argv[index] == "--channels"
-            && argv.get(index + 1).map(String::as_str) == Some(crate::claude_channel::ST3_CHANNEL)
+            && argv.get(index + 1).map(String::as_str) == Some(crate::claude_channel::FRACTAL_CHANNEL)
         {
             if existing_mcp.is_none() {
                 output.extend(["--mcp-config".to_string(), mcp.clone()]);
@@ -951,6 +961,22 @@ pub fn channel_transcript_paths(
         .map(|binding| binding.transcript_path))
 }
 
+/// A receipt may name a native user record only in the same verified binding that
+/// supplied the channel's transcript. This accessor grants no new binding authority.
+pub fn channel_receipt_session(
+    session_dir: &Path,
+    identity: &str,
+    runtime_id: &str,
+    incarnation: &str,
+    transcript: &Path,
+) -> Result<Option<String>> {
+    Ok(load_binding(session_dir, identity, runtime_id)?
+        .filter(|binding| {
+            binding.runtime_incarnation == incarnation && binding.transcript_path == transcript
+        })
+        .map(|binding| binding.native_session_id))
+}
+
 /// Recover a SessionStart binding that ran before Claude created its transcript.
 /// The lightweight hook binding is fenced by this wrapper; never discover a
 /// session by recency or use an older wrapper's transcript as receipt evidence.
@@ -1339,6 +1365,29 @@ pub fn run_observe_payload_paths(
 }
 
 fn observe_payload(
+    session_dir: &Path,
+    agent_dir: &Path,
+    native: bool,
+    identity: &str,
+    runtime_id: Option<&str>,
+    event: &str,
+    raw: &str,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Result<()> {
+    if native || crate::claude_process::recorded(agent_dir)? {
+        let session = var(SESSION_ENV).unwrap_or_default();
+        let sequence = var(SESSION_SEQ_ENV).and_then(|v| v.parse().ok()).unwrap_or(0);
+        let command = format!("\"$ST_HOOKS/claude-observe.sh\" {event}");
+        return crate::claude_process::with_caller(agent_dir, &session, sequence,
+            std::process::id(), None, crate::claude_process::Caller::Hook { trampoline: &command }, |_| {
+                observe_payload_owned(session_dir, agent_dir, native, identity, runtime_id, event, raw, var)
+            });
+    }
+    observe_payload_owned(session_dir, agent_dir, native, identity, runtime_id, event, raw, var)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observe_payload_owned(
     session_dir: &Path,
     agent_dir: &Path,
     native: bool,
@@ -1804,7 +1853,11 @@ pub fn run_statusline(catalog_root: &Path, identity: &str) -> Result<()> {
     let mut raw = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut raw);
     if let Err(error) = record_statusline(catalog_root, identity, &raw) {
-        tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        if crate::claude_process::failure_kind(&error).is_some() {
+            eprintln!("st: {}", crate::claude_process::diagnostic(&error));
+        } else {
+            tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        }
     }
     chain_statusline(&raw)
 }
@@ -1820,7 +1873,11 @@ pub fn run_statusline_paths(agent_dir: &Path, identity: &str) -> Result<()> {
     let mut raw = Vec::new();
     let _ = std::io::stdin().read_to_end(&mut raw);
     if let Err(error) = record_statusline_paths(agent_dir, identity, &raw, true) {
-        tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        if crate::claude_process::failure_kind(&error).is_some() {
+            eprintln!("st: {}", crate::claude_process::diagnostic(&error));
+        } else {
+            tracing::warn!("st claude-statusline: recording failed; chaining anyway: {error:#}");
+        }
     }
     chain_statusline(&raw)
 }
@@ -1831,6 +1888,18 @@ fn record_statusline_paths(
     raw: &[u8],
     native: bool,
 ) -> Result<()> {
+    if native || crate::claude_process::recorded(agent_dir)? {
+        let session = crate::contracts::env(SESSION_ENV).unwrap_or_default();
+        let sequence = crate::contracts::env(SESSION_SEQ_ENV).and_then(|v| v.parse().ok()).unwrap_or(0);
+        return crate::claude_process::with_caller(agent_dir, &session, sequence,
+            std::process::id(), None, crate::claude_process::Caller::Hook {
+                trampoline: "\"$ST_HOOKS/claude-statusline.sh\"",
+            }, |_| record_statusline_owned(agent_dir, identity, raw, native));
+    }
+    record_statusline_owned(agent_dir, identity, raw, native)
+}
+
+fn record_statusline_owned(agent_dir: &Path, identity: &str, raw: &[u8], native: bool) -> Result<()> {
     let payload: serde_json::Value = serde_json::from_slice(raw).unwrap_or(serde_json::Value::Null);
     // Deliberately uncounted. The tee builds no telemetry pipeline at all (`DQ-C13`, see
     // `main`), so a `record_hook_invocation` here could never reach a collector — and a metric
@@ -2127,22 +2196,37 @@ mod tests {
     use crate::provider_session::run_provider;
 
     #[test]
-    fn st3_plugin_admission_uses_development_without_policy_and_preserves_other_channels() {
+    fn receipt_identity_requires_the_same_current_binding_and_transcript() {
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join("native.jsonl");
+        let binding = ClaudeSessionBinding {
+            schema: BINDING_SCHEMA.into(), agent: "agent/fixture".into(), runtime_id: "fixture-runtime".into(),
+            runtime_incarnation: "wrapper-current".into(), native_session_id: "00000000-0000-0000-0000-000000000001".into(),
+            canonical_workspace: root.path().to_path_buf(), transcript_path: transcript.clone(), resume_generation: None,
+        };
+        std::fs::write(root.path().join(BINDING_FILE), serde_json::to_vec(&binding).unwrap()).unwrap();
+        assert_eq!(channel_receipt_session(root.path(), "agent/fixture", "fixture-runtime", "wrapper-current", &transcript).unwrap(), Some(binding.native_session_id));
+        assert!(channel_receipt_session(root.path(), "agent/fixture", "fixture-runtime", "wrapper-old", &transcript).unwrap().is_none());
+        assert!(channel_receipt_session(root.path(), "agent/fixture", "fixture-runtime", "wrapper-current", &root.path().join("other.jsonl")).unwrap().is_none());
+    }
+
+    #[test]
+    fn fractal_plugin_admission_uses_development_without_policy_and_preserves_other_channels() {
         let args = vec![
             "claude".into(),
             "--channels".into(),
-            crate::claude_channel::ST3_CHANNEL.into(),
+            crate::claude_channel::FRACTAL_CHANNEL.into(),
             "--channels".into(),
             "plugin:other@other".into(),
             "boot prompt".into(),
         ];
-        assert_eq!(st3_plugin_admission_argv(args.clone(), true), args);
-        let development = st3_plugin_admission_argv(args, false);
+        assert_eq!(fractal_plugin_admission_argv(args.clone(), true), args);
+        let development = fractal_plugin_admission_argv(args, false);
         assert_eq!(
             &development[1..3],
             &[
                 "--dangerously-load-development-channels",
-                crate::claude_channel::ST3_CHANNEL
+                crate::claude_channel::FRACTAL_CHANNEL
             ]
         );
         assert_eq!(
@@ -2203,7 +2287,7 @@ mod tests {
     }
 
     #[test]
-    fn st3_channel_selection_overrides_old_plugins_and_preserves_other_settings() {
+    fn fractal_channel_selection_overrides_old_plugins_and_preserves_other_settings() {
         let authored = serde_json::json!({
             "enabledPlugins": {
                 "st-channel@st": false,
@@ -2212,18 +2296,19 @@ mod tests {
                 "st2-channel@st2": true,
                 "bridge@tools": true
             },
-            "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "observe"}]}]}
+            "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "observe"}]}]},
+            "permissions": {"allow": ["Read(./notes/**)"], "deny": ["Read(./private/**)"]}
         });
         let argv = vec![
             "claude".into(),
             "--channels".into(),
-            crate::claude_channel::ST3_CHANNEL.into(),
+            crate::claude_channel::FRACTAL_CHANNEL.into(),
             "--settings".into(),
             authored.to_string(),
             "boot prompt".into(),
         ];
         for packaged in [true, false] {
-            let selected = select_st3_channel_plugin(argv.clone(), packaged).unwrap();
+            let selected = select_fractal_channel_plugin(argv.clone(), packaged).unwrap();
             assert_eq!(selected.last().map(String::as_str), Some("boot prompt"));
             assert_eq!(selected.iter().filter(|arg| *arg == "--settings").count(), 1);
             let position = selected.iter().position(|arg| arg == "--settings").unwrap();
@@ -2231,21 +2316,23 @@ mod tests {
             assert_eq!(settings["enabledPlugins"]["st-channel@st"], packaged);
             assert_eq!(settings["enabledPlugins"]["st3-channel@st3"], false);
             assert_eq!(settings["enabledPlugins"]["st3-channel@st2"], false);
-            assert_eq!(settings["enabledPlugins"]["st2-channel@st2"], true);
+            assert_eq!(settings["enabledPlugins"]["st2-channel@st2"], false);
             assert_eq!(settings["enabledPlugins"]["bridge@tools"], true);
             assert_eq!(settings["hooks"], authored["hooks"]);
-            assert_eq!(select_st3_channel_plugin(selected.clone(), packaged).unwrap(), selected);
+            assert_eq!(settings["permissions"], authored["permissions"]);
+            assert_eq!(select_fractal_channel_plugin(selected.clone(), packaged).unwrap(), selected);
         }
     }
 
     #[test]
-    fn st3_channel_selection_adds_overrides_without_authored_settings() {
-        let selected = select_st3_channel_plugin(vec!["claude".into()], true).unwrap();
+    fn fractal_channel_selection_adds_overrides_without_authored_settings() {
+        let selected = select_fractal_channel_plugin(vec!["claude".into()], true).unwrap();
         assert_eq!(selected.len(), 3);
         let settings: serde_json::Value = serde_json::from_str(&selected[2]).unwrap();
         assert_eq!(settings["enabledPlugins"]["st-channel@st"], true);
         assert_eq!(settings["enabledPlugins"]["st3-channel@st3"], false);
         assert_eq!(settings["enabledPlugins"]["st3-channel@st2"], false);
+        assert_eq!(settings["enabledPlugins"]["st2-channel@st2"], false);
     }
 
     #[test]
@@ -2286,7 +2373,7 @@ mod tests {
     }
 
     #[test]
-    fn st3_development_channel_merges_an_authored_mcp_configuration() {
+    fn fractal_development_channel_merges_an_authored_mcp_configuration() {
         let xcode = serde_json::json!({
             "mcpServers": {
                 "xcode": {
@@ -2301,12 +2388,12 @@ mod tests {
             "--mcp-config".into(),
             serde_json::to_string(&xcode).unwrap(),
             "--channels".into(),
-            crate::claude_channel::ST3_CHANNEL.into(),
+            crate::claude_channel::FRACTAL_CHANNEL.into(),
             "--remote-control".into(),
             "prompt".into(),
         ];
 
-        let output = development_st3_channel_argv(
+        let output = development_fractal_channel_argv(
             argv,
             Path::new("/opt/st3/bin/st3"),
             Path::new("/var/lib/st3"),
@@ -2342,8 +2429,8 @@ mod tests {
     }
 
     #[test]
-    fn st3_binds_an_authored_mcp_config_before_the_boot_prompt() {
-        let output = bind_st3_mcp_config_values(vec![
+    fn fractal_binds_an_authored_mcp_config_before_the_boot_prompt() {
+        let output = bind_fractal_mcp_config_values(vec![
             "claude".into(),
             "--mcp-config".into(),
             r#"{"mcpServers":{"xcode":{"command":"mcpbridge"}}}"#.into(),
@@ -2362,7 +2449,7 @@ mod tests {
     }
 
     #[test]
-    fn st3_development_channel_rejects_conflicting_server_ownership() {
+    fn fractal_development_channel_rejects_conflicting_server_ownership() {
         let argv = vec![
             "claude".into(),
             format!(
@@ -2370,10 +2457,10 @@ mod tests {
                 serde_json::json!({"mcpServers": {"st3": {"command": "other"}}})
             ),
             "--channels".into(),
-            crate::claude_channel::ST3_CHANNEL.into(),
+            crate::claude_channel::FRACTAL_CHANNEL.into(),
         ];
 
-        let error = development_st3_channel_argv(
+        let error = development_fractal_channel_argv(
             argv,
             Path::new("/opt/st3/bin/st3"),
             Path::new("/var/lib/st3"),

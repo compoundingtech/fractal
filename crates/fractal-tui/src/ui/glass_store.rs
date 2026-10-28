@@ -18,10 +18,10 @@ const MAX_BYTES: u64 = 1 << 20;
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Stored {
     pub version: u32,
-    /// The glass `stui --glasses` opens here.
+    /// The glass `fractal tui --glasses` opens here.
     pub last: Option<String>,
     pub glasses: Vec<StoredGlass>,
-    /// Whether the Ctrl+S sidebar is shown here; unset, it is, as the old stui's list was.
+    /// Whether the Ctrl+S sidebar is shown here; unset, it is, as the old Fractal TUI's list was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidebar: Option<bool>,
 }
@@ -130,7 +130,7 @@ pub fn path(person: &str) -> Option<PathBuf> {
     Some(dir.join(format!("glasses-{key}.json")))
 }
 
-/// The directory stui keeps per-device state in, and a stable key for `person` within it.
+/// The directory Fractal TUI keeps per-device state in, and a stable key for `person` within it.
 pub(crate) fn person_state(person: &str) -> Option<(PathBuf, String)> {
     if person.is_empty() {
         return None;

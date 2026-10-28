@@ -1,4 +1,4 @@
-//! The part of `store::delivery` that moved up from st3-store.
+//! The part of `store::delivery` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::message_desired_recipient_match;
 use crate::message_sent_recipient_match;
@@ -55,6 +55,24 @@ fn subscription_request_view(
     }
 }
 
+/// Each recipient's work-wake subjects through a store index, so a reconcile pass reads only the
+/// sent claims committed since, not the body of every message the agent was ever sent.
+#[derive(Default)]
+struct WorkWakeSubjects(Mutex<HashMap<String, KeptWorkWakes>>);
+
+struct KeptWorkWakes {
+    /// The recipient's names when these were read; a new name reads its history again.
+    names: Vec<String>,
+    through: u64,
+    subjects: Vec<(String, u64)>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Work-wake subjects this thread read from sent claims, kept ones not counted.
+    pub(crate) static WORK_WAKE_SUBJECTS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// The seat channel's current owner, and whether `fence`'s binding still exists.
 fn mailbox_owner_key(
     connection: &Connection,
@@ -103,6 +121,14 @@ pub trait DeliveryStore {
             &self,
             input: &ClaimInput,
             fence: &crate::mailbox::Fence,
+        ) -> Result<(ClaimRecord, bool), St3Error>;
+    /// Called only inside the native lease/authority guard. Metadata commits with
+    /// the first new read receipt; replay/settlement never adds or changes a binding.
+    fn append_native_mailbox_receipt_outcome(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
         ) -> Result<(ClaimRecord, bool), St3Error>;
     /// Search refreshes only a person's private message texts, using the same endpoint
     /// indexes as the mailbox. Other fleet writes do not invalidate this source.
@@ -330,6 +356,32 @@ impl DeliveryStore for Store {
         self.append_claim_fenced_outcome(input, Some(fence))
     }
 
+    fn append_native_mailbox_receipt_outcome(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
+        ) -> Result<(ClaimRecord, bool), St3Error> {
+        if native.is_some_and(|native| !native.valid() || input.kind != "message.read") {
+            return Err(St3Error::new(
+                "invalid-native-receipt",
+                "native proof needs a read receipt",
+            ));
+        }
+        append_claim_with_commit_context(
+            &self.graph,
+            input,
+            Some(fence),
+            None,
+            None,
+            None,
+            ClaimCommitContext {
+                native_receipt: native,
+                ..Default::default()
+            },
+        )
+    }
+
     fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String> {
         let connection = self.readers.get();
         let (count, newest): (u64, u64) = connection.query_row(
@@ -347,6 +399,8 @@ impl DeliveryStore for Store {
 
     fn conversation_search_timeline_stamp(&self, agent: &str, incarnation: &str, through: u64) -> Result<String> {
         let connection = self.readers.get();
+        let agent = fractal_store::store::identities::resolve_reference_conn(&connection, agent)?;
+        let agent = agent.as_str();
         let (local_count, local_newest): (u64,u64) = connection.query_row(
             "SELECT COUNT(*),COALESCE(MAX(id),0) FROM local_observations
              WHERE subject=?1 AND kind='harness.timeline'
@@ -395,35 +449,87 @@ impl DeliveryStore for Store {
     }
 
     fn work_wake_messages_for_reconcile(&self, agent: &str) -> Result<Vec<MessageView>> {
-        let recipient = normalize_message_party(agent);
+        let connection = self.readers.get();
+        let recipient = fractal_store::store::identities::resolve_reference_conn(
+            &connection, &normalize_message_party(agent),
+        )?;
         let bare_recipient = recipient
             .strip_prefix("agent/")
             .filter(|suffix| !suffix.contains('/'))
             .unwrap_or(&recipient);
-        let connection = self.readers.get();
+        let names = connection
+            .prepare_cached("SELECT name FROM identity_names WHERE identity=?1 ORDER BY name")?
+            .query_map([&recipient], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        let through: u64 = connection.query_row(
+            "SELECT COALESCE(MAX(store_index), 0) FROM claims",
+            [],
+            |row| row.get(0),
+        )?;
+        let wakes = self.extension::<WorkWakeSubjects>();
+        let kept = wakes
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&recipient)
+            .filter(|kept| kept.names == names && kept.through <= through)
+            .map(|kept| (kept.through, kept.subjects.clone()));
+        let (after, mut subjects) = kept.unwrap_or_default();
+        // Sent claims are only appended, so only those after the kept cut can add a wake. The
+        // rowid bounds are checked on the index entry, before the body is read.
         let mut statement = connection.prepare_cached(
             "SELECT DISTINCT sent.subject,
                     (SELECT MIN(created.store_index) FROM claims created
                      WHERE created.subject=sent.subject) AS created_index
              FROM claims sent INDEXED BY claims_message_to_index
              WHERE sent.kind='message.sent'
-               AND json_extract(sent.body, '$.fields.to') IN (?1, ?2)
+               AND json_extract(sent.body, '$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
+               AND sent.store_index>?3 AND sent.store_index<=?4
                AND instr(sent.body, 'st3-work:')>0
              ORDER BY created_index, sent.subject",
         )?;
-        let subjects = statement
-            .query_map(params![recipient, bare_recipient], |row| {
+        let added = statement
+            .query_map(params![recipient, bare_recipient, after, through], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
+        #[cfg(test)]
+        WORK_WAKE_SUBJECTS_READ.with(|read| read.set(read.get() + added.len()));
+        let known = subjects.iter().map(|(subject, _)| subject.clone()).collect::<HashSet<_>>();
+        subjects.extend(added.into_iter().filter(|(subject, _)| !known.contains(subject)));
+        subjects.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+        let mut gone = BTreeSet::new();
         let mut messages = Vec::with_capacity(subjects.len());
-        for (subject, created_index) in subjects {
-            let message = self.message_view_cached(&connection, &subject, created_index)?;
-            if message.to == recipient
-                && message.tags.iter().any(|tag| tag.starts_with("st3-work:"))
-            {
-                messages.push(message);
+        for chunk in subjects.chunks(fractal_store::store::message_versions::CHUNK) {
+            let requested = chunk
+                .iter()
+                .map(|(subject, _)| subject.as_str())
+                .collect::<Vec<_>>();
+            let versions = fractal_store::store::message_versions::read(&connection, &requested)?;
+            for ((subject, created_index), version) in chunk.iter().zip(versions) {
+                if version.latest_claim_index == 0 {
+                    gone.insert(subject.clone());
+                    continue;
+                }
+                let message = self.message_view_cached_at_version(
+                    &connection,
+                    subject,
+                    *created_index,
+                    version,
+                )?;
+                if message.to == recipient
+                    && message.tags.iter().any(|tag| tag.starts_with("st3-work:"))
+                {
+                    messages.push(message);
+                }
+            }
+        }
+        subjects.retain(|(subject, _)| !gone.contains(subject));
+        {
+            let mut kept = wakes.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if kept.get(&recipient).is_none_or(|kept| kept.through <= through) {
+                kept.insert(recipient.clone(), KeptWorkWakes { names, through, subjects });
             }
         }
         sort_messages_canonically(&connection, &mut messages)?;
@@ -444,15 +550,20 @@ impl DeliveryStore for Store {
             limit: usize,
         ) -> Result<(Vec<MessageView>, Option<u64>)> {
         let connection = self.readers.get();
+        let sender = fractal_store::store::identities::resolve_reference_conn(&connection, sender)?;
+        let sender = sender.as_str();
+        let recipients = recipients.iter().map(|recipient|
+            fractal_store::store::identities::resolve_reference_conn(&connection, recipient)
+        ).collect::<Result<Vec<_>, _>>()?;
         let mut statement = connection.prepare_cached(
             "SELECT subject, store_index FROM claims INDEXED BY claims_message_from_index
-             WHERE kind='message.sent' AND json_extract(body, '$.fields.from')=?1
+             WHERE kind='message.sent' AND json_extract(body, '$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
                AND store_index>?2 AND store_index<=?3
-               AND json_extract(body, '$.fields.to') IN (SELECT value FROM json_each(?4))
+               AND json_extract(body, '$.fields.to') IN (SELECT value FROM json_each(?4) UNION SELECT name FROM identity_names WHERE identity IN (SELECT value FROM json_each(?4)))
              ORDER BY store_index LIMIT ?5",
         )?;
         let mut subjects = statement.query_map(
-            params![sender, after, through, serde_json::to_string(recipients)?, limit.saturating_add(1)],
+            params![sender, after, through, serde_json::to_string(&recipients)?, limit.saturating_add(1)],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
         )?.collect::<Result<Vec<_>, _>>()?;
         let more = subjects.len() > limit;
@@ -491,30 +602,34 @@ impl DeliveryStore for Store {
             through: u64,
             limit: usize,
         ) -> Result<(Vec<MessageView>, Option<u64>)> {
-        let recipient = recipient.map(normalize_message_party);
-        let sender = sender.map(normalize_message_party);
+        let connection = self.readers.get();
+        let recipient = recipient.map(|party| fractal_store::store::identities::resolve_reference_conn(
+            &connection, &normalize_message_party(party),
+        )).transpose()?;
+        let sender = sender.map(|party| fractal_store::store::identities::resolve_reference_conn(
+            &connection, &normalize_message_party(party),
+        )).transpose()?;
         anyhow::ensure!(
             sender.is_some() || (subject.is_none() && subject_prefix.is_none()),
             "subject filters need a sender filter"
         );
-        let connection = self.readers.get();
         // Sender selection starts at the existing expression indexes, not the recipient's
         // entire mailbox. Include legacy root fields and declarations, whose defaults and
         // canonical party spelling are resolved by message_view_cached below.
         let sql = if sender.is_some() {
             "WITH candidates(subject) AS (
                 SELECT subject FROM claims INDEXED BY claims_message_from_index
-                WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (?1,?2)
+                WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
                 UNION
                 SELECT subject FROM claims INDEXED BY claims_message_legacy_from_index
                 WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-                  AND json_extract(body,'$.from') IN (?1,?2)
+                  AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2)
                 UNION
                 SELECT desired.subject FROM desired
                 WHERE desired.kind='message' AND (
                     EXISTS (SELECT 1 FROM json_each(desired.body,'$.children') child
                             WHERE json_extract(child.value,'$.name')='from'
-                              AND json_extract(child.value,'$.arguments[0]') IN (?1,?2))
+                              AND json_extract(child.value,'$.arguments[0]') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1 UNION SELECT ?2))
                     OR (?1='requester' AND NOT EXISTS (
                         SELECT 1 FROM json_each(desired.body,'$.children') child
                         WHERE json_extract(child.value,'$.name')='from')))
@@ -836,6 +951,13 @@ impl DeliveryStore for Store {
         ) -> Result<crate::mailbox::Fence, St3Error> {
         let mut connection = self.connection.write();
         let tx = connection.transaction().map_err(internal)?;
+        let mut stable_request;
+        let identity = fractal_store::store::identities::resolve_reference_conn(&tx, &request.subject)?;
+        let request = if identity == request.subject { request } else {
+            stable_request = request.clone();
+            stable_request.subject = identity;
+            &stable_request
+        };
         check_mailbox_incarnation(&tx, request)?;
         if let Some(member) = argv_member {
             mailbox_lease::check_argv_declaration(&tx, request, member, &self.origin)?;
@@ -934,7 +1056,7 @@ impl DeliveryStore for Store {
             mailbox_lease::record_argv_binding(&tx, &bound, member)?;
         }
         tx.commit().map_err(internal)?;
-        if let Some(wakes) = self.smalltalk.mailbox_wakes.get() {
+        if let Some(wakes) = self.fractal.mailbox_wakes.get() {
             wakes.owner_changed(&bound.subject, &bound.component);
         }
         Ok(bound)
@@ -949,6 +1071,13 @@ impl DeliveryStore for Store {
             fence: &crate::mailbox::Fence,
         ) -> Result<MailboxWatermark, St3Error> {
         let connection = self.readers.get();
+        let mut stable_fence;
+        let identity = fractal_store::store::identities::resolve_reference_conn(&connection, &fence.subject)?;
+        let fence = if identity == fence.subject { fence } else {
+            stable_fence = fence.clone();
+            stable_fence.subject = identity;
+            &stable_fence
+        };
         // The process-wide committed index may advance beyond a pinned reader. Capture both
         // cursors from its SQLite snapshot, or a concurrent commit could be skipped forever.
         let (index, local) = connection

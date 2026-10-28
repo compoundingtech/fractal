@@ -796,17 +796,27 @@ fn idle_lookup_cost_is_flat_with_delivered_mail_and_pr_history() {
         (scope.finish(), start.elapsed())
     };
     // Delivered but unread/unclosed messages are retained, so this cannot pass by archiving.
+    // Pull requests seed a quarter of the history; the daily run (ST_TEST_SCALE=full, docs/ci.md)
+    // seeds all of it. Doubling either size still adds thousands of VM steps to a scan, far past
+    // the 50 the assertion below allows.
+    let (messages, observations) = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+        (10_000, 2_000)
+    } else {
+        (2_500, 500)
+    };
     idle.seat
         .store
-        .seed_idle_history(SEAT, idle.start, 0..10_000, 0..2_000);
+        .seed_idle_history(SEAT, idle.start, 0..messages, 0..observations);
     let baseline = measure();
     idle.seat
         .store
-        .seed_idle_history(SEAT, idle.start, 10_000..20_000, 2_000..4_000);
+        .seed_idle_history(SEAT, idle.start, messages..2 * messages, observations..2 * observations);
     let grown = measure();
     let plans = idle.seat.store.idle_lookup_plans(SEAT, &watch).unwrap();
     eprintln!(
-        "idle retained-history: 10k delivered / 5 watches / 2k observations = {baseline:?}; 20k / 5 / 4k = {grown:?}; plans={plans:?}"
+        "idle retained-history: {messages} delivered / 5 watches / {observations} observations = {baseline:?}; {} / 5 / {} = {grown:?}; plans={plans:?}",
+        2 * messages,
+        2 * observations
     );
     assert_eq!(baseline.0.fullscan_steps, 0);
     assert_eq!(grown.0.fullscan_steps, 0);

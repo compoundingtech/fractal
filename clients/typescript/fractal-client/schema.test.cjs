@@ -185,6 +185,24 @@ test('pairing challenge object siblings constrain every union branch in both dec
     assert.throws(() => Rich.decodeUnknownSync(Rich.PairingChallenge, 'strict')(future));
 });
 
+test('prompt answers keep ordinary text bounds and optional delegation across the main carry', async () => {
+    const [{ Schema }, Rich] = await modules;
+    for (const mode of ['strict', 'tolerant']) {
+        const decode = Rich.decodeUnknownSync(Rich.PromptRespondParameters, mode);
+        for (const answer of ['allow', 'deny', 'dismiss', 'approve', 'use-all', 'trust', '{"0":[1],"1":[0,2]}', 'x'.repeat(16384)]) {
+            const wire = { target_id: 'agent/example/worker', episode: 'claim/prompt', answer };
+            assert.deepEqual(Schema.encodeSync(Rich.PromptRespondParameters)(decode(wire)), wire);
+        }
+        for (const answer of ['', 'x'.repeat(16385)]) {
+            assert.throws(() => decode({ target_id: 'agent/example/worker', episode: 'claim/prompt', answer }));
+        }
+        const wire = { target_id: 'agent/example/worker', episode: 'claim/prompt', answer: 'dismiss',
+            delegation: { person: 'person/avery', policy: 'claim/policy', message: 'message/instruction',
+                quote: 'Dismiss that notice.', episode: 'claim/prompt' } };
+        assert.deepEqual(Schema.encodeSync(Rich.PromptRespondParameters)(decode(wire)), wire);
+    }
+});
+
 test('queued mission deadlines decode null and admission timestamps', async () => {
     const [{ Option, Schema }, Rich] = await modules;
     const wire = require('../../../docs/st3/client-v0/fixtures/person-ask-mission.json');
@@ -688,6 +706,20 @@ test('phone observation schema keeps histogram pairs and live-share as separate 
     ]) assert.throws(()=>decode({...report,samples}));
 });
 
+test('native delivery links are optional message references and round trip', async () => {
+    const [{ Schema }, Rich] = await modules;
+    const items = require('../../../docs/st3/client-v0/fixtures/timeline-delivery-links.json').value.items;
+    for (const entry of items) {
+        const typed = Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict')(entry);
+        assert.deepEqual(Schema.encodeSync(Rich.TimelineEntry)(typed), {
+            ...entry, timestamp: new Date(entry.timestamp).toISOString(),
+        });
+    }
+    for (const delivers of [null, 'native-user-1', 'agent/fixture', 'message/with space']) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.TimelineEntry, 'strict')({ ...items[0], delivers }));
+    }
+});
+
 test('producer conformance fixtures decode strictly without losing tool results', async () => {
     const [{ Schema }, Rich] = await modules;
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
@@ -702,7 +734,7 @@ test('producer conformance fixtures decode strictly without losing tool results'
 });
 
 test('known daemon sender schema gap remains an explicit rejection (issue #1957)', async () => {
-    // https://github.com/compoundingtech/smalltalk/issues/1957 — pending sender amendment.
+    // https://github.com/compoundingtech/fractal/issues/1957 — pending sender amendment.
     const [, Rich] = await modules;
     const entry = {
         id: 'timeline-entry/ada', sequence: 0, revision: 1, final: true,
@@ -728,6 +760,34 @@ test('exchange carrier additions preserve legacy absence and future carrier valu
     assert.throws(() => decode({ ...observed, last_failed_exchange: { carrier: 'fabric' } }));
 });
 
+test('stream sync notice frames decode in both modes, and a bad notice never reads as level', async () => {
+    const [, Rich] = await modules;
+    const fixture = require('../../../fixtures/clients/stream-sync/frames.json');
+    // What a reader makes of a decoded frame's sync: only exactly level, or a catching-up or
+    // diverged with peers, is known; anything else is unknown.
+    const read = (sync) => sync === undefined ? 'unknown'
+        : sync.state === 'level' && !sync.peers ? 'level'
+        : (sync.state === 'catching-up' || sync.state === 'diverged') && sync.peers?.length ? sync.state
+        : 'unknown';
+    for (const [name, { frame, expect }] of Object.entries(fixture.valid)) {
+        for (const mode of ['tolerant', 'strict']) {
+            const decoded = Rich.decodeUnknownSync(Rich.CollectionFrame, mode)(frame);
+            assert.equal(read(decoded.sync), expect, `${name} ${mode}`);
+        }
+        // A key a newer daemon adds is ignored when tolerant, the production default.
+        const newer = { ...frame, a_key_from_a_newer_daemon: { any: 'value' } };
+        assert.equal(read(Rich.decodeUnknownSync(Rich.CollectionFrame, 'tolerant')(newer).sync), expect, `${name} newer`);
+    }
+    for (const [name, { frame, expect }] of Object.entries(fixture.invalid)) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.CollectionFrame, 'strict')(frame), undefined, `${name} strict`);
+        assert.equal(expect, 'unknown');
+        // Tolerant decoding never turns a bad notice into level: it fails the frame, or reads it
+        // as something the reader rule calls unknown.
+        let decoded;
+        try { decoded = Rich.decodeUnknownSync(Rich.CollectionFrame, 'tolerant')(frame); } catch { decoded = undefined; }
+        if (decoded) assert.notEqual(read(decoded.sync), 'level', `${name} tolerant`);
+    }
+});
 
 test('message provenance retains its serving model and reads historical absence strictly', async () => {
     const [{ Schema }, Rich] = await modules;
@@ -741,4 +801,27 @@ test('message provenance retains its serving model and reads historical absence 
     assert.throws(() => decode({ ...historical, authorization_model: 'unqualified-model' }));
     assert.throws(() => decode({ ...historical, authorization_model: null }));
     assert.throws(() => decode({ ...historical, undeclared_authority: true }));
+});
+
+
+test('schedule schema tolerates future state strings and retains raw declaration fields', async () => {
+    const fs = require('node:fs'); const path = require('node:path');
+    const [{ Schema }, Rich] = await modules;
+    const wire = JSON.parse(fs.readFileSync(path.join(__dirname, '../../../docs/st3/client-v0/fixtures/schedules-page.json'), 'utf8')).value;
+    const decoded = Rich.decodeUnknownSync(Rich.SchedulesPage, 'tolerant')(wire);
+    // PageInfo.omitted_items is optional on the wire and encodes as null when the daemon leaves it out.
+    assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), { ...wire, page: { omitted_items: null, ...wire.page } });
+});
+
+test('optional author and recipients retain closed legacy scalar types', async () => {
+    const [{Schema},Rich] = await modules;
+    const items = require('../../../docs/st3/client-v0/fixtures/timeline-message-participants.json').value.items;
+    const decode = Rich.decodeUnknownSync(Rich.TimelineEntry,'strict');
+    for (const entry of items) assert.deepEqual(Schema.encodeSync(Rich.TimelineEntry)(decode(entry)), {
+        ...entry,timestamp:new Date(entry.timestamp).toISOString(),
+    });
+    for (const patch of [ {from:'daemon/runtime'}, {to:['agent/worker']}, {author:'step/fixture'},
+        {recipients:['daemon/runtime']}, {author:null}, {recipients:null} ]) {
+        assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
+    }
 });

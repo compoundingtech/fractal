@@ -685,10 +685,19 @@ fn run_sequence(seed: u64, events: usize) -> BTreeSet<String> {
 
 #[test]
 fn incremental_passes_write_what_full_passes_write() {
+    // Pull requests run seeds 1..=4, the fewest that reach every kind listed below; the daily run
+    // (ST_TEST_SCALE=full, docs/ci.md) runs 1..=8. If a change stops the four reaching a kind, the
+    // coverage assertion fails, so the smaller set cannot pass by comparing less.
+    // ST3_DIFFERENTIAL_SEEDS overrides both.
+    let default_seeds = if std::env::var_os("ST_TEST_SCALE").is_some_and(|scale| scale == "full") {
+        8
+    } else {
+        4
+    };
     let seeds = std::env::var("ST3_DIFFERENTIAL_SEEDS")
         .ok()
         .and_then(|value| value.parse().ok())
-        .unwrap_or(8);
+        .unwrap_or(default_seeds);
     let mut reached = BTreeSet::new();
     for seed in std::env::var("ST3_DIFFERENTIAL_FIRST")
         .ok()

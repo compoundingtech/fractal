@@ -82,7 +82,7 @@ on the receiving machine. Building/signing a candidate still requires the explic
 configured keychain identity. The helper restores installation files, not
 application databases; schema compatibility must be checked by the deployment caller.
 
-<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032 -->
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-service-labels-fractal — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
 For the default-host Fractal cutover, `st service install --stage-fractal` installs
 `com.compoundingtech.fractal` and `com.compoundingtech.fractal.replication` definitions
 disabled without loading or starting them. On Linux the same command stages

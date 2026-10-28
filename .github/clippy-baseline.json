@@ -31,7 +31,6 @@
       "clippy::unnecessary_lazy_evaluations": 1
     },
     "fractal-api-core": {
-      "clippy::collapsible_if": 2,
       "clippy::manual_next_back": 1
     },
     "fractal-client": {
@@ -77,7 +76,6 @@
     },
     "fractal-tui": {
       "clippy::cloned_ref_to_slice_refs": 2,
-      "clippy::collapsible_if": 1,
       "clippy::double_ended_iterator_last": 1,
       "clippy::if_same_then_else": 1,
       "clippy::int_plus_one": 1,

@@ -35,7 +35,7 @@ async fn reserved_addresses_refuse_connections_until_initialized_serving() {
     let task = tokio::spawn(super::serve_reserved_unix_with_ready(
         reserved,
         axum::Router::new().fallback(|| async { "initialized" }),
-        false,
+        None,
         move || ready.send(()).unwrap(),
     ));
     serving.await.unwrap();

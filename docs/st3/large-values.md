@@ -83,9 +83,42 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Cold runtime reduction inventory (PR #1706)
+
+The `fractal_store::store` maintainer owns `lv-h5911198f6cf3` and `lv-ha1002d83b7ac`:
+the first selects existing integer claim identities in descending canonical order, and the
+second hydrates one existing kind/body at a time until consumed fields resolve. Claim bodies
+and canonical subject/time keys remain inline; a decoded-row bound is not a byte-size bound.
+The existing reference/chunking representation work remains required. The obsolete full-history
+source reader `lv-hcd8a9be75153` is removed in favor of the existing indexed per-origin reader.
+
+The `fractal_store::store::tests` maintainer owns `lv-h13b02e7126c4` and `lv-hf8af949bb730`.
+These rewrite isolated in-memory claim fixtures to exercise historical sparse/legacy records;
+they do not add a production ingestion path. Body/predecessor preparation remains the owning
+module's representation work, with no new size guarantee or admission relaxation.
+
+### Person rename and review reassignment inventory review
+
+Owner review for [PR #1185](https://github.com/compoundingtech/fractal/pull/1185):
+the PR-owning fleet seat reviewed the following transitional exceptions. The
+producer modules named by the markers retain responsibility for their TODOs.
+These accept existing inline representations, not a value-size or cost bound.
+
+| Inventory ID | Producer and reviewed value flow | Reason and next step |
+| --- | --- | --- |
+| `lv-h17335d660f3b` | `fractal_store::store::attention` prepares the effective-reviewer pending-request query and hydrates request bodies and canonical episode timestamps. | Preserve exact episode and canonical ordering; trace composed SQL and reference/chunk variable request values. |
+| `lv-h9b347ba24aa6` | `fractal_evidence::store::evidence` reads request ID, owner and effective reviewer through the generated reviewer fold. | Trace composed query and reference representation while preserving exact request identity and historical authority. |
+| `lv-h1a7e1457e965` | `fractal_store::store::human_review_reassignment` reads the effective reviewer for one request, including canonical repair and receipt selection. | Trace generated SQL and move variable reviewer/request keys to a reviewed reference representation. |
+| `lv-h12810b4d74c0` | `fractal_store::store::person_rename` hydrates a receipt by idempotency key. | Preserve original report and actor/people validation; prepare a body/reference representation with identical replay semantics. |
+| `lv-h273f7a4b7c06` | `fractal_store::store::person_rename` reads the canonical receipt destination by old-person subject. | Both reducers must choose the same winner; reference variable person keys without changing canonical ordering. |
+| `lv-hfbb687ae03ed` | `fractal_store::store::person_work` evaluates receipt-winner SQL for a reassignment claim. | Trace composed SQL and variable claim/person keys toward a reference representation without changing winner selection. |
+| `lv-hf6f5b79d7be9` | `fractal_store::store::person_work` updates assignee and its index key, fenced by step and previous person. | Preserve atomic episode-fenced assignment; bound/reference values and account for old cell/index-key reclamation. |
+| `lv-h2c8b0107116f` | `fractal_store::store` hydrates the first authorized exact-request answer with effective-reviewer predicates. | Reference/chunk hydrated values while preserving answer authority at its canonical moment. |
+| `lv-h82624af80f95` | `fractal_store::store` schema adds request, answer, reassignment, reviewer-routing and exact episode indexes. | Existing variable inline keys enable indexed episode seeks but are not bounded-size proof; reference/chunk variable columns and index expressions without changing fold semantics. |
+
 ### Conversation-owner inventory review (PR #3116)
 
-The [owner-once change](https://github.com/compoundingtech/smalltalk/pull/3116)
+The [owner-once change](https://github.com/compoundingtech/fractal/pull/3116)
 retains the existing inline claim representation. The responsible maintainers
 are the maintainers of the producer modules named below; ownership does not
 transfer to the offline command or this inventory. All entries remain
@@ -260,3 +293,72 @@ Real representation/conversion decisions require separate storage/contract revie
 and the required human decision before implementation. Native cost controls,
 large-cell fixtures, long-reader/WAL checks and crash/reopen tests remain future
 qualification work. This source guard supplies none of those results.
+
+## Completion-health candidate review
+
+`fractal_store::store::completion_state` owns the new health-v1 namespace and its
+inventory exceptions. Schema site `lv-hde7868afa605` retains claim identifiers,
+subjects, canonical sort keys and three selected JSON fields inline. Field count
+is bounded; encoded identifier/key/reason sizes are not. No cursor, resource facts
+or signed envelope is copied into this namespace. The producer maintainer retains
+`chunk-or-reference-variable-columns`: qualify physical references for variable
+keys/values, including predecessor selection and deletion, without imposing new
+logical input limits.
+
+The module's remaining inventoried sinks create body-free queues, process changed
+claim identities, read one changed authoritative body and insert/delete its narrow
+candidates. `lv-hb0cb6dfa9cec` and `lv-h73e9590d9234` are the prepared query and bind
+for that single-body read; `lv-hde7c87402fcd` binds indexed field-winner reads.
+They remain transitional exceptions, not byte-size guarantees. Inline narrow
+candidates preserve existing canonical ordering and avoid copying historical
+cursor payloads on completion reads; eventual physical breakup must preserve
+explicit clearing markers versus JSON null and indexed repaired predecessors.
+Queue/reclamation and dynamic-source TODOs remain with this same producer.
+
+Cold-store hydration runs after both APIs bind. Its persisted subject/kind/index
+cursor seeks at most sixteen source identities per independent background writer
+loan, yielding after ten milliseconds between candidates and resting outside the
+writer between loans. Bootstrap does not copy the historical inventory into the
+pending queue. Live changes behind its cursor are drained in a bounded final phase.
+Until hydration completes, preparation refuses the projection and canonical reads
+retain the original fold. A single source body and COMMIT remain indivisible, so
+the chunk budget is not a hard elapsed-time bound. Local-observation retention does
+not bound replicated observer claim history.
+
+`fractal_store::store::completion_state_tests` owns the associated fixture-only
+exceptions: invented time/origin/position mutations, repair membership, deletion,
+savepoints and preparation closures. These exercise invalidation and rollback;
+they are not new production value producers or permission to relax wire limits.
+
+## Deploy verification inventory review (PR #3823)
+
+The [deploy verification change](https://github.com/compoundingtech/fractal/pull/3823)
+reads existing claim, signature and receipt representations without adding a
+production writer or changing their storage format. The responsible maintainers
+are those of `fractal_store::store::deploy` and its `tests` module. These
+transitional exceptions do not prove byte-size or execution-cost bounds.
+
+- `lv-hcd60d83de7b8` resolves a claim by ID and decodes its existing inline body,
+  predecessors and variable identity fields. `lv-he4d379218d03` binds GO/local
+  origin strings and reads claim IDs/origins for authenticated clock evidence.
+  `lv-h5e7d6e0f3a53` reads IDs/kinds in store order for revocation, consumption,
+  STOP and lift verification. The formatted predicates retain the existing
+  unrepaired-claim and replica exclusions. All three remain inline to preserve
+  exact canonical authorization and historical claim decoding; the producer
+  maintainer owns `trace-statement-and-value-representation`: connect formatted
+  statements, variable TEXT/index keys and decoded claim values to the shared
+  bounded/reference representation while retaining snapshot, signature and
+  eligible-origin/local-clock ratchet semantics.
+- Fixture-only `lv-h493aa8cab034` and `lv-h63250a64d298` mutate/remove the
+  host-b replication receipt; `lv-haeca40cf61e3` inserts an unsupported raw
+  revocation envelope and variable timestamp/state fields. They deliberately
+  retain the actual inline receipt/transport representation to test stale,
+  missing and unreadable evidence. The test-module maintainer owns
+  `chunk-or-reference-exact-wire-values`: adapt these fixtures to the shared
+  representation while preserving exact raw-envelope rejection coverage.
+- Fixture-only `lv-h8c4ce07dd4ee` changes principal-migration state to legacy;
+  `lv-h455635f8de24` inserts a variable claim ID into repaired membership.
+  These direct mutations exercise incomplete authority and repaired-release
+  rejection, not new production value producers. The test-module maintainer
+  owns `bound-or-reference-values-and-reclamation`: carry those assertions to
+  the bounded membership/state representation and its cleanup semantics.

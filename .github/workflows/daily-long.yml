@@ -327,7 +327,7 @@ jobs:
           start=$SECONDS
           nix build --print-build-logs --out-link "$RUNNER_TEMP/vm-driver" .#legacyPackages.x86_64-linux.transport-isolation-vm.driver
           printf '| VM driver build | %ss |\n' "$((SECONDS - start))" >> "$GITHUB_STEP_SUMMARY"
-      - name: Run all three systemd-scope tests in the VM
+      - name: Run all seven selected systemd-scope tests in the VM
         id: vmtest
         env:
           FRACTAL_ISOLATION_ARCHIVE: "${{ runner.temp }}/ci-test-archives/workspace.tar.zst"
@@ -564,6 +564,7 @@ jobs:
       CI_TEST_PARTITION: "hash:1/2"
       CI_TEST_THREADS: "8"
       ST_TEST_SCALE: full
+      CI_TEST_LANE: daily
       CI_CACHE_DEV_SHELL: default
     steps:
       - name: Require the shared test producer to succeed
@@ -733,6 +734,7 @@ jobs:
       CI_TEST_PARTITION: "hash:2/2"
       CI_TEST_THREADS: "8"
       ST_TEST_SCALE: full
+      CI_TEST_LANE: daily
       CI_CACHE_DEV_SHELL: default
     steps:
       - name: Require the shared test producer to succeed

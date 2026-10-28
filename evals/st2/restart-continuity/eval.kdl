@@ -52,7 +52,7 @@ eval {
     judge "only rc.dev changed the ledger repository" {
       exec "bash ./judges/isolation.sh"
     }
-    judge "delegation, report, and confirmation use Small Talk" {
+    judge "delegation, report, and confirmation use Fractal" {
       exec "bash ./judges/coordination.sh"
     }
   }

@@ -153,7 +153,7 @@ async fn open_in(
                     }
                 }
                 None => Err(Miss::NotThisTerminal(format!(
-                    "st does not say which host runs `{}`",
+                    "Fractal does not say which host runs `{}`",
                     terminal.subject
                 ))),
             };
@@ -181,7 +181,7 @@ async fn open_in(
                 (Ok(_), None) => unreachable!("a Fabric stream needs an owner"),
             }
         }
-        Err(error) => gateway(terminal, "local PTY discovery", &error.plain(), false),
+        Err(error) => gateway(terminal, "local PTY discovery", &error.human(), false),
     }
 }
 
@@ -245,7 +245,7 @@ async fn over_fabric(
     }
     if terminal.name.is_empty() || terminal.incarnation.is_empty() {
         return Err(Miss::NotThisTerminal(format!(
-            "st has no running terminal for `{}` on {owner} yet",
+            "Fractal has no running terminal for `{}` on {owner} yet",
             terminal.subject
         )));
     }
@@ -254,13 +254,13 @@ async fn over_fabric(
     let capabilities = client
         .capabilities()
         .await
-        .map_err(|error| Miss::NotThisTerminal(error.plain()))?;
+        .map_err(|error| Miss::NotThisTerminal(error.human()))?;
     for scope in ["terminal.read", "terminal.control"] {
         if !capabilities.value.capabilities.iter().any(|capability| {
             capability.id == scope && capability.state == fractal_client::CapabilityState::Granted
         }) {
             return Err(Miss::NotThisTerminal(format!(
-                "st does not grant you `{scope}` for a direct attachment"
+                "Fractal does not grant you `{scope}` for a direct attachment"
             )));
         }
     }
@@ -346,21 +346,19 @@ mod tests {
     }
 
     fn state(root: &Path) -> fractal_daemon::api::AppState {
-        fractal_daemon::api::AppState {
-            owning_person: None,
-            store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            event_notify: tokio::sync::watch::channel(0_u64).0,
-            node: "attach-node".into(),
-            state_dir: root.join("daemon"),
-            pty_root: root.join("pty"),
-            pty_binary: root.join("bin/pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: fractal_daemon::model::PlannerSpec::default(),
-        }
+        fractal_daemon::api::AppState { owning_person: None,
+        store: Arc::new(fractal_daemon::store::Store::open_memory("attach-node").unwrap()),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0_u64).0,
+        node: "attach-node".into(),
+        state_dir: root.join("daemon"),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("bin/pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     fn observe_terminal(store: &fractal_daemon::store::Store, incarnation: &str) {
@@ -479,7 +477,7 @@ mod tests {
         assert_eq!(&answer, b"world");
     }
 
-    /// Time the real attach path to a live seat, read only: the runtime read stui makes, the
+    /// Time the real attach path to a live seat, read only: the runtime read Fractal TUI makes, the
     /// route (local socket or Fabric), and the first screen of a PEEK, which sends no input and
     /// resizes nothing. Run by hand against a real daemon and fleet:
     /// `STUI_PROBE_SUBJECT=agent/... STUI_PROBE_PERSON=person/... cargo test -p fractal-tui
@@ -495,7 +493,7 @@ mod tests {
                 .unwrap();
         let client = Client::unix_as(&socket, person);
         let started = Instant::now();
-        // stui's own feed already holds an agent's incarnation and host, so a real attach reads
+        // Fractal TUI's own feed already holds an agent's incarnation and host, so a real attach reads
         // no runtime. With STUI_PROBE_INCARNATION and STUI_PROBE_OWNER (from `st agents show
         // AGENT --json`: value.incarnation_id, value.host_id) the probe does the same; without
         // them it makes the runtime read, which a busy daemon can take seconds to answer.
@@ -565,7 +563,7 @@ mod tests {
             opened_at.elapsed() - routed,
             started.elapsed()
         );
-        // The same seat through the client gateway, as stui attached before: the daemon relays.
+        // The same seat through the client gateway, as Fractal TUI attached before: the daemon relays.
         let gateway = Instant::now();
         let mut relayed = client
             .raw_terminal_peek(&terminal, &incarnation)

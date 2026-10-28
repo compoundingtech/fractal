@@ -42,7 +42,7 @@ const SUBJECT_MAX_CHARS: usize = 160;
 const SENDER_MAX_CHARS: usize = 80;
 /// Envelope identities are whole graph subjects, so they keep a larger bound than the PING header.
 const ADDRESS_MAX_CHARS: usize = 256;
-const ST3_BODY_MAX_CHARS: usize = 2048;
+const FRACTAL_BODY_MAX_CHARS: usize = 2048;
 /// The one sentence wrapped around a message from a person. It is imperative and plain: a person
 /// has no inbox, so the agent answers by printing in the conversation. Views also recognize the
 /// older sentence, "The person reads replies in st, not in the agent's session."
@@ -79,10 +79,10 @@ pub fn poke_id(filename: &str) -> &str {
 /// Prefer the canonical st3 message subject carried across the compatibility inbox boundary.
 /// Native st2 messages retain their stable filename-derived identifier.
 fn poke_reference(msg: &Message) -> &str {
-    st3_message_reference(msg).unwrap_or_else(|| poke_id(&msg.filename))
+    fractal_message_reference(msg).unwrap_or_else(|| poke_id(&msg.filename))
 }
 
-pub fn st3_message_reference(msg: &Message) -> Option<&str> {
+pub fn fractal_message_reference(msg: &Message) -> Option<&str> {
     msg.tags
         .iter()
         .find_map(|tag| tag.strip_prefix("st3-message:"))
@@ -91,37 +91,37 @@ pub fn st3_message_reference(msg: &Message) -> Option<&str> {
 
 /// The st3 bridge records the graph recipient and the SHA-256 of the exact graph body on each
 /// projected inbox file, because the inbox round trip may add a trailing newline to the body.
-pub const ST3_TO_TAG: &str = "st3-to:";
-pub const ST3_SHA256_TAG: &str = "st3-sha256:";
+pub const FRACTAL_TO_TAG: &str = "st3-to:";
+pub const FRACTAL_SHA256_TAG: &str = "st3-sha256:";
 /// One tag per attachment on a projected message: [`AttachmentNotice`] as percent-escaped JSON.
-pub const ST3_ATTACHMENT_TAG: &str = "st3-attachment:";
+pub const FRACTAL_ATTACHMENT_TAG: &str = "st3-attachment:";
 
-fn st3_tag<'a>(msg: &'a Message, prefix: &str) -> Option<&'a str> {
+fn fractal_tag<'a>(msg: &'a Message, prefix: &str) -> Option<&'a str> {
     msg.tags.iter().find_map(|tag| tag.strip_prefix(prefix))
 }
 
 /// Lowercase hex SHA-256 of one exact graph message body.
-pub fn st3_body_sha256(body: &str) -> String {
+pub fn fractal_body_sha256(body: &str) -> String {
     use sha2::{Digest as _, Sha256};
     format!("{:x}", Sha256::digest(body.as_bytes()))
 }
 
-fn st3_body_preview(body: &str) -> (String, bool) {
+fn fractal_body_preview(body: &str) -> (String, bool) {
     let normalized = normalize_line(body);
     let mut characters = normalized.chars();
-    let preview: String = characters.by_ref().take(ST3_BODY_MAX_CHARS).collect();
+    let preview: String = characters.by_ref().take(FRACTAL_BODY_MAX_CHARS).collect();
     let truncated = characters.next().is_some();
     (preview, truncated)
 }
 
 /// The plain ST3 notice. Claude receives it inside its own channel tag.
 /// The graph remains the source of the complete message when the preview is bounded.
-pub fn st3_ping_text(reference: &str, from: &str, subject: Option<&str>, body: &str) -> String {
+pub fn fractal_ping_text(reference: &str, from: &str, subject: Option<&str>, body: &str) -> String {
     let person_message = from.starts_with("person/");
     let from = normalize_field(Some(from), "unknown", SENDER_MAX_CHARS);
     let subject = normalize_field(subject, "(no subject)", SUBJECT_MAX_CHARS);
     let header = format!("[PING from st3] {reference} from {from}: {subject}");
-    let (preview, truncated) = st3_body_preview(body);
+    let (preview, truncated) = fractal_body_preview(body);
     let mut notice = if preview.is_empty() {
         header
     } else if truncated {
@@ -141,7 +141,7 @@ pub fn st3_ping_text(reference: &str, from: &str, subject: Option<&str>, body: &
 /// `graph` is the message subject, `message/ID`; `id` is its ID; `sha256` hashes the complete
 /// graph body. Every value is escaped, so no sender-chosen text can close the element or add an
 /// attribute. The body is a bounded one-line preview; truncation is noted after the element.
-pub fn st3_notification_text(
+pub fn fractal_notification_text(
     reference: &str,
     from: &str,
     to: &str,
@@ -149,7 +149,7 @@ pub fn st3_notification_text(
     body: &str,
     body_sha256: &str,
 ) -> String {
-    st3_notification_with_attachments(reference, from, to, subject, body, body_sha256, &[])
+    fractal_notification_with_attachments(reference, from, to, subject, body, body_sha256, &[])
 }
 
 /// A file a message carries, as the seat's harness is told about it: where this machine keeps
@@ -169,7 +169,7 @@ impl AttachmentNotice {
     /// every byte outside a plain word is escaped.
     pub fn to_tag(&self) -> String {
         let json = serde_json::to_string(self).unwrap_or_default();
-        let mut tag = String::from(ST3_ATTACHMENT_TAG);
+        let mut tag = String::from(FRACTAL_ATTACHMENT_TAG);
         for byte in json.bytes() {
             if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/') {
                 tag.push(char::from(byte));
@@ -181,7 +181,7 @@ impl AttachmentNotice {
     }
 
     pub fn from_tag(tag: &str) -> Option<Self> {
-        let escaped = tag.strip_prefix(ST3_ATTACHMENT_TAG)?.as_bytes();
+        let escaped = tag.strip_prefix(FRACTAL_ATTACHMENT_TAG)?.as_bytes();
         let mut bytes = Vec::with_capacity(escaped.len());
         let mut index = 0;
         while index < escaped.len() {
@@ -216,7 +216,7 @@ pub struct NotificationMetadata<'a> {
 }
 
 /// The attachment envelope for an ordinary message, without assistant metadata.
-pub fn st3_notification_with_attachments(
+pub fn fractal_notification_with_attachments(
     reference: &str,
     from: &str,
     to: &str,
@@ -225,7 +225,7 @@ pub fn st3_notification_with_attachments(
     body_sha256: &str,
     attachments: &[AttachmentNotice],
 ) -> String {
-    st3_notification_with_metadata(
+    fractal_notification_with_metadata(
         reference, from, to, subject, body, body_sha256,
         NotificationMetadata { attachments, assistant: None },
     )
@@ -234,7 +234,7 @@ pub fn st3_notification_with_attachments(
 /// Include separately supplied, verified assistant provenance outside the bounded body. The
 /// warning prefix and `sender_class` attribute come only from `assistant`; body text cannot forge
 /// either, and the prefix stands even when the body preview truncates.
-pub fn st3_notification_with_metadata(
+pub fn fractal_notification_with_metadata(
     reference: &str,
     from: &str,
     to: &str,
@@ -272,7 +272,7 @@ pub fn st3_notification_with_metadata(
             "[PING from st3] {graph} from {from} sender_class=external-assistant: {subject}\n{EXTERNAL_ASSISTANT_WARNING}\n{envelope}"
         );
     }
-    let (preview, truncated) = st3_body_preview(body);
+    let (preview, truncated) = fractal_body_preview(body);
     if !preview.is_empty() {
         envelope.push_str(&xml_escape(&preview, false));
         if truncated {
@@ -464,20 +464,20 @@ fn poke_text_with_resolver(
     recipient: &str,
     msg: &Message,
 ) -> String {
-    if let Some(reference) = st3_message_reference(msg) {
-        let sha256 = st3_tag(msg, ST3_SHA256_TAG)
+    if let Some(reference) = fractal_message_reference(msg) {
+        let sha256 = fractal_tag(msg, FRACTAL_SHA256_TAG)
             .filter(|hash| hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
-            .map_or_else(|| st3_body_sha256(&msg.body), str::to_owned);
+            .map_or_else(|| fractal_body_sha256(&msg.body), str::to_owned);
         let attachments: Vec<AttachmentNotice> = msg
             .tags
             .iter()
             .filter_map(|tag| AttachmentNotice::from_tag(tag))
             .collect();
         return with_tag_notices(
-            st3_notification_with_attachments(
+            fractal_notification_with_attachments(
                 reference,
                 msg.from.as_deref().unwrap_or_default(),
-                st3_tag(msg, ST3_TO_TAG).unwrap_or(recipient),
+                fractal_tag(msg, FRACTAL_TO_TAG).unwrap_or(recipient),
                 msg.subject.as_deref(),
                 &msg.body,
                 &sha256,

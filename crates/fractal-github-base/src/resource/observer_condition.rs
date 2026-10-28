@@ -2,7 +2,7 @@
 //! a failed observation; the store's attention snapshot reads the same classification back.
 use serde_json::Value;
 
-use super::{ProviderForbidden, ProviderRateLimit, ProviderUnauthenticated};
+use super::{LocalObserverBudget, ProviderForbidden, ProviderRateLimit, ProviderUnauthenticated};
 
 /// Why an observer cannot observe, and whether a person has to act.
 pub enum ObserverCondition {
@@ -11,6 +11,8 @@ pub enum ObserverCondition {
     /// A rate limit ends at a known reset. It needs a person only when the observer was already
     /// limited and is still limited after the reset that limit named.
     RateLimited { reason: String, outlasted: bool },
+    /// This daemon refused admission locally; no provider request was made.
+    LocalBudget(String),
     /// Any other failure. A person looks at it once it has lasted an hour.
     Unreachable(String),
     /// The daemon rejected the observation itself. It is not polled again on this revision.
@@ -28,6 +30,9 @@ impl ObserverCondition {
             || error.downcast_ref::<ProviderUnauthenticated>().is_some()
         {
             return Self::Access(reason);
+        }
+        if error.downcast_ref::<LocalObserverBudget>().is_some() {
+            return Self::LocalBudget(reason);
         }
         if error.downcast_ref::<ProviderRateLimit>().is_some() {
             let outlasted = previous.is_some_and(|actual| {
@@ -50,6 +55,7 @@ impl ObserverCondition {
         match self {
             Self::Access(_) => "access-denied",
             Self::RateLimited { .. } => "rate-limited",
+            Self::LocalBudget(_) => "local-observer-budget",
             Self::Unreachable(_) => "unreachable",
             Self::Rejected(_) => "rejected",
         }
@@ -59,6 +65,7 @@ impl ObserverCondition {
         match self {
             Self::Access(_) | Self::Rejected(_) => true,
             Self::RateLimited { outlasted, .. } => *outlasted,
+            Self::LocalBudget(_) => false,
             Self::Unreachable(_) => failing_for_ms >= OBSERVER_UNREACHABLE_ATTENTION_MS,
         }
     }
@@ -67,6 +74,7 @@ impl ObserverCondition {
         match self {
             Self::Access(_) => "An observer has no access to GitHub",
             Self::RateLimited { .. } => "A GitHub rate limit outlasted its reset",
+            Self::LocalBudget(_) => "The local observer budget is reached",
             Self::Unreachable(_) => "An observer has failed for an hour",
             Self::Rejected(_) => "st rejects an observer's observations",
         }
@@ -82,6 +90,7 @@ impl ObserverCondition {
             Self::RateLimited { reason, .. } => format!(
                 "{subject} is still limited after the reset GitHub named: {reason}. Something else spends the GitHub budget that every host shares; `st doctor` on {host} shows how much of it remains, how much that host's observers spent, and each observer's requests. The observer waits for each reset on its own. {closes}"
             ),
+            Self::LocalBudget(reason) => format!("{subject}: {reason}. The observer waits for its next local slot on {host}. {closes}"),
             Self::Unreachable(reason) => format!(
                 "{subject} has failed to observe for over an hour: {reason}. Inspect it with `st subject {subject}`. {closes}"
             ),
@@ -89,5 +98,22 @@ impl ObserverCondition {
                 "st rejected an observation from {subject}: {reason}. Correct the observer's declaration and apply it again; inspect it with `st subject {subject}`. {closes}"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_refusal_is_not_a_github_rate_limit_or_an_attention_fault() {
+        let error = anyhow::Error::new(LocalObserverBudget { retry_at_unix_ms: 123_456 });
+        let condition = ObserverCondition::of(&error, None);
+        assert_eq!(condition.code(), "local-observer-budget");
+        assert!(!condition.needs_person(u128::MAX));
+        assert!(condition.reason("observer/test", "host").contains(
+            "local observer budget reached, next slot at 123456 (Unix ms)"
+        ));
+        assert!(!condition.reason("observer/test", "host").contains("GitHub HTTP"));
     }
 }

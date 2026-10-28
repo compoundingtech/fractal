@@ -18,6 +18,7 @@ convergence-audit = []
 [dependencies]
 anyhow = "1"
 fractal-daemon = { path = "../fractal-daemon" }
+fractal-store = { path = "../fractal-store" }
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
 ciborium = "0.2"
@@ -45,14 +46,14 @@ opentelemetry = "0.30"
 opentelemetry-otlp = { version = "0.30", default-features = false, features = ["http-json", "reqwest-blocking-client", "internal-logs", "logs"] }
 opentelemetry_sdk = { version = "0.30", features = ["spec_unstable_metrics_views", "logs"] }
 opentelemetry-appender-tracing = { version = "0.30", features = ["experimental_use_tracing_span_context"] }
-pty-client = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
-pty-core = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
-pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "e237afa8587fb953cc589c35e0c9a252f7192444" }
+pty-client = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
+pty-core = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
+pty-terminal = { git = "https://github.com/compoundingtech/pty", rev = "79d526d1be4f77bb3764dc1d880492806f8a07fc" }
 resvg = "0.48"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 ring = "0.17"
 rusqlite = { version = "0.32", features = ["bundled", "trace", "functions"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
@@ -114,7 +115,7 @@ test = false
 doctest = false
 doc = false
 
-# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
 # Keep the existing executable target; fractal dispatches through installed links to it.
 [[bin]]
 name = "st3"
@@ -132,6 +133,11 @@ doc = false
 [[test]]
 name = "integration"
 path = "tests/integration.rs"
+
+[[test]]
+name = "website_cli_capture"
+path = "tests/website_cli_capture.rs"
+required-features = ["test-support"]
 
 [[test]]
 name = "perf_load"

@@ -85,7 +85,10 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
             Operation::FolderRename { id,name } => writes.push((format!("folder/{id}/name"), json!(name))),
             Operation::FolderMove { id,parent,key } => writes.push((format!("folder/{id}/position"), json!({"parent":parent,"key":key}))),
             Operation::FolderDelete { id } => writes.push((format!("folder/{id}/tombstone"), json!(true))),
-            Operation::SubjectPlace { subject,folder,key } => writes.push((format!("placement/{subject}"), json!({"folder":folder,"key":key}))),
+            Operation::SubjectPlace { subject,folder,key } => {
+                // Local admission already binds aliases; signed replay references are immutable.
+                writes.push((format!("placement/{subject}"), json!({"folder":folder,"key":key})));
+            }
             Operation::Retire {} => { transaction.execute(/* sqlite-large-value: allow-for-now lv-hcd2673f57bfc owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangements SET retired=1 WHERE subject=?1", [&claim.subject])?; }
         }
     }
@@ -168,8 +171,32 @@ pub fn arrangement_at(connection: &Connection, subject: &str, through: u64) -> R
     let Some((owner,created,retired,revision,time,index)) = row else { return Ok(None); };
     anyhow::ensure!(index <= through, "arrangement snapshot frontier is stale; read current heads in a read snapshot");
     if !created || retired { return Ok(None); }
-    let heads = heads(connection, subject)?;
-    resource(subject, &owner, &revision, time.parse()?, &heads).map(Some)
+    let mut current_heads = BTreeMap::<String, Head>::new();
+    for (key, head) in heads(connection, subject)? {
+        let key = if let Some(id) = key.strip_prefix("placement/") {
+            let identity = super::identities::resolve_reference_conn(connection, id)?;
+            let kind = if identity.starts_with("agent/") {
+                Some(super::identities::IdentityKind::Agent)
+            } else if identity.starts_with("mission/") {
+                Some(super::identities::IdentityKind::Mission)
+            } else { None };
+            let canonical = match kind {
+                Some(kind) => match super::identities::resolve_identity_conn(connection, kind, &identity) {
+                    Ok(resolved) => resolved.canonical_id,
+                    Err(error) if error.code == "identity-unknown" => identity,
+                    Err(error) => return Err(error.into()),
+                },
+                None => identity,
+            };
+            format!("placement/{canonical}")
+        } else { key };
+        // Historical spellings share one placement register; the same deterministic
+        // claim ordering used by projection selects its head without moving its key.
+        if current_heads.get(&key).is_none_or(|previous| head.2 > previous.2) {
+            current_heads.insert(key, head);
+        }
+    }
+    resource(subject, &owner, &revision, time.parse()?, &current_heads).map(Some)
 }
 
 pub fn resource(subject: &str, owner: &str, revision: &str, time: u128, heads: &BTreeMap<String, Head>) -> Result<Value> {
@@ -231,7 +258,14 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
                     _ => unreachable!("folder mutation"),
                 }
             }
-            Operation::SubjectPlace { subject,folder,key } => { heads.insert(format!("placement/{subject}"),prepared_head(json!({"folder":folder,"key":key}))); }
+            Operation::SubjectPlace { subject,folder,key } => {
+                let identity = super::identities::resolve_reference_conn(transaction, subject)?;
+                if identity != *subject {
+                    return Err(St3Error::new("invalid-arrangement-operations",
+                        "signed placement targets must use immutable identities"));
+                }
+                heads.insert(format!("placement/{identity}"),prepared_head(json!({"folder":folder,"key":key})));
+            }
             _ => {}
         }
     }

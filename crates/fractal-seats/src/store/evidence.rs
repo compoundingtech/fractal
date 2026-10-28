@@ -1,4 +1,4 @@
-//! The part of `store::evidence` that moved up from st3-store.
+//! The part of `store::evidence` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::SeatsStore;
 use super::*;
@@ -39,7 +39,7 @@ impl EvidenceSeatsStore for Store {
         let local = crate::performance::task("roster/frontier-read", || {
             roster_local_frontier(&self.readers.get(), index)
         })?;
-        let cache = self.smalltalk.agent_resources_cache.lock()
+        let cache = self.fractal.agent_resources_cache.lock()
             .expect("agent resources cache poisoned");
         let hit = cache.iter().rev()
             .find(|entry| entry.index == index && entry.local == local && entry.history == history)
@@ -107,6 +107,14 @@ impl EvidenceSeatsStore for Store {
             append_latest_observation_publication(
                 &self.graph, &input, now_ms(), Some(&publication.runtime_incarnation),
             )
+        } else if input.kind == "harness.limits" {
+            // Every seat on an account reports its limits; only a report that changes the
+            // account's answer replicates.
+            validate_claim_input(&input)?;
+            append_limits_publication(
+                &self.graph, &input, now_ms(), Some(&publication.runtime_incarnation),
+            )
+            .map(|(record, appended)| (record, appended, false))
         } else {
             append_claim_with_fences(
                 &self.graph, &input, None, Some(&publication.runtime_incarnation),

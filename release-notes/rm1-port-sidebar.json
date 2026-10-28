@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Port the accepted RM1 two-line agent sidebar into fractal-web using shared kit rows and G3 status glyphs. Keep last-observed working and idle states distinct and show only reported usage facts.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No database or wire schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rule changes." },
+  "compatibility": { "status": "none", "detail": "Presentation-only change. Existing user folder arrangements and navigation remain intact; unavailable roster fields are omitted." },
+  "downtime": { "status": "none", "detail": "None." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Nothing to recover." }
+}

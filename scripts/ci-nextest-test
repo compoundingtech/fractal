@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Test that scripts/ci-nextest leaves the daily-only groups out of every lane but the daily one."""
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+ROOT = Path(__file__).resolve().parent.parent
+
+FAKE_CARGO = """#!/usr/bin/env bash
+if [[ "$1" == metadata ]]; then echo '{"workspace_members":[],"packages":[]}'; exit 0; fi
+printf '%s\\n' "$@" > "$CALLS"
+"""
+
+
+def selection(filterset, lane=None, extra=()):
+    with tempfile.TemporaryDirectory() as temp:
+        temp = Path(temp)
+        (temp / "scripts").mkdir()
+        (temp / ".config").mkdir()
+        for script in ("ci-nextest", "ci-nextest-targets"):
+            shutil.copy(ROOT / "scripts" / script, temp / "scripts" / script)
+        (temp / ".config" / "daily-only.filterset").write_text(filterset)
+        (temp / "bin").mkdir()
+        cargo = temp / "bin" / "cargo"
+        cargo.write_text(FAKE_CARGO)
+        cargo.chmod(0o755)
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("CI_TEST_LANE", "CI_TEST_PARTITION", "CI_TEST_EXTRACTED", "CI_LOCAL_CARGO_HOME")}
+        env.update(PATH=f"{temp / 'bin'}:{env['PATH']}", CALLS=str(temp / "calls"), GITHUB_ACTIONS="true")
+        if lane:
+            env["CI_TEST_LANE"] = lane
+        subprocess.run(["bash", "scripts/ci-nextest", "list", *extra], cwd=temp, env=env, check=True)
+        calls = (temp / "calls").read_text().splitlines()
+        return calls[calls.index("-E") + 1]
+
+
+FILTERSET = """# A comment, and a blank line, are not filters.
+
+test(/^first::/)
+package(=fractal) and test(/^(a|b)::/)
+"""
+EXCLUDED = "(test(/^first::/)) or (package(=fractal) and test(/^(a|b)::/))"
+
+# Pull requests, merge groups and local runs leave every daily-only line out, joined with `or`
+# (a `|` inside a regex is kept).
+assert selection(FILTERSET) == f"(all()) and not ({EXCLUDED})", selection(FILTERSET)
+# Only the daily shards select them.
+assert selection(FILTERSET, lane="daily") == "all()"
+# Any other lane value excludes them too.
+assert selection(FILTERSET, lane="pr") == f"(all()) and not ({EXCLUDED})"
+# A caller's filterset still intersects the selection.
+assert selection(FILTERSET, extra=("-E", "test(=x)")) == f"((all()) and not ({EXCLUDED})) and ((test(=x)))"
+# A file of comments excludes nothing.
+assert selection("# nothing has moved yet\n") == "all()"
+# The checked-in file parses to at least one filter.
+assert "not (" in selection((ROOT / ".config" / "daily-only.filterset").read_text())
+print("ci-nextest daily-only selection: ok")

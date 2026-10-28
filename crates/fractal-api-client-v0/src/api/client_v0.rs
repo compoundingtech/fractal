@@ -1,4 +1,4 @@
-//! The part of `api::client_v0` that moved up from st3-api.
+//! The part of `api::client_v0` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use crate::AttentionListStore;
 use crate::AttentionStore;
@@ -42,12 +42,17 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod inventory;
 pub mod raw_terminal;
+pub mod private_notes;
+mod runtime_start_diagnostics;
 pub mod search;
+pub mod schedules;
 pub mod summary;
 #[cfg(test)]
 mod agents_window_tests;
 #[cfg(test)]
 mod push_tests;
+#[cfg(test)]
+mod pairing_order_tests;
 #[cfg(test)]
 mod collection_refresh_tests;
 #[cfg(test)]
@@ -60,7 +65,14 @@ pub mod observer_subscription_detail_tests;
 #[path = "client_v0/published_attention_tests.rs"]
 mod published_attention_tests;
 #[cfg(test)]
+#[path = "client_v0/alert_action_tests.rs"]
+mod alert_action_tests;
+#[cfg(test)]
 mod stream_start_tests;
+#[cfg(test)]
+mod conversation_delivery_tests;
+#[cfg(test)]
+mod conversation_participants_tests;
 
 /// The client-v0 routes, added to the API router as a [`RouteFamily`].
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
@@ -94,6 +106,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
         .route("/v1/client/devices", get(devices))
+        .route("/v1/client/private-notes/{*uri}", get(private_notes::detail))
         .route("/v1/client/resources", get(resources::list))
         .route(
             "/v1/client/agent-workspaces/{*id}",
@@ -124,10 +137,12 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             "/v1/client/conversations/{id}/stream",
             get(conversation_stream),
         )
+        .route("/v1/client/schedules", get(schedules::list))
         .route("/v1/client/missions", get(missions))
         .route("/v1/client/missions-tree", get(missions_tree))
         .route("/v1/client/missions/{*id}", get(mission_detail))
         .route("/v1/client/runtimes", get(runtimes))
+        .route("/v1/client/runtime-starts", get(runtime_start_diagnostics::list))
         .route("/v1/client/runtimes/{*id}", get(runtime_detail))
         .route("/v1/client/observers", get(observers))
         .route(
@@ -197,6 +212,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         )
 }
 
+/// Socket ownership ends this span only after the first data frame reaches the client.
 struct FirstFrame {
     span: tracing::Span,
     read_pending: bool,
@@ -208,6 +224,7 @@ fn subscription_first_frame(
     collection: &str,
     id: &str,
     upgrade: Option<&opentelemetry::trace::SpanContext>,
+    frame_trace: Option<&crate::otel::FrameTraceContext>,
 ) -> Option<FirstFrame> {
     let profile = (collection == "conversation")
         .then(|| crate::profile::Op::start("stream conversation/first-frame", None))
@@ -226,12 +243,14 @@ fn subscription_first_frame(
         "terminal" => "terminal",
         _ => return None,
     };
+    let remote = crate::otel::extract_frame_context(frame_trace);
     let span = tracing::info_span!(
         parent: None,
         "st.subscription.first_frame",
-        otel.kind = "internal",
+        otel.kind = if remote.is_some() { "server" } else { "internal" },
         st.collection = collection,
         st.subscription.id = id,
+        st.parent.sampled = tracing::field::Empty,
         st.projection.hit = false,
         st.projection.cold = false,
         st.projection.incremental = false,
@@ -240,7 +259,7 @@ fn subscription_first_frame(
         st.page.bytes = tracing::field::Empty,
         span.label = collection,
     );
-    span.set_parent(opentelemetry::Context::new());
+    crate::otel::set_remote_parent(&span, remote.unwrap_or_default());
     if let Some(upgrade) = upgrade.filter(|context| context.is_valid()) {
         span.add_link(upgrade.clone());
     }
@@ -1196,6 +1215,11 @@ async fn deliver_ivm_collection(
             result
         }
         Output::Silent => Refreshed::Current,
+        // Proposed opt-in resync-snapshot contract:
+        // docs/st3/client-v0/collection-resync-snapshot-proposal.md. On an IVM
+        // journal gap, the replacement authorized window and its continuation
+        // must come from one read cut and one frame. Keep this legacy branch for
+        // clients that have not opted in; this comment changes no wire behavior.
         output @ (Output::Unavailable | Output::Resync) => {
             let code = if matches!(output, Output::Resync) { "cursor-gap" } else { "internal" };
             if send_collection(socket, json!({"kind":"resync", "id":subscription.request.id,
@@ -1272,6 +1296,7 @@ struct ResolvedConversation {
     snapshot: ClientSnapshot,
     local_position: u64,
     managed: Option<super::ManagedSessionOwner>,
+    routing_owner: Option<super::ManagedSessionOwner>,
 }
 
 fn resolve_conversation(
@@ -1292,7 +1317,14 @@ fn resolve_conversation(
             .map_err(ApiError::internal)?;
         (session_id, managed)
     };
-    Ok((session_id, ResolvedConversation { snapshot, local_position, managed }))
+    let routing_owner = if crate::subagent_sessions::child_parts(&session_id).is_some() {
+        fractal_api_core::api::client_v0::routing_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).map_err(ApiError::internal)?
+    } else {
+        managed.clone()
+    };
+    Ok((session_id, ResolvedConversation { snapshot, local_position, managed, routing_owner }))
 }
 
 /// Where a conversation is read: here, or on the host that owns its session.
@@ -1339,7 +1371,7 @@ async fn open_conversation_subscription(
         crate::performance::task("conversation/admission", || {
             let target = request.conversation.as_deref().unwrap_or_default();
             let (session_id, resolved) = resolve_conversation(&state, target)?;
-            let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+            let remote = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())?;
             Ok((session_id, remote, Some(resolved)))
         })
     })
@@ -1484,7 +1516,7 @@ fn conversation_open_local_marked(
         Some(resolved) => resolved,
         None => resolve_conversation(state, session_id)?.1,
     };
-    let ResolvedConversation { snapshot, local_position, managed } = resolved;
+    let ResolvedConversation { snapshot, local_position, managed, .. } = resolved;
     #[cfg(test)]
     AFTER_CONVERSATION_SNAPSHOT.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
@@ -1497,9 +1529,9 @@ fn conversation_open_local_marked(
     BEFORE_CONVERSATION_PAGE.with(|pause| {
         if let Some(pause) = pause.borrow_mut().take() { pause(); }
     });
-    let (page, source_generation, suppressed_sequence) =
-        match conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok(), limit) {
-            Ok((page, generation, _, suppressed)) => (page, generation, suppressed),
+    let (page, source_generation, suppressed_sequence, extent) =
+        match conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok(), limit, None) {
+            Ok((page, generation, _, suppressed, extent)) => (page, generation, suppressed, extent),
             Err(error) if error.status == StatusCode::TOO_MANY_REQUESTS || error.code == "cursor-gap" => return Err(error),
             // OPEN keeps the established managed-transcript availability notice and stored
             // fallback. Successful native reads still capture page and generation together;
@@ -1509,15 +1541,16 @@ fn conversation_open_local_marked(
                 (timeline_first_page(
                     state, &snapshot, session, session_id.to_owned(),
                     &ClientListQuery { limit: Some(limit), ..Default::default() },
-                    Some(error),
-                    managed.as_ref(),
-                )?.0, 0, 0)
+                    Some(error), managed.as_ref(),
+                )?.0, 0, 0, ReplayExtent::default())
             }
         };
+    // The source's native high-water, not the window's: graph-only windows must not rewind it.
     let cursor = conversation_cursor(state, session_id, ConversationPosition {
         store_index: snapshot.store_index,
         local_position,
-        native_sequence: native_latest_sequence(&page).max(suppressed_sequence),
+        native_sequence: native_latest_sequence(&page).max(suppressed_sequence)
+            .max(extent.native_latest()),
         source_generation,
     });
     remember_cursor(&cursor, mark.transcript_seen);
@@ -1743,8 +1776,8 @@ fn frame_bytes(frame: &Value) -> usize {
     serde_json::to_vec(frame).map_or(usize::MAX, |bytes| bytes.len())
 }
 
-/// The order a conversation page was built in: native pages by their timeline key, stored
-/// pages by sequence alone. A follower places later changes with the same comparison.
+/// The order a conversation page was built in. Followers use the same chronological key for
+/// stored projections and the source's selected key for native projections.
 #[derive(Clone, Copy)]
 enum WindowOrder {
     Native(crate::external_sessions::TimelineOrder),
@@ -1784,7 +1817,7 @@ fn is_native_record(item: &Value) -> bool {
     item["id"].as_str().is_some_and(|id| id.starts_with("timeline-entry/native-"))
 }
 
-/// A native page's key for one entry: transcript records rank 0, Small Talk messages 1, as
+/// A native page's key for one entry: transcript records rank 0, Fractal messages 1, as
 /// the native page builders assign by source.
 fn native_entry_key(item: &Value) -> crate::external_sessions::TimelineKey {
     crate::external_sessions::timeline_key(item, u8::from(!is_native_record(item)))
@@ -1799,7 +1832,9 @@ fn delta_follows_window(order: WindowOrder, item: &Value, oldest: &Value) -> boo
             WindowOrder::Native(order) => native_entry_key(item)
                 .cmp_in(&native_entry_key(oldest), order)
                 .is_ge(),
-            WindowOrder::Stored => stored_timeline_position(item) >= stored_timeline_position(oldest),
+            WindowOrder::Stored => native_entry_key(item)
+                .cmp_in(&native_entry_key(oldest), crate::external_sessions::TimelineOrder::TimestampSequence)
+                .is_ge(),
         }
 }
 
@@ -2046,7 +2081,8 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         // replacements, so queued collection/conversation results cannot reuse it.
                         generation += 1;
                         first_frames.remove(&request.id);
-                        if let Some(first_frame) = subscription_first_frame(&request.collection, &request.id, upgrade.as_ref()) {
+                        // Initial telemetry must not be retained or cloned on later rereads.
+                        if let Some(first_frame) = subscription_first_frame(&request.collection, &request.id, upgrade.as_ref(), request.frame_trace.take().as_ref()) {
                             first_frames.insert(request.id.clone(), first_frame);
                         }
                         if request.collection == "conversation" {
@@ -2527,10 +2563,16 @@ pub async fn agent_declaration(
     let lookup_subject = subject.clone();
     let store = state.store.clone();
     let revision = query.revision;
-    let (declaration, revisions) = blocking_store(move || {
+    let (declaration, revisions, uris) = blocking_store(move || {
         let declaration = store.agent_declaration(&lookup_subject, revision.as_deref())?;
         let revisions = store.agent_declaration_revisions(&lookup_subject)?;
-        Ok((declaration, revisions))
+        let uris = match &declaration {
+            Some((_, tree)) => {
+                store.declared_resource_uris(&crate::graph::declared_resources(tree))?
+            }
+            None => BTreeMap::new(),
+        };
+        Ok((declaration, revisions, uris))
     })
     .await?;
     let Some((revision, mut tree)) = declaration else {
@@ -2539,7 +2581,7 @@ pub async fn agent_declaration(
     if !query.show_env_values {
         crate::graph::redact_agent_env_values(&mut tree);
     }
-    let kdl = crate::graph::render_agent_desired_kdl(&tree).map_err(ApiError::bad)?;
+    let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).map_err(ApiError::bad)?;
     let accountable = fractal_schema::accountable::from_desired(&tree)
         .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
     let mut value = json!({
@@ -2646,7 +2688,8 @@ pub async fn subject_definition(
             if !show_env_values {
                 crate::graph::redact_agent_env_values(&mut desired);
             }
-            let kdl = crate::graph::render_agent_desired_kdl(&desired)?;
+            let uris = store.declared_resource_uris(&crate::graph::declared_resources(&desired))?;
+            let kdl = crate::graph::render_agent_desired_kdl(&desired, &uris)?;
             let revision = status.desired_revision
                 .ok_or_else(|| anyhow::anyhow!("an applied definition has no desired revision"))?;
             let token = status.desired_token
@@ -2879,6 +2922,11 @@ fn mission_resources_filtered(
     for mission in definitions.keys() {
         missions.entry(mission.clone()).or_default();
     }
+    let resource_uris = store.declared_resource_uris(
+        definitions
+            .values()
+            .flat_map(|(definition, _)| &definition.resources),
+    )?;
     let page_runs = missions
         .values()
         .flatten()
@@ -3189,6 +3237,10 @@ fn mission_resources_filtered(
                 "run_generations": run_generations,
                 "visualization": visualization,
                 "usage": usage,
+                "resources": crate::api::client_declared_resources(
+                    definition.map_or(&[][..], |(definition, _)| definition.resources.as_slice()),
+                    &resource_uris,
+                ),
                 "operational": {
                     "layer": if historical { "history" } else { "current" },
                     "actionable": !historical,
@@ -3319,19 +3371,12 @@ fn observer_subscription_resources(
         } else {
             "subscription.state"
         };
-        let claim = state
-            .store
-            .claims_for_subject_kind_at(
-                &desired.subject,
-                claim_kind,
-                Some(snapshot.store_index.saturating_add(1)),
-                true,
-                1,
-            )?
-            .claims
-            .into_iter()
-            .next()
-            .map(|claim| (claim.body, claim.accepted_at_unix_ms));
+        // The canonical newest state at the cut, the one the detail read and attention choose.
+        let claim = state.store.observer_subscription_state(
+            &desired.subject,
+            claim_kind,
+            snapshot.store_index,
+        )?;
         let revision = state
             .store
             .selected_desired_revision(&desired.subject)?
@@ -3811,6 +3856,7 @@ pub async fn missions(
             has_more,
             next_cursor,
             cursor_expires_at: has_more.then(|| client_timestamp(expires_at_unix_ms)),
+            omitted_items: None,
         },
         sync: client_sync_notice(&state),
         replicated: None,
@@ -4264,6 +4310,7 @@ pub async fn operation_detail(
     )
 }
 
+
 #[derive(Default, Deserialize)]
 pub struct ConversationQuery {
     after: Option<String>,
@@ -4338,9 +4385,132 @@ fn conversation_read_now(
     })
 }
 
+/// Match the IDs minted by the stored projection, never a source's sequence namespace.
+fn stored_timeline_claim_entry_ids(session_id: &str, claim: &ClaimRecord) -> Vec<String> {
+    let suffixes: &[&str] = match claim.kind.as_str() {
+        "harness.timeline" => &["invalid-transition"],
+        "runtime.observed" => &["runtime-status"],
+        "harness.observed" => &["harness-status", "transcript-not-bound"],
+        "harness.diagnostic" => &["diagnostic"],
+        "harness.usage" => &["usage"],
+        "message.sent" => &["message", "content"],
+        _ => &[],
+    };
+    suffixes.iter().map(|suffix| timeline_claim_entry_id(session_id, claim, suffix)).collect()
+}
+
+fn native_entry_sequence(item: &Value) -> Option<u64> {
+    item["id"].as_str()
+        .filter(|id| id.starts_with("timeline-entry/native-"))
+        .and_then(|_| item["sequence"].as_u64())
+}
+
+/// What a bounded conversation window can omit, read beside it. Source sequences are not a
+/// presentation order: graph rows can fill the newest chronological window, and a backdated
+/// change can fall below it, so neither the window's native high-water nor its oldest row
+/// proves that every change since a cursor was delivered.
+#[derive(Default)]
+struct ReplayExtent {
+    /// Native sequences, newest first by sequence and without delivery echoes; `None` when
+    /// nothing was read beside the window.
+    native: Option<Vec<u64>>,
+    /// Whether `native` reaches the source's oldest native entry.
+    native_complete: bool,
+    /// The highest delivery echo among the native entries read beside the window.
+    native_suppressed: u64,
+    /// Every projected entry ID of a stored timeline; native pages have none.
+    stored_ids: Option<Vec<String>>,
+}
+
+impl ReplayExtent {
+    fn from_projection(items: &[Value]) -> Self {
+        let mut native = items.iter().filter_map(native_entry_sequence).collect::<Vec<_>>();
+        native.sort_unstable_by(|left, right| right.cmp(left));
+        Self {
+            native: Some(native),
+            native_complete: true,
+            native_suppressed: 0,
+            stored_ids: Some(items.iter()
+                .filter_map(|item| item["id"].as_str().map(str::to_owned)).collect()),
+        }
+    }
+
+    fn native_latest(&self) -> u64 {
+        self.native.as_ref().and_then(|native| native.first().copied()).unwrap_or(0)
+            .max(self.native_suppressed)
+    }
+
+    fn native_window_gap(&self, mark: u64, items: &[Value]) -> bool {
+        self.native.as_ref().is_some_and(|sequences| {
+            let unread = !self.native_complete
+                && sequences.last().is_none_or(|sequence| *sequence > mark);
+            unread || sequences.iter().filter(|sequence| **sequence > mark).count()
+                != items.iter().filter_map(native_entry_sequence).filter(|sequence| *sequence > mark).count()
+        })
+    }
+}
+
+/// The native extent beside a keyset window. A window that holds the whole source, or one
+/// already newest by sequence, is its own extent. A truncated chronological window reads the
+/// newest native entries by sequence from the same source generation, echo-suppressed like the
+/// window: one entry for the cursor's high-water, or one window more than a replay can deliver.
+#[allow(clippy::too_many_arguments)]
+fn native_replay_extent(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    session_id: &str,
+    source: &crate::external_sessions::ExternalSession,
+    page: &Value,
+    generation: u64,
+    mark: Option<u64>,
+    managed: Option<&super::ManagedSessionOwner>,
+) -> Result<ReplayExtent, ApiError> {
+    let truncated = page["page"]["has_more"].as_bool().unwrap_or(false);
+    let order = native_timeline_order(managed);
+    if !truncated || order == crate::external_sessions::TimelineOrder::Sequence {
+        let mut native = page["items"].as_array().into_iter().flatten()
+            .filter_map(native_entry_sequence).collect::<Vec<_>>();
+        native.sort_unstable_by(|left, right| right.cmp(left));
+        return Ok(ReplayExtent {
+            native: Some(native),
+            native_complete: !truncated,
+            ..Default::default()
+        });
+    }
+    let _span = crate::profile::span("conversation/native-extent");
+    let messages = native_session_messages(state, snapshot, session, session_id, managed)?;
+    let limit = if mark.is_some() { CLIENT_MAX_PAGE_ITEMS + 1 } else { 1 };
+    let (tail, suppressed) = canonical_native_slice(
+        state, snapshot, source, session, session_id, &messages,
+        crate::external_sessions::TimelineOrder::Sequence, None, limit, managed, false,
+    )?;
+    if source.driver != crate::external_sessions::ExternalDriver::OpenCode
+        && tail.generation != generation
+    {
+        return Err(conversation_replay_gap(
+            session_id, "source-generation",
+            "the transcript was rewritten in place; refresh the newest conversation page",
+        ));
+    }
+    Ok(ReplayExtent {
+        native: Some(tail.items.iter().filter_map(native_entry_sequence).collect()),
+        native_complete: !tail.has_more,
+        native_suppressed: suppressed,
+        stored_ids: None,
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    static NATIVE_EXTENT_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
 /// Read OPEN and change-replay pages through the same bounded fold, retaining the generation
-/// and suppressed-native high-water without a second native read. The flag says whether the
-/// page came from the native projection rather than the stored timeline.
+/// and suppressed-native high-water. The flag says whether the page came from the native
+/// projection rather than the stored timeline; the extent is what the bounded window can omit.
+#[allow(clippy::too_many_arguments)]
 fn conversation_first_page_at_generation(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -4349,7 +4519,8 @@ fn conversation_first_page_at_generation(
     managed: Option<&super::ManagedSessionOwner>,
     source: Option<&crate::external_sessions::ExternalSession>,
     limit: usize,
-) -> Result<(Value, u64, bool, u64), ApiError> {
+    native_mark: Option<u64>,
+) -> Result<(Value, u64, bool, u64, ReplayExtent), ApiError> {
     let query = ClientListQuery { limit: Some(limit), ..Default::default() };
     match source {
         // Replay selects only its newest bounded projection, including for OpenCode.
@@ -4359,22 +4530,76 @@ fn conversation_first_page_at_generation(
             if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
                 *rebuilds.entry(session_id.to_owned()).or_default() += 1;
             }
-            let (page, generation, suppressed_sequence) = native_slice_page_at_generation(
-                state, snapshot, session, session_id, &query, source, managed,
-            )?;
-            // OpenCode's generation moves on every append, so it cannot fence rewrites
-            // without turning each append into a full reload.
-            let fence = if source.driver == crate::external_sessions::ExternalDriver::OpenCode {
-                0
-            } else {
-                generation
-            };
-            Ok((page.0, fence, true, suppressed_sequence))
+            // Generation alone does not fence appends. Bracket the display read with
+            // sequence-head reads and retry if its append frontier moved. An append after
+            // the second read remains beyond the returned cursor and is replayable.
+            for _ in 0..3 {
+                let head = if native_timeline_order(managed)
+                    == crate::external_sessions::TimelineOrder::TimestampSequence
+                {
+                    let messages = native_session_messages(state, snapshot, session, session_id, managed)?;
+                    let (head, suppressed) = canonical_native_slice(
+                        state, snapshot, source, session, session_id, &messages,
+                        crate::external_sessions::TimelineOrder::Sequence, None, 1, managed, false,
+                    )?;
+                    Some(head.items.iter().filter_map(native_entry_sequence).max().unwrap_or(0)
+                        .max(suppressed))
+                } else {
+                    None
+                };
+                let (page, generation, suppressed_sequence) = native_slice_page_at_generation(
+                    state, snapshot, session, session_id, &query, source, managed,
+                )?;
+                #[cfg(test)]
+                NATIVE_EXTENT_READ_HOOK.with(|hook| {
+                    if let Some(hook) = hook.borrow_mut().take() { hook(); }
+                });
+                let extent = native_replay_extent(
+                    state, snapshot, session, session_id, source, &page.0, generation, native_mark, managed,
+                )?;
+                if page.0["page"]["has_more"].as_bool().unwrap_or(false)
+                    && head.is_some_and(|head| head != extent.native_latest())
+                {
+                    continue;
+                }
+                // OpenCode's generation moves on every append, so it cannot fence rewrites
+                // without turning each append into a full reload.
+                let fence = if source.driver == crate::external_sessions::ExternalDriver::OpenCode {
+                    0
+                } else {
+                    generation
+                };
+                return Ok((page.0, fence, true, suppressed_sequence, extent));
+            }
+            Err(conversation_replay_gap(
+                session_id, "source-appending",
+                "the transcript changed while reading; refresh the newest conversation page",
+            ))
         }
-        None => crate::performance::task("conversation/first-page", || {
-            Ok((timeline_first_page(state, snapshot, session, session_id.to_owned(), &query, None, managed)?.0, 0, false, 0))
-        }),
+        None => {
+            let mut projected = ReplayExtent::default();
+            let page = crate::performance::task("conversation/first-page", || {
+                timeline_first_page_with_extent(state, snapshot, session, session_id.to_owned(), &query, None, managed, Some(&mut |items| projected = ReplayExtent::from_projection(items)))
+            })?;
+            Ok((page.0, 0, false, 0, projected))
+        }
     }
+}
+
+// Replays are bounded independently of cursor age and unrelated local subjects.
+// Exceeding this budget asks the client for an authoritative newest page.
+const CONVERSATION_REPLAY_SCAN_LIMIT: usize = 10_000;
+
+fn charge_conversation_replay_scan(
+    session_id: &str,
+    remaining: &mut usize,
+    count: usize,
+) -> Result<(), ApiError> {
+    *remaining = remaining.checked_sub(count).ok_or_else(|| conversation_replay_gap(
+        session_id, "scan-limit",
+        "the conversation exceeded its replay scan limit; refresh the newest conversation page",
+    ))?;
+    Ok(())
 }
 
 fn conversation_read_now_unbounded(
@@ -4387,25 +4612,24 @@ fn conversation_read_now_unbounded(
     let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
         .map_err(ApiError::internal)?;
     let source = conversation_blocks::source(state, session_id, managed.as_ref());
-    let (page, source_generation, native_replay, suppressed_sequence) =
-        conversation_first_page_at_generation(state, &snapshot, session, session_id, managed.as_ref(), source.as_ref().ok(), CLIENT_MAX_PAGE_ITEMS)?;
-    let all = page["items"]
-        .as_array()
-        .ok_or_else(|| ApiError::internal("the timeline has no items"))?;
-    let native_sequences = all
-        .iter()
-        .filter(|item| {
-            item["id"]
-                .as_str()
-                .is_some_and(|id| id.starts_with("timeline-entry/native-"))
-        })
-        .filter_map(|item| item["sequence"].as_u64());
-    let native_latest = native_sequences.clone().max().unwrap_or(0).max(suppressed_sequence);
-    let native_oldest = native_sequences.min();
-    let local_latest = local_latest_position(state)?;
     let position = after
         .map(|cursor| conversation_position(state, session_id, cursor))
         .transpose()?;
+    let (page, source_generation, native_replay, suppressed_sequence, extent) =
+        conversation_first_page_at_generation(
+            state, &snapshot, session, session_id,
+            managed.as_ref(), source.as_ref().ok(), CLIENT_MAX_PAGE_ITEMS,
+            position.map(|position| position.native_sequence),
+        )?;
+    let all = page["items"]
+        .as_array()
+        .ok_or_else(|| ApiError::internal("the timeline has no items"))?;
+    let native_sequences = all.iter().filter_map(native_entry_sequence);
+    // Source watermarks must not go backward when graph events evict native rows from the
+    // newest display window: the extent reads the source's own high-water beside the window.
+    let native_latest = native_sequences.clone().max().unwrap_or(0).max(suppressed_sequence)
+        .max(extent.native_latest());
+    let local_latest = local_latest_position(state)?;
     if let Some(position) = position {
         if position.store_index > snapshot.store_index
             || position.local_position > local_latest
@@ -4426,35 +4650,49 @@ fn conversation_read_now_unbounded(
         }
     }
     let mut changed_indexes = BTreeSet::new();
+    // Changed graph rows are selected by the entry IDs their claims project to, never by
+    // comparing sequences: native and graph counters are separate namespaces.
+    let mut changed_ids = BTreeSet::new();
     let mut explicit_ids = BTreeSet::new();
     let mut message_indexes = BTreeSet::new();
     let mut retention_changed = false;
+    let mut scan_remaining = CONVERSATION_REPLAY_SCAN_LIMIT;
     if let Some(ConversationPosition { store_index, local_position, .. }) = position {
         let owner = super::managed_session_owner_at(&state.store, snapshot.store_index, session_id)
             .map_err(ApiError::internal)?
             .map(|managed| managed.0);
-        // Native pages contain native records and Small Talk messages, not the driver's
+        if session.conversation_delivery_links && native_replay
+            && let Some(owner) = owner.as_deref()
+            && state.store.conversation_delivery_changed(owner, store_index, snapshot.store_index)
+                .map_err(ApiError::internal)?
+        {
+            return Err(conversation_replay_gap(session_id, "delivery-link-changed",
+                "a native consumption receipt changed; refresh the conversation page"));
+        }
+        // Native pages contain native records and Fractal messages, not the driver's
         // mirrored harness.timeline entries. Requiring those IDs in a native page creates
         // a false gap on every observation, even when the native transcript is unchanged.
         if let Some(owner) = owner.as_deref().filter(|_| !native_replay) {
-            for claim in state
-                .store
-                .claims_page(Some(owner), None, store_index, None, false, 10_000)
-                .map_err(ApiError::internal)?
-                .claims
-            {
-                changed_indexes.insert(claim.store_index);
-                if claim.kind == "harness.timeline" {
-                    retention_changed |= claim.body.pointer("/fields/entry_type")
-                        .and_then(Value::as_str) == Some("truncation");
-                    if let Some(id) = claim
-                        .body
-                        .pointer("/fields/entry_id")
-                        .and_then(Value::as_str)
-                    {
-                        explicit_ids.insert(id.to_owned());
+            let mut after = store_index;
+            loop {
+                let page = state.store.claims_page(
+                    Some(owner), None, after, snapshot.store_index.checked_add(1), false,
+                    scan_remaining + 1,
+                ).map_err(ApiError::internal)?;
+                charge_conversation_replay_scan(session_id, &mut scan_remaining, page.claims.len())?;
+                for claim in page.claims {
+                    after = after.max(claim.store_index);
+                    changed_indexes.insert(claim.store_index);
+                    changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
+                    if claim.kind == "harness.timeline" {
+                        retention_changed |= claim.body.pointer("/fields/entry_type")
+                            .and_then(Value::as_str) == Some("truncation");
+                        if let Some(id) = claim.body.pointer("/fields/entry_id").and_then(Value::as_str) {
+                            explicit_ids.insert(id.to_owned());
+                        }
                     }
                 }
+                if page.next_cursor.is_none() { break; }
             }
         }
         for claim in owner.as_deref().map(|owner| {
@@ -4465,27 +4703,45 @@ fn conversation_read_now_unbounded(
                 .is_none_or(|message_session| message_session == session_id) {
                 changed_indexes.insert(claim.store_index);
                 message_indexes.insert(claim.store_index);
+                // A stored timeline names a message by its claim; a native page by its digest.
+                changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
+                let digest = hex::encode(Sha256::digest(claim.id.as_bytes()));
+                for suffix in ["message", "content"] {
+                    changed_ids.insert(format!(
+                        "timeline-entry/{}/{}-{suffix}",
+                        session_id.trim_start_matches("session/"), &digest[..16],
+                    ));
+                }
             }
         }
         if !native_replay {
-            for claim in state
-                .store
-                .local_observations_after(local_position, 10_000)
-                .map_err(ApiError::internal)?
-            {
-                if claim.subject == owner.as_deref().unwrap_or_default()
-                    && claim.kind == "harness.timeline"
-                {
-                    retention_changed |= claim.body.pointer("/fields/entry_type")
-                        .and_then(Value::as_str) == Some("truncation");
-                    if let Some(id) = claim
-                        .body
-                        .pointer("/fields/entry_id")
-                        .and_then(Value::as_str)
+            let mut after = local_position;
+            loop {
+                let limit = scan_remaining + 1;
+                let claims = state.store.local_observations_after(after, limit)
+                    .map_err(ApiError::internal)?;
+                charge_conversation_replay_scan(session_id, &mut scan_remaining, claims.len())?;
+                let exhausted = claims.len() < limit;
+                for claim in claims {
+                    let position = crate::store::local_observation_position(&claim)
+                        .ok_or_else(|| ApiError::internal("a local observation has no position"))?;
+                    after = after.max(position);
+                    if position > local_latest { break; }
+                    if claim.subject == owner.as_deref().unwrap_or_default() {
+                        changed_indexes.insert(claim.store_index);
+                        changed_ids.extend(stored_timeline_claim_entry_ids(session_id, &claim));
+                    }
+                    if claim.subject == owner.as_deref().unwrap_or_default()
+                        && claim.kind == "harness.timeline"
                     {
-                        explicit_ids.insert(id.to_owned());
+                        retention_changed |= claim.body.pointer("/fields/entry_type")
+                            .and_then(Value::as_str) == Some("truncation");
+                        if let Some(id) = claim.body.pointer("/fields/entry_id").and_then(Value::as_str) {
+                            explicit_ids.insert(id.to_owned());
+                        }
                     }
                 }
+                if exhausted || after >= local_latest { break; }
             }
         }
     }
@@ -4497,7 +4753,8 @@ fn conversation_read_now_unbounded(
             "transcript retention changed; refresh the newest conversation page",
         ));
     }
-    let mut items = all
+    // The window is already in presentation order; the delta keeps it.
+    let items = all
         .iter()
         .filter(|item| {
             let Some(ConversationPosition { native_sequence, .. }) = position else {
@@ -4517,19 +4774,11 @@ fn conversation_read_now_unbounded(
             ) {
                 return !explicit_ids.is_empty() || !changed_indexes.is_empty();
             }
-            explicit_ids.contains(id)
-                || item["sequence"]
-                    .as_u64()
-                    .is_some_and(|sequence| changed_indexes.contains(&(sequence / 4)))
+            explicit_ids.contains(id) || changed_ids.contains(id)
         })
         .cloned()
         .collect::<Vec<_>>();
-    items.sort_by(|a, b| {
-        a["timestamp"]
-            .as_str()
-            .cmp(&b["timestamp"].as_str())
-            .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
-    });
+    let changed = |item: &&Value| item["id"].as_str().is_some_and(|id| changed_ids.contains(id));
     let missing_message_pair = message_indexes.iter().any(|index| {
         ![
             index.saturating_mul(4),
@@ -4539,19 +4788,27 @@ fn conversation_read_now_unbounded(
         .all(|sequence| {
             items
                 .iter()
-                .any(|item| item["sequence"].as_u64() == Some(*sequence))
+                .any(|item| item["sequence"].as_u64() == Some(*sequence) && changed(&item))
         })
     });
     let missing_explicit_id = explicit_ids.iter()
         .any(|id| !items.iter().any(|item| item["id"].as_str() == Some(id)));
-    let native_window_gap = all.len() == 200
-        && position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
-            native_oldest.is_some_and(|first| first > native)
-        });
-    if missing_message_pair || missing_explicit_id || native_window_gap {
+    // Every native entry after the cursor must be in the delta: neither the high-water mark nor
+    // the window's oldest row proves it when the window is chronological.
+    let native_window_gap = position.is_some_and(|ConversationPosition { native_sequence: native, .. }| {
+        extent.native_window_gap(native, &items)
+    });
+    // A changed graph row the bounded window omits (for example a backdated observation) must
+    // resynchronize, not be skipped as the cursor advances past it.
+    let graph_window_gap = position.is_some() && extent.stored_ids.as_ref().is_some_and(|ids| {
+        ids.iter().filter(|id| changed_ids.contains(*id)).count()
+            != items.iter().filter(changed).count()
+    });
+    if missing_message_pair || missing_explicit_id || native_window_gap || graph_window_gap {
         let reason = if missing_message_pair { "message-pair" }
             else if missing_explicit_id { "explicit-id" }
-            else { "native-window" };
+            else if native_window_gap { "native-window" }
+            else { "graph-window" };
         return Err(conversation_replay_gap(
             session_id, reason, "the conversation exceeded its bounded replay window",
         ));
@@ -4570,7 +4827,7 @@ fn conversation_read_now_unbounded(
 }
 
 /// What a conversation read last saw, so a wake-up can tell cheaply whether anything that
-/// concerns the conversation changed: a claim about its agent, Small Talk to or from it, a local
+/// concerns the conversation changed: a claim about its agent, Fractal to or from it, a local
 /// timeline entry, or its native transcript file.
 #[derive(Clone)]
 struct ConversationMark {
@@ -4821,7 +5078,7 @@ pub async fn conversation_changes(
             let session_id = conversation_session_id(&state, &id)?;
             let snapshot = new_client_snapshot(&state);
             let owner =
-                super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+                fractal_api_core::api::client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
                     .map_err(ApiError::internal)?;
             Ok((session_id, owner))
         },
@@ -4877,7 +5134,7 @@ pub async fn conversation_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
-    let first_frame = subscription_first_frame("conversation", "conversation", upgrade.as_ref());
+    let first_frame = subscription_first_frame("conversation", "conversation", upgrade.as_ref(), None);
     require_scope(&session, "read.projections")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -4892,7 +5149,7 @@ pub async fn conversation_stream(
         .to_owned();
     let session_id = conversation_session_id(&state, &id)?;
     let snapshot = new_client_snapshot(&state);
-    let remote = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
+    let remote = fractal_api_core::api::client_v0::routing_session_owner_at(&state.store, snapshot.store_index, &session_id)
         .map_err(ApiError::internal)?
         .and_then(|(_, _, origin)| origin)
         .filter(|origin| origin != state.store.origin())
@@ -5018,6 +5275,10 @@ pub struct PairingBegin {
     full_control: Option<bool>,
     /// Narrows the default device grant; every entry must be a limited pairing scope.
     scopes: Option<Vec<String>>,
+    /// Let this one pairing grant the device the client gateway over Fabric. Off unless the
+    /// person asks (`st devices pair --fabric-gateway`).
+    #[serde(default)]
+    fabric_gateway: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -5068,6 +5329,7 @@ pub async fn pairing_begin(
     let subject = format!("custom/client/pairing-{}", &stable[..24]);
     let expires_at = client_now_ms() + 300_000;
     let person_id = request.person_id;
+    let fabric_gateway = request.fabric_gateway == Some(true);
     let scopes: Vec<&str> = match (request.full_control.unwrap_or(false), request.scopes) {
         (true, Some(_)) => {
             return Err(validation(
@@ -5097,20 +5359,24 @@ pub async fn pairing_begin(
                 .collect()
         }
     };
+    let mut begun_fields = BTreeMap::from([
+        ("pairing_id".into(), Value::String(pairing_id.clone())),
+        ("device_name".into(), Value::String(request.device_name)),
+        ("person_id".into(), Value::String(person_id.clone())),
+        ("scopes".into(), json!(scopes)),
+        ("code_hash".into(), Value::String(credential_digest(&code))),
+        ("expires_at_unix_ms".into(), json!(expires_at)),
+    ]);
+    if fabric_gateway {
+        begun_fields.insert("fabric_gateway".into(), Value::Bool(true));
+    }
     state
         .store
         .append_claim(&ClaimInput {
             subject,
             kind: "custom.client.pairing-begun".into(),
             actor: Some(person_id.clone()),
-            fields: BTreeMap::from([
-                ("pairing_id".into(), Value::String(pairing_id.clone())),
-                ("device_name".into(), Value::String(request.device_name)),
-                ("person_id".into(), Value::String(person_id)),
-                ("scopes".into(), json!(scopes)),
-                ("code_hash".into(), Value::String(credential_digest(&code))),
-                ("expires_at_unix_ms".into(), json!(expires_at)),
-            ]),
+            fields: begun_fields,
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
@@ -5138,6 +5404,10 @@ pub struct PairingComplete {
     /// Where the device keeps its signing key: `secure-enclave` or `software`.
     #[serde(default)]
     key_storage: Option<String>,
+    /// The device's Fabric NodeID. When this member exposes its client gateway over Fabric,
+    /// pairing grants that NodeID the gateway, inbound-only, and revoking the pairing removes it.
+    #[serde(default)]
+    fabric_node_id: Option<String>,
 }
 
 /// Proof bytes and their authorization model come from one pinned snapshot. The model
@@ -5228,6 +5498,40 @@ impl Drop for PreparedDeviceGrant<'_> {
     }
 }
 
+/// Whether a pairing other than `device`'s, issued here, unrevoked and unexpired, carries `node`.
+fn fabric_node_still_paired(
+    state: &AppState,
+    completed: &[ClaimRecord],
+    device: &str,
+    node: &str,
+) -> Result<bool, ApiError> {
+    let revoked = state
+        .store
+        .claims_for_kind_at("custom.client.pairing-revoked", None, true, 10_000)
+        .map_err(ApiError::internal)?
+        .claims
+        .into_iter()
+        .filter_map(|claim| {
+            claim
+                .body
+                .pointer("/fields/device_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<BTreeSet<_>>();
+    let now = client_now_ms();
+    Ok(completed.iter().any(|claim| {
+        let field = |name: &str| claim.body.pointer(&format!("/fields/{name}"));
+        let other = field("device_id").and_then(Value::as_str);
+        claim.origin == state.node
+            && field("fabric_node_id").and_then(Value::as_str) == Some(node)
+            && other.is_some_and(|other| other != device && !revoked.contains(other))
+            && field("expires_at_unix_ms")
+                .and_then(Value::as_u64)
+                .is_some_and(|expires| u128::from(expires) > now)
+    }))
+}
+
 // Proof preparation must not let simultaneous completions enroll a second key after another
 // request has consumed the same code. All checks and store writes follow this serialization.
 static PAIRING_COMPLETIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -5245,6 +5549,13 @@ pub async fn pairing_complete(
     }
     if let Some(completed) = assistant::complete(&state, &id, &request, session.transport).await? {
         return Ok(completed);
+    }
+    if let Some(node) = &request.fabric_node_id
+        && !crate::fabric_gateway::valid_node_id(node)
+    {
+        return Err(validation(
+            "the pairing completion's Fabric NodeID must be 64 lowercase hex characters",
+        ));
     }
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
@@ -5285,6 +5596,12 @@ pub async fn pairing_complete(
             "the pairing code is invalid, expired, or already used",
         ));
     }
+    // A Fabric grant needs the person's yes for this pairing, given when the code was made.
+    let fabric_wanted = begun
+        .body
+        .pointer("/fields/fabric_gateway")
+        .and_then(Value::as_bool)
+        == Some(true);
     let device_public_key = request.device_public_key.clone();
     let mut secret = [0_u8; 32];
     getrandom::fill(&mut secret).map_err(ApiError::internal)?;
@@ -5372,11 +5689,7 @@ pub async fn pairing_complete(
     } else {
         None
     };
-    let completed = state.store.append_claim(&ClaimInput {
-        subject: begun.subject.clone(),
-        kind: "custom.client.pairing-completed".into(),
-        actor: Some(person_id.clone()),
-        fields: BTreeMap::from([
+    let mut fields = BTreeMap::from([
             ("pairing_id".into(), Value::String(pairing_id)),
             ("device_id".into(), Value::String(device_id.clone())),
             ("session_actor".into(), Value::String(session_actor.clone())),
@@ -5393,7 +5706,15 @@ pub async fn pairing_complete(
             ("scopes".into(), json!(scopes)),
             ("delegated_scopes".into(), json!(scopes)),
             ("expires_at_unix_ms".into(), json!(expires_at)),
-        ]),
+    ]);
+    if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
+        fields.insert("fabric_node_id".into(), Value::String(node.clone()));
+    }
+    let completed = state.store.append_claim(&ClaimInput {
+        subject: begun.subject.clone(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some(person_id.clone()),
+        fields,
         evidence: vec![begun.id.clone()],
         expected_subject: Some(Some(begun.id.clone())),
         idempotency_key: None,
@@ -5417,6 +5738,19 @@ pub async fn pairing_complete(
     }
     if let Some(proof) = root_proof {
         session["person_root_key_proof"] = proof;
+    }
+    // The pairing stands whatever Fabric says: the device can still use another route, and
+    // the session reports what happened so the device can say it.
+    if let Some(node) = &request.fabric_node_id {
+        let grant = if fabric_wanted {
+            crate::fabric_gateway::grant(&state.state_dir, node).await
+        } else {
+            crate::fabric_gateway::Grant::NotRequested
+        };
+        if let crate::fabric_gateway::Grant::Failed { detail } = &grant {
+            tracing::warn!(%device_id, %detail, "could not grant a paired device the client gateway over Fabric");
+        }
+        session["fabric_grant"] = grant.to_json();
     }
     Ok(Json(session))
 }
@@ -5698,7 +6032,7 @@ pub async fn terminal_stream(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
-    let first_frame = subscription_first_frame("terminal", "terminal", upgrade.as_ref());
+    let first_frame = subscription_first_frame("terminal", "terminal", upgrade.as_ref(), None);
     require_scope(&session, "terminal.read")?;
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)
@@ -7192,6 +7526,15 @@ async fn publish_creation(
             )));
         }
     }
+    if kind == "agent" && session.authority_actor.starts_with("agent/")
+        && state.store.latest_actual_value(&session.authority_actor).map_err(ApiError::internal)?.is_some()
+    {
+        let desired = intent.subjects.values().find(|member| member.subject == subject).unwrap();
+        let harness = desired.member.as_ref().and_then(|member| member.driver.as_deref())
+            .ok_or_else(|| validation("helper creation requires a typed harness"))?;
+        state.store.bind_helper_launcher_from_peer(desired, &key, &session.authority_actor, harness, session.peer_process.as_ref())
+            .map_err(|error| validation(error.to_string()))?;
+    }
     let mut scoped = request.clone();
     scoped.idempotency_key = format!("client-create:{key}");
     apply_runtime_control_intent(state, snapshot, &scoped, &session.authority_actor, kdl).await?;
@@ -7395,13 +7738,21 @@ async fn dispatch_action(
         ))),
         // A person's answer to a native harness prompt, which the prompt's hook delivers.
         "prompt.respond" => {
+            let delegation = p
+                .get("delegation")
+                .map(|value| {
+                    serde_json::from_value::<crate::model::DelegationProof>(value.clone())
+                        .map_err(|_| validation("invalid delegation proof"))
+                })
+                .transpose()?;
             let answered = state
                 .store
-                .answer_native_prompt(
+                .respond_native_prompt(
                     &parameter_string(p, "target_id")?,
                     &parameter_string(p, "episode")?,
                     &parameter_string(p, "answer")?,
                     authority_actor,
+                    delegation.as_ref(),
                 )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
@@ -7995,7 +8346,7 @@ async fn dispatch_action(
                 .ok_or_else(|| validation("agent.retire needs fence.runtime_desired_revision"))?;
             state
                 .store
-                .retire_agent(
+                .retire_agent_with_successor(
                     &agent,
                     authority_actor,
                     &parameters.reason,
@@ -8003,6 +8354,7 @@ async fn dispatch_action(
                     request.fence.runtime_incarnation.as_deref(),
                     &request.idempotency_key,
                     &state.configured_peers,
+                    parameters.successor.as_deref(),
                 )
                 .map_err(ApiError::bad)?;
             signal_changed(state);
@@ -8079,8 +8431,12 @@ async fn dispatch_action(
                     serde_json::to_string(&agent).map_err(ApiError::internal)?
                 )
             } else {
-                let mut node =
-                    crate::graph::render_desired_node(&declared.desired).map_err(ApiError::bad)?;
+                let uris = state
+                    .store
+                    .declared_resource_uris(&crate::graph::declared_resources(&declared.desired))
+                    .map_err(ApiError::internal)?;
+                let mut node = crate::graph::render_agent_node(&declared.desired, &uris)
+                    .map_err(ApiError::bad)?;
                 let identity = agent.trim_start_matches("agent/");
                 let mut body = node.children_mut().take().unwrap_or_default();
                 if let Some(child) = body
@@ -8363,6 +8719,15 @@ async fn dispatch_action(
                     .revoke_device_key(person, key, &format!("pairing of {device} revoked"))
                     .map_err(ApiError::bad)?;
             }
+            // Its Fabric grant goes too, unless another live pairing of the same NodeID on this
+            // member still needs it. A grant left behind reaches only the paired-only gateway,
+            // which no longer accepts this device's credential.
+            if let Some(node) = field("fabric_node_id")
+                && !fabric_node_still_paired(state, &claims.claims, &device, node)?
+                && let Err(error) = crate::fabric_gateway::revoke(&state.state_dir, node).await
+            {
+                tracing::warn!(%device, error = %format!("{error:#}"), "could not remove a revoked device's Fabric grant");
+            }
             signal_changed(state);
             Ok(vec![device])
         }
@@ -8407,6 +8772,13 @@ fn action_request_digest(request: &ActionRequest) -> Result<String, ApiError> {
         .as_object_mut()
         .expect("an action is an object")
         .remove("fence");
+    if request.action_type == "private-notes.write" {
+        // The shared receipt reserves the cross-action key, not the private
+        // mutation. Content matching and recovery stay in the owner-local ledger.
+        if let Some(parameters) = content["parameters"].as_object_mut() {
+            parameters.remove("markdown");
+        }
+    }
     Ok(hex::encode(Sha256::digest(
         serde_json::to_vec(&content).map_err(ApiError::internal)?,
     )))
@@ -8562,7 +8934,7 @@ async fn action_inner(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
-    Json(request): Json<ActionRequest>,
+    Json(mut request): Json<ActionRequest>,
     reserved_gate: Option<tokio::sync::OwnedMutexGuard<()>>,
 ) -> Result<Json<Value>, ApiError> {
     // The message-send wrapper validates before reserving its gate and capacity.
@@ -8575,16 +8947,35 @@ async fn action_inner(
         Some(guard) => guard,
         None => gate.lock_owned().await,
     };
+    if request.action_type == "agent.create" && session.authority_actor.starts_with("agent/")
+        && state.store.latest_actual_value(&session.authority_actor).map_err(ApiError::internal)?.is_some()
+    {
+        state.store.verify_helper_launcher_peer(&session.authority_actor, session.peer_process.as_ref())
+            .map_err(|error| validation(error.to_string()))?;
+    }
     let request_digest = action_request_digest(&request)?;
     let receipt_digest = hex::encode(Sha256::digest(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
     ));
     let receipt_subject = format!("custom/client/action-{}", &receipt_digest[..32]);
+    // The old open custom namespace admitted client receipts with absent/null actors.
+    // Never dispatch an already-used legacy key or infer authorship from those fields.
+    if !state.store.claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .map_err(ApiError::internal)?.is_empty()
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "legacy-action-receipt-untrusted".into(),
+            message: "this idempotency key has an unverifiable legacy receipt; inspect the original outcome before choosing a new key".into(),
+            details: Box::default(),
+        });
+    }
     if let Some(receipt) = state
         .store
-        .claims_for(&receipt_subject, Some("custom.client.action-result"))
+        .observations_for(&receipt_subject, "client.action-result")
         .map_err(ApiError::internal)?
-        .last()
+        .into_iter()
+        .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
     {
         let old_digest = receipt
             .body
@@ -8597,6 +8988,12 @@ async fn action_inner(
                 message: "the idempotency key was already used for a different action".into(),
                 details: Box::default(),
             });
+        }
+        if request.action_type == "private-notes.write" {
+            // Never replay a private fence from the graph or bypass current
+            // ownership checks and owner-local exact-request recovery.
+            validate_fence(&state, &request.fence)?;
+            return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
         }
         let mut result = receipt
             .body
@@ -8794,6 +9191,9 @@ async fn action_inner(
     } else {
         None
     };
+    if request.action_type == "private-notes.write" {
+        return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
+    }
     let affected = if let Some(attachment) = &terminal_attachment {
         vec![
             attachment["attachment_id"]
@@ -8814,6 +9214,12 @@ async fn action_inner(
     if let Some(claim) = arrangement_claim {
         result["arrangement_revision"] = json!(claim.id);
     }
+    if request.action_type == "agent.create"
+        && let Some(subject) = affected.first()
+        && let Some(binding) = state.store.helper_launcher_binding(subject).map_err(ApiError::internal)?
+    {
+        result["launcher_binding"] = binding.attribution();
+    }
     let mut persisted_result = result.clone();
     persisted_result
         .as_object_mut()
@@ -8821,8 +9227,8 @@ async fn action_inner(
         .remove("terminal_attachment");
     let receipt_write = state.store.append_claim(&ClaimInput {
         subject: receipt_subject.clone(),
-        kind: "custom.client.action-result".into(),
-        actor: Some(session_claim_actor(&session)),
+        kind: "client.action-result".into(),
+        actor: None,
         fields: BTreeMap::from([
             (
                 "authority_actor".into(),
@@ -8844,10 +9250,10 @@ async fn action_inner(
         }
         let receipt = state
             .store
-            .claims_for(&receipt_subject, Some("custom.client.action-result"))
+            .observations_for(&receipt_subject, "client.action-result")
             .map_err(ApiError::internal)?
             .into_iter()
-            .last()
+            .rfind(|receipt| receipt.origin == state.store.origin() && receipt.actor.is_none())
             .ok_or_else(|| ApiError::internal("action receipt CAS lost without a winner"))?;
         if receipt
             .body
@@ -11675,7 +12081,7 @@ mission "differential" state="ready" {
                                             .block_on(held.wait_for(|released| *released));
                                         let target = request.conversation.as_deref().unwrap_or_default();
                                         let (session_id, resolved) = resolve_conversation(&state, target)?;
-                                        let remote = conversation_owner_host(&state, &session, resolved.managed.as_ref())?;
+                                        let remote = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())?;
                                         Ok((session_id, remote, Some(resolved)))
                                     }).await.unwrap()
                                 }
@@ -12325,7 +12731,7 @@ mission "differential" state="ready" {
                 "children": [{ "name": "child", "arguments": [null] }],
             }],
         });
-        let rendered = crate::graph::render_agent_desired_kdl(&desired).unwrap();
+        let rendered = crate::graph::render_agent_desired_kdl(&desired, &BTreeMap::new()).unwrap();
         let document = rendered.parse::<kdl::KdlDocument>().unwrap();
         assert_eq!(document.nodes()[0].name().value(), "version");
         assert_eq!(document.nodes()[1].name().value(), "agent");
@@ -12562,7 +12968,7 @@ mission "differential" state="ready" {
             .claims_for(&sent.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        let body = session_message_body(&state, &claim);
+        let body = session_message_body(&state, &claim, false);
         assert_eq!(
             body["attachments"],
             json!([{
@@ -12595,10 +13001,10 @@ mission "differential" state="ready" {
             .claims_for(&plain.subject, Some("message.sent"))
             .unwrap()
             .remove(0);
-        assert!(session_message_body(&state, &claim).get("attachments").is_none());
+        assert!(session_message_body(&state, &claim, false).get("attachments").is_none());
         // What a person wrote carries its provenance (here no signature: the fixture seals
         // nothing); what an agent wrote carries none.
-        let provenance = session_message_body(&state, &claim)["provenance"].clone();
+        let provenance = session_message_body(&state, &claim, false)["provenance"].clone();
         assert_eq!(provenance["verdict"], "unsigned", "{provenance}");
         assert!(provenance.get("signer").is_none());
         let agent_claim = state
@@ -12608,7 +13014,7 @@ mission "differential" state="ready" {
             .remove(0);
         let mut agent_claim = agent_claim;
         agent_claim.body["fields"]["from"] = json!("agent/terminal-test.seat");
-        assert!(session_message_body(&state, &agent_claim).get("provenance").is_none());
+        assert!(session_message_body(&state, &agent_claim, false).get("provenance").is_none());
     }
 
     #[test]
@@ -12813,21 +13219,19 @@ mission "differential" state="ready" {
     }
 
     pub fn test_state_named(root: &Path, node: &str) -> AppState {
-        AppState {
-            owning_person: Some("person/operator".into()),
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.to_path_buf(),
-            pty_root: root.join("pty"),
-            pty_binary: root.join("unused-pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: crate::model::PlannerSpec::default(),
-        }
+        AppState { owning_person: Some("person/operator".into()),
+        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: crate::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     #[tokio::test]
@@ -13079,6 +13483,167 @@ subscription "watch/source" {
         assert_eq!(gate("watch"), "watch");
         assert_eq!(gate("flag"), "predicate");
         assert_eq!(gate("command"), "command");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn helper_creation_uses_authenticated_launcher_and_persists_binding_in_receipt() {
+        fn pidfd(pid: u32) -> std::os::fd::OwnedFd {
+            use std::os::fd::FromRawFd as _;
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+            // A successful pidfd_open transfers a fresh descriptor to this fixture.
+            unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as libc::c_int) }
+        }
+
+        for owner in [Some("person/ada"), None] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state_named(root.path(), "helper-binding");
+            let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\" {}; }";
+            let intent = crate::graph::parse_intent(source, "helper-binding").unwrap();
+            let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+            state.store.apply_as(&intent, &expected, "declare-launcher", owner).unwrap();
+            let launcher = "agent/helper-binding.launcher";
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":"launcher-1"})),
+                ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":"launcher-1",
+                    "harness":"codex", "credential_home":"/logins/launcher-codex",
+                    "runtime_pid":std::process::id(),
+                    "runtime_pid_start_token":fractal_runtime::process_start_token(std::process::id()).unwrap().to_string()})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject: launcher.into(), kind: kind.into(), actor: None,
+                    fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+                    expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            let mut session = ClientSession::local(Some(launcher)).unwrap();
+            session.peer_process = Some(fractal_runtime::PeerProcessIdentity::capture(std::process::id(), pidfd(std::process::id())).unwrap());
+            let snapshot = new_client_snapshot(&state);
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "create-helper-launcher-binding".into(),
+                fence: Fence { snapshot_id: snapshot.id.clone(), ..Default::default() },
+                parameters: json!({"name":"helper", "harness":"codex", "workspace":"/tmp"}),
+            };
+            let mut unproven = session.clone();
+            unproven.peer_process = None;
+            let refused = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(unproven), Json(request.clone())).await.unwrap_err();
+            assert!(refused.message.contains("kernel-authenticated"));
+            for field in ["launcher", "person", "credential_home", "launcher_binding"] {
+                let mut forged = request.clone();
+                forged.parameters[field] = json!("person/intruder");
+                let before = state.store.index().unwrap();
+                assert!(dispatch_action(&state, &snapshot, &session, &forged).await.is_err());
+                assert_eq!(state.store.index().unwrap(), before);
+            }
+            let result = action(State(state.clone()), Extension(snapshot), Extension(session.clone()), Json(request.clone()))
+                .await.unwrap().0;
+            let subject = result["affected_ids"][0].as_str().unwrap();
+            let binding = state.store.helper_launcher_binding(subject).unwrap().unwrap();
+            assert_eq!(binding.launcher, launcher);
+            assert_eq!(binding.person.as_deref(), owner);
+            assert_eq!(binding.credential_home.as_deref(), Some("/logins/launcher-codex"));
+            assert_eq!(binding.incarnation, "launcher-1");
+            assert_eq!(state.store.agent_person(subject).unwrap().as_deref(), owner);
+            assert_eq!(result["launcher_binding"], binding.attribution());
+            assert_eq!(result["launcher_binding"]["credential_home_label"], "launcher-codex");
+            assert!(!result.to_string().contains("/logins/"));
+            let receipts = state.store.local_observations_after(0, 100).unwrap();
+            let persisted = receipts.iter().find(|receipt| receipt.kind == "client.action-result").unwrap();
+            assert_eq!(persisted.body["fields"]["result"]["launcher_binding"], binding.attribution());
+            assert!(!persisted.body.to_string().contains("/logins/"));
+            let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)), Extension(session), Json(request))
+                .await.unwrap().0;
+            assert_eq!(replay["launcher_binding"], result["launcher_binding"]);
+            assert!(!replay.to_string().contains("/logins/"));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn helper_launcher_socket_child() {
+        use std::io::{Read as _, Write as _};
+        let Ok(socket) = std::env::var("ST3_HELPER_TEST_SOCKET") else { return };
+        let payload = std::env::var("ST3_HELPER_TEST_REQUEST").unwrap();
+        let actor = std::env::var("ST_AGENT").unwrap();
+        let expected = std::env::var("ST3_HELPER_TEST_EXPECTED").unwrap();
+        let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(15))).unwrap();
+        write!(stream, "POST /v1/client/actions HTTP/1.1\r\nHost: localhost\r\nx-st3-person: {actor}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        if expected == "refused" {
+            assert!(response.starts_with("HTTP/1.1 422"), "{response}");
+            assert!(response.contains("not a descendant"), "{response}");
+        } else {
+            assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+            assert!(response.contains("\"launcher\":\"agent/helper-socket.launcher\""), "{response}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn helper_launcher_socket_provenance_refuses_forged_environment_and_accepts_descendant() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "helper-socket");
+        let source = "version 2\nagent \"launcher\" { workspace \"/tmp\"; harness \"codex\" {} }\nagent \"victim\" { workspace \"/tmp\"; harness \"codex\" {} }";
+        let intent = crate::graph::parse_intent(source, "helper-socket").unwrap();
+        let expected = intent.subjects.keys().map(|subject| (subject.clone(), Vec::new())).collect();
+        state.store.apply_as(&intent, &expected, "declare-socket-launchers", Some("person/ada")).unwrap();
+        let mut victim = tokio::process::Command::new("sleep").arg("60").kill_on_drop(true).spawn().unwrap();
+        for (name, pid) in [("launcher", std::process::id()), ("victim", victim.id().unwrap())] {
+            let subject = format!("agent/helper-socket.{name}");
+            for (kind, fields) in [
+                ("runtime.observed", json!({"status":"running", "incarnation_id":name})),
+                ("runtime.action.succeeded", json!({"action":"start", "incarnation_id":name,
+                    "harness":"codex", "credential_home":format!("/logins/{name}"),
+                    "runtime_pid":pid, "runtime_pid_start_token":fractal_runtime::process_start_token(pid).unwrap().to_string()})),
+            ] {
+                state.store.append_claim(&ClaimInput {
+                    subject: subject.clone(), kind: kind.into(), actor: None,
+                    fields: serde_json::from_value(fields).unwrap(), evidence: vec![],
+                    expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+        }
+        let socket = root.path().join("api.sock");
+        let serving_socket = socket.clone();
+        let state_socket = root.path().join("state.sock");
+        let app = crate::api::router(state.clone());
+        let store = state.store.clone();
+        let (ready, listening) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            crate::api::serve_unix_bound_with_ready(&serving_socket, &state_socket, app, store,
+                || { let _ = ready.send(()); }).await.unwrap();
+        });
+        listening.await.unwrap();
+        for (name, outcome) in [("victim", "refused"), ("launcher", "accepted")] {
+            let actor = format!("agent/helper-socket.{name}");
+            let request = json!({
+                "api_version":CLIENT_API_VERSION, "id":format!("action/socket-{name}"),
+                "type":"agent.create", "idempotency_key":format!("helper-socket-provenance-{name}"),
+                "fence":{"snapshot_id":new_client_snapshot(&state).id},
+                "parameters":{"name":format!("{name}-helper"), "harness":"codex", "workspace":root.path()}
+            });
+            let output = tokio::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "api::client_v0::tests::helper_launcher_socket_child", "--nocapture"])
+                .env("ST3_HELPER_TEST_SOCKET", &socket)
+                .env("ST3_HELPER_TEST_REQUEST", request.to_string())
+                .env("ST3_HELPER_TEST_EXPECTED", outcome)
+                .env("ST_AGENT", actor)
+                .env_remove("FRACTAL_AGENT")
+                .output().await.unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "child test did not execute");
+        }
+        assert!(state.store.desired_subjects_named(&["agent/helper-socket.victim-helper".into()]).unwrap().is_empty());
+        assert_eq!(state.store.helper_launcher_binding("agent/helper-socket.launcher-helper").unwrap().unwrap().launcher,
+            "agent/helper-socket.launcher");
+        victim.kill().await.unwrap();
+        victim.wait().await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]
@@ -14653,17 +15218,12 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert_eq!(replay["affected_ids"], first["affected_ids"]);
-        for kind in ["message.sent", "custom.client.action-result"] {
-            assert_eq!(
-                state
-                    .store
-                    .claims_for_kind_at(kind, None, true, 100)
-                    .unwrap()
-                    .claims
-                    .len(),
-                1
-            );
-        }
+        assert_eq!(
+            state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
+            1
+        );
+        assert_eq!(state.store.local_observations_after(0, 100).unwrap().iter()
+            .filter(|receipt| receipt.kind == "client.action-result").count(), 1);
         let mut changed = request;
         changed.parameters["content"] = json!("A different send must conflict");
         assert_eq!(
@@ -14754,17 +15314,12 @@ subscription "watch/source" {
         .unwrap()
         .0;
         assert!(!receipt["affected_ids"].as_array().unwrap().is_empty());
-        for kind in ["message.sent", "custom.client.action-result"] {
-            assert_eq!(
-                state
-                    .store
-                    .claims_for_kind_at(kind, None, true, 100)
-                    .unwrap()
-                    .claims
-                    .len(),
-                1
-            );
-        }
+        assert_eq!(
+            state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
+            1
+        );
+        assert_eq!(state.store.local_observations_after(0, 100).unwrap().iter()
+            .filter(|receipt| receipt.kind == "client.action-result").count(), 1);
     }
 
     #[test]
@@ -14779,6 +15334,125 @@ subscription "watch/source" {
         assert_eq!(envelope["retryable"], false);
         assert_eq!(envelope["details"]["applied"], "unknown");
         assert_eq!(envelope["details"]["idempotency_key"], "example-exact-key");
+    }
+
+    #[tokio::test]
+    async fn forged_action_receipts_cannot_replay_launcher_attribution() {
+        for (peer, null_actor) in [(false, false), (false, true), (true, true)] {
+            let root = tempfile::tempdir().unwrap();
+            let state = test_state(root.path());
+            let session = ClientSession::local(Some("person/alex")).unwrap();
+            // A valid creation must be refused before dispatch when a legacy receipt exists.
+            let request = ActionRequest {
+                api_version: CLIENT_API_VERSION.into(), id: "action/forged-helper".into(),
+                action_type: "agent.create".into(), idempotency_key: "forged-helper-key".into(),
+                fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+                parameters: json!({"name":"forged-helper", "harness":"codex", "workspace":root.path()}),
+            };
+            let digest = hex::encode(Sha256::digest(
+                format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+            let forged = ClaimInput {
+                subject: format!("custom/client/action-{}", &digest[..32]),
+                kind: "custom.client.action-result".into(),
+                actor: if null_actor { None } else { Some(session_claim_actor(&session)) },
+                fields: BTreeMap::from([
+                    ("request_digest".into(), json!(action_request_digest(&request).unwrap())),
+                    ("result".into(), json!({"status":"completed", "affected_ids":["agent/forged"],
+                        "launcher_binding":{"launcher":"agent/attacker", "person":"person/intruder"}})),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            };
+            assert_eq!(state.store.append_client_claim(&forged).unwrap_err().code, "claim-write-forbidden");
+            let mut reserved = forged.clone();
+            reserved.kind = "client.action-result".into();
+            assert_eq!(state.store.append_client_claim(&reserved).unwrap_err().code, "claim-write-forbidden");
+            if peer {
+                let source = Store::open_memory("malicious-peer").unwrap();
+                source.append_claim(&forged).unwrap();
+                const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+                source.bind_fleet(FLEET).unwrap();
+                state.store.bind_fleet(FLEET).unwrap();
+                let exchange = source.export_replication_exchange(FLEET,
+                    &crate::model::ReplicationInventory::default()).unwrap();
+                state.store.receive_replication_exchange("malicious-peer", FLEET, &exchange).unwrap();
+            } else {
+                // Simulate a pre-hardening client-authored local claim already on disk.
+                state.store.append_claim(&forged).unwrap();
+            }
+            let before = state.store.status(None).unwrap().store_index;
+            let outcome = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+                Extension(session), Json(request)).await;
+            if peer {
+                // Unadmitted peer claims cannot become local replay authority.
+                let result = outcome.unwrap().0;
+                assert!(result.get("launcher_binding").is_none());
+                assert_ne!(result["affected_ids"], json!(["agent/forged"]));
+            } else {
+                assert_eq!(outcome.unwrap_err().code, "legacy-action-receipt-untrusted");
+                assert_eq!(state.store.status(None).unwrap().store_index, before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn admitted_peer_action_receipt_cannot_occupy_local_cas_subject() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let source = Store::open_memory("admitted-peer").unwrap();
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+        source.bind_fleet(FLEET).unwrap();
+        state.store.bind_fleet(FLEET).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id: "action/peer-cas".into(),
+            action_type: "agent.create".into(), idempotency_key: "peer-cas-idempotency-key".into(),
+            fence: Fence { snapshot_id: new_client_snapshot(&state).id, ..Default::default() },
+            parameters: json!({"name":"peer-cas-helper", "harness":"codex", "workspace":root.path()}),
+        };
+        let digest = hex::encode(Sha256::digest(
+            format!("{}:{}", session.actor, request.idempotency_key).as_bytes()));
+        let subject = format!("custom/client/action-{}", &digest[..32]);
+        source.append_claim(&ClaimInput {
+            subject: "host/admitted-peer".into(), kind: "transport.observed".into(), actor: None,
+            fields: BTreeMap::from([("status".into(), json!("up"))]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        // Model the older peer's replicated typed receipt using the transaction writer:
+        // the current append entrypoint deliberately routes this kind to the local log.
+        let forged = {
+            let mut connection = source.connection.write();
+            let transaction = connection.transaction().unwrap();
+            let receipt = crate::store::append_claim_tx(
+                &transaction, source.origin(), &subject, "client.action-result", None,
+                &json!({"fields": {
+                    "request_digest": action_request_digest(&request).unwrap(),
+                    "result": {"affected_ids": ["agent/forged"]},
+                }}), &[], None,
+            ).unwrap();
+            transaction.commit().unwrap();
+            receipt
+        };
+        let exchange = source.export_replication_exchange(FLEET,
+            &state.store.replication_inventory().unwrap()).unwrap();
+        state.store.receive_replication_exchange("admitted-peer", FLEET, &exchange).unwrap();
+        let admission = state.store.validate_replication_backlog().unwrap();
+        assert!(admission.valid > 0, "the peer must be admitted, not merely received");
+        assert!(admission.invalid > 0, "the peer action receipt must be rejected");
+        state.store.project_replication_backlog().unwrap();
+        assert!(state.store.latest_claim("host/admitted-peer", Some("transport.observed")).unwrap().is_some());
+        assert!(state.store.claim_by_id(&forged.id).unwrap().is_none());
+        assert!(state.store.claims_for(&subject, Some("client.action-result")).unwrap().is_empty());
+        assert!(state.store.observations_for(&subject, "client.action-result").unwrap().is_empty());
+        let first = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session.clone()), Json(request.clone())).await.unwrap().0;
+        assert_ne!(first["affected_ids"], json!(["agent/forged"]));
+        let replay = action(State(state.clone()), Extension(new_client_snapshot(&state)),
+            Extension(session), Json(request)).await.unwrap().0;
+        assert_eq!(first["affected_ids"], replay["affected_ids"]);
+        let receipts = state.store.observations_for(&subject, "client.action-result").unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].origin, state.store.origin());
+        assert!(state.store.claims_for(&subject, Some("client.action-result")).unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -14805,7 +15479,7 @@ subscription "watch/source" {
         state.store.append_claim(&ClaimInput {
             subject: format!("custom/client/action-{}", &key_digest[..32]),
             kind: "custom.client.action-result".into(),
-            actor: Some(session_claim_actor(&session)),
+            actor: None,
             fields: BTreeMap::from([
                 ("request_digest".into(), json!(legacy_digest)),
                 ("result".into(), json!({"status":"completed"})),
@@ -14822,7 +15496,7 @@ subscription "watch/source" {
             Json(request),
         ).await.unwrap_err();
         assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.code, "legacy-action-receipt-untrusted");
         assert_eq!(state.store.status(None).unwrap().store_index, before);
         assert!(state.store.claims_for_kind_at("message.sent", None, true, 100)
             .unwrap().claims.is_empty());
@@ -15625,6 +16299,87 @@ mission "example/steps" state="ready" {
     }
 
     #[test]
+    fn missions_show_the_resources_their_published_revision_names() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "resource-node");
+        let uri = "https://github.com/compoundingtech/smalltalk/issues/752";
+        let source = format!(
+            "version 2\nmission \"example/tracked\" state=\"ready\" {{\n  goal \"Track the issue.\"\n  resource \"tracker\" uri=\"{uri}\" reason=\"tracking issue\"\n}}\n"
+        );
+        let intent = crate::graph::parse_intent(&source, "resource-node").unwrap();
+        let preview = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source,
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply_as(&intent, &preview.subject_tokens, "publish", Some("person/ada"))
+            .unwrap();
+        let expected = json!([{
+            "name": "tracker",
+            "subject": format!("resource/uri/{}", hex::encode(Sha256::digest(uri))),
+            "kind": "uri",
+            "resolution": "resolved",
+            "uri": uri,
+            "reason": "tracking issue",
+        }]);
+        let index = state.store.index().unwrap();
+        let detail =
+            mission_resources(&state.store, index, true, Some("mission/example/tracked")).unwrap();
+        assert_eq!(detail[0]["resources"], expected);
+        let cards =
+            mission_list_cards(&state.store, &["mission/example/tracked".to_owned()]).unwrap();
+        assert_eq!(cards[0]["resources"], expected);
+        let typed: fractal_client::Resource = serde_json::from_value(cards[0].clone()).unwrap();
+        let fractal_client::Resource::Mission(typed) = typed else {
+            panic!("a mission resource");
+        };
+        assert_eq!(typed.resources[0].uri.as_deref(), Some(uri));
+
+        // Republish without the edge: both client views use the current revision, while the
+        // URI subject remains available to other declarations that still reference it.
+        let source =
+            "version 2\nmission \"example/tracked\" state=\"ready\" {\n  goal \"Track the issue.\"\n}\n";
+        let intent = crate::graph::parse_intent(source, "resource-node").unwrap();
+        let preview = state
+            .store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.to_owned(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        state
+            .store
+            .apply_as(&intent, &preview.subject_tokens, "remove", Some("person/ada"))
+            .unwrap();
+        let detail = mission_resources(
+            &state.store,
+            state.store.index().unwrap(),
+            true,
+            Some("mission/example/tracked"),
+        )
+        .unwrap();
+        assert_eq!(detail[0]["resources"], json!([]));
+        let cards =
+            mission_list_cards(&state.store, &["mission/example/tracked".to_owned()]).unwrap();
+        assert_eq!(cards[0]["resources"], json!([]));
+        let subject = format!("resource/uri/{}", hex::encode(Sha256::digest(uri)));
+        assert_eq!(
+            state.store.selected_desired_kind(&subject).unwrap().as_deref(),
+            Some("resource")
+        );
+    }
+
+    #[test]
     fn mission_resources_include_published_definitions_without_runs() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "zero-run-node");
@@ -15783,6 +16538,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({"target_id": external.id}),
         };
@@ -15868,7 +16624,7 @@ mission "example/zero-run" state="ready" {
         );
     }
 
-    /// Per-PR contract for the Codex `import` boot canary (scripts/st3-boot-canaries/run,
+    /// Per-PR contract for the Codex `import` boot canary (scripts/fractal-boot-canaries/run,
     /// `prepare_codex_import` and `prove_codex_import`), in its topology: discovery reaches the
     /// saved session through a `~/.codex` symlink to the originating home, and a second, stale
     /// home holds a copy of the same native ID (the canary launches the daemon with
@@ -15935,6 +16691,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({"target_id": external.id}),
         };
@@ -17093,10 +17850,9 @@ mission "example/zero-run" state="ready" {
         full_follower.abort();
     }
 
-    /// Stored pages sort by sequence alone. When observed timestamps run against the sequence,
-    /// a follower must still place changes by sequence, as its frame was built.
+    /// Stored projection and follower placement both follow the original timestamps.
     #[tokio::test]
-    async fn stored_deltas_follow_sequence_order_when_timestamps_run_against_it() {
+    async fn stored_deltas_follow_chronology_when_timestamps_run_against_sequence() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "first-frame-skewed");
         let owner = "agent/first-frame-skewed";
@@ -17135,10 +17891,10 @@ mission "example/zero-run" state="ready" {
             claim("harness.timeline", entry(index, 1, &format!("skewed {index}")));
         }
         let session_id = managed_session_id(owner, incarnation);
-        // The page itself is in sequence order whatever the timestamps say.
+        // The page is chronological despite independent source sequence order.
         let full = timeline_walk(&state, &session_id, 200);
         let position = |id: &str| full.iter().position(|item| item["id"] == id).unwrap();
-        assert!(position("timeline-entry/skewed-5") < position("timeline-entry/skewed-25"));
+        assert!(position("timeline-entry/skewed-25") < position("timeline-entry/skewed-5"));
         let session = ClientSession::local(Some("person/example")).unwrap();
         let follow = |limit: Option<usize>| {
             let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
@@ -17157,14 +17913,12 @@ mission "example/zero-run" state="ready" {
             .await.unwrap().unwrap();
         let held = ids(small_first["items"].as_array().unwrap());
         assert_eq!(small_first["has_more"], true, "{small_first}");
-        assert!(held.contains(&"timeline-entry/skewed-25".to_owned()), "{held:?}");
-        assert!(!held.contains(&"timeline-entry/skewed-5".to_owned()), "{held:?}");
+        assert!(held.contains(&"timeline-entry/skewed-5".to_owned()), "{held:?}");
+        assert!(!held.contains(&"timeline-entry/skewed-25".to_owned()), "{held:?}");
         tokio::time::timeout(Duration::from_secs(10), full_frames.recv()).await.unwrap().unwrap();
-        // A new entry, a revision of a held entry with an early timestamp, and a revision of
-        // an older entry with a late one.
+        // Append and revise the late-timestamp entry already held by the small follower.
         claim("harness.timeline", entry(30, 1, "skewed 30"));
-        claim("harness.timeline", entry(25, 2, "skewed 25 revised"));
-        // First check that a held revision stays a delta even with its early timestamp.
+        claim("harness.timeline", entry(5, 2, "skewed 5 revised"));
         async fn sent_until(
             frames: &mut tokio::sync::mpsc::UnboundedReceiver<(String, u64, Value)>,
             wanted: &[&str],
@@ -17187,26 +17941,25 @@ mission "example/zero-run" state="ready" {
         // Control: the whole-window follower receives the append and held revision as deltas.
         sent_until(
             &mut full_frames,
-            &["timeline-entry/skewed-30", "timeline-entry/skewed-25"],
+            &["timeline-entry/skewed-30", "timeline-entry/skewed-5"],
         )
         .await;
         let small = sent_until(
             &mut small_frames,
-            &["timeline-entry/skewed-30", "timeline-entry/skewed-25"],
+            &["timeline-entry/skewed-30", "timeline-entry/skewed-5"],
         )
         .await;
         assert!(
-            small.iter().any(|item| item["id"] == "timeline-entry/skewed-25" && item["revision"] == 2),
-            "a held entry's revision arrives despite its early timestamp: {small:?}"
+            small.iter().any(|item| item["id"] == "timeline-entry/skewed-5" && item["revision"] == 2),
+            "a held entry's revision arrives despite its smaller source sequence: {small:?}"
         );
-        // Now revise the older entry with a late timestamp: it refreshes the frame's cursor,
-        // not an out-of-window delta. The projection's sequence order decides "older".
-        claim("harness.timeline", entry(5, 2, "skewed 5 revised"));
+        // A revision before the chronological window refreshes the older-page cursor.
+        claim("harness.timeline", entry(25, 2, "skewed 25 revised"));
         let replacement = next_replacement(&mut small_frames).await;
         assert_eq!(replacement["items"].as_array().unwrap().len(), 10);
         let history = history_from_frame(&state, &session_id, &replacement).await;
         assert!(history.iter().any(|item|
-            item["id"] == "timeline-entry/skewed-5" && item["revision"] == 2));
+            item["id"] == "timeline-entry/skewed-25" && item["revision"] == 2));
         small_follower.abort();
         full_follower.abort();
     }
@@ -17287,6 +18040,117 @@ mission "example/zero-run" state="ready" {
         assert!(history.iter().any(|item|
             item["body"]["text"] == "older native history message"));
         follower.abort();
+    }
+
+    fn remote_child_fixture(root: &Path) -> (AppState, String, String) {
+        let (mut owner, parent_id, _) =
+            conversation_first_frame_fixture(root, "conversation-owner", 1);
+        owner.native_session_home = None;
+        let (_, resolved) = resolve_conversation(&owner, &parent_id).unwrap();
+        let parent = conversation_blocks::source(&owner, &parent_id, resolved.managed.as_ref()).unwrap();
+        let directory = parent.transcript.with_extension("");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("child.jsonl"), concat!(
+            "{\"type\":\"session\",\"id\":\"child-native\",\"cwd\":\"/work\",\"timestamp\":\"2026-10-08T12:00:00Z\"}\n",
+            "{\"type\":\"message\",\"id\":\"child-message\",\"timestamp\":\"2026-10-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"child only\"}]}}\n",
+        )).unwrap();
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "child", &parent_id);
+        (owner, parent_id, child_id)
+    }
+
+    #[tokio::test]
+    async fn remote_child_admission_without_relay_is_unavailable_not_parent_content() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let (owner, _, child_id) = remote_child_fixture(owner_root.path());
+        let gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
+        gateway.store.import_replication(
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
+        ).unwrap();
+        let (resolved_id, resolved) = resolve_conversation(&gateway, &child_id).unwrap();
+        assert_eq!(resolved_id, child_id);
+        assert!(resolved.managed.is_none());
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let request = serde_json::from_value(json!({
+            "kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":child_id,
+        })).unwrap();
+        let permits = ConversationAdmissionPermits {
+            _socket: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+            _daemon: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+        };
+        let error = open_conversation_subscription(gateway, session, request, permits)
+            .await.err().unwrap();
+        assert_eq!(error.code, "remote-unavailable");
+    }
+
+    #[tokio::test]
+    async fn two_host_child_admission_relays_child_identity_and_never_parent_content() {
+        let owner_root = tempfile::tempdir().unwrap();
+        let gateway_root = tempfile::tempdir().unwrap();
+        let (owner, parent_id, child_id) = remote_child_fixture(owner_root.path());
+        let mut gateway = test_state_named(gateway_root.path(), "child-routing-gateway");
+        gateway.store.import_replication(
+            "conversation-owner", &owner.store.export_replication(0).unwrap(),
+        ).unwrap();
+        let owner_socket = owner_root.path().join("owner-st3.sock");
+        let served_owner = owner_socket.clone();
+        let owner_app = crate::api::router(owner);
+        tokio::spawn(async move { crate::api::serve_unix(&served_owner, owner_app).await });
+        for _ in 0..200 {
+            if tokio::net::UnixStream::connect(&owner_socket).await.is_ok() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        gateway.client_relay = crate::peer::conversation_gateway_relay(
+            &owner_socket, crate::api::raw_terminal_owner_splice, gateway_root.path(),
+        ).await.unwrap();
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let request = serde_json::from_value(json!({
+            "kind":"subscribe", "id":"chat", "collection":"conversation", "conversation":child_id,
+        })).unwrap();
+        let permits = ConversationAdmissionPermits {
+            _socket: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+            _daemon: Arc::new(tokio::sync::Semaphore::new(1)).acquire_owned().await.unwrap(),
+        };
+        let (resolved_id, remote, resolved) =
+            open_conversation_subscription(gateway.clone(), session.clone(), request, permits).await.unwrap();
+        assert_eq!(resolved_id, child_id);
+        assert!(resolved.as_ref().unwrap().managed.is_none());
+        assert_eq!(remote.as_deref(), Some("host/conversation-owner"));
+        let (start, page, _) = conversation_open_value(
+            &gateway, &session, &resolved_id, remote.as_deref(), resolved, 20,
+        ).await.unwrap();
+        assert_eq!(page["session_id"], child_id);
+        assert!(page.to_string().contains("child only"), "{page}");
+        assert!(!page.to_string().contains("entry 0 "), "{page}");
+        let cursor = start["next_cursor"].as_str().unwrap();
+        assert!(conversation_position(&gateway, &parent_id, cursor).is_err());
+        let (frame, _) = first_frame_and_older_history(
+            &gateway, &child_id, remote.as_deref(), Some(20),
+        ).await;
+        assert_eq!(frame["session_id"], child_id);
+        assert!(frame.to_string().contains("child only"), "{frame}");
+        assert!(!frame.to_string().contains("entry 0 "), "{frame}");
+        let changes = conversation_changes(
+            State(gateway.clone()), Extension(session.clone()), AxumPath(child_id.clone()),
+            Query(ConversationQuery { after: None, wait_ms: Some(0) }),
+        ).await.unwrap().0;
+        assert_eq!(changes["session_id"], child_id);
+        assert!(!changes.to_string().contains("entry 0 "), "{changes}");
+        let page = fractal_api_core::api::client_reads::client_sessions_detail(
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session.clone()),
+            AxumPath(format!("{}/timeline", child_id.trim_start_matches("session/"))),
+            Query(ClientListQuery::default()),
+        ).await.unwrap().0;
+        assert_eq!(page["session_id"], child_id);
+        assert!(page.to_string().contains("child only"), "{page}");
+        assert!(!page.to_string().contains("entry 0 "), "{page}");
+        let detail = fractal_api_core::api::client_reads::client_sessions_detail(
+            State(gateway.clone()), Extension(new_client_snapshot(&gateway)), Extension(session),
+            AxumPath(child_id.trim_start_matches("session/").to_owned()),
+            Query(ClientListQuery::default()),
+        ).await.unwrap().0;
+        assert_eq!(detail["id"], child_id);
+        assert_eq!(detail["managed"], false);
     }
 
     #[tokio::test]
@@ -18152,6 +19016,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters,
         };
@@ -18251,14 +19116,14 @@ mission "example/zero-run" state="ready" {
             vec!["generic legacy message", "current composer message"]
         );
 
-        // The agent's own Small Talk joins its conversation, saying who wrote to whom.
+        // The agent's own Fractal joins its conversation, saying who wrote to whom.
         let _ = accept_message(
             &state,
             MessageSendRequest {
                 idempotency_key: "session-message-outgoing".into(),
                 from: subject.into(),
                 to: "agent/session-message-peer".into(),
-                content: "outgoing small talk".into(),
+                content: "outgoing Fractal message".into(),
                 title: Some("A question".into()),
                 in_reply_to: None,
                 tags: Vec::new(),
@@ -18280,7 +19145,7 @@ mission "example/zero-run" state="ready" {
         let items = timeline["items"].as_array().unwrap();
         let outgoing = items
             .iter()
-            .position(|item| item["body"]["text"] == "outgoing small talk")
+            .position(|item| item["body"]["text"] == "outgoing Fractal message")
             .expect("the agent's own message is in its conversation");
         let header = &items[outgoing - 1];
         assert_eq!(header["type"], "message");
@@ -18289,7 +19154,7 @@ mission "example/zero-run" state="ready" {
         assert_eq!(header["body"]["to"], "agent/session-message-peer");
         assert_eq!(header["body"]["title"], "A question");
 
-        // A new incarnation starts a new conversation: earlier Small Talk stays with the old one.
+        // A new incarnation starts a new conversation: earlier Fractal stays with the old one.
         std::thread::sleep(std::time::Duration::from_millis(2));
         state
             .store
@@ -18515,7 +19380,7 @@ mission "example/zero-run" state="ready" {
                 ("from".into(), json!("person/alex")),
                 ("to".into(), json!(owner)),
                 ("session_id".into(), json!(session_id)),
-                ("content".into(), json!("Small Talk message")),
+                ("content".into(), json!("Fractal message")),
                 ("status".into(), json!("sent")),
             ]),
             evidence: Vec::new(),
@@ -19711,6 +20576,13 @@ mission "example/zero-run" state="ready" {
         // A transcript st3 binds but cannot read is named, so the failure can be reported.
         {
             use std::os::unix::fs::PermissionsExt as _;
+            // This rollout is not named after its thread, so binding finds it through discovery,
+            // which keeps each file's header for the length and time it last read. The reads above
+            // can all come from discovery's two-second cache, filled before the 230 turns landed;
+            // when that cache runs out just after the chmod, the header is read again, fails, and
+            // the transcript is not bound at all. Read it now, as it is, so st3 has bound it.
+            crate::external_sessions::discover_fresh(state.native_session_home.as_deref(), true)
+                .unwrap();
             std::fs::set_permissions(&transcript, std::fs::Permissions::from_mode(0o000)).unwrap();
             // Root reads anything; the check needs a file this user really cannot read.
             if std::fs::read(&transcript).is_err() {
@@ -20329,19 +21201,275 @@ mission "example/zero-run" state="ready" {
                     .transcript
                     .is_err()
             );
-            // Neither a stale binding nor no binding can justify guessing in a linked inventory.
+            // A previously accepted binding becomes stale when the successor starts;
+            // it cannot justify guessing another seat's transcript in the linked inventory.
+            write_session(
+                &authored,
+                id,
+                "2026-09-25T14:00:00Z",
+                "Seat A's bound conversation",
+            );
+            let successor = "successor-incarnation";
             append(
-                "harness.session-file",
-                json!({"harness":driver,"agent":owner,"incarnation_id":"old-incarnation","session_id":sibling_id,"path":legacy.join(format!("2026-09-25T16-00-00-000Z_{sibling_id}.jsonl"))}),
+                "runtime.observed",
+                json!({"status":"running","runtime_id":"example.resumed","incarnation_id":successor}),
+            );
+            append(
+                "harness.observed",
+                json!({"state":"idle","driver":driver,"incarnation_id":successor}),
             );
             assert!(
-                managed_transcript(&state, owner, incarnation)
+                managed_transcript(&state, owner, successor)
                     .unwrap()
                     .unwrap()
                     .transcript
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn mixed_timeline_windows_keep_source_sequences_and_original_revision_chronology() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "chronology-node");
+        let owner = "agent/chronology-owner";
+        let incarnation = "chronology-runtime:i1";
+        let stamp = |at: &str| {
+            chrono::DateTime::parse_from_rfc3339(at).unwrap().timestamp_millis() as u64
+        };
+        let append = |subject: &str, kind: &str, fields: BTreeMap<String, Value>| {
+            state.store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: Some(owner.into()),
+                fields,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        // These graph claims have no producer timestamp field. Control only the
+        // private projection fixture's accepted clock, without forging their schema.
+        let graph_clock = rusqlite::Connection::open(root.path().join("graph.db")).unwrap();
+        smallclaims::store::configure_projection_writer(&graph_clock).unwrap();
+        let set_graph_time = |claim: ClaimRecord, at: &str| {
+            graph_clock.execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![stamp(at).to_string(), claim.id],
+            ).unwrap();
+        };
+        set_graph_time(append(owner, "runtime.observed", BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("runtime_id".into(), json!("chronology-runtime")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("terminal".into(), json!(false)),
+        ])), "2026-10-04T17:15:16Z");
+        let native = |operation: &str, id: &str, sequence: u64, revision: u64,
+                      at: &str, role: &str, kind: &str, body: Value| {
+            append(owner, "harness.timeline", BTreeMap::from([
+                ("operation".into(), json!(operation)),
+                ("entry_id".into(), json!(id)),
+                ("sequence".into(), json!(sequence)),
+                ("revision".into(), json!(revision)),
+                ("role".into(), json!(role)),
+                ("entry_type".into(), json!(kind)),
+                ("final".into(), json!(kind != "content")),
+                ("body".into(), body),
+                ("driver".into(), json!("omp")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("observed_at_unix_ms".into(), json!(stamp(at))),
+            ]))
+        };
+        native("append", "timeline-entry/answer", 1, 1, "2026-10-04T21:40:10Z",
+               "assistant", "content", json!({"media_type":"text/plain","text":"working"}));
+        // Old graph events have a larger local store-derived sequence than recent native prose.
+        append(owner, "harness.usage", BTreeMap::from([
+            ("input_tokens".into(), json!(7)),
+            ("semantics".into(), json!("response")),
+            ("driver".into(), json!("omp")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("observed_at_unix_ms".into(), json!(stamp("2026-10-04T21:40:11Z"))),
+        ]));
+        let session_id = managed_session_id(owner, incarnation);
+        set_graph_time(append("message/chronology", "message.sent", BTreeMap::from([
+            ("from".into(), json!("agent/peer")),
+            ("to".into(), json!(owner)),
+            ("session_id".into(), json!(session_id)),
+            ("content".into(), json!("continue")),
+            ("status".into(), json!("sent")),
+        ])), "2026-10-04T21:40:12Z");
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let initial = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let collision_sequence = (state.store.index().unwrap() + 1) * 4;
+        native("finalize", "timeline-entry/answer", 999, 2, "2026-10-04T22:00:00Z",
+               "assistant", "content", json!({"media_type":"text/plain","text":"answer"}));
+        native("append", "timeline-entry/call", collision_sequence, 1, "2026-10-04T21:40:19Z",
+               "assistant", "tool_call", json!({"call_id":"call/chronology","name":"read","arguments":{}}));
+        native("append", "timeline-entry/result", collision_sequence + 1, 1, "2026-10-04T21:40:20Z",
+               "tool", "tool_result", json!({"call_id":"call/chronology","status":"success","media_type":"text/plain","content":"ok"}));
+        let page = timeline_value(&state, &new_client_snapshot(&state), &session, &session_id,
+                                  &ClientListQuery { limit: Some(6), ..Default::default() }).unwrap().0;
+        let entries = page["items"].as_array().unwrap();
+        assert_eq!(entries.iter().map(|entry| entry["type"].as_str().unwrap()).collect::<Vec<_>>(),
+                   ["content", "usage", "message", "content", "tool_call", "tool_result"]);
+        assert_eq!(entries[0]["id"], "timeline-entry/answer");
+        assert_eq!(entries[0]["sequence"], 1);
+        assert_eq!(entries[0]["revision"], 2);
+        assert_eq!(entries[0]["timestamp"], "2026-10-04T21:40:10.000Z");
+        assert_eq!(entries[0]["final"], true);
+        assert_eq!(entries[3]["sequence"].as_u64(), entries[2]["sequence"].as_u64().map(|sequence| sequence + 1));
+        let changes = conversation_read_now(&state, &session, &session_id,
+                                            initial["next_cursor"].as_str()).unwrap();
+        assert_eq!(changes["items"].as_array().unwrap().iter().map(|entry| entry["id"].as_str().unwrap()).collect::<Vec<_>>(),
+                   ["timeline-entry/answer", "timeline-entry/call", "timeline-entry/result"]);
+        let idle = conversation_read_now(&state, &session, &session_id,
+                                         changes["next_cursor"].as_str()).unwrap();
+        assert!(idle["items"].as_array().unwrap().is_empty());
+        let usage = append(owner, "harness.usage", BTreeMap::from([
+            ("input_tokens".into(), json!(77)),
+            ("semantics".into(), json!("response")),
+            ("driver".into(), json!("omp")),
+            ("incarnation_id".into(), json!(incarnation)),
+            ("observed_at_unix_ms".into(), json!(stamp("2026-10-04T21:40:21Z"))),
+        ]));
+        assert_eq!(usage.store_index * 4, collision_sequence, "fixture exercises a cross-namespace counter collision");
+        let usage_delta = conversation_read_now(&state, &session, &session_id,
+                                                idle["next_cursor"].as_str()).unwrap();
+        assert_eq!(usage_delta["items"].as_array().unwrap().iter().map(|entry| entry["type"].as_str().unwrap()).collect::<Vec<_>>(), ["usage"]);
+    }
+
+    #[test]
+    fn chronological_graph_changes_outside_window_resynchronize_before_cursor_advances() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "backdated-graph-node");
+        let owner = "agent/backdated-graph";
+        let incarnation = "backdated-runtime:i1";
+        state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("backdated-runtime")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("terminal".into(), json!(false)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        state.store.append_local_observations_for_test(
+            &(1..=205).map(|sequence| ClaimInput {
+                subject: owner.into(), kind: "harness.timeline".into(), actor: Some(owner.into()),
+                fields: BTreeMap::from([
+                    ("operation".into(), json!("append")),
+                    ("entry_id".into(), json!(format!("timeline-entry/newer-{sequence}"))),
+                    ("sequence".into(), json!(sequence)),
+                    ("revision".into(), json!(1)),
+                    ("role".into(), json!("assistant")),
+                    ("entry_type".into(), json!("content")),
+                    ("final".into(), json!(true)),
+                    ("body".into(), json!({"media_type":"text/plain","text":format!("newer {sequence}")})),
+                    ("driver".into(), json!("omp")),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("observed_at_unix_ms".into(), json!(1_791_151_200_000_u64)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).collect::<Vec<_>>(),
+        );
+        let session_id = managed_session_id(owner, incarnation);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let initial = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let usage = |semantics: &str| state.store.append_claim(&ClaimInput {
+            subject: owner.into(), kind: "harness.usage".into(), actor: Some(owner.into()),
+            fields: BTreeMap::from([
+                ("semantics".into(), json!(semantics)),
+                ("driver".into(), json!("omp")),
+                ("input_tokens".into(), json!(7)),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("observed_at_unix_ms".into(), json!(1_791_100_000_000_u64)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        // A suppressed rollup is not an omitted conversation event.
+        usage("response_rollup");
+        let rollup = conversation_read_now(&state, &session, &session_id,
+                                           initial["next_cursor"].as_str()).unwrap();
+        assert!(rollup["items"].as_array().unwrap().is_empty());
+        usage("response");
+        let gap = conversation_read_now(&state, &session, &session_id,
+                                        rollup["next_cursor"].as_str()).unwrap_err();
+        assert_eq!(gap.code, "cursor-gap");
+        assert_eq!(gap.details["full_resync"], true);
+    }
+
+    #[test]
+    fn native_conversation_cursor_survives_a_graph_only_window_and_detects_real_loss() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "native-cursor-node");
+        let owner = "agent/native-cursor-owner";
+        let incarnation = "123:2000-01-01T00:00:00.000Z";
+        let transcript = root.path().join("current.jsonl");
+        std::fs::write(&transcript, format!("{}\n{}\n",
+            json!({"type":"session","id":"native-cursor","timestamp":"2000-01-01T00:00:01Z","cwd":root.path()}),
+            json!({"type":"message","id":"old","timestamp":"2000-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"old native prose"}]}}),
+        )).unwrap();
+        for (kind, fields) in [
+            ("runtime.observed", BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("native-cursor-runtime")),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("terminal".into(), json!(false)),
+            ])),
+            ("harness.observed", BTreeMap::from([
+                ("state".into(), json!("working")),
+                ("driver".into(), json!("omp")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ])),
+            ("harness.session-file", BTreeMap::from([
+                ("harness".into(), json!("omp")),
+                ("agent".into(), json!(owner)),
+                ("incarnation_id".into(), json!(incarnation)),
+                ("session_id".into(), json!("native-cursor")),
+                ("path".into(), json!(transcript)),
+            ])),
+        ] {
+            state.store.append_claim(&ClaimInput {
+                subject: owner.into(), kind: kind.into(), actor: Some(owner.into()), fields,
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let session_id = managed_session_id(owner, incarnation);
+        let session = ClientSession::local(Some("person/example")).unwrap();
+        let before = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let native_before = conversation_position(&state, &session_id, before["next_cursor"].as_str().unwrap()).unwrap().native_sequence;
+        for index in 0..101 {
+            state.store.append_claim(&ClaimInput {
+                subject: format!("message/native-cursor-{index}"), kind: "message.sent".into(),
+                actor: Some("person/example".into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!("person/example")),
+                    ("to".into(), json!(owner)),
+                    ("session_id".into(), json!(session_id)),
+                    ("content".into(), json!(format!("graph message {index}"))),
+                    ("status".into(), json!("sent")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let baseline = conversation_read_now(&state, &session, &session_id, None).unwrap();
+        let cursor = baseline["next_cursor"].as_str().unwrap();
+        assert_eq!(conversation_position(&state, &session_id, cursor).unwrap().native_sequence, native_before);
+        assert!(conversation_read_now(&state, &session, &session_id, Some(cursor)).unwrap()["items"].as_array().unwrap().is_empty());
+        use std::io::Write as _;
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+        writeln!(writer, "{}", json!({"type":"message","id":"new","timestamp":"2099-01-01T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"new native prose"}]}})).unwrap();
+        let changed = conversation_read_now(&state, &session, &session_id, Some(cursor)).unwrap();
+        assert_eq!(changed["items"].as_array().unwrap().iter()
+            .filter_map(|item| item["body"]["text"].as_str()).collect::<Vec<_>>(), ["new native prose"]);
+        let after = changed["next_cursor"].as_str().unwrap();
+        // A changed native row omitted by the bounded projection is a real gap, even if a
+        // later native row remains visible; neither the high-water mark nor a first-row guess
+        // proves all changes were delivered.
+        writeln!(writer, "{}", json!({"type":"message","id":"backdated","timestamp":"2000-01-01T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"late old prose"}]}})).unwrap();
+        writeln!(writer, "{}", json!({"type":"message","id":"newest","timestamp":"2099-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"newest prose"}]}})).unwrap();
+        assert_eq!(conversation_read_now(&state, &session, &session_id, Some(after)).unwrap_err().code, "cursor-gap");
     }
 
     #[test]
@@ -20710,9 +21838,6 @@ mission "example/zero-run" state="ready" {
                 .all(|entry| entry["id"] != "timeline-entry/wrong-incarnation"),
             "explicit timeline claims are fenced to the live incarnation"
         );
-        assert!(entries.windows(2).all(|pair| {
-            pair[0]["sequence"].as_u64().unwrap() < pair[1]["sequence"].as_u64().unwrap()
-        }));
     }
 
     #[test]
@@ -21168,6 +22293,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(1),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/terminal-owner" }),
         };
@@ -21243,6 +22369,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: None,
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": attachment_id }),
         };
@@ -21560,6 +22687,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(snapshot.store_index),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/concurrent-terminal-owner" }),
         };
@@ -21615,14 +22743,15 @@ mission "example/zero-run" state="ready" {
                 .count(),
             1
         );
+        let local = state.store.local_observations_tail(100).unwrap();
         assert_eq!(
-            page.claims
+            local
                 .iter()
-                .filter(|claim| claim.kind == "custom.client.action-result")
+                .filter(|claim| claim.kind == "client.action-result")
                 .count(),
             1
         );
-        let stored = serde_json::to_string(&page).unwrap();
+        let stored = serde_json::to_string(&(page, local)).unwrap();
         assert!(!stored.contains(capability));
         assert!(!stored.contains("st3.cap."));
         assert!(!stored.contains("stream_capability"));
@@ -22123,6 +23252,7 @@ mission "example/zero-run" state="ready" {
                 runtime_desired_revision: None,
                 terminal_sequence: Some(owner.store.index().unwrap()),
                 preview_token: None,
+                private_notes: None,
             },
             parameters: json!({ "target_id": "terminal/agent/fleet-terminal" }),
         };
@@ -22187,8 +23317,10 @@ mission "example/zero-run" state="ready" {
             assistant_write: None,
             transport: "paired",
             local_peer: false,
+            peer_process: None,
             custom_forms: false,
             conversation_blocks: false,
+            conversation_delivery_links: false, conversation_message_participants: false,
             assistant_content_handles: false,
             messages_paging: false,
             scopes: ["terminal.read".into()].into_iter().collect(),

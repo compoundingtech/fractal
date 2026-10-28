@@ -1,4 +1,4 @@
-//! The part of `api::client_v0::assistant::authorization` that moved up from st3-api.
+//! The part of `api::client_v0::assistant::authorization` that moved up from fractal-api-core.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use axum::extract::OriginalUri;

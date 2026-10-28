@@ -1,16 +1,16 @@
 # iPhone design direction
 
-The iPhone app follows system typography, appearance and navigation. The web supplies information structure: agent identity and status, conversations with disclosed work, and related resources. This direction for [#2784](https://github.com/compoundingtech/smalltalk/issues/2784) was confirmed on 2026-10-14. Merge it before rebuilding screens.
+The iPhone app follows system typography, appearance and navigation. The web supplies information structure: agent identity and status, conversations with disclosed work, and related resources. This direction for [#2784](https://github.com/compoundingtech/fractal/issues/2784) was confirmed on 2026-10-14. Merge it before rebuilding screens.
 
 ## Shared rules and surface ownership
 
 | Boundary | Direction |
 | --- | --- |
-| Shared product rules | Keep generated contracts, stable IDs, action capabilities and server authority. Use pure [st3-views] models for Home grouping/counts, alert ownership, requests/answers and conversation normalization. Share semantic meanings and fixtures. |
+| Shared product rules | Keep generated contracts, stable IDs, action capabilities and server authority. Use pure [@fractal/views] models for Home grouping/counts, alert ownership, requests/answers and conversation normalization. Share semantic meanings and fixtures. |
 | Web ownership | [packages/fractal-ui] owns DOM components, StyleX tokens, React Aria and pane geometry. [LiveAgentWorkspace] and [ConversationPane] own web navigation, data demand and kit adapters. |
 | iPhone ownership | [App] and [navigation] own native stacks, tabs and sheets; [ui], [theme] and screens own text styles, dynamic colors, touch layout and keyboard behavior. Pairing, key storage, transport and notification integration remain platform responsibilities. |
 
-Today the phone imports st3-views; the web adapts SDK data into the Fractal kit. Extract reusable pure rules into st3-views as slices need them; keep renderers separate. The kit's [sync-line] model is intended for st3-views but has not migrated.
+Today the phone imports `@fractal/views`; the web adapts SDK data into the Fractal kit. Extract reusable pure rules into `@fractal/views` as slices need them; keep renderers separate. The kit's [sync-line] model is intended for `@fractal/views` but has not migrated.
 
 ## Typography and appearance
 
@@ -26,17 +26,17 @@ For [Now], use an inset grouped list: connection and freshness notice, nonzero a
 
 The badge and heading count only open alerts for the paired person. Updates ask nothing; messages stay in conversations. Preserve closed items until cleared and explicit Mark read for updates. Pick the phone's rule over web Sidebar's local ReadInbox-on-open to preserve deliberate acknowledgment: opening never reads an update or resolves a request ([Now], [homeView], [web Sidebar]).
 
-Keep alerts answerable above their conversation ([Alerts], [Conversation], [#1959](https://github.com/compoundingtech/smalltalk/issues/1959)), with disclosure and existing capability-gated actions. Preserve full pending-call context before Allow. Coordinate [#2783](https://github.com/compoundingtech/smalltalk/issues/2783) on IDs, count and destination: future push opens detail after sync, showing closed if resolved; notification contents never authorize answers. APNs and Release alert links are separate work.
+Keep alerts answerable above their conversation ([Alerts], [Conversation], [#1959](https://github.com/compoundingtech/fractal/issues/1959)), with disclosure and existing capability-gated actions. Preserve full pending-call context before Allow. Coordinate [#2783](https://github.com/compoundingtech/fractal/issues/2783) on IDs, count and destination: future push opens detail after sync, showing closed if resolved; notification contents never authorize answers. APNs and Release alert links are separate work.
 
 ## Screen slice order
 
 After merge: **Home and alert detail → Agents → Conversation and alert strip → Missions → Fleet → Terminal → Resources and Spaces polish**. Each gets a small PR with before/after screenshots attached using invented data. Home establishes reusable text, color and list primitives. Verify light/dark, large text, VoiceOver, back navigation, live/offline/error states and unchanged actions. Coordinate Home and alerts with #2783 and #1959; keep updates reactive and fix local defects at their cause.
 
-[st3-views]: ../../clients/typescript/fractal-views/README.md
+[@fractal/views]: ../../clients/typescript/fractal-views/README.md
 [packages/fractal-ui]: ../../packages/fractal-ui/README.md
 [LiveAgentWorkspace]: ../../apps/fractal-web/src/web/LiveAgentWorkspace.tsx
 [ConversationPane]: ../../apps/fractal-web/src/web/ConversationPane.tsx
-[sync-line]: ../../packages/fractal-ui/src/assistant-ui/st3-views/sync-line.ts
+[sync-line]: ../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts
 [App]: ../../apps/ios/App.tsx
 [navigation]: ../../apps/ios/navigation.ts
 [ui]: ../../apps/ios/ui.tsx

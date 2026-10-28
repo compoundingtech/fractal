@@ -3,13 +3,13 @@ use super::*;
 impl Store {
     #[cfg(any(test, feature = "test-support"))]
     pub fn count_refolded_cards_for_test(&self, cards: usize) {
-        self.smalltalk.agent_resources_refolded_cards.fetch_add(cards, std::sync::atomic::Ordering::Relaxed);
-        self.smalltalk.agent_resources_largest_fold.fetch_max(cards, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.agent_resources_refolded_cards.fetch_add(cards, std::sync::atomic::Ordering::Relaxed);
+        self.fractal.agent_resources_largest_fold.fetch_max(cards, std::sync::atomic::Ordering::Relaxed);
     }
 
     #[cfg(any(test, feature = "test-support"))]
     pub fn agent_resources_refolded_cards_for_test(&self) -> usize {
-        self.smalltalk.agent_resources_refolded_cards.load(std::sync::atomic::Ordering::Relaxed)
+        self.fractal.agent_resources_refolded_cards.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Only fields consumed by agent cards, retaining the full reducer's membership,
@@ -607,7 +607,7 @@ impl Store {
             .into_iter()
             .collect::<Vec<_>>();
         let kept = {
-            let folds = self.smalltalk.usage_folds.lock().expect("usage folds poisoned");
+            let folds = self.fractal.usage_folds.lock().expect("usage folds poisoned");
             unique_subjects.iter()
                 .filter_map(|subject| folds.get(subject.as_str())
                     .filter(|cached| cached.through <= through)
@@ -695,7 +695,7 @@ impl Store {
         let summaries = folded.iter()
             .filter_map(|(subject, cached)| cached.fold.summary().map(|summary| (subject.clone(), summary)))
             .collect();
-        let mut folds = self.smalltalk.usage_folds.lock().expect("usage folds poisoned");
+        let mut folds = self.fractal.usage_folds.lock().expect("usage folds poisoned");
         for (subject, cached) in folded {
             folds.keep(subject, cached);
         }
@@ -800,12 +800,12 @@ impl Store {
             let (title, detail) = if let [seat] = names.as_slice() {
                 (
                     format!("{seat} on {host} needs you to log in"),
-                    format!("{seat} on {host} needs you to log in: attach (Ctrl+] in stui) and {how}. A successful authenticated turn clears this alert automatically."),
+                    format!("{seat} on {host} needs you to log in: attach (Ctrl+] in Fractal TUI) and {how}. A successful authenticated turn clears this alert automatically."),
                 )
             } else {
                 (
                     format!("{} seats on {host} need you to log in to {login}", names.len()),
-                    format!("{} on {host} share the login {login}, which needs you to sign in again: attach to {} (Ctrl+] in stui) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.", names.join(", "), first.subject),
+                    format!("{} on {host} share the login {login}, which needs you to sign in again: attach to {} (Ctrl+] in Fractal TUI) and {how}. One sign-in fixes every seat; each clears when its next authenticated turn succeeds.", names.join(", "), first.subject),
                 )
             };
             items.push(AttentionItemView {
@@ -897,7 +897,7 @@ fn attention_closing_step(
     })
 }
 
-fn attention_target_state_tx(connection: &Connection, target: &str) -> Result<Option<TargetState>> {
+pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -> Result<Option<TargetState>> {
     let row = |sql: &str, id: &str| -> Result<Option<TargetState>> {
         connection
             .query_row(/* sqlite-large-value: allow-for-now lv-h734e628c2a7c owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ sql, [id], |row| {
@@ -1204,51 +1204,27 @@ fn attention_item_from_revision(
     }
 }
 
-fn pending_human_reviews_tx(
+pub(super) fn pending_human_reviews_tx(
     connection: &Connection,
     reviewer: Option<&str>,
 ) -> Result<Vec<HumanReviewView>> {
     let requests = {
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h152042da2cc3 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
-            "SELECT request.id, request.store_index, request.batch_id, request.subject,
-                    request.kind, request.origin, request.actor, request.body,
-                    request.predecessors, request.accepted_at_unix_ms
-             FROM claims request INDEXED BY claims_human_gate_request_index
-             WHERE request.kind='gate.requested'
-               AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
-               AND (?1 IS NULL OR json_extract(request.body, '$.fields.reviewer')=?1)
-               AND NOT EXISTS (SELECT 1 FROM claims result WHERE {})
-             ORDER BY CANONICAL_ASC(request)",
-            reviewer_answer_sql("result")
-        )))?;
+        let mut statement =
+            connection.prepare(/* sqlite-large-value: allow-for-now lv-h17335d660f3b owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &human_review_reassignment::pending_requests_sql(reviewer.is_some()))?;
         statement
-            .query_map([reviewer], claim_from_row)?
+            .query_map([reviewer], |row| {
+                Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    // A build that words a gate's request differently asks the same gate again. The reviewer
-    // answers the newest request, which is the one the gate waits on, and has waited since the
-    // first.
-    let mut reviews: Vec<HumanReviewView> = Vec::new();
-    for request in requests {
-        let Some(review) = current_human_review(connection, request)? else {
-            continue;
-        };
-        match reviews.iter_mut().find(|kept| {
-            kept.owner == review.owner
-                && kept.reviewer == review.reviewer
-                && kept.attempt == review.attempt
-        }) {
-            Some(kept) => {
-                let first = kept.requested_at_unix_ms.min(review.requested_at_unix_ms);
-                if review.requested_at_unix_ms >= kept.requested_at_unix_ms {
-                    *kept = review;
-                }
-                kept.requested_at_unix_ms = first;
-            }
-            None => reviews.push(review),
+    let mut pending = Vec::with_capacity(requests.len());
+    for (request, first_requested_at) in requests {
+        if let Some(mut review) = current_human_review(connection, request)? {
+            review.requested_at_unix_ms = first_requested_at.parse()?;
+            pending.push(review);
         }
     }
-    Ok(reviews)
+    Ok(pending)
 }
 
 pub fn attention_request_view_tx(
@@ -1360,7 +1336,7 @@ fn attention_target_can_end(connection: &Connection, target: &str) -> Result<boo
         || pull_request_state_tx(connection, target)?.is_some())
 }
 
-type TargetState = (String, Option<u128>);
+pub(crate) type TargetState = (String, Option<u128>);
 
 /// Target kinds whose own state can end an attention request; see
 /// the retained legacy request metadata. A pull request resource

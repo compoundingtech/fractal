@@ -65,7 +65,7 @@ it.each(['switch completion', 'switch abandonment', 'direct-open abandonment'] a
     expect(timing.getEntriesByName('fractal:switch_to_tail', 'measure')).toHaveLength(0)
     if (!direct) {
       const second = [...host.querySelectorAll<HTMLElement>('nav [data-testid="taste-agent-row"]')].find(row => row.textContent?.includes('Second Agent'))!
-      const title = second.querySelector<HTMLElement>('[data-row-column="title-text"]')!
+      const title = second.querySelector<HTMLElement>('[data-row-column="title"]')!
       await act(async () => title.click())
       expect(window.location.pathname).toBe('/w/agent/second')
     }

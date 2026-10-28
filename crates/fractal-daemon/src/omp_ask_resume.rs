@@ -98,7 +98,7 @@ fn healing_command(
         if name.starts_with("ST3_")
             || name.starts_with("ST2_")
             || (name.starts_with("ST_") && name != "ST_AGENT")
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/smalltalk/issues/3032
+            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
             || (name.starts_with("FRACTAL_") && name != "FRACTAL_AGENT")
             // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
             || matches!(name.as_ref(), "PTY_SESSION" | "PTY_ROOT" | "PTY_SESSION_DIR")
@@ -390,7 +390,7 @@ if '--resume' in sys.argv and 'ST_ADMISSION_TRACE' not in os.environ:
     #[test]
     fn native_reopen_contraction_probe_when_omp_is_supplied() {
         let Some(binary) = std::env::var_os("OMP_BIN") else {
-            eprintln!("SKIP native reopen contraction probe: set OMP_BIN to the raw pinned OMP executable; smalltalk does not provide OMP");
+            eprintln!("SKIP native reopen contraction probe: set OMP_BIN to the raw pinned OMP executable; Fractal does not provide OMP");
             return;
         };
         // The hermetic contraction gate belongs to dotfiles/flakes/external/omp: invoke this

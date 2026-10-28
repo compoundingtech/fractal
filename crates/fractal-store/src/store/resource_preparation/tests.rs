@@ -35,6 +35,22 @@ fn a_second_connection_commit_is_detected_by_the_same_writer_data_version() {
     assert!(!fence.current(&store, &writer, &prepared));
 }
 
+#[test]
+fn preparation_fence_accepts_only_exact_native_queue_notifier_definitions() {
+    let directory = tempfile::tempdir().unwrap();
+    for name in ["preparation_work_pending", "preparation_work_dirty"] {
+        let store = Store::open(&directory.path().join(format!("{name}.sqlite")), "example-notifier-fence").unwrap();
+        let writer = store.connection.write();
+        assert!(temporary_schema_safe(&writer), "the installed body-free notifiers are eligible");
+        writer.execute_batch(&format!(
+            /* sqlite-large-value: allow-for-now lv-hf18af68df655 owner=fractal_store::store::resource_preparation::tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER temp.{name};
+             CREATE TEMP TRIGGER {name} AFTER INSERT ON main.local_resource_preparation_dirty
+             BEGIN SELECT 1; END;"
+        )).unwrap();
+        assert!(!temporary_schema_safe(&writer), "a trusted name cannot admit an altered notifier");
+    }
+}
+
 // Use the public client admission and the same local AUTOINCREMENT publication as log_diet.
 // Warm up its actor key before pinning so a key-creation failure cannot imitate the lock.
 fn unrelated_timeline(store: &Store, sequence: u64) -> Result<(ClaimRecord, bool), St3Error> {

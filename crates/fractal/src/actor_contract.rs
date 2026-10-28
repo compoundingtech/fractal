@@ -143,7 +143,12 @@ mod tests {
     fn actor_contract_records_runtime_person_exceptions() {
         let value = generate(super::super::Cli::command());
         let commands = &value["contract"]["commands"];
-        for path in ["st conversations send", "st conversations reply"] {
+        for path in [
+            "st conversations send",
+            "st conversations reply",
+            "st agents rename-id",
+            "st missions rename-id",
+        ] {
             assert_eq!(commands[path]["actor"], "required", "{path}");
             assert_eq!(commands[path]["can_carry_person"], true, "{path}");
         }

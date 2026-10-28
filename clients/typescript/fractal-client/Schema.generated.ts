@@ -145,6 +145,13 @@ export const Revision = /*#__PURE__*/ (() => Schema.String.check(Schema.isMinLen
 export type Revision = typeof Revision.Type
 export type RevisionEncoded = typeof Revision.Encoded
 
+export const PrivateNotesFence = /*#__PURE__*/ (() => Schema.Struct({
+  "carrier_generation": Revision,
+  "revision": Revision
+}).annotate({ identifier: "PrivateNotesFence" }))()
+export type PrivateNotesFence = typeof PrivateNotesFence.Type
+export type PrivateNotesFenceEncoded = typeof PrivateNotesFence.Encoded
+
 export const RunGenerationId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:run-generation)/[^\\s]+$", "u"), "run-generation").annotate({ identifier: "RunGenerationId" }))()
 export type RunGenerationId = typeof RunGenerationId.Type
 export type RunGenerationIdEncoded = typeof RunGenerationId.Encoded
@@ -158,6 +165,7 @@ export const Fence = /*#__PURE__*/ (() => Schema.Struct({
   "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "mission_generation": optionalKey(RunGenerationId),
   "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))),
+  "private_notes": optionalKey(PrivateNotesFence),
   "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "runtime_desired_revision": optionalKey(Schema.String),
   "runtime_incarnation": optionalKey(Schema.String),
@@ -183,6 +191,7 @@ export const ActionCommon = /*#__PURE__*/ (() => Schema.Struct({
   "type": Schema.Literals([
   "arrangement.edit",
   "custom.reply",
+  "private-notes.write",
   "prompt.respond",
   "attention.resolve",
   "review.approve",
@@ -268,7 +277,8 @@ export type AgentResumeParametersEncoded = typeof AgentResumeParameters.Encoded
 
 export const AgentRetireParameters = /*#__PURE__*/ (() => Schema.Struct({
   "agent": Id,
-  "reason": Schema.String.check(Schema.isMinLength(1))
+  "reason": Schema.String.check(Schema.isMinLength(1)),
+  "successor": optionalKey(Id)
 }).annotate({ identifier: "AgentRetireParameters" }))()
 export type AgentRetireParameters = typeof AgentRetireParameters.Type
 export type AgentRetireParametersEncoded = typeof AgentRetireParameters.Encoded
@@ -468,12 +478,35 @@ export const PersonStepParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type PersonStepParameters = typeof PersonStepParameters.Type
 export type PersonStepParametersEncoded = typeof PersonStepParameters.Encoded
 
-/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {"0":[1],"1":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). */
+/** Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile. */
+export const PrivateNotesUri = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^dev\\.schickling\\.agent-private-notes://[^/]+/[^/]+$", "u"))).pipe(Schema.brand("st3/PrivateNotesUri")).annotate({ identifier: "PrivateNotesUri", description: "Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile." }))()
+export type PrivateNotesUri = typeof PrivateNotesUri.Type
+export type PrivateNotesUriEncoded = typeof PrivateNotesUri.Encoded
+
+export const PrivateNotesWriteParameters = /*#__PURE__*/ (() => Schema.Struct({
+  "markdown": Schema.String,
+  "uri": PrivateNotesUri
+}).annotate({ identifier: "PrivateNotesWriteParameters" }))()
+export type PrivateNotesWriteParameters = typeof PrivateNotesWriteParameters.Type
+export type PrivateNotesWriteParametersEncoded = typeof PrivateNotesWriteParameters.Encoded
+
+export const DelegationProof = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Schema.String,
+  "message": Schema.String,
+  "person": Schema.String,
+  "policy": Schema.String,
+  "quote": Schema.String
+}).annotate({ identifier: "DelegationProof" }))()
+export type DelegationProof = typeof DelegationProof.Type
+export type DelegationProofEncoded = typeof DelegationProof.Encoded
+
+/** A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {"0":[1],"1":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). An authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof; when delegation is present, answer must be dismiss. Parameters never select the actor. */
 export const PromptRespondParameters = /*#__PURE__*/ (() => Schema.Struct({
   "answer": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(16384)),
+  "delegation": optionalKey(DelegationProof),
   "episode": Schema.String,
   "target_id": Id
-}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit)." }))()
+}).annotate({ identifier: "PromptRespondParameters", description: "A person's answer to a native harness prompt alert: its seat, the episode on the alert's action_parameters, and one of its answers. allow or deny a permission; approve or deny a plan; for a question, deny, or its choices as positions in place of answer: a JSON object of each question's position in the pending call to the positions of the options chosen, such as {\"0\":[1],\"1\":[0,2]}; a screen prompt's own answer (use, use-all, skip, trust, exit, quit). An authenticated agent may only dismiss an auto-denial under an exact current close-item delegation proof; when delegation is present, answer must be dismiss. Parameters never select the actor." }))()
 export type PromptRespondParameters = typeof PromptRespondParameters.Type
 export type PromptRespondParametersEncoded = typeof PromptRespondParameters.Encoded
 
@@ -497,18 +530,20 @@ export type TerminalCreateParametersEncoded = typeof TerminalCreateParameters.En
 export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": ArrangementEditParameters, "type": Schema.Literal("arrangement.edit") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": CustomReplyParameters, "type": Schema.Literal("custom.reply") }),
+  Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": PrivateNotesFence, "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PrivateNotesWriteParameters, "type": Schema.Literal("private-notes.write") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PromptRespondParameters, "type": Schema.Literal("prompt.respond") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentCreateParameters, "type": Schema.Literal("agent.create") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentRetireParameters, "type": Schema.Literal("agent.retire") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentRetireParameters, "type": Schema.Literal("agent.retire") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentStopParameters, "type": Schema.Literal("agent.stop") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentStopParameters, "type": Schema.Literal("agent.stop") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentStartParameters, "type": Schema.Literal("agent.start") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentStartParameters, "type": Schema.Literal("agent.start") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentSuspendParameters, "type": Schema.Literal("agent.suspend") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentSuspendParameters, "type": Schema.Literal("agent.suspend") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentResumeParameters, "type": Schema.Literal("agent.resume") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": AgentResumeParameters, "type": Schema.Literal("agent.resume") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TerminalCreateParameters, "type": Schema.Literal("terminal.create") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("terminal.end") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": PersonAskParameters, "type": Schema.Literal("work.ask") }),
@@ -522,39 +557,39 @@ export const ActionRequest = /*#__PURE__*/ (() => Schema.Union([
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "feedback": Schema.String, "launch_id": Id }), "type": Schema.Literal("launch.revise") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "launch_id": Id, "variant_id": Id }), "type": Schema.Literal("launch.preview") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken")), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "launch_id": Id, "variant_id": Id }), "type": Schema.Literal("launch.approve") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken")), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "launch_id": Id, "variant_id": Id }), "type": Schema.Literal("launch.approve") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("launch.cancel") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "inputs": Schema.Record(Schema.String, Schema.String), "mission_id": Id, "workspace": Schema.String }), "type": Schema.Literal("mission.start") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "launch_id": Id, "mission_run_id": Id }), "type": Schema.Literal("mission.revise") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "launch_id": Id, "mission_run_id": Id }), "type": Schema.Literal("mission.revise") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken")), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("mission.approve-revision") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken")), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("mission.approve-revision") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("mission.cancel-revision") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("mission.cancel-revision") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("mission.cancel") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("mission.cancel") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("session.import") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("session.import") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": Revision, "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["work.claim","work.renew","work.progress","work.complete","work.fail","work.release"]) }),
+"fence": Schema.Struct({ "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": Revision, "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["work.claim","work.renew","work.progress","work.complete","work.fail","work.release"]) }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": Revision, "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "reason": Schema.String.check(Schema.isMinLength(1)), "target_id": Id }), "type": Schema.Literal("work.retry") }),
+"fence": Schema.Struct({ "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": Revision, "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "reason": Schema.String.check(Schema.isMinLength(1)), "target_id": Id }), "type": Schema.Literal("work.retry") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": Revision, "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "mission": Schema.Record(Schema.String, Schema.Unknown), "name": Schema.String, "target_id": Id }), "type": Schema.Literal("work.publish-mission") }),
+"fence": Schema.Struct({ "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "mission_generation": RunGenerationId, "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": Revision, "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "mission": Schema.Record(Schema.String, Schema.Unknown), "name": Schema.String, "target_id": Id }), "type": Schema.Literal("work.publish-mission") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "agent_id": Id, "anchor_run_id": optionalKey(Id), "mission_run_id": Id, "placement": Schema.Literals(["top","bottom","before","after"]), "reason": optionalKey(Schema.String) }), "type": Schema.Literal("agent.queue-move") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "anchor_id": optionalKey(Id), "detail": optionalKey(Schema.String), "entry_id": Id, "head": optionalKey(Schema.String), "lane_id": Id, "outcome": optionalKey(Schema.Literals(["completed","removed"])), "placement": optionalKey(Schema.Literals(["top","bottom","before","after"])), "reason": optionalKey(Schema.String), "state": optionalKey(Schema.Literals(["waiting","held","ready","running"])) }), "type": Schema.Literals(["lane.join","lane.leave","lane.move","lane.mark","lane.approve"]) }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["runtime.stop","runtime.restart","runtime.reset"]) }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": Schema.String, "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["runtime.stop","runtime.restart","runtime.reset"]) }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("runtime.context-clear") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("runtime.context-clear") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "signal": Schema.Literals(["interrupt","terminate","kill"]), "target_id": Id }), "type": Schema.Literal("runtime.signal") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "signal": Schema.Literals(["interrupt","terminate","kill"]), "target_id": Id }), "type": Schema.Literal("runtime.signal") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "mode": Schema.Literals(["line","raw","key"]), "terminal_id": Id, "value": Schema.String }), "type": Schema.Literal("terminal.input") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "mode": Schema.Literals(["line","raw","key"]), "terminal_id": Id, "value": Schema.String }), "type": Schema.Literal("terminal.input") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "columns": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "rows": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "terminal_id": Id }), "type": Schema.Literal("terminal.resize") }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": Schema.Struct({ "columns": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "rows": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "terminal_id": Id }), "type": Schema.Literal("terminal.resize") }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
-"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["terminal.attach","terminal.detach"]) }),
+"fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": optionalKey(PrivateNotesFence), "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": Schema.String, "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }), "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literals(["terminal.attach","terminal.detach"]) }),
   Schema.Struct({ "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]), "fence": Fence, "id": Id, "idempotency_key": Schema.String.check(Schema.isMinLength(16)).check(Schema.isMaxLength(256)).pipe(Schema.brand("st3/IdempotencyKey")), "parameters": TargetParameters, "type": Schema.Literal("pairing.revoke") })
 ], { mode: "oneOf" }).annotate({ identifier: "ActionRequest" }))()
 export type ActionRequest = typeof ActionRequest.Type
@@ -587,6 +622,7 @@ export const ActionResult = /*#__PURE__*/ (() => Schema.Struct({
   "arrangement_revision": optionalKey(Revision),
   "kind": Schema.Literal("action-result"),
   "operation_id": Id,
+  "private_notes": optionalKey(PrivateNotesFence),
   "snapshot_id": Id,
   "status": Schema.Literals(["accepted","completed","rejected"]),
   "terminal_attachment": Schema.OptionFromOptionalNullOr(TerminalAttachment, NULL_NONE)
@@ -646,6 +682,13 @@ export type AgentIdEncoded = typeof AgentId.Encoded
 export const AgentLifecycle = /*#__PURE__*/ (() => openEnum(["standing","owner","bounded"]).annotate({ identifier: "AgentLifecycle", description: "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown." }))()
 export type AgentLifecycle = typeof AgentLifecycle.Type
 export type AgentLifecycleEncoded = typeof AgentLifecycle.Encoded
+
+export const AgentMailCustody = /*#__PURE__*/ (() => Schema.Struct({
+  "state": Schema.Literal("pending"),
+  "successor": AgentId
+}).annotate({ identifier: "AgentMailCustody" }))()
+export type AgentMailCustody = typeof AgentMailCustody.Type
+export type AgentMailCustodyEncoded = typeof AgentMailCustody.Encoded
 
 export const StepRunId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:step-run)/[^\\s]+$", "u"), "step-run").annotate({ identifier: "StepRunId" }))()
 export type StepRunId = typeof StepRunId.Type
@@ -830,6 +873,23 @@ export const AgentTodo = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentTodo = typeof AgentTodo.Type
 export type AgentTodoEncoded = typeof AgentTodo.Encoded
 
+/** A named edge from a seat or mission declaration to an ordinary resource subject in the graph. */
+export const DeclaredResource = /*#__PURE__*/ (() => Schema.Struct({
+  /** Whether the edge was authored with uri= or subject=. */
+  "kind": Schema.Literals(["uri","subject"]).annotate({ description: "Whether the edge was authored with uri= or subject=." }),
+  /** Unique within the declaration. */
+  "name": Schema.String.annotate({ description: "Unique within the declaration." }),
+  "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** URI locator availability. Subject references use not-applicable; this is not a subject existence check. */
+  "resolution": Schema.Literals(["resolved","unresolved","not-applicable"]).annotate({ description: "URI locator availability. Subject references use not-applicable; this is not a subject existence check." }),
+  /** The ordinary resource subject targeted by this edge. URI references use resource/uri/SHA256 of the exact URI. */
+  "subject": Id,
+  /** The exact absolute URI, any scheme. Present only for resolved URI references. */
+  "uri": optionalKey(Schema.String).annotate({ description: "The exact absolute URI, any scheme. Present only for resolved URI references." })
+}).annotate({ identifier: "DeclaredResource", description: "A named edge from a seat or mission declaration to an ordinary resource subject in the graph." }))()
+export type DeclaredResource = typeof DeclaredResource.Type
+export type DeclaredResourceEncoded = typeof DeclaredResource.Encoded
+
 export const HostId = /*#__PURE__*/ (() => subjectRef(new RegExp("^(?:host)/[^\\s]+$", "u"), "host").annotate({ identifier: "HostId" }))()
 export type HostId = typeof HostId.Type
 export type HostIdEncoded = typeof HostId.Encoded
@@ -920,6 +980,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "activity": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "What the seat is doing that is neither ordinary work nor a wait on a person, shown as its status and never as an alert: compacting while its harness compacts its conversation (Claude Code, Codex and omp report both edges). Absent otherwise and on older daemons; clients show unknown values as plain text." }),
   /** Structured human ask kind (question, permission, or review); meaningful only while blocked_on is human. */
   "ask": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Structured human ask kind (question, permission, or review); meaningful only while blocked_on is human." }),
+  /** Background job count from the selected current-incarnation harness state report; zero is known empty, null is unknown. */
+  "background_jobs": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Background job count from the selected current-incarnation harness state report; zero is known empty, null is unknown." }),
   /** Current incarnation's harness blocking axis; human means a person must answer before it continues. */
   "blocked_on": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Current incarnation's harness blocking axis; human means a person must answer before it continues." }),
   /** The requested Git worktree repository, base and branch. Present before launch; it does not assert that checkout succeeded. */
@@ -950,6 +1012,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "last_activity_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   /** The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row. */
   "lifecycle": optionalKey(AgentLifecycle),
+  /** Pending mail held for the named successor; omitted without custody. */
+  "mail_custody": optionalKey(AgentMailCustody),
   "name": Schema.String,
   "next_work": Schema.OptionFromOptionalNullOr(WorkLabel, NULL_NONE),
   "next_work_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
@@ -963,6 +1027,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "reachability": AgentReachability,
   /** Diagnostic harness reason, not a machine-readable verdict. */
   "reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "Diagnostic harness reason, not a machine-readable verdict." }),
+  /** The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field. */
+  "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
   /** Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons. */
   "rollout": Schema.OptionFromOptionalNullOr(Schema.Record(Schema.String, Schema.Unknown), NULL_NONE).annotate({ description: "Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons." }),
@@ -971,8 +1037,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   /** When this observed state began in this runtime incarnation. Same-state observations never reset it. */
   "since": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE).annotate({ description: "When this observed state began in this runtime incarnation. Same-state observations never reset it." }),
   "state": AgentState,
-  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field. */
-  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field." }),
+  /** The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents. */
+  "subagents": optionalKey(Schema.Array(AgentSubagent)).annotate({ description: "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents." }),
   /** The seat's latest suspend or resume and its phase. An older daemon omits the field. */
   "suspension": Schema.OptionFromOptionalNullOr(AgentSuspension, NULL_NONE).annotate({ description: "The seat's latest suspend or resume and its phase. An older daemon omits the field." }),
   /** Latest accepted harness todo snapshot and claim provenance; null if none was observed. Stale observations remain visible. */
@@ -1086,6 +1152,37 @@ export const AgentWorkspace = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentWorkspace = typeof AgentWorkspace.Type
 export type AgentWorkspaceEncoded = typeof AgentWorkspace.Encoded
 
+/** Node-local graph cut and roster-relevant local activity frontier. These numbers are not comparable across nodes or epochs. */
+export const AgentsStatusWatermark = /*#__PURE__*/ (() => Schema.Struct({
+  "local_frontier": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "store_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AgentsStatusWatermark", description: "Node-local graph cut and roster-relevant local activity frontier. These numbers are not comparable across nodes or epochs." }))()
+export type AgentsStatusWatermark = typeof AgentsStatusWatermark.Type
+export type AgentsStatusWatermarkEncoded = typeof AgentsStatusWatermark.Encoded
+
+/** Identity and source cut of one immutable complete current agents publication. This definition does not add fields to legacy HTTP responses or collection frames. */
+export const AgentsPublicationMetadata = /*#__PURE__*/ (() => Schema.Struct({
+  /** Server-captured presentation time in Unix milliseconds, not producer observation time or evidence receipt time. */
+  "materialized_at_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Server-captured presentation time in Unix milliseconds, not producer observation time or evidence receipt time." }),
+  /** Opaque UUID for the publication owner's epoch. Restart, full projection reset or revision exhaustion starts a new epoch. */
+  "node_epoch": Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "u"))).annotate({ description: "Opaque UUID for the publication owner's epoch. Restart, full projection reset or revision exhaustion starts a new epoch." }),
+  /** Increasing JSON-safe publication number within one node epoch. Gaps are allowed; this is not a replay cursor. */
+  "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)).annotate({ description: "Increasing JSON-safe publication number within one node epoch. Gaps are allowed; this is not a replay cursor." }),
+  "status_watermark": AgentsStatusWatermark
+}).annotate({ identifier: "AgentsPublicationMetadata", description: "Identity and source cut of one immutable complete current agents publication. This definition does not add fields to legacy HTTP responses or collection frames." }))()
+export type AgentsPublicationMetadata = typeof AgentsPublicationMetadata.Type
+export type AgentsPublicationMetadataEncoded = typeof AgentsPublicationMetadata.Encoded
+
+/** Complete immutable current agents view. Order contains each item ID once in presentation order. No core row-count or encoded-byte limit applies. This transport-neutral definition does not change legacy response shapes. */
+export const AgentsPublication = /*#__PURE__*/ (() => Schema.Struct({
+  "has_more": Schema.Literal(false),
+  "items": Schema.Array(Agent),
+  "order": Schema.Array(Id).check(Schema.isUnique()),
+  "publication": AgentsPublicationMetadata
+}).annotate({ identifier: "AgentsPublication", description: "Complete immutable current agents view. Order contains each item ID once in presentation order. No core row-count or encoded-byte limit applies. This transport-neutral definition does not change legacy response shapes." }))()
+export type AgentsPublication = typeof AgentsPublication.Type
+export type AgentsPublicationEncoded = typeof AgentsPublication.Encoded
+
 export const ArrangementNameRegister = /*#__PURE__*/ (() => Schema.Struct({
   "revision": Revision,
   "value": ArrangementName
@@ -1170,7 +1267,8 @@ export const PageInfo = /*#__PURE__*/ (() => Schema.Struct({
   "cursor_expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
   "has_more": Schema.Boolean,
   "limit": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200)),
-  "next_cursor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE)
+  "next_cursor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  "omitted_items": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE)
 }).annotate({ identifier: "PageInfo" }))()
 export type PageInfo = typeof PageInfo.Type
 export type PageInfoEncoded = typeof PageInfo.Encoded
@@ -1631,6 +1729,72 @@ export const AttentionBlocked = /*#__PURE__*/ (() => Schema.Struct({
 export type AttentionBlocked = typeof AttentionBlocked.Type
 export type AttentionBlockedEncoded = typeof AttentionBlocked.Encoded
 
+export const AttentionActor = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Id,
+  /** The name a person reads. */
+  "label": Schema.String.annotate({ description: "The name a person reads." })
+}).annotate({ identifier: "AttentionActor" }))()
+export type AttentionActor = typeof AttentionActor.Type
+export type AttentionActorEncoded = typeof AttentionActor.Encoded
+
+export const AttentionRevisionLine = /*#__PURE__*/ (() => Schema.Struct({
+  /** + adds a step, - removes one, ~ changes the mission or a step. */
+  "op": Schema.Literals(["+","-","~"]).annotate({ description: "+ adds a step, - removes one, ~ changes the mission or a step." }),
+  /** In plain words: `step PATH`, or `PATH: fields` and `mission: fields` for a change. */
+  "text": Schema.String.annotate({ description: "In plain words: `step PATH`, or `PATH: fields` and `mission: fields` for a change." })
+}).annotate({ identifier: "AttentionRevisionLine" }))()
+export type AttentionRevisionLine = typeof AttentionRevisionLine.Type
+export type AttentionRevisionLineEncoded = typeof AttentionRevisionLine.Encoded
+
+export const AttentionRevision = /*#__PURE__*/ (() => Schema.Struct({
+  /** The revision the run runs now. */
+  "from_revision": Schema.String.annotate({ description: "The revision the run runs now." }),
+  /** The mission's own changed fields, then by step path the steps added, removed and changed. */
+  "lines": Schema.Array(AttentionRevisionLine).check(Schema.isMaxLength(200)).annotate({ description: "The mission's own changed fields, then by step path the steps added, removed and changed." }),
+  "reason": Schema.String,
+  /** The candidate revision. */
+  "to_revision": Schema.String.annotate({ description: "The candidate revision." }),
+  /** Whether there were more than 200 lines. */
+  "truncated": Schema.Boolean.annotate({ description: "Whether there were more than 200 lines." })
+}).annotate({ identifier: "AttentionRevision" }))()
+export type AttentionRevision = typeof AttentionRevision.Type
+export type AttentionRevisionEncoded = typeof AttentionRevision.Encoded
+
+export const AttentionWaiting = /*#__PURE__*/ (() => Schema.Struct({
+  /** The step's name within its mission. */
+  "path": Schema.String.annotate({ description: "The step's name within its mission." }),
+  "step": StepRunId
+}).annotate({ identifier: "AttentionWaiting" }))()
+export type AttentionWaiting = typeof AttentionWaiting.Type
+export type AttentionWaitingEncoded = typeof AttentionWaiting.Encoded
+
+export const AttentionPresentation = /*#__PURE__*/ (() => Schema.Struct({
+  /** Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff. */
+  "agent": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." }),
+  /** The card; null for a row that is no card (an unread message stays in its conversation). */
+  "kind": Schema.OptionFromNullOr(Schema.Literals([
+  "review",
+  "feedback",
+  "request",
+  "update",
+  "launch",
+  "revision",
+  "prompt",
+  "login",
+  "fault"
+])).annotate({ description: "The card; null for a row that is no card (an unread message stays in its conversation)." }),
+  /** Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission. */
+  "raised_by": Schema.OptionFromNullOr(AttentionActor).annotate({ description: "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." }),
+  /** On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision. */
+  "revision": optionalKey(AttentionRevision),
+  /** The Now group, by its fixtures/clients/words.json tier id; null for a row that is not a Now card. */
+  "tier": Schema.OptionFromNullOr(Schema.Literals(["stopped","alert","today","later"])).annotate({ description: "The Now group, by its fixtures/clients/words.json tier id; null for a row that is not a Now card." }),
+  /** The step it holds. */
+  "waiting": Schema.OptionFromNullOr(AttentionWaiting).annotate({ description: "The step it holds." })
+}).annotate({ identifier: "AttentionPresentation" }))()
+export type AttentionPresentation = typeof AttentionPresentation.Type
+export type AttentionPresentationEncoded = typeof AttentionPresentation.Encoded
+
 export const AttentionTargetState = /*#__PURE__*/ (() => Schema.Struct({
   "id": Id,
   "since": optionalKey(Timestamp),
@@ -1710,6 +1874,8 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
   "mission_run_id": optionalKey(Id),
   "operational": optionalKey(Operational),
   "person_id": Id,
+  /** st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons. */
+  "presentation": optionalKey(AttentionPresentation),
   "preview": Schema.OptionFromOptionalNullOr(LaunchPreview, NULL_NONE),
   "preview_token": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "priority": Schema.Literals(["critical","high","normal","low"]),
@@ -1922,15 +2088,20 @@ export const ClientDiagnosticsBatch = /*#__PURE__*/ (() => Schema.Struct({
 export type ClientDiagnosticsBatch = typeof ClientDiagnosticsBatch.Type
 export type ClientDiagnosticsBatchEncoded = typeof ClientDiagnosticsBatch.Encoded
 
+/** Proposed in #1910; pending decision. {traceparent: string, tracestate?: string}. Any JSON value is accepted; absent, null, non-object, missing/non-string traceparent or invalid W3C traceparent is ignored. The daemon validates with the W3C propagator, not this schema. */
+export const SubscribeTraceContext = /*#__PURE__*/ (() => Schema.Unknown.annotate({ identifier: "SubscribeTraceContext", description: "Proposed in #1910; pending decision. {traceparent: string, tracestate?: string}. Any JSON value is accepted; absent, null, non-object, missing/non-string traceparent or invalid W3C traceparent is ignored. The daemon validates with the W3C propagator, not this schema." }))()
+export type SubscribeTraceContext = typeof SubscribeTraceContext.Type
+export type SubscribeTraceContextEncoded = typeof SubscribeTraceContext.Encoded
+
 export const CollectionCommand = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
-  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+  Schema.Struct({ "actor": optionalKey(Schema.Null), "collection": Schema.Literals(["clients","usage","machines","devices","sessions","terminals"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "since_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "status": optionalKey(Schema.Null), "trace": optionalKey(SubscribeTraceContext), "until_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }),
+  Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "collection": Schema.Literals(["missions","attention","work","glasses","summary"]), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext) }),
   Schema.Struct({ "actor": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), /** Follow exactly this current agent rather than the bounded fleet window. */
-"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE) }),
+"agent": Schema.OptionFromOptionalNullOr(AgentId, NULL_NONE).annotate({ description: "Follow exactly this current agent rather than the bounded fleet window." }), "collection": Schema.Literal("agents"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "status": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "trace": optionalKey(SubscribeTraceContext) }),
   Schema.Struct({ "collection": Schema.Literal("arrangements"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(200))), "person": ArrangementPerson, /** Follow only this arrangement; its owner must equal person. */
-"subject": optionalKey(ArrangementId) }),
-  Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id }),
-  Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe") }),
+"subject": optionalKey(ArrangementId), "trace": optionalKey(SubscribeTraceContext) }),
+  Schema.Struct({ "capability": Schema.String, "collection": Schema.Literal("terminal"), "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "incarnation": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE), "kind": Schema.Literal("subscribe"), "terminal": Id, "trace": optionalKey(SubscribeTraceContext) }),
+  Schema.Struct({ "collection": Schema.Literal("conversation"), "conversation": Id, "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("subscribe"), "trace": optionalKey(SubscribeTraceContext) }),
   Schema.Struct({ "id": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(128)), "kind": Schema.Literal("unsubscribe") })
 ], { mode: "oneOf" }).annotate({ identifier: "CollectionCommand" }))()
 export type CollectionCommand = typeof CollectionCommand.Type
@@ -2592,6 +2763,8 @@ export const Mission = /*#__PURE__*/ (() => Schema.Struct({
   "operational": optionalKey(Operational),
   /** st's presentation of this mission: its word, who must act, each step, the stuck step and what a person can do (docs/clients/ui-contract.md, Mission). Absent on older daemons and until st has a published agents roster. */
   "presentation": optionalKey(MissionPresentation),
+  /** The resources the current published revision names, in authored order. Read-only. An older daemon omits the field. */
+  "resources": optionalKey(Schema.Array(DeclaredResource)).annotate({ description: "The resources the current published revision names, in authored order. Read-only. An older daemon omits the field." }),
   "revision": Revision,
   "run_counts": optionalKey(Schema.Record(Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)))),
   "run_details": optionalKey(Schema.Array(MissionRunSummary)),
@@ -2783,6 +2956,30 @@ export const UnknownResource = /*#__PURE__*/ (() => Schema.Struct({
 export type UnknownResource = typeof UnknownResource.Type
 export type UnknownResourceEncoded = typeof UnknownResource.Encoded
 
+/** An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free. */
+export const UsageCredits = /*#__PURE__*/ (() => Schema.Struct({
+  "budget_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "period_start_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "unpriced_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "used_microusd": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "UsageCredits", description: "An api-key account's spend so far in the UTC calendar month of the period's end, against its monthly budget. Costs are API-equivalent; tokens with no price are counted apart, never as free." }))()
+export type UsageCredits = typeof UsageCredits.Type
+export type UsageCreditsEncoded = typeof UsageCredits.Encoded
+
+export const UsageAccount = /*#__PURE__*/ (() => Schema.Struct({
+  /** The label its usage rows and limits carry, joining them to this account. */
+  "account": optionalKey(Schema.String).annotate({ description: "The label its usage rows and limits carry, joining them to this account." }),
+  "credits": optionalKey(UsageCredits),
+  "driver": optionalKey(Schema.String),
+  "kind": Schema.Literals(["subscription","api-key"]),
+  /** The declared name, like nathan/claude-1. */
+  "name": Schema.String.annotate({ description: "The declared name, like nathan/claude-1." }),
+  "plan": optionalKey(Schema.String),
+  "provider": Schema.String
+}).annotate({ identifier: "UsageAccount" }))()
+export type UsageAccount = typeof UsageAccount.Type
+export type UsageAccountEncoded = typeof UsageAccount.Encoded
+
 export const UsageLimit = /*#__PURE__*/ (() => Schema.Struct({
   "account": Schema.String,
   "account_ref": optionalKey(Schema.String),
@@ -2833,6 +3030,8 @@ export type UsagePricingEncoded = typeof UsagePricing.Encoded
 
 export const UsageRow = /*#__PURE__*/ (() => Schema.Struct({
   "account": optionalKey(Schema.String),
+  /** The declared account this row's spend is read against, when one claims its label. Absent on older servers. */
+  "account_ref": optionalKey(Schema.String).annotate({ description: "The declared account this row's spend is read against, when one claims its label. Absent on older servers." }),
   "agent": Id,
   "cache_write_1h_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "cache_write_tokens": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
@@ -2855,6 +3054,8 @@ export type UsageRow = typeof UsageRow.Type
 export type UsageRowEncoded = typeof UsageRow.Encoded
 
 export const UsagePeriod = /*#__PURE__*/ (() => Schema.Struct({
+  /** Every declared account in name order, so each panel lists the same accounts. Absent on older servers. */
+  "accounts": optionalKey(Schema.Array(UsageAccount)).annotate({ description: "Every declared account in name order, so each panel lists the same accounts. Absent on older servers." }),
   "agent_messages": optionalKey(AgentMessageEstimate),
   "limits": optionalKey(Schema.Array(UsageLimit)),
   "rows": Schema.Array(UsageRow),
@@ -3013,6 +3214,19 @@ export const Snapshot = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "Snapshot", description: "The complete projected state at one local store index and projection version." }))()
 export type Snapshot = typeof Snapshot.Type
 export type SnapshotEncoded = typeof Snapshot.Encoded
+
+/** This host's replication as a stream frame states it: level, or catching up with or diverged from the peers named. Unlike a page's SyncNotice it is explicit when level, so that its absence on a stream means unknown. A state this client does not know reads as unknown, never level. */
+export const StreamSync = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "peers": optionalKey(Schema.Array(Schema.Unknown).check(Schema.isMaxLength(0))), "state": Schema.Literal("level") }),
+  Schema.Struct({ /** The peers this host is behind or diverged from: present exactly when the state is not level. */
+"peers": Schema.Array(SyncPeer).check(Schema.isMinLength(1)).annotate({ description: "The peers this host is behind or diverged from: present exactly when the state is not level." }), "state": Schema.Literal("catching-up") }),
+  Schema.Struct({ /** The peers this host is behind or diverged from: present exactly when the state is not level. */
+"peers": Schema.Array(SyncPeer).check(Schema.isMinLength(1)).annotate({ description: "The peers this host is behind or diverged from: present exactly when the state is not level." }), "state": Schema.Literal("diverged") }),
+  Schema.Struct({ /** The peers this host is behind or diverged from: present exactly when the state is not level. */
+"peers": optionalKey(Schema.Array(SyncPeer).check(Schema.isMinLength(1))).annotate({ description: "The peers this host is behind or diverged from: present exactly when the state is not level." }), "state": unknownCase(["level","catching-up","diverged"]) })
+], { mode: "oneOf" }).annotate({ identifier: "StreamSync", description: "This host's replication as a stream frame states it: level, or catching up with or diverged from the peers named. Unlike a page's SyncNotice it is explicit when level, so that its absence on a stream means unknown. A state this client does not know reads as unknown, never level." }))()
+export type StreamSync = typeof StreamSync.Type
+export type StreamSyncEncoded = typeof StreamSync.Encoded
 
 export const TerminalFacts = /*#__PURE__*/ (() => Schema.Struct({
   "clients": optionalKey(Schema.Struct({ "attached": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "read_only": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "total": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)) })),
@@ -3596,11 +3810,13 @@ export const TimelineMessageBody = /*#__PURE__*/ (() => Schema.Struct({
   /** The assistant grant that authorized the send, with sender_class. */
   "assistant_grant_id": optionalKey(Schema.String).annotate({ description: "The assistant grant that authorized the send, with sender_class." }),
   "attachments": optionalKey(Schema.Array(Attachment)),
+  "author": optionalKey(ActorRef),
   "blocks": optionalKey(Schema.Array(TimelineBlock)),
   "body_bytes": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
   "from": optionalKey(SenderRef),
   "message_id": Schema.String,
   "provenance": optionalKey(MessageProvenance),
+  "recipients": optionalKey(Schema.Array(ParticipantRef)),
   "reply_to": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   /** Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text. */
   "sender_class": optionalKey(Schema.Literals(["external-assistant"])).annotate({ description: "Trusted sender class stamped only by the authorized external-assistant send path; never derived from body text." }),
@@ -3672,23 +3888,25 @@ export type TimelineUsageBodyEncoded = typeof TimelineUsageBody.Encoded
 
 /** One conversation timeline entry. `replace` keeps id, sequence, role and type; `finalize` makes it immutable. */
 export const TimelineEntry = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "body": TimelineMessageBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("message") }),
-  Schema.Struct({ "body": TimelineContentBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("content") }),
-  Schema.Struct({ "body": TimelineToolCallBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_call") }),
-  Schema.Struct({ "body": TimelineToolResultBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_result") }),
-  Schema.Struct({ "body": TimelineStatusBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("status") }),
-  Schema.Struct({ "body": TimelineErrorBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("error") }),
-  Schema.Struct({ "body": TimelineUsageBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("usage") }),
-  Schema.Struct({ "body": TimelineRedactionBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("redaction") }),
-  Schema.Struct({ "body": TimelineTruncationBody, "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("truncation") }),
-  Schema.Struct({ "body": Schema.Record(Schema.String, Schema.Unknown), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": unknownCase(["message","content","tool_call","tool_result","status","error","usage","redaction","truncation"]) })
+  Schema.Struct({ "body": TimelineMessageBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("message") }),
+  Schema.Struct({ "body": TimelineContentBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("content") }),
+  Schema.Struct({ "body": TimelineToolCallBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_call") }),
+  Schema.Struct({ "body": TimelineToolResultBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("tool_result") }),
+  Schema.Struct({ "body": TimelineStatusBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("status") }),
+  Schema.Struct({ "body": TimelineErrorBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("error") }),
+  Schema.Struct({ "body": TimelineUsageBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("usage") }),
+  Schema.Struct({ "body": TimelineRedactionBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("redaction") }),
+  Schema.Struct({ "body": TimelineTruncationBody, "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": Schema.Literal("truncation") }),
+  Schema.Struct({ "body": Schema.Record(Schema.String, Schema.Unknown), "delivers": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^message/[^\\s]+$", "u")))), "final": Schema.Boolean, "id": TimelineEntryId, "revision": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)), "role": Schema.Literals(["system","user","assistant","tool"]), "sequence": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "timestamp": Timestamp, "type": unknownCase(["message","content","tool_call","tool_result","status","error","usage","redaction","truncation"]) })
 ], { mode: "oneOf" }).annotate({ identifier: "TimelineEntry", description: "One conversation timeline entry. `replace` keeps id, sequence, role and type; `finalize` makes it immutable." }))()
 export type TimelineEntry = typeof TimelineEntry.Type
 export type TimelineEntryEncoded = typeof TimelineEntry.Encoded
 
 export const CollectionFrame = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot }),
-  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, "upserts": Schema.Array(Resource) }),
+  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "items": Schema.Array(Resource), "kind": Schema.Literal("snapshot"), "order": Schema.Array(Id), "snapshot": Snapshot, /** This host's replication, taken when this frame was built. A daemon that sends it sends it on every snapshot of the collections that carry it (attention). Absent means unknown (an older daemon), never level. */
+"sync": optionalKey(StreamSync) }),
+  Schema.Struct({ "collection": CollectionName, "has_more": Schema.Boolean, "id": Schema.String, "kind": Schema.Literal("changes"), "order": Schema.Array(Id), "removes": Schema.Array(Id), "snapshot": Snapshot, /** Present only when this host's replication changed since the last frame of this subscription (its state, or which peers are ahead), including back to level. Absent means it did not change. */
+"sync": optionalKey(StreamSync), "upserts": Schema.Array(Resource) }),
   Schema.Struct({ "collection": Schema.Literal("terminal"), "id": Schema.String, "kind": Schema.Literal("screen"), "snapshot": Snapshot, "value": TerminalScreen }),
   Schema.Struct({ "collection": Schema.Literal("conversation"), "has_more": optionalKey(Schema.Boolean), /** Present when conversation-blocks.v1 is negotiated and at least one header field is available */
 "header": optionalKey(ConversationHeader), "id": Schema.String, "items": Schema.Array(TimelineEntry), "kind": Schema.Literal("conversation"), /** Replacement frames only, present whenever has_more is true: the timeline cursor (GET /v1/client/sessions/{id}/timeline?cursor=...) for the entries just before this frame's oldest entry. */
@@ -3869,12 +4087,22 @@ export const Page = /*#__PURE__*/ (() => Schema.Struct({
 export type Page = typeof Page.Type
 export type PageEncoded = typeof Page.Encoded
 
+export const FabricGrant = /*#__PURE__*/ (() => Schema.Struct({
+  "detail": optionalKey(Schema.String),
+  "peer": optionalKey(Schema.String),
+  "service": optionalKey(Schema.String),
+  "state": Schema.Literals(["granted","already-trusted","not-enabled","not-requested","failed"])
+}).annotate({ identifier: "FabricGrant" }))()
+export type FabricGrant = typeof FabricGrant.Type
+export type FabricGrantEncoded = typeof FabricGrant.Encoded
+
 export const PersonPairedSession = /*#__PURE__*/ (() => Schema.Struct({
   "credential": Schema.RedactedFromValue(Schema.String.check(Schema.isMinLength(32))),
   "device_id": Id,
   "device_key_chain": optionalKey(Schema.Array(Schema.String)),
   "device_key_proofs": optionalKey(Schema.Array(Schema.Record(Schema.String, Schema.Unknown)).check(Schema.isMaxLength(2))),
   "expires_at": Timestamp,
+  "fabric_grant": optionalKey(FabricGrant),
   "kind": Schema.Literal("paired-session"),
   "person_id": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/]+$", "u"))),
   "person_root_key_proof": optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
@@ -3897,6 +4125,33 @@ export const PairingChallenge = /*#__PURE__*/ (() => Schema.Union([
 ], { mode: "oneOf" }).annotate({ identifier: "PairingChallenge" }))()
 export type PairingChallenge = typeof PairingChallenge.Type
 export type PairingChallengeEncoded = typeof PairingChallenge.Encoded
+
+export const PrivateNotesAction = /*#__PURE__*/ (() => Schema.Struct({
+  /** The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions. */
+  "fence": Schema.Struct({ "attempt": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "mission_generation": optionalKey(RunGenerationId), "preview_token": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^lpv0:[0-9a-f]{64}$", "u"))).pipe(Schema.brand("st3/PreviewToken"))), "private_notes": PrivateNotesFence, "readiness_epoch": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))), "runtime_desired_revision": optionalKey(Schema.String), "runtime_incarnation": optionalKey(Schema.String), "snapshot_id": SnapshotId, "step_definition": optionalKey(Revision), "subject_revisions": Schema.Record(Schema.String, Revision).check(Schema.makeFilter((o: object) => Object.keys(o).every(Schema.is(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]*/", "u"))))), { expected: "property names matching the schema" })), "terminal_sequence": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))) }).annotate({ description: "The snapshot and exact mutable identities the user acted on; echoed byte-identically in actions." }),
+  "id": Schema.Literal("private-notes.write")
+}).annotate({ identifier: "PrivateNotesAction" }))()
+export type PrivateNotesAction = typeof PrivateNotesAction.Type
+export type PrivateNotesActionEncoded = typeof PrivateNotesAction.Encoded
+
+export const PrivateNotesData = /*#__PURE__*/ (() => Schema.Struct({
+  "fence": PrivateNotesFence,
+  "markdown": Schema.String,
+  "uri": PrivateNotesUri
+}).annotate({ identifier: "PrivateNotesData" }))()
+export type PrivateNotesData = typeof PrivateNotesData.Type
+export type PrivateNotesDataEncoded = typeof PrivateNotesData.Encoded
+
+export const PrivateNotesSubject = /*#__PURE__*/ (() => Schema.Struct({
+  "actions": Schema.Array(PrivateNotesAction).check(Schema.isMaxLength(1)),
+  "data": PrivateNotesData,
+  "family": Schema.Literal("private-notes"),
+  "live": Schema.Null,
+  "ref": PrivateNotesUri,
+  "schema": Schema.Literal("fractal.private-notes@1")
+}).annotate({ identifier: "PrivateNotesSubject" }))()
+export type PrivateNotesSubject = typeof PrivateNotesSubject.Type
+export type PrivateNotesSubjectEncoded = typeof PrivateNotesSubject.Encoded
 
 /** Canonical publication values with resolved compiler defaults; requires read.declarations. */
 export const PublicationDefinition = /*#__PURE__*/ (() => Schema.Struct({
@@ -3934,6 +4189,81 @@ export const ResourcesPage = /*#__PURE__*/ (() => Schema.Struct({
 }).annotate({ identifier: "ResourcesPage" }))()
 export type ResourcesPage = typeof ResourcesPage.Type
 export type ResourcesPageEncoded = typeof ResourcesPage.Encoded
+
+export const ScheduleUnheardHost = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "age_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991))),
+  "host_id": Schema.String,
+  "last_exchange_at": Schema.OptionFromNullOr(Schema.String),
+  "reason": openEnum(["older-than-threshold","never-recorded","clock-unknown"])
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleUnheardHost" }))()
+export type ScheduleUnheardHost = typeof ScheduleUnheardHost.Type
+export type ScheduleUnheardHostEncoded = typeof ScheduleUnheardHost.Encoded
+
+export const ScheduleCoverage = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "covered_host_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "membership": openEnum(["unknown"]),
+  "omitted_configured_peer_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "omitted_covered_host_count": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "scope": Schema.Literal("configured-peers-and-page-hosts"),
+  "truncated": Schema.Boolean,
+  /** Positive display threshold in milliseconds; default 300000, capped at the JSON exact integer ceiling; never host health. */
+  "unheard_after_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)).annotate({ description: "Positive display threshold in milliseconds; default 300000, capped at the JSON exact integer ceiling; never host health." }),
+  "unheard_hosts": Schema.Array(ScheduleUnheardHost).check(Schema.isMaxLength(200))
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleCoverage" }))()
+export type ScheduleCoverage = typeof ScheduleCoverage.Type
+export type ScheduleCoverageEncoded = typeof ScheduleCoverage.Encoded
+
+export const ScheduleKnowledge = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "age_ms": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991))),
+  "basis": openEnum(["local-read","last-direct-exchange","unknown"]),
+  "completeness": openEnum(["unknown"]),
+  "last_exchange_at": Schema.OptionFromNullOr(Schema.String),
+  "origin_host_id": Schema.OptionFromNullOr(Schema.String)
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleKnowledge" }))()
+export type ScheduleKnowledge = typeof ScheduleKnowledge.Type
+export type ScheduleKnowledgeEncoded = typeof ScheduleKnowledge.Encoded
+
+export const ScheduleOwner = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "generation_id": Schema.OptionFromNullOr(Schema.String),
+  "run_id": Schema.OptionFromNullOr(Schema.String),
+  "state": openEnum(["recorded","not-recorded","unknown"]),
+  "step_id": Schema.OptionFromNullOr(Schema.String)
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleOwner" }))()
+export type ScheduleOwner = typeof ScheduleOwner.Type
+export type ScheduleOwnerEncoded = typeof ScheduleOwner.Encoded
+
+export const ScheduleDeclaration = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "declaration": Schema.Unknown,
+  "declaration_bytes": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).check(Schema.isLessThanOrEqualTo(9007199254740991)),
+  "declaration_claim_id": Schema.String,
+  "declaration_origin_host_id": Schema.OptionFromNullOr(Schema.String),
+  "id": Schema.String,
+  "knowledge": ScheduleKnowledge,
+  "next_declared_fire_at": Schema.OptionFromNullOr(Schema.String),
+  "next_fire_basis": Schema.Literal("declaration-only"),
+  "next_fire_state": openEnum(["future","stopped","past-one-shot","unknown"]),
+  "owner": ScheduleOwner,
+  "primary_host_id": Schema.OptionFromNullOr(Schema.String),
+  "read_problem": Schema.OptionFromNullOr(Schema.String),
+  "revision": Schema.String,
+  "standby_node": Schema.Unknown,
+  "standby_state": openEnum(["declared","not-declared","unknown"]),
+  "state": openEnum(["declared","stopped","unknown"])
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "ScheduleDeclaration" }))()
+export type ScheduleDeclaration = typeof ScheduleDeclaration.Type
+export type ScheduleDeclarationEncoded = typeof ScheduleDeclaration.Encoded
+
+export const SchedulesPage = /*#__PURE__*/ (() => Schema.StructWithRest(Schema.Struct({
+  "as_of": Timestamp,
+  "basis": Schema.Literal("local-replicated-declarations"),
+  "collection": Schema.Literal("schedules"),
+  "coverage": ScheduleCoverage,
+  "items": Schema.Array(ScheduleDeclaration).check(Schema.isMaxLength(200)),
+  "kind": Schema.Literal("page"),
+  "page": PageInfo
+}), [Schema.Record(Schema.String, Schema.Unknown)]).annotate({ identifier: "SchedulesPage" }))()
+export type SchedulesPage = typeof SchedulesPage.Type
+export type SchedulesPageEncoded = typeof SchedulesPage.Encoded
 
 /** What was left of one objective or budget across a period, in equal steps; a step holds its lowest reading and is null when nothing was read. */
 export const SloHistory = /*#__PURE__*/ (() => Schema.Struct({
@@ -4021,7 +4351,7 @@ export const Envelope = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "request_id": RequestId,
   "snapshot": Snapshot,
-  "value": Schema.Union([DirectiveNotes, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, ClientDiagnosticsAck, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
+  "value": Schema.Union([DirectiveNotes, Capabilities, PrivateNotesSubject, DocumentContent, DocumentsPage, SchedulesPage, DocumentReferences, SubjectDefinition, PublicationDefinition, AgentWorkspace, Page, ResourcesPage, Resource, TimelinePage, ConversationChanges, ConversationSearch, EventPage, ActionResult, ClientDiagnosticsAck, PairingChallenge, PairedSession, AssistantGrant, AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage, TerminalScreen, StatusHistory, AgentQueue, UsagePeriod, MailBacklog, SloList, SloHistory], { mode: "oneOf" })
 }).annotate({ identifier: "Envelope" }))()
 export type Envelope = typeof Envelope.Type
 export type EnvelopeEncoded = typeof Envelope.Encoded
@@ -4029,8 +4359,15 @@ export type EnvelopeEncoded = typeof Envelope.Encoded
 /** Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads. */
 export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "recipient-retired",
+  "identity-cycle",
+  "identity-occupied",
+  "identity-retired-source",
+  "identity-cross-kind",
+  "identity-unknown",
   "lifecycle-unavailable",
   "retirement-upgrade-required",
+  "invalid-custody-successor",
+  "custody-pending",
   "attention-migrated",
   "arrangement-exists",
   "arrangement-folder-exists",
@@ -4050,6 +4387,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "not-found",
   "forbidden",
   "unsupported-capability",
+  "peer-too-old",
   "validation-failed",
   "idempotency-conflict",
   "issuer-required",
@@ -4086,6 +4424,9 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "content-not-text",
   "invalid-document-reference",
   "document-not-synced",
+  "private-notes-unreachable",
+  "private-notes-carrier-conflict",
+  "private-notes-indeterminate",
   "internal"
 ]).annotate({ identifier: "ErrorCode", description: "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads." }))()
 export type ErrorCode = typeof ErrorCode.Type
@@ -4246,7 +4587,7 @@ export type ObservationResponseEncoded = typeof ObservationResponse.Encoded
 /** Static unauthenticated pairing preflight; no envelope, presence update or graph information. */
 export const PairingAdvertisement = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
-  "capabilities": Schema.Array(Schema.Struct({ "id": Schema.Literal("device-key-proofs"), "state": Schema.Literal("granted"), "version": Schema.Literal(1) })).check(Schema.isMinLength(1)).check(Schema.isMaxLength(1))
+  "capabilities": Schema.Array(Schema.Struct({ "id": Schema.Literals(["device-key-proofs","fabric-gateway-grant"]), "state": Schema.Literal("granted"), "version": Schema.Literal(1) })).check(Schema.isMinLength(1)).check(Schema.isMaxLength(2))
 }).annotate({ identifier: "PairingAdvertisement", description: "Static unauthenticated pairing preflight; no envelope, presence update or graph information." }))()
 export type PairingAdvertisement = typeof PairingAdvertisement.Type
 export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
@@ -4254,6 +4595,8 @@ export type PairingAdvertisementEncoded = typeof PairingAdvertisement.Encoded
 export const PersonPairingBegin = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "device_name": Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(120)),
+  /** Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing. */
+  "fabric_gateway": optionalKey(Schema.Boolean).annotate({ description: "Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing." }),
   "full_control": optionalKey(Schema.Boolean),
   "person_id": Schema.String.check(Schema.isPattern(new RegExp("^person/[^/]+$", "u"))),
   /** Narrows the default limited grant. Must not be combined with full_control. */
@@ -4273,6 +4616,7 @@ export const PairingComplete = /*#__PURE__*/ (() => Schema.Struct({
   "api_version": Schema.Literals(["st3.client.v0","fractal.client.v0"]),
   "code": Schema.String.check(Schema.isPattern(new RegExp("^[A-Z2-9]{8}$", "u"))),
   "device_public_key": Schema.String.check(Schema.isMinLength(32)),
+  "fabric_node_id": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[0-9a-f]{64}$", "u")))),
   "key_storage": optionalKey(Schema.Literals(["secure-enclave","software"]))
 }).annotate({ identifier: "PairingComplete" }))()
 export type PairingComplete = typeof PairingComplete.Type

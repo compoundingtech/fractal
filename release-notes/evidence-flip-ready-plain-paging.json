@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/evidence-flip-ready reads the pull request runs by plain paging, newest first back to the window start, instead of GitHub's created= filter, which answered an empty or short listing for about one request in four; a short page is asked again, and a window past the listing's 1,000-run cap is unreadable rather than undercounted",
+  "replay": {"status": "none", "detail": "A CI helper script, its test and docs; no claims or projections change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or skip policy change; the flip trigger is unchanged."},
+  "compatibility": {"status": "none", "detail": "No API, CLI or wire change; the script's JSON keeps its fields."},
+  "downtime": {"status": "none", "detail": "No runtime code changes."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

@@ -1,4 +1,4 @@
-//! Tests of `smallclaims::store::checkpoint` through smalltalk's store.
+//! Tests of `smallclaims::store::checkpoint` through Fractal's store.
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub use crate::store::checkpoint_tests_shared_seats::*;
@@ -357,15 +357,6 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
     // Epoch checks keep the capture coherent across bounded page snapshots. The set must not
     // depend on how the pages fall: one row to a page, a few, or the maximum bounded page.
     let store = Store::open_memory("alder").unwrap();
-    store
-        .append_claim_outcome(&input(
-            AGENT,
-            "harness.observed",
-            Some(AGENT),
-            json!({"state": "idle", "incarnation_id": "inc-1"}),
-            "harness",
-        ))
-        .unwrap();
     let old = now_ms() - 9 * DAY_MS;
     for n in 0..40_u64 {
         store
@@ -544,6 +535,7 @@ fn sealed_capture_rejects_invalid_envelope_times_at_first_use() {
 }
 
 #[test]
+
 fn sealed_capture_restarts_when_trim_commits_between_metadata_and_bodies() {
     use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
     struct Pause {
@@ -574,10 +566,6 @@ fn sealed_capture_restarts_when_trim_commits_between_metadata_and_bodies() {
     let scratch = tempfile::tempdir().unwrap();
     // WAL lets the trim commit while one bounded body page holds its read snapshot.
     let store = Arc::new(Store::open(&scratch.path().join("claims.sqlite3"), "alder").unwrap());
-    store.append_claim(&input(
-        AGENT, "harness.observed", Some(AGENT),
-        json!({"state":"idle","incarnation_id":"one"}), "harness",
-    )).unwrap();
     let old = now_ms() - 9 * DAY_MS;
     for n in 0..3 {
         store.append_claim(&input(
@@ -1465,6 +1453,7 @@ fn only(exchange: &ReplicationExchange, envelopes: Vec<ReplicaEnvelope>) -> Repl
             buckets: Vec::new(),
             accepts: None,
             checkpoint: None,
+            claim_range_query: None,
         },
         envelopes,
         ..exchange.clone()
@@ -2353,7 +2342,7 @@ carriers=every-rule-but-loop.state-keeps-the-newest-carrier-of-each-field";
 
 #[test]
 fn the_policy_renders_the_rules_description_with_review_question_history_and_usage_reader() {
-    assert_eq!(super::checkpoint_rules::RULES_VERSION, 19);
+    assert_eq!(super::checkpoint_rules::RULES_VERSION, 20);
     let questions = "keep=all-while-pending,newest-once-resolved-1d-before-cut";
     assert_eq!(
         super::checkpoint_rules::rules_description(),
@@ -2367,6 +2356,7 @@ fn the_policy_renders_the_rules_description_with_review_question_history_and_usa
                 "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n",
                 &format!(
                     "sekret.changed slot=subject keep=newest min-age-before-cut=5d\n\
+                     slo.breach-transition slot=subject keep=episode-event-fences-and-conflicts-after-recovery-7d\n\
                      harness-question.observed slot=subject {questions}\n"
                 ),
             )
@@ -2629,6 +2619,7 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         Rule::UsageCumulative => "cumulative",
         Rule::AccountLimits => "limits",
         Rule::QuestionLifecycle => "question",
+        Rule::SloEventFences => "slo",
     };
     let field_sets = [
         json!({}),
@@ -2687,6 +2678,11 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
         if claim.kind == "harness.limits" {
             let slot = vec![claim.subject.clone(), claim.kind.clone()];
             assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("limits", slot)));
+            continue;
+        }
+        if claim.kind == "slo.breach-transition" {
+            let slot = vec![claim.subject.clone(), claim.kind.clone()];
+            assert_eq!(slot_of(claim).map(|(rule, slot)| (name(rule), slot)), Some(("slo", slot)));
             continue;
         }
         if claim.kind == "runtime.reconcile-decision" {

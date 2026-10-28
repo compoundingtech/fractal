@@ -242,3 +242,99 @@ fn a_later_queued_job_rejects_an_earlier_jobs_uncommitted_write() {
         "the native counter must reject before commit publication"
     );
 }
+
+#[test]
+fn observation_preparation_history_decodes_are_independent_of_history_length() {
+    use fractal_store::store::ACTUAL_HISTORY_BODIES_DECODED;
+
+    const ITEMS: u64 = 3;
+    let (_directory, store, revision) = fixture();
+    let resource = "resource/example-repository";
+    let facts = json!({"pull_requests": (1..=ITEMS)
+        .map(|number| json!({"number": number, "state": "open"}))
+        .collect::<Vec<_>>()});
+    let mut measurements = Vec::new();
+    for history in [1, 8, 32] {
+        let prior = measurements.last().map_or(0, |(length, _)| *length);
+        for _ in prior..history {
+            for number in 0..=ITEMS {
+                let (subject, kind, observed) = if number == 0 {
+                    (resource.to_owned(), "vcs.repository", json!({}))
+                } else {
+                    (format!("{resource}/pull-request/{number}"),
+                     "vcs.pull-request", json!({"number": number, "state": "open"}))
+                };
+                store.append_claim(&ClaimInput {
+                    subject,
+                    kind: "resource.observed".into(),
+                    actor: None,
+                    fields: BTreeMap::from([
+                        ("kind".into(), json!(kind)),
+                        ("facts".into(), observed),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                }).unwrap();
+            }
+        }
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        let prepared = Fence::new(&store).prepare_with_actuals(&store, |reader, _| {
+            read_inputs(reader, Observation {
+                observer: "observer/fixture",
+                desired_revision: &revision,
+                attempt: None,
+                resource,
+                facts: &facts,
+                subscriptions: &[],
+            })
+        });
+        let inputs = prepared.value.expect("file-backed preparation is available").unwrap();
+        assert_eq!(inputs.recorded_items.len(), ITEMS as usize);
+        assert!(inputs.recorded_items.values().all(Option::is_some));
+        let decoded = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
+        measurements.push((history, decoded));
+    }
+    eprintln!("preparation history bodies decoded (I={ITEMS}): {measurements:?}");
+    let baseline = measurements[0].1;
+    assert!(
+        measurements.iter().all(|(_, decoded)| *decoded <= baseline),
+        "fixed-cardinality preparation must not decode growing claim history: {measurements:?}"
+    );
+}
+
+#[test]
+fn canonical_observer_fallback_history_reads_are_bounded() {
+    use fractal_store::store::ACTUAL_HISTORY_BODIES_DECODED;
+
+    let (_directory, store, revision) = fixture();
+    let facts = json!({"state": "open"});
+    let cursor = "x".repeat(64 * 1024);
+    let mut measurements = Vec::new();
+    for history in [1, 8, 32] {
+        let prior = measurements.last().map_or(0, |(length, _)| *length);
+        let mut writer = store.connection.write();
+        let transaction = writer.transaction().unwrap();
+        for _ in prior..history {
+            append_claim_tx(&transaction, &store.origin, "observer/fixture", "observer.observed",
+                None, &json!({"fields": {
+                    "status": "healthy", "revision": revision, "cursor": cursor, "changed": true,
+                }}), &[], None).unwrap();
+        }
+        transaction.commit().unwrap();
+        let transaction = writer.transaction().unwrap();
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(0));
+        // This is the exact None-preparation branch in record_resource_observation_attempt.
+        let prepared = inputs(&transaction, "observer/fixture", &revision, None,
+            "resource/fixture", &facts, &[]).unwrap();
+        assert!(prepared.active_subscriptions.is_empty());
+        let decoded = ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
+        measurements.push((history, decoded));
+        transaction.rollback().unwrap();
+    }
+    eprintln!("canonical observer fallback (history claims, bodies decoded): {measurements:?}");
+    assert!(
+        measurements.iter().all(|(_, decoded)| *decoded <= measurements[0].1),
+        "fixed-input fallback must not decode growing observer history: {measurements:?}"
+    );
+}

@@ -91,8 +91,6 @@ const ADAPTER_ACTOR: &str = "agent/bench/cost/adapter";
 /// much worse unnoticed. Each breaks the daemon's rule that no query's cost grows with the whole
 /// store and is owed a fix. A fixed one fails the check until it leaves this list.
 const KNOWN_GROWTH: &[(&str, f64)] = &[
-    // Attention reads every person ask (11.8x full-scan steps).
-    ("GET /v1/attention", 18.0),
     // Checkpoint status walks the sealed set (9.8x).
     ("GET /v1/checkpoint/status", 15.0),
     // Doctor checks the whole store, as it must (11.4x full-scan steps).
@@ -104,8 +102,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
     ("GET /v1/outcome-history", 12.5),
     // The repair plan's work grows faster than the store (24.7x steps, 64.6x full-scan steps).
     ("GET /v1/repair", 97.0),
-    // Reviews scan every claim of their kinds (19.6x steps, 25.0x full-scan steps).
-    ("GET /v1/reviews", 38.0),
     // Sessions read every harness observation (11.5x full-scan steps).
     ("GET /v1/sessions", 17.5),
 ];
@@ -114,8 +110,20 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/client/private-notes/{*uri}",
+        "owner-local catalog/filesystem read with generation and revision fences; private bytes and recovery receipts are outside the replicated graph; path and audit refusal boundaries are covered by private_notes tests",
+    ),
+    (
+        "POST /v1/deploy/verify-go",
+        "requires an immutable packaged deployment policy and genuinely signed local GO/principal/STOP history, absent from generated cost stores; deploy_verify.rs covers the real CLI/API refusal boundary; successful verification scans eligible-origin and deployment history, whose growth is not measured here",
+    ),
+    (
         "GET /v1/internal/fleet/leave-state",
         "proxies a live replication worker's in-memory membership/receipt snapshot over its private socket; no claim-store scan; worker snapshot and API incarnation controls are unit-covered",
+    ),
+    (
+        "POST /v1/internal/fleet/pairing-admission",
+        "explicit one-use fleet admission proxies the bounded signed request to the live worker; uses the existing invite redemption and verified membership fold, not a polling read path",
     ),
     (
         "GET /v1/internal/fleet/admission-residue",
@@ -322,6 +330,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     // Writes that need a live runtime or a person's approval the generated store lacks.
     ("POST /v1/agents/rename", "renames a declared agent"),
+    (
+        "POST /v1/persons/rename",
+        "explicit identity repair enumerates the old person's current work and reviews once; requires that person's authority and is not a steady-state daemon request; covered by api::tests::human_review_list_and_decisions_use_exact_current_requests",
+    ),
     ("POST /v1/agents/restart", "restarts a live seat"),
     (
         "POST /v1/agents/rollout",
@@ -341,6 +353,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "POST /v1/repair/apply",
         "applies an operational repair plan",
+    ),
+    (
+        "POST /v1/repair/apply-attributed",
+        "applies an operational repair plan with an authenticated harness binding absent from generated cost stores; API repair tests cover actor enforcement",
     ),
     (
         "POST /v1/replication/repair",
@@ -369,11 +385,11 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ),
     (
         "PUT /v1/client/glasses/{id}",
-        "a stui layout, outside the graph",
+        "a Fractal TUI layout, outside the graph",
     ),
     (
         "DELETE /v1/client/glasses/{id}",
-        "a stui layout, outside the graph",
+        "a Fractal TUI layout, outside the graph",
     ),
     ("POST /v1/intent/mission", "plans a mission from KDL"),
     ("POST /v1/intent/apply", "applies a planned mission"),
@@ -864,6 +880,10 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get(
+        "GET /v1/resource-references/{*subject}",
+        "/v1/resource-references/resource/bench/cost",
+    ),
     get("GET /v1/events", "/v1/events?after={event_after}&limit=100"),
     get(
         "GET /v1/events/page",
@@ -924,6 +944,7 @@ const PROBES: &[Probe] = &[
         "GET /v1/mission-runs/{run}/revision-proposal",
         "/v1/mission-runs/{run}/revision-proposal",
     ),
+    get("GET /v1/mission-runs/{run}/waiting-on", "/v1/mission-runs/{run}/waiting-on"),
     get("GET /v1/mission-runs/{run}", "/v1/mission-runs/{run}"),
     get(
         "GET /v1/run-generations/{generation}",
@@ -1146,6 +1167,22 @@ const PROBES: &[Probe] = &[
         "/v1/internal/replication/checkpoint-need",
         |_, _| json!({}),
     ),
+    get("GET /v1/client/runtime-starts", "/v1/client/runtime-starts"),
+    get("GET /v1/client/schedules", "/v1/client/schedules?limit=50"),
+    // Last, so the identities `prepare_renames` declares change no earlier probe's store. Each
+    // attempt renames its own fresh identity.
+    post("POST /v1/agents/rename-id", "/v1/agents/rename-id", |_, attempt| json!({
+        "from": format!("agent/bench/cost/rename-{attempt}"),
+        "to": format!("agent/bench/cost/renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-agent-rename-{attempt}"),
+    })),
+    post("POST /v1/missions/rename-id", "/v1/missions/rename-id", |_, attempt| json!({
+        "from": format!("mission/cost-rename-{attempt}"),
+        "to": format!("mission/cost-renamed-{attempt}"),
+        "actor": "person/bench-operator", "reason": "Invented rename",
+        "idempotency_key": format!("cost-mission-rename-{attempt}"),
+    })),
 ];
 
 /// Each write publishes a fresh, fenced member rather than measuring an idempotent retry.
@@ -1457,19 +1494,17 @@ mission "cost/history" state="ready" {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = fractal_daemon::api::router(AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.path().join("state"),
-        pty_root: root.path().join("pty"),
-        pty_binary: stub_pty(root.path()),
-        fleet_id: None, configured_peers: Vec::new(), client_relay: None,
-        native_session_home: Some(root.path().join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-    });
+    let app = fractal_daemon::api::router(AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.path().join("state"),
+    pty_root: root.path().join("pty"),
+    pty_binary: stub_pty(root.path()),
+    fleet_id: None, configured_peers: Vec::new(), client_relay: None,
+    native_session_home: Some(root.path().join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  });
     let mut measurements = Vec::new();
     for run in 0..100 {
         let view = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
@@ -1968,7 +2003,7 @@ fn declared_routes(source: &str) -> BTreeSet<String> {
         .expect("api.rs builds its router in router_for_transport")..])
 }
 
-/// The routes of a route family a crate above st3-api adds to the router (its `routes` fn).
+/// The routes of a route family a crate above fractal-api-core adds to the router (its `routes` fn).
 fn family_routes(source: &str) -> BTreeSet<String> {
     let start = source
         .find("pub fn routes(")
@@ -2375,21 +2410,19 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         ..Default::default()
     })
     .unwrap();
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.join("state"),
-        pty_root: root.join("pty"),
-        pty_binary: pty,
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![PEER.into()],
-        client_relay: relay,
-        native_session_home: Some(root.join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: NODE.into(),
+    state_dir: root.join("state"),
+    pty_root: root.join("pty"),
+    pty_binary: pty,
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![PEER.into()],
+    client_relay: relay,
+    native_session_home: Some(root.join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
@@ -2405,7 +2438,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let client = Client::unix(&socket);
-    // Client reads come from a person, as stui and the app make them.
+    // Client reads come from a person, as Fractal TUI and the app make them.
     let person = Client::unix_as(&socket, "person/bench-operator").unwrap();
     let challenge: Value = person.post("/v1/client/pairings", &json!({
         "api_version":"st3.client.v0", "device_name":"Cost phone",
@@ -2630,6 +2663,9 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/work/start" {
             prepare_handoffs(&store, &mut fixture);
         }
+        if probe.route == "POST /v1/agents/rename-id" {
+            prepare_renames(&store);
+        }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
@@ -2817,7 +2853,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
 
 fn custom_manifest(version: u32) -> fractal_schema::custom::Manifest {
     let mut manifest: fractal_schema::custom::Manifest =
-        serde_json::from_str(include_str!("../../../examples/st3/custom-review.json")).unwrap();
+        serde_json::from_str(include_str!("../../../examples/fractal/custom-review.json")).unwrap();
     manifest.version = version;
     manifest.subject_prefix = format!("custom/garden/review/v{version}/");
     manifest
@@ -3024,6 +3060,18 @@ async fn fixture(person: &Client, client: &Client, subjects: Subjects) -> Fixtur
 
 /// Set up fresh writes outside the measured region. A handoff releases its sender before the
 /// next task starts, so each dedicated agent has exactly one worker lease during measurement.
+/// Four agents and four missions for the rename probes, one of each per attempt.
+fn prepare_renames(store: &Store) {
+    let kdl = (0..4)
+        .map(|attempt| format!(
+            "agent \"bench/cost/rename-{attempt}\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\" }}\n\
+             mission \"cost-rename-{attempt}\" state=\"ready\" {{ goal \"Invented goal\"; step \"review\" {{ assigned-to \"person/bench-operator\" }} }}\n"
+        ))
+        .collect::<String>();
+    let intent = fractal_daemon::parse_intent(&format!("version 2\n{kdl}"), NODE).unwrap();
+    store.apply_internal(&intent, "cost-rename-identities").unwrap();
+}
+
 fn prepare_handoffs(store: &Store, fixture: &mut Fixture) {
     let kdl = (0..4)
         .map(|attempt| format!(

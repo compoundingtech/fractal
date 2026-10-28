@@ -65,7 +65,7 @@ async fn main() {
         });
     }
     let path = fractal_client::discover_unix_endpoint(None).expect("a local st endpoint");
-    // The person as stui resolves it: ST3_PERSON, else `person` in the st config.
+    // The person as Fractal TUI resolves it: ST3_PERSON, else `person` in the st config.
     let person = std::env::var("ST3_PERSON").ok().or_else(|| {
         let home = std::env::var_os("HOME")?;
         let raw = std::fs::read_to_string(std::path::Path::new(&home).join(".config/st3/config.toml")).ok()?;

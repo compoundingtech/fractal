@@ -1,4 +1,6 @@
-// A request card as stui shows one (crates/fractal-tui/src/ui/screens.rs, `report` and the Request
+import type { MailImage } from './conversationView.ts';
+
+// A request card as the Fractal terminal UI shows one (crates/fractal-tui/src/ui/screens.rs, `report` and the Request
 // card): a JSON report reads as its telling fields, a yes-or-no question gets Yes and No, and
 // every answer (Nothing to do included) completes the waiting step with a short reason.
 
@@ -8,7 +10,7 @@ export const isRequest = (kind: string) => kind === 'person-step' || kind === 'a
 /** A question that ends in `?` can be answered in one tap. */
 export const yesNo = (title: string) => title.trimEnd().endsWith('?');
 
-/** What each answer sends as the step's reason, as stui sends it. */
+/** What each answer sends as the step's reason, as the Fractal terminal UI sends it. */
 export const ANSWERS = { yes: 'Yes', no: 'No', nothing: 'Nothing for me to do here.' } as const;
 
 export type ReportRow = { key: string; value: string; tone: 'fault' | 'text' | 'soft' };
@@ -38,7 +40,7 @@ export function report(text: string): Report | null {
   return { before: text.slice(0, start).trim(), rows, more: Math.max(0, rest.length - OTHERS) };
 }
 
-/** A question as agents write one, "Recommend: …⏎Why: …⏎Answer …", given room to read, as stui's
+/** A question as agents write one, "Recommend: …⏎Why: …⏎Answer …", given room to read, as the Fractal terminal UI's
  * `spaced`: a blank line between consecutive lines of prose, and a short leading label ("Why:")
  * in bold. Lists, quotes, tables, headings and code keep their lines together. */
 export function spaced(question: string): string {
@@ -68,9 +70,9 @@ export function spaced(question: string): string {
 type Request = { type: string; custom?: boolean; answers?: { id: string; outcome?: string | null }[] };
 
 /**
- * The typed answer for a person step, as stui sends it: the named answer chosen (with the words
+ * The typed answer for a person step, as the Fractal terminal UI sends it: the named answer chosen (with the words
  * when it requests changes), or the person's own words where the request takes them. Words
- * alone on a structured request are refused by st (`answer-required`), which left an answered
+ * alone on a structured request are refused by Fractal (`answer-required`), which left an answered
  * item on Home (Nathan, 2026-10-03). A string says why words cannot answer it.
  */
 export function personAnswer(request: Request | null | undefined, chosen: string | undefined, words: string): { id?: string; text?: string } | undefined | string {
@@ -83,4 +85,22 @@ export function personAnswer(request: Request | null | undefined, chosen: string
   if (request.type === 'feedback' || (request.type === 'choice' && request.custom)) return { text };
   const changes = request.answers?.find(answer => answer.outcome === 'request_changes');
   return changes ? { id: changes.id, text } : 'This asks you to pick one of its answers.';
+}
+
+/**
+ * The images an ask carries, read from Fractal by its person step (`step`, the attention's
+ * `source_id`) the way a message's images are read by the message, as the Fractal terminal UI reads them.
+ */
+export function requestImages(request: { attachments?: ReadonlyArray<{ sha256: string; media_type: string; name?: unknown; size: number }> } | null | undefined, step: string): MailImage[] {
+  return (request?.attachments ?? []).filter(attachment => attachment.media_type.startsWith('image/')).map(attachment => {
+    const name = optionalText(attachment.name);
+    return { sha256: attachment.sha256, message: step, mediaType: attachment.media_type, ...(name ? { name } : {}), size: attachment.size };
+  });
+}
+
+/** A name as decoded (an Option) or as sent (a string or null). */
+function optionalText(value: unknown): string | undefined {
+  if (typeof value === 'string') return value || undefined;
+  const option = value as { _tag?: string; value?: unknown } | null | undefined;
+  return option?._tag === 'Some' && typeof option.value === 'string' ? option.value || undefined : undefined;
 }

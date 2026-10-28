@@ -8,6 +8,25 @@ pub fn denied(message: impl Into<String>) -> St3Error {
     St3Error::new("delegation-refused", message)
 }
 
+pub fn add_fields(fields: &mut BTreeMap<String, Value>, proof: &DelegationProof) {
+    fields.insert("acted_for".into(), json!(proof.person));
+    fields.insert("delegation".into(), json!(proof));
+}
+
+pub fn add_evidence(
+    connection: &Connection,
+    evidence: &mut Vec<String>,
+    proof: &DelegationProof,
+) -> Result<(), St3Error> {
+    let instruction = message_sent(connection, &proof.message)?;
+    for reference in [&instruction.id, &proof.policy] {
+        if !evidence.contains(reference) {
+            evidence.push(reference.clone());
+        }
+    }
+    Ok(())
+}
+
 pub fn policy_actions(fields: &BTreeMap<String, Value>) -> Result<Vec<String>, St3Error> {
     let actions: Vec<String> =
         serde_json::from_value(fields.get("actions").cloned().unwrap_or(Value::Null))
@@ -57,6 +76,9 @@ pub fn validate_write(
     let Some(value) = fields.get("delegation") else {
         if fields.contains_key("acted_for")
             || (kind == "work.person-done"
+                && actor.is_some_and(|actor| actor.starts_with("agent/")))
+            || (kind == "harness.diagnostic"
+                && fields.get("code") == Some(&json!("native-prompt-answered"))
                 && actor.is_some_and(|actor| actor.starts_with("agent/")))
         {
             return Err(denied(
@@ -163,6 +185,12 @@ pub fn validate_write(
             }
             "close-item"
         }
+        "harness.diagnostic" => {
+            super::attention_snapshot::validate_delegated_denial(
+                tx, subject, fields, evidence, &proof,
+            )?;
+            "close-item"
+        }
         _ => {
             return Err(denied(
                 "this operation is outside the allowed delegation list",
@@ -177,6 +205,7 @@ pub fn validate_write(
     let instruction = message_sent(tx, &proof.message)?;
     if instruction.actor.as_deref() != Some(&proof.person)
         || instruction.body["fields"]["from"] != proof.person
+        || (kind == "harness.diagnostic" && instruction.body["fields"]["to"].as_str() != actor)
     {
         return Err(denied(
             "the instruction's recorded sender must be the person acted for",

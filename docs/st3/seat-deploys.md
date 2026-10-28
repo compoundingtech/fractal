@@ -1,13 +1,41 @@
 # Seats across deploys
 
-A deploy installs a new st binary and then restarts the daemon, either from the same path or from a
+A deploy installs a new Fractal binary and then restarts the daemon, either from the same path or from a
 new one such as a new Nix store path. The daemon adopts every running seat; it does not restart them.
 This document explains how each seat's message path follows the new binary without ending the
-provider session, and how st reports a seat whose message path did not.
+provider session, and how Fractal reports a seat whose message path did not.
+
+## Self-restarts at a turn boundary
+
+`st agents restart agent/example/worker --as agent/example/worker` returns
+`Restart pending` immediately when that seat's fresh harness report shows a turn in flight.
+The daemon preserves the request across its own restarts and waits for a fresh report from the
+same incarnation saying both idle and quiescent. It then uses the ordinary restart path, keeping
+the declaration, restart budget, receipts and native-session continuation behavior.
+The request is superseded by a later explicit restart, a stop, a replacement declaration or a new
+incarnation. Slice 1 exposes the pending result in the CLI response; show, roster and cancellation
+surfaces are deferred to a later change.
+
+Another actor's restart remains immediate. `--now` also requests an immediate restart, including
+from the seat itself. A dead runtime, stale report, missing report or report from another
+incarnation does not qualify a new request for deferral. Once accepted as pending, a request
+never forces a restart: if no fresh idle and quiescent boundary arrives within 30 minutes, the
+daemon raises one attention item for that request. It stays pending even if the harness stops
+reporting. The attention item clears when the request reaches the boundary or is superseded.
+
+The pending request uses the existing `runtime.action.requested` vocabulary with the string
+`action="restart-when-idle"`, its declaration evidence and old incarnation. No registry, SQL
+schema, checkpoint rule or client-v0 field changes. An older reconciler only selects
+`action="restart"`, so it leaves this pending request alone indefinitely: it neither restarts
+the seat nor raises the 30-minute attention item. Only an upgraded reconciler supplies those
+behaviors. A pending request recorded through an upgraded API and routed to an older runtime
+owner therefore silently does nothing until that owner upgrades; use an explicit immediate
+restart if interruption is intended. Older APIs also lack self-deferral, so upgrade the API
+and the runtime owner before relying on the turn boundary.
 
 ## Harness admission at the next launch
 
-Before starting an unseen installed omp or OpenCode build, st measures its native delivery
+Before starting an unseen installed omp or OpenCode build, Fractal measures its native delivery
 contract in a disposable session. Existing running providers and driver adoption across deploys
 are unaffected. On a new launch (including restart or residency resume), a failed omp measurement
 refuses to start the provider; OpenCode starts with native delivery disabled and mail stays queued.
@@ -63,7 +91,7 @@ as `vanished` from PTY liveness, without an exit code. If only the driver was si
 ## What runs in a seat
 
 Each seat runs in its own PTY. The daemon starts `st3 driver HARNESS` there, and the driver starts
-the provider. Several st processes carry the seat's messages for the whole provider session:
+the provider. Several Fractal processes carry the seat's messages for the whole provider session:
 
 | Harness | Driver | Channel |
 | --- | --- | --- |
@@ -161,7 +189,7 @@ read until binding succeeds. When the daemon returns, the same initialized child
 its existing fence. Native handoff tracking and receipts prevent replay. EOF cancels a pending
 attachment immediately, leaving no detached reconnect worker. An omitted plugin, an uninitialized
 MCP client, or a child Claude has already closed still needs the bounded seat-restart recovery;
-st does not type into the provider to recreate its channel.
+Fractal does not type into the provider to recreate its channel.
 
 A resumed push channel whose saved incarnation differs from the live incarnation refuses
 before mailbox binding, instead of continuing until a later fence. The non-push `claude-mcp`
@@ -274,7 +302,7 @@ delivery presence is independent of whether the harness can start another turn:
   and for Claude the channel reported in the last ten seconds from that image too. Pi-family
   channels must also have received the provider's idle proof and have no rejected handoff waiting;
 - `outdated`: the same live, ready path, but the process or the Claude channel still runs a
-  replaced st binary. It delivers with its old code. The reason says whether it is switching, because
+  replaced Fractal binary. It delivers with its old code. The reason says whether it is switching, because
   the file it follows now holds the daemon's image, or whether it follows another file and needs a
   seat restart to run current code;
 - `legacy`: a recent metadata-free mailbox poll came from this seat's native delivery process.
@@ -333,5 +361,5 @@ stable executable, and the service PATH puts its directory first; `pty` still co
 configured package. A systemd restart trigger or a build reference in the launchd plist makes
 Home Manager restart the daemon when the package changes despite its stable executable path.
 
-`scripts/st3-graceful-messaging-eval/run` proves this end to end for each harness; see
-[the eval](../../evals/st3/graceful-messaging/README.md).
+`scripts/fractal-graceful-messaging-eval/run` proves this end to end for each harness; see
+[the eval](../../evals/fractal/graceful-messaging/README.md).

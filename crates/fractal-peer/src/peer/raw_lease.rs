@@ -244,7 +244,7 @@ pub async fn receive_owner(
             urlencoding::encode(binding.terminal.trim_start_matches("terminal/")),
             urlencoding::encode(&binding.incarnation)
         );
-        // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
+        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: WebSocket cutover requires #3430 on every receiver; HTTP headers stay unchanged; sunset 2026-11-01.
         let mut request = format!("ws://localhost{raw_path}").into_client_request()?;
         request
             .headers_mut()
@@ -256,7 +256,7 @@ pub async fn receive_owner(
         request.headers_mut().insert(
             "sec-websocket-protocol",
             HeaderValue::from_str(&format!(
-                "st3.client.pty.v0, st3.cap.{}",
+                "fractal.client.pty.v0, fractal.cap.{}",
                 attachment.stream_capability
             ))?,
         );

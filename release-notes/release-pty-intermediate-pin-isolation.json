@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep native release PTY fingerprints and intermediate artifacts isolated by runtime revision",
+  "replay": { "status": "none", "detail": "No replay change." },
+  "schema": { "status": "none", "detail": "No database schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint rules change." },
+  "compatibility": { "status": "none", "detail": "Native release builds scope Cargo's intermediate build directory to the pinned PTY runtime, preventing a shared runner build directory from reusing another revision's path-crate artifacts. Release contents and runtime interfaces are unchanged." },
+  "downtime": { "status": "none", "detail": "No service restart or downtime." },
+  "manual": { "status": "none", "detail": "No manual action required; existing dependency caches remain enabled." },
+  "recovery": { "status": "none", "detail": "No recovery change." }
+}

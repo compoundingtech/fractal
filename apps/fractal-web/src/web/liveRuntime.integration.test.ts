@@ -99,9 +99,10 @@ it('uses replay transports without early adoption and closes replay with the pag
   }
   const { live, telemetry } = createPageRuntime(replay)
   expect(source).toHaveBeenLastCalledWith(expect.objectContaining({
+    adoptEarlyCollections: false,
     options: expect.objectContaining({
       baseUrl: 'https://example.test', maxFollows: 8, conversationSlots: 'advertised',
-      adoptEarlyCollections: false, socket: replay.socket, fetch: replay.fetch,
+      socket: replay.socket, fetch: replay.fetch,
     }),
   }))
   const underlying = source.mock.results.at(-1)!.value!

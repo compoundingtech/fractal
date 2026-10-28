@@ -1,4 +1,4 @@
-# st observability
+# Fractal observability
 
 This reference describes the current daemon, CLI, replication worker and hook
 telemetry in the `crates/fractal` implementation. The shared client-class vocabulary
@@ -10,25 +10,25 @@ O11Y-R10–R18 remain the accepted constraints. They include coverage targets th
 are not all implemented; the mechanism and integration boundaries below state the
 current coverage. Budget limits are requirements, not claims of measured compliance.
 
-- **O11Y-R10 Process signals:** The st3 daemon, replication worker, and CLI use the OpenTelemetry
+- **O11Y-R10 Process signals:** The Fractal daemon, replication worker, and CLI use the OpenTelemetry
   SDK to produce traces, metrics, and logs. Their `service.name` values are `st-daemon`,
   `st-replication-worker`, and `st-cli`. Hooks send signals through the daemon and never export
   directly; hook spans and invocation metrics emitted by the observations exporter use
   `st-hook`. Harness-timer statusline commands remain exempt from telemetry initialization.
-- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, st3 builds no
+- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, Fractal builds no
   exporter or SDK provider, makes no telemetry network calls, and incurs no measurable telemetry
   overhead. Exporter configuration uses standard `OTEL_*` variables.
 - **O11Y-R12 Reactor isolation:** Export work must not run on the daemon's request reactor.
-- **O11Y-R13 Signal version:** Every st3 signal carries `service.version` from the machine build
+- **O11Y-R13 Signal version:** Every Fractal signal carries `service.version` from the machine build
   identity, including signals from the observations exporter.
-- **O11Y-R14 Bounded metrics and attributes:** st3 exposes a bounded rate, error, duration, and
+- **O11Y-R14 Bounded metrics and attributes:** Fractal exposes a bounded rate, error, duration, and
   saturation metric set with at most 2,000 active series per daemon. Agent, session, message,
   terminal, attachment, and lease ids are forbidden in metric labels and `span.label`.
   Capabilities and their hashes are forbidden in every signal.
 - **O11Y-R15 Trace propagation:** W3C `traceparent` and `tracestate` propagate end to end across
-  st3 HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
+  Fractal HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
   protocol. Peer trace context is covered by the peer signature.
-- **O11Y-R16 Sampling:** st3 exports every span when traces are enabled and performs no
+- **O11Y-R16 Sampling:** Fractal exports every span when traces are enabled and performs no
   in-process sampling. The local collector applies the fleet sampling policy: keep traces
   with an error, a local root longer than 1 second, a sampled caller, and a deterministic
   1% of the rest. Sampling never affects metrics.
@@ -74,7 +74,7 @@ so a healthy daemon exports no log stream, while WARN/ERROR diagnostics still ex
 With no `OTEL_EXPORTER_OTLP_ENDPOINT`, initialization builds no telemetry subscriber,
 SDK providers, exporters, or threads. An atomic enabled gate returns before span construction.
 Local stderr diagnostics remain available. Standard `OTEL_*` environment variables configure
-export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every st3
+export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every Fractal
 unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 
 | Process unit | `service.name` | Shutdown budget |
@@ -120,10 +120,10 @@ The local collector applies tail sampling keyed by trace id (O11Y-R16), keeping 
 any span has status `ERROR`, a local root lasts more than 1 second, or the root came from a
 sampled caller. It keeps a deterministic trace-id ratio of 1% of the remaining traces.
 
-The sampled-caller signal is `st.parent.sampled`: because st3 exports every span with
+The sampled-caller signal is `st.parent.sampled`: because Fractal exports every span with
 AlwaysOn, every exported span carries the sampled flag, and the collector cannot recover the
 caller's decision from trace flags. Server spans set `st.parent.sampled=true` only when
-the remote parent is sampled and its tracestate has no `st` key. st's own clients mark
+the remote parent is sampled and its tracestate has no `st` key. Fractal's own clients mark
 collector-owned sampling with `st=c`; their AlwaysOn flag must not force the collector to
 keep every trace. Unsampled or st-marked parents record false; a missing parent records no
 attribute. The decision wait must be long enough for the daemon's SDK batch delay and
@@ -171,6 +171,8 @@ follows the collector sampling policy above; the process exports every span.
 ```text
 HTTP upgrade SERVER span (ends at 101)
     <link> st.subscription.first_frame INTERNAL root (subscribe -> first frame sent)
+frame remote parent -> st.subscription.first_frame SERVER span (valid subscribe trace)
+    <link> HTTP upgrade SERVER span
 HTTP receive SERVER span
     <link> st.replication.projection INTERNAL root (new or deferred data only)
 st.roster.rebuild INTERNAL root (cold build only; optional admission-holder link)
@@ -182,16 +184,31 @@ span. The context is captured before handler dispatch because the handler constr
 and terminal pumps. W3C context on the upgrade therefore survives task boundaries without
 extending the request span's lifetime.
 
-Each accepted subscribe constructs one `st.subscription.first_frame` root with an empty
-parent context and a link to the valid upgrade span context. It ends after the first
-frame is sent. Later rereads, resyncs, and changes construct no spans; there are no
-per-frame child spans. Construction is gated by the trace-export `AtomicBool`, before
-labels, collections, or counts are inspected (O11Y-R02, O11Y-R18).
+Accepted subscriptions to `missions`, `attention`, `agents`, `work`, `glasses`,
+`arrangements`, `conversation`, and `terminal` construct one bounded
+`st.subscription.first_frame` span linked to the valid upgrade context.
+The proposed optional subscribe `trace` field
+(pending [#1910](https://github.com/compoundingtech/fractal/pull/1910)) carries W3C
+`traceparent` and optional `tracestate`; the field's repository-local naming and
+compatibility contract is in [collections.md](client-v0/collections.md).
+Every collection-socket subscribe variant accepts the field, but only the collections
+listed above use the W3C propagator to extract it for their first-frame span.
+A valid frame context parents a SERVER span and
+records `st.parent.sampled` through the same helper as HTTP SERVER spans.
+Absent, null, malformed, or invalid context never rejects a frame: the span remains
+an INTERNAL root with an empty parent. Dedicated streams have no subscribe frame
+and retain the INTERNAL root behavior.
+
+The span ends after the first frame is sent. Later rereads, resyncs, and changes
+construct no spans; there are no per-frame child spans. Construction and extraction
+are gated by the trace-export `AtomicBool`, before labels, collections, or counts
+are inspected (O11Y-R02, O11Y-R18). No command or strict HTTP body gains frame context.
 
 | First-frame attribute | Type / vocabulary |
 | --- | --- |
 | `st.collection` | String: `missions`, `attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, `terminal` |
 | `st.subscription.id` | String: protocol subscription identity, span-only |
+| `st.parent.sampled` | Boolean: valid external frame remote parent's sampled flag; st-marked parents record false, same policy as HTTP |
 | `st.projection.hit`, `st.projection.cold`, `st.projection.incremental`, `st.projection.shared` | Boolean: projection path used by the initial read |
 | `st.page.rows` | Integer: initial frame rows after truncation |
 | `st.page.bytes` | Integer: serialized initial frame bytes |
@@ -317,7 +334,7 @@ is span-only and never a metric label or `span.label`.
 
 ## Metric naming and cardinality
 
-The repository-local st3 instrument namespace uses lowercase dot-separated names:
+The repository-local Fractal instrument namespace uses lowercase dot-separated names:
 daemon work and storage instruments use `st.`, while HTTP and database client
 instruments use the OpenTelemetry `http.server` and `db.client` namespaces.
 Duration instruments use seconds. Depth, size, and age gauges describe saturation.
@@ -336,6 +353,7 @@ values map to `other`; routes are matched templates, not raw paths.
 | Wake `cause`, FIFO `queue`, startup `phase`, replication `result` | Closed registries |
 | Replication `peer` | Fleet node membership |
 | Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
+| Projection `collection` | `missions`, `agents`, `attention`, else `other` |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -620,6 +638,33 @@ Excluded from FIFO telemetry are coalesced Notify/watch states, caches,
 durable inbox and seat queues, driver-side mailbox `Subscription` queues, and
 ping sidecar queues.
 
+## Projection freshness telemetry
+
+The `projection-fresh` target (docs/clients/ui-contract.md, SLOs) does not sample a publication
+more than 10,000 claims after its collection's previous one: it follows a catch-up, and finding
+its first local commit would scan those claims on the refresher's path. Each such publication
+adds one to a counter, so a catch-up is seen rather than hidden from the target.
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.slo.projection_fresh.skipped` | Counter | `{publication}` | `collection=missions`, `agents`, `attention`, or `other` |
+
+It contributes at most 4 attribute series and counts only while daemon metrics are enabled.
+
+## Assistant read receipt telemetry
+
+Caller-bound assistant read receipts commit on one background writer after the read returns
+(docs/st3/external-assistants.md). Each writer transaction records how many receipts it
+committed; a receipt that fails to commit is counted and logged at `error` with its subject.
+
+| Instrument | Type | Unit | Complete attribute set |
+| --- | --- | --- | --- |
+| `st.assistant.read_receipts.batch.size` | Histogram | `{receipt}` | none; buckets `1,2,4,…,256` |
+| `st.assistant.read_receipts.failures` | Counter | `{receipt}` | none |
+
+Both record only while daemon metrics are enabled. The same distribution is available in
+process from `ReceiptWriter::stats`, and each commit logs `receipt_count` at `debug`.
+
 ## Daemon startup telemetry (O11Y-R10, O11Y-R11, O11Y-R14, O11Y-R16, O11Y-R18)
 
 ```text
@@ -694,7 +739,7 @@ exchange(peer) → st.replication.round (detached root, one per exchange call)
 ```
 
 The root uses the OpenTelemetry API's `start_with_context` with an empty
-parent context. smallclaims depends on the OTel API only; st3 owns providers.
+parent context. smallclaims depends on the OTel API only; Fractal owns providers.
 The round does not inherit an ambient daemon or worker span. `span.label` is
 the bounded operation `round`.
 Span fields use the `st.replication.*` prefix. The round records `peer`,
@@ -830,7 +875,7 @@ treats any present `st` key as collector-owned sampling, so only sampled externa
 
 The typed Rust client's optional `trace-propagation` feature owns its OTel API and tracing
 bridge dependencies, not an exporter or SDK initializer. `st3` enables the feature;
-`stui` and the client TUI example leave it disabled. Without the feature, injection is
+`fractal-tui` and the client TUI example leave it disabled. Without the feature, injection is
 a no-op with no context lookup, trace headers, or OTel dependencies. The embedding
 application owns subscriber and propagator setup. The client source is generated from
 `crates/fractal-client-codegen/templates/lib.rs.in`; the
@@ -860,8 +905,11 @@ no root, abnormal/failure results are ERROR, and roots remain parentless even wi
 both an entered tracing span and an attached OTel context.
 
 The stage-span receiver proof compares `st.request.id` with the HTTP envelope, checks
-roster/page stage values, and links first-frame roots to the exported upgrade trace/span
-ids. It asserts that repeated rereads or changes produce no additional first-frame
+roster/page stage values, and links first-frame spans to the exported upgrade trace/span
+ids. It checks valid frame parent trace/span IDs, SERVER kind, sampled and unsampled
+flags, and malformed-field fallback to an INTERNAL root without losing first-frame
+delivery. The client contract proof preserves old-shape subscribes and accepts malformed
+telemetry. Repeated rereads or changes produce no additional first-frame
 roots, cold roster builds are detached and unlinked, and receive projection roots are
 detached but linked to the receive request. Empty receives produce no projection root.
 

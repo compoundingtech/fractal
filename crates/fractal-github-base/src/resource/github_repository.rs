@@ -22,7 +22,7 @@ use sha2::{Digest as _, Sha256};
 use crate::github_http::GithubAuth;
 use super::{
     GITHUB_AUTH_REMEDY, GithubListing, ObservationRequest, ProviderObservation, github_cache_for,
-    github_client, github_graphql, github_json, github_listing,
+    github_client, github_graphql_with_cache_eligibility, github_json, github_listing,
 };
 
 /// The data types a repository observer can emit.
@@ -64,25 +64,109 @@ const ITEM_MENTIONS: usize = 50;
 /// How far behind the local clock a first watermark starts, for clock skew with GitHub.
 const WATERMARK_SKEW: Duration = Duration::from_secs(5 * 60);
 
-/// What a repository observer remembers between polls. Each watermark is the newest `updated_at`
-/// a listing has returned, so a listing's URL stays the same, and its conditional request free,
-/// until something changes. Each digest names the listing version whose items were already
-/// returned, so an unchanged listing returns nothing to record. A cursor from an older build
-/// names neither, and its first poll reads every open item.
+/// Bound immediate reconciliation; persistent churn must not create a one-second hot loop.
+const IMMEDIATE_RECONCILIATION_SWEEPS: u8 = 2;
+
+/// Repository listing watermarks overlap by one second, making GitHub's exclusive `since`
+/// inclusive at its timestamp precision. Idle polls keep the same URL and ETag. Version maps
+/// deduplicate identity/update-time/content and retain the timestamp boundary, or the whole
+/// active sweep until two complete ordered page-version sequences agree. Older cursors default
+/// the maps and safely replay their first overlap.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RepositoryCursor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_since: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comments_since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    items_scan: Option<ListingScan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comments_scan: Option<ListingScan>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub seen: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    item_versions: BTreeMap<String, ItemVersion>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    comment_versions: BTreeMap<String, ItemVersion>,
     /// Open identities, and closed items awaiting their final detail read. Subject numbers
     /// stay at their original locations even when GitHub's node now lives elsewhere.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     identities: BTreeMap<String, ItemIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     detail_after: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ItemVersion {
+    at: String,
+    digest: String,
+}
+
+/// Freeze the committed watermark until two complete, freshly revalidated sweeps
+/// have identical ordered page versions. Offset pagination is not a snapshot.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+struct ListingScan {
+    next: Option<String>,
+    newest: Option<String>,
+    digest: String,
+    previous: Option<String>,
+    #[serde(default)]
+    unstable_sweeps: u8,
+}
+
+struct ContentDigest(Sha256);
+
+impl std::io::Write for ContentDigest {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn content_digest(value: &Value) -> String {
+    let mut digest = ContentDigest(Sha256::new());
+    serde_json::to_writer(&mut digest, value)
+        .expect("JSON values serialize to an infallible digest writer");
+    hex::encode(digest.0.finalize())
+}
+
+fn finish_listing(
+    scan: &mut Option<ListingScan>,
+    watermark: &mut Option<String>,
+    listing: &GithubListing,
+) -> bool {
+    let newest = newest_updated_at(&listing.values);
+    if scan.is_none() && !listing.truncated {
+        *watermark = newest.into_iter().chain(watermark.take()).max()
+            .or_else(|| Some(watermark_now()));
+        return false;
+    }
+    let progress = scan.get_or_insert_with(ListingScan::default);
+    progress.newest = newest.into_iter().chain(progress.newest.take()).max();
+    for version in &listing.versions {
+        let mut digest = Sha256::new();
+        digest.update(b"github-listing-page");
+        digest.update(progress.digest.as_bytes());
+        digest.update(version.as_bytes());
+        progress.digest = hex::encode(digest.finalize());
+    }
+    progress.next.clone_from(&listing.next);
+    if listing.truncated {
+        return true;
+    }
+    if progress.previous.as_ref() != Some(&progress.digest) {
+        progress.previous = Some(std::mem::take(&mut progress.digest));
+        progress.unstable_sweeps = progress.unstable_sweeps
+            .saturating_add(1).min(IMMEDIATE_RECONCILIATION_SWEEPS);
+        return progress.unstable_sweeps < IMMEDIATE_RECONCILIATION_SWEEPS;
+    }
+    *watermark = progress.newest.take().into_iter().chain(watermark.take()).max();
+    *scan = None;
+    false
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -624,6 +708,39 @@ const OPEN_PULL_REQUESTS: &str = "query($owner: String!, $name: String!, $after:
 
 // GitHub can reject the combined query even when each 100-item read succeeds separately.
 // Keep closure/transfer lookups out of the expensive PR review and check-rollup query.
+const RESOLVED_ISSUES: &str = "query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    id
+    ... on Issue {
+      number url state stateReason updatedAt
+      timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
+        createdAt actor { login }
+        closer {
+          ... on PullRequest { url }
+          ... on Commit { url }
+        }
+      } } }
+    }
+  }
+}";
+
+const RESOLVED_PULLS: &str = "query($ids: [ID!]!) {
+  nodes(ids: $ids) {
+    id
+    ... on PullRequest {
+      number url state updatedAt merged mergedAt mergedBy { login } mergeCommit { oid url }
+      timelineItems(last: 1, itemTypes: [CLOSED_EVENT]) { nodes { ... on ClosedEvent {
+        createdAt closer {
+          ... on PullRequest { url }
+          ... on Commit { url }
+        }
+      } } }
+    }
+  }
+}";
+
+// A PAT can resolve both identity kinds in one page. Preserve that request count
+// when no installation is selected, including the unconfigured-source default.
 const RESOLVED_ITEMS: &str = "query($ids: [ID!]!) {
   nodes(ids: $ids) {
     id
@@ -1152,6 +1269,41 @@ fn newest_updated_at<'a>(values: impl IntoIterator<Item = &'a Value>) -> Option<
         .map(str::to_owned)
 }
 
+/// GitHub documents `since` as exclusive. Include updates arriving later in the same second.
+fn inclusive_since(since: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(since)
+        .ok()
+        .and_then(|at| at.checked_sub_signed(chrono::Duration::seconds(1)))
+        .map_or_else(|| since.to_owned(), |at| at.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+}
+
+fn changed_versions<'a>(
+    versions: &'a mut BTreeMap<String, ItemVersion>,
+    values: &'a [Value],
+) -> impl Iterator<Item = &'a Value> + 'a {
+    values.iter().filter(move |value| {
+        let Some(id) = value.get("id").or_else(|| value.get("node_id")).or_else(|| value.get("number")) else {
+            return true;
+        };
+        let Some(at) = value.get("updated_at").and_then(Value::as_str) else {
+            return true;
+        };
+        let id = id.to_string();
+        let digest = content_digest(value);
+        if versions.get(&id).is_some_and(|known| known.at == at && known.digest == digest) {
+            return false;
+        }
+        versions.insert(id, ItemVersion { at: at.to_owned(), digest });
+        true
+    })
+}
+
+fn retain_boundary(versions: &mut BTreeMap<String, ItemVersion>, since: Option<&str>) {
+    if let Some(since) = since {
+        versions.retain(|_, version| version.at.as_str() >= since);
+    }
+}
+
 pub async fn observe_at(
     request: ObservationRequest,
     api_base: &str,
@@ -1227,11 +1379,12 @@ pub async fn observe_at(
             }
             Some(since) => github_listing(
                 &client,
-                format!(
-                    "{base}/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-                ),
+                cursor.items_scan.as_mut().and_then(|scan| scan.next.take()).unwrap_or_else(|| format!(
+                    "{base}/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100",
+                    since = inclusive_since(since),
+                )),
                 token,
-                cache_for,
+                if cursor.items_scan.is_some() { Duration::ZERO } else { cache_for },
                 LISTING_PAGES,
                 true,
             )
@@ -1245,7 +1398,7 @@ pub async fn observe_at(
                 .insert("open-reactions".into(), listing_digest(&listing));
         }
         if !cursor.already_seen("items", listing_digest(&listing)) {
-            for issue in &listing.values {
+            for issue in changed_versions(&mut cursor.item_versions, &listing.values) {
                 let mut item = listed_item(issue, fields, watermark.as_deref());
                 if (fields.contains("pull_requests") || fields.contains("issues"))
                     && let (Some(id), Some(number)) = (
@@ -1311,11 +1464,10 @@ pub async fn observe_at(
                 }
             }
         }
-        cursor.items_since = newest_updated_at(&listing.values)
-            .into_iter()
-            .chain(watermark.clone())
-            .max()
-            .or_else(|| Some(watermark_now()));
+        more |= finish_listing(&mut cursor.items_scan, &mut cursor.items_since, &listing);
+        if cursor.items_scan.is_none() {
+            retain_boundary(&mut cursor.item_versions, cursor.items_since.as_deref());
+        }
 
         // A reaction changes no `updated_at`, so reactions on open items come from the open
         // listing. A first poll already read it.
@@ -1354,29 +1506,28 @@ pub async fn observe_at(
                 Some(since) => {
                     let comments = github_listing(
                         &client,
-                        format!(
-                            "{base}/issues/comments?sort=updated&direction=asc&since={since}&per_page=100"
-                        ),
+                        cursor.comments_scan.as_mut().and_then(|scan| scan.next.take()).unwrap_or_else(|| format!(
+                            "{base}/issues/comments?sort=updated&direction=asc&since={since}&per_page=100",
+                            since = inclusive_since(&since),
+                        )),
                         token,
-                        cache_for,
+                        if cursor.comments_scan.is_some() { Duration::ZERO } else { cache_for },
                         LISTING_PAGES,
                         true,
                     )
                     .await?;
                     more |= comments.truncated;
                     if !cursor.already_seen("comments", listing_digest(&comments)) {
-                        for item in comments
-                            .values
-                            .iter()
+                        for item in changed_versions(&mut cursor.comment_versions, &comments.values)
                             .filter_map(|comment| listed_comment(comment, fields))
                         {
                             merge(&mut items, item);
                         }
                     }
-                    cursor.comments_since = newest_updated_at(&comments.values)
-                        .into_iter()
-                        .chain(Some(since))
-                        .max();
+                    more |= finish_listing(&mut cursor.comments_scan, &mut cursor.comments_since, &comments);
+                    if cursor.comments_scan.is_none() {
+                        retain_boundary(&mut cursor.comment_versions, cursor.comments_since.as_deref());
+                    }
                 }
             }
             // Reactions on comments come from the newest hundred comments.
@@ -1419,7 +1570,7 @@ pub async fn observe_at(
                     .as_ref()
                     .is_some_and(|after| *id <= after)
             }))
-            .cloned()
+            .map(|id| (id.clone(), cursor.identities[id].pull))
             .collect::<Vec<_>>();
         let details = open_pull_requests(
             &client,
@@ -1440,7 +1591,7 @@ pub async fn observe_at(
         )
         .await?;
         if details.identities_read > 0 {
-            cursor.detail_after = identities.get(details.identities_read - 1).cloned();
+            cursor.detail_after = identities.get(details.identities_read - 1).map(|(id, _)| id.clone());
         }
         for node in details.resolved.iter() {
             let Some(id) = node.get("id").and_then(Value::as_str) else {
@@ -1573,17 +1724,58 @@ pub async fn observe_at(
         ).await?;
         facts.insert(super::github_workflows::PERFORMANCE_FAILURES_FIELD.into(),
             serde_json::to_value(failures)?);
+        // The same observer, token and cadence read Workspace CI's recent runs for `st slo`. They
+        // are kept in memory only, never in the facts, and a failed read never fails this one.
+        super::github_workflows::observe_workspace_ci(
+            &client, &base, &repository, token, cache_for, now_ms() as u64,
+        ).await;
     }
+    // Once either listing exhausts its reconciliation burst, throttle the observation,
+    // including pagination in the other listing. Keep every frozen watermark and cursor.
+    let reconcile_backoff = [&cursor.items_scan, &cursor.comments_scan].into_iter()
+        .flatten().any(|scan| scan.unstable_sweeps >= IMMEDIATE_RECONCILIATION_SWEEPS);
     Ok(ProviderObservation {
         facts: Value::Object(facts),
         cursor: Some(serde_json::to_string(&cursor)?),
-        // A listing longer than one read continues at once.
-        next_check_unix_ms: now_ms().saturating_add(if more {
+        // Large listings continue immediately only while the reconciliation burst permits it.
+        next_check_unix_ms: now_ms().saturating_add(if more && !reconcile_backoff {
             super::PROVIDER_CONTINUE_MS
         } else {
             300_000
         }),
     })
+}
+
+/// Neither installation has statuses:read. An app-only rollup is not complete.
+fn merge_legacy_statuses(node: &mut Value, combined: &Value) -> Result<()> {
+    let statuses = combined.get("statuses").and_then(Value::as_array)
+        .context("the GitHub combined status response has no statuses")?;
+    anyhow::ensure!(combined.get("total_count").and_then(Value::as_u64).unwrap_or(statuses.len() as u64) <= statuses.len() as u64,
+        "the GitHub combined status response is truncated");
+    let commit = node.pointer_mut("/commits/nodes/0/commit")
+        .context("the GitHub pull request has no head commit for legacy statuses")?;
+    if commit.get("statusCheckRollup").is_none_or(Value::is_null) {
+        commit["statusCheckRollup"] = json!({"state": null, "contexts": {"nodes": []}});
+    }
+    let rollup = &mut commit["statusCheckRollup"];
+    let contexts = rollup.pointer_mut("/contexts/nodes").and_then(Value::as_array_mut)
+        .context("the GitHub check rollup has no contexts")?;
+    contexts.retain(|context| context["__typename"] != "StatusContext");
+    contexts.extend(statuses.iter().map(|status| json!({
+        "__typename": "StatusContext", "context": status["context"],
+        "state": status["state"].as_str().map(str::to_ascii_uppercase),
+    })));
+    if statuses.is_empty() { return Ok(()); }
+    let state = combined.get("state").and_then(Value::as_str);
+    anyhow::ensure!(matches!(state, Some("success" | "pending" | "failure" | "error")),
+        "the GitHub combined status response has no valid state");
+    let checks = rollup.get("state").and_then(Value::as_str);
+    rollup["state"] = json!(if matches!(state, Some("failure" | "error")) || matches!(checks, Some("FAILURE" | "ERROR")) {
+        "FAILURE"
+    } else if state == Some("pending") || matches!(checks, Some("PENDING" | "EXPECTED")) {
+        "PENDING"
+    } else { "SUCCESS" });
+    Ok(())
 }
 
 /// The repository's open pull requests as GraphQL last answered on this host. GraphQL has no
@@ -1605,9 +1797,15 @@ async fn open_pull_requests(
     changed: bool,
     listed: &BTreeSet<u64>,
     emit_pulls: bool,
-    identities: &[String],
+    identities: &[(String, bool)],
 ) -> Result<RepositoryDetails> {
-    let key = format!("{api_base} {locator}");
+    let read_token = crate::github_http::read_auth(owner, "gh-ci", token);
+    let issue_token = crate::github_http::read_auth(owner, "github-ledger", token);
+    let key = if read_token.cache_principal() == "pat" && issue_token.cache_principal() == "pat" {
+        format!("{api_base} {locator}")
+    } else {
+        format!("{api_base} {locator} {} {}", read_token.cache_principal(), issue_token.cache_principal())
+    };
     let previous = {
         let mut checks = pull_request_checks()
             .lock()
@@ -1651,6 +1849,7 @@ async fn open_pull_requests(
     let mut page_size = PULL_REQUEST_PAGE_SIZE;
     let mut failed_size_ceiling = PULL_REQUEST_PAGE_SIZE + 1;
     let mut calls = 0;
+    let mut cacheable = true;
     loop {
         anyhow::ensure!(
             nodes.len() < OPEN_PULL_REQUEST_LIMIT,
@@ -1663,16 +1862,19 @@ async fn open_pull_requests(
             );
             calls += 1;
             tracing::debug!(owner, repository, page_size, "reading GitHub pull request page");
-            match github_graphql(
+            match github_graphql_with_cache_eligibility(
                 client,
                 api_base,
-                token,
+                &read_token,
                 OPEN_PULL_REQUESTS,
                 json!({"owner": owner, "name": repository, "after": after, "first": page_size}),
             )
             .await
             {
-                Ok(data) => data,
+                Ok((data, request_cacheable)) => {
+                    cacheable &= request_cacheable;
+                    data
+                }
                 Err(error)
                     if page_size > 1
                         && error.to_string().contains(
@@ -1699,23 +1901,26 @@ async fn open_pull_requests(
             .skip(identities_read)
             .take(100)
             .collect::<Vec<_>>();
-        if !ids.is_empty() {
+        let partitions: &[Option<bool>] = if matches!(read_token, GithubAuth::Read { .. }) || matches!(issue_token, GithubAuth::Read { .. }) {
+            &[Some(false), Some(true)]
+        } else { &[None] };
+        for partition in partitions {
+            let ids = ids.iter().filter(|(_, is_pull)| partition.is_none_or(|pull| *is_pull == pull))
+                .map(|(id, _)| id).collect::<Vec<_>>();
+            if ids.is_empty() { continue; }
             anyhow::ensure!(
                 calls < PULL_REQUEST_CALL_LIMIT,
                 "the GitHub pull request observation exceeded {PULL_REQUEST_CALL_LIMIT} GraphQL calls"
             );
             calls += 1;
-            let resolved_data =
-                github_graphql(client, api_base, token, RESOLVED_ITEMS, json!({"ids": ids}))
-                    .await?;
-            resolved.extend(
-                resolved_data
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
+            let (auth, query) = match partition {
+                Some(true) => (&read_token, RESOLVED_PULLS),
+                Some(false) => (&issue_token, RESOLVED_ISSUES),
+                None => (&read_token, RESOLVED_ITEMS),
+            };
+            let (resolved_data, request_cacheable) = github_graphql_with_cache_eligibility(client, api_base, auth, query, json!({"ids": ids})).await?;
+            cacheable &= request_cacheable;
+            resolved.extend(resolved_data.get("nodes").and_then(Value::as_array).into_iter().flatten().cloned());
         }
         identities_read = identities.len().min(identities_read + 100).min(1000);
         if !emit_pulls {
@@ -1748,6 +1953,17 @@ async fn open_pull_requests(
             .min(PULL_REQUEST_PAGE_SIZE)
             .min(failed_size_ceiling - 1);
     }
+    if matches!(read_token, GithubAuth::Read { .. }) {
+        let mut statuses = BTreeMap::new();
+        for node in &mut nodes {
+            let Some(head) = node.get("headRefOid").and_then(Value::as_str).map(str::to_owned) else { continue; };
+            if !statuses.contains_key(&head) {
+                let payload = github_json(client, format!("{api_base}/repos/{owner}/{repository}/commits/{head}/status?per_page=100"), &read_token, cache_for).await?;
+                statuses.insert(head.clone(), payload.value);
+            }
+            merge_legacy_statuses(node, &statuses[&head])?;
+        }
+    }
     let mut required = BTreeMap::<String, Option<Vec<RequiredCheck>>>::new();
     for node in &nodes {
         if let Some(base) = node.get("baseRefName").and_then(Value::as_str)
@@ -1779,7 +1995,7 @@ async fn open_pull_requests(
     open.sort_by_key(|facts| facts.get("number").and_then(Value::as_u64));
     let open = Arc::new(open);
     let resolved = Arc::new(resolved);
-    pull_request_checks()
+    if cacheable { pull_request_checks()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .insert(
@@ -1792,7 +2008,7 @@ async fn open_pull_requests(
                 resolved: resolved.clone(),
                 emit_pulls,
             },
-        );
+        ); }
     Ok(RepositoryDetails {
         open,
         resolved,
@@ -2155,6 +2371,104 @@ mod tests {
         })
     }
 
+    #[tokio::test]
+    async fn pat_only_mixed_opaque_identities_keep_one_query_and_legacy_cache_identity() {
+        use crate::github_http::app_read::tests::server;
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = calls.clone();
+        let fixture = server(move |authorization, _, body| {
+            recorded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(authorization, "Bearer fixture-pat");
+            assert_eq!(body["query"], RESOLVED_ITEMS);
+            assert_eq!(body["variables"]["ids"], json!(["opaque-issue", "opaque-pull"]));
+            (reqwest::StatusCode::OK, json!({"data":{"nodes":[
+                {"id":"opaque-issue","state":"CLOSED"}, {"id":"opaque-pull","state":"MERGED"}
+            ]}}))
+        }).await;
+        let details = open_pull_requests(&reqwest::Client::new(), &fixture.base,
+            &GithubAuth::test("fixture-pat"), Duration::ZERO, "pat-fixture/repo",
+            ("pat-fixture", "repo"), true, true, &BTreeSet::new(), false,
+            &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(details.identities_read, 2);
+        assert_eq!(details.resolved.len(), 2);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        assert!(pull_request_checks().lock().unwrap_or_else(PoisonError::into_inner)
+            .contains_key(&format!("{} pat-fixture/repo", fixture.base)));
+    }
+
+    #[tokio::test]
+    async fn installation_pages_split_opaque_identities_and_merge_pat_legacy_status_once_per_head() {
+        use crate::github_http::app_read::{select, tests::{install, server}};
+        use reqwest::StatusCode;
+        let root = tempfile::tempdir().unwrap();
+        let owner = "mixed-fixture";
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(60);
+        install(root.path(), owner, "gh-ci", "fixture-ci", expires);
+        install(root.path(), owner, "github-ledger", "fixture-ledger", expires);
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let mut first = open_pull(1, "same-head", "SUCCESS");
+        let mut second = open_pull(2, "same-head", "SUCCESS");
+        for node in [&mut first, &mut second] {
+            node.pointer_mut("/commits/nodes/0/commit/statusCheckRollup/contexts/nodes")
+                .unwrap().as_array_mut().unwrap().retain(|context| context["__typename"] == "CheckRun");
+        }
+        let fixture = server(move |authorization, path, body| {
+            recorded.lock().push((authorization.to_owned(), path.to_owned(), body.clone()));
+            if path.contains("/commits/") {
+                assert_eq!(authorization, "Bearer fixture-pat");
+                return (StatusCode::OK, json!({"state":"failure", "total_count":1,
+                    "statuses":[{"context":"legacy/build","state":"failure"}]}));
+            }
+            let query = body["query"].as_str().unwrap();
+            if body["variables"].get("owner").is_some() {
+                assert_eq!(authorization, "Bearer fixture-ci");
+                (StatusCode::OK, json!({"data":{"repository":{"pullRequests":{
+                    "pageInfo":{"hasNextPage":false}, "nodes":[first, second]}}}}))
+            } else if body["variables"]["ids"] == json!(["opaque-issue"]) {
+                assert_eq!(authorization, "Bearer fixture-ledger");
+                assert_eq!(query, RESOLVED_ISSUES);
+                (StatusCode::OK, json!({"data":{"nodes":[{"id":"opaque-issue","state":"CLOSED"}]}}))
+            } else {
+                assert_eq!(authorization, "Bearer fixture-ci");
+                assert_eq!(query, RESOLVED_PULLS);
+                assert_eq!(body["variables"]["ids"], json!(["opaque-pull"]));
+                (StatusCode::OK, json!({"data":{"nodes":[{"id":"opaque-pull","state":"MERGED"}]}}))
+            }
+        }).await;
+        let details = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), true, true,
+            &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(details.identities_read, 2);
+        assert_eq!(details.resolved.len(), 2);
+        assert_eq!(details.open.len(), 2);
+        for pull in details.open.iter() {
+            assert_eq!(pull["checks_state"], "failure");
+            assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "legacy/build" && check["conclusion"] == "failure"));
+            assert!(pull["checks"].as_array().unwrap().iter().any(|check| check["name"] == "lint"));
+        }
+        let reused = open_pull_requests(&reqwest::Client::new(), &fixture.base, &auth,
+            Duration::ZERO, "mixed-fixture/repo", (owner, "repo"), false, false,
+            &BTreeSet::new(), true, &[("opaque-issue".into(), false), ("opaque-pull".into(), true)]).await.unwrap();
+        assert_eq!(reused.identities_read, 0, "intentional PAT status reads must preserve the GraphQL detail cache");
+        assert!(Arc::ptr_eq(&details.open, &reused.open));
+        let requests = requests.lock();
+        assert_eq!(requests.len(), 4, "one PR query, two separately authorized identity queries, one PAT status read");
+        assert_eq!(requests.iter().filter(|(_, path, _)| path.contains("/status")).count(), 1);
+    }
+
+    #[test]
+    fn legacy_status_merge_preserves_checks_and_refuses_truncation() {
+        let mut pull = open_pull(1, "head", "SUCCESS");
+        merge_legacy_statuses(&mut pull, &json!({"state":"pending","total_count":0,"statuses":[]})).unwrap();
+        assert_eq!(pull.pointer("/commits/nodes/0/commit/statusCheckRollup/state").unwrap(), "SUCCESS");
+        merge_legacy_statuses(&mut pull, &json!({"state":"pending","total_count":1,
+            "statuses":[{"context":"legacy","state":"pending"}]})).unwrap();
+        assert_eq!(pull.pointer("/commits/nodes/0/commit/statusCheckRollup/state").unwrap(), "PENDING");
+        assert!(merge_legacy_statuses(&mut pull, &json!({"state":"success","total_count":2,"statuses":[]})).is_err());
+    }
+
     fn pull_page(nodes: Value, after: Option<&str>, resolved: Value) -> Value {
         json!({"data": {
             "repository": {"pullRequests": {
@@ -2166,10 +2480,11 @@ mod tests {
     }
 
     async fn read_pull_pages(base: &str, identities: &[String]) -> Result<RepositoryDetails> {
+        let identities = identities.iter().map(|id| (id.clone(), false)).collect::<Vec<_>>();
         open_pull_requests(
             &reqwest::Client::new(), base, &GithubAuth::test("fixture-auth"),
             Duration::ZERO, "github/acme/garden", ("acme", "garden"),
-            true, true, &BTreeSet::new(), true, identities,
+            true, true, &BTreeSet::new(), true, &identities,
         )
         .await
     }
@@ -2453,6 +2768,12 @@ mod tests {
     const WORKFLOW_RUNS: &str = "/repos/acme/garden/actions/workflows/perf.yml/runs?branch=main&event=push&status=failure&per_page=100";
     const DAILY_RUNS: &str = "/repos/acme/garden/actions/workflows/daily-long.yml/runs?branch=main&status=failure&per_page=100";
 
+    /// The requests other than the Workspace CI run reads, which these fixtures answer 404: a
+    /// failed read of them leaves the observation as it was.
+    fn without_workspace_ci(requests: Vec<String>) -> Vec<String> {
+        requests.into_iter().filter(|request| !request.contains("/fleet.yml/")).collect()
+    }
+
     fn daily_run(id: u64, attempt: u64, event: &str) -> Value {
         json!({"id": id, "run_attempt": attempt, "head_sha": "d".repeat(40),
             "name": "Daily long lanes", "path": ".github/workflows/daily-long.yml", "event": event,
@@ -2500,15 +2821,135 @@ mod tests {
         assert_eq!(failures[1]["run_attempt"], 2);
         assert_eq!(failures[1]["workflow_path"], ".github/workflows/perf.yml");
         assert_eq!(failures[0]["url"], "https://github.com/acme/garden/actions/runs/7");
-        assert_eq!(github.take_requests(), vec!["GET /repos/acme/garden HTTP/1.1".to_owned(),
+        assert_eq!(without_workspace_ci(github.take_requests()), vec!["GET /repos/acme/garden HTTP/1.1".to_owned(),
             format!("GET {WORKFLOW_RUNS} HTTP/1.1"), format!("GET {DAILY_RUNS} HTTP/1.1")]);
         assert!(failures.iter().all(|failure| failure.get("failed_jobs").is_none()));
         let second = observe_at(request(&[field], first.cursor.as_deref(), Some(first.facts.clone())),
             &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
         assert_eq!(second.facts, first.facts);
-        let revalidated = github.requests.lock().clone();
+        let revalidated = without_workspace_ci(github.requests.lock().clone());
         assert_eq!(revalidated.len(), 3);
         assert!(revalidated.iter().all(|head| head.to_ascii_lowercase().contains("if-none-match:")));
+        assert!(github.graphql_requests.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn workspace_ci_runs_are_read_with_performance_failures_and_kept_out_of_the_facts() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7, "full_name": "acme/garden"}));
+        github.route(WORKFLOW_RUNS, json!({"workflow_runs": [workflow_run(7, 1)]}));
+        github.route(DAILY_RUNS, json!({"workflow_runs": []}));
+        let field = super::super::github_workflows::PERFORMANCE_FAILURES_FIELD;
+        // Without Workspace CI routes the reads fail, and the observation is what it was.
+        let without = observe_at(request(&[field], None, None), &base,
+            Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        let since = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+            chrono::Utc::now().timestamp_millis() - 86_400_000).unwrap().format("%Y-%m-%d");
+        let pulls = format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?event=pull_request&status=success&created=%3E%3D{since}&per_page=100");
+        let groups = format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?event=merge_group&status=completed&created=%3E%3D{since}&per_page=100");
+        let run = |id: u64, event: &str, branch: &str, conclusion: &str| json!({"id": 9_000_000 + id,
+            "name": "Workspace CI", "path": ".github/workflows/fleet.yml", "event": event,
+            "head_branch": branch, "status": "completed", "conclusion": conclusion,
+            "created_at": "2026-10-20T10:00:00Z", "run_started_at": "2026-10-20T10:00:30Z",
+            "updated_at": "2026-10-20T10:09:00Z", "repository": {"full_name": "acme/garden"}});
+        github.route(&pulls, json!({"total_count": 2, "workflow_runs": [
+            run(1, "pull_request", "feature", "success"),
+            run(2, "pull_request", "gh-readonly-queue/main/pr-4-abc", "success")]}));
+        github.route(&groups, json!({"total_count": 2, "workflow_runs": [
+            run(3, "merge_group", "gh-readonly-queue/main/pr-4-abc", "success"),
+            run(4, "merge_group", "gh-readonly-queue/main/pr-5-def", "failure")]}));
+        github.take_requests();
+        let with = observe_at(request(&[field], without.cursor.as_deref(), Some(without.facts.clone())),
+            &base, Some(&GithubAuth::test("fixture-auth"))).await.unwrap();
+        assert_eq!(with.facts, without.facts, "the runs never enter the observed facts");
+        let requests = github.take_requests();
+        for path in [&pulls, &groups] {
+            assert!(requests.contains(&format!("GET {path} HTTP/1.1")), "{path}");
+        }
+        let ci = super::super::github_workflows::workspace_ci().expect("the runs were kept");
+        assert_eq!(ci.runs.iter().map(|run| run.run_id - 9_000_000).collect::<Vec<_>>(), [1, 3, 4]);
+        assert!(github.graphql_requests.lock().is_empty());
+        // Without the field, nothing reads them.
+        observe_at(request(&["issues"], None, None), &base, Some(&GithubAuth::test("fixture-auth"))).await.ok();
+        assert!(!github.take_requests().iter().any(|request| request.contains("/fleet.yml/")));
+    }
+
+    #[tokio::test]
+    async fn an_empty_or_short_workspace_ci_listing_fails_the_read_and_a_quiet_one_does_not() {
+        use super::super::github_workflows::workspace_ci_runs;
+        let (github, base) = FakeGithub::start().await;
+        let base = format!("{base}/repos/acme/garden");
+        let now = chrono::Utc::now();
+        let since = (now - chrono::TimeDelta::days(1)).format("%Y-%m-%d");
+        let listing = |filter: &str| format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?{filter}&created=%3E%3D{since}&per_page=100");
+        let newest = |filter: &str| format!("/repos/acme/garden/actions/workflows/fleet.yml/runs?{filter}&per_page=1");
+        let (pulls, groups) = ("event=pull_request&status=success", "event=merge_group&status=completed");
+        // The created= filter answers nothing for pull requests, but their newest run is from today.
+        github.route(&listing(pulls), json!({"total_count": 0, "workflow_runs": []}));
+        github.route(&listing(groups), json!({"total_count": 0, "workflow_runs": []}));
+        github.route(&newest(pulls), json!({"total_count": 9, "workflow_runs": [{"id": 1, "created_at": now.to_rfc3339()}]}));
+        github.route(&newest(groups), json!({"total_count": 9, "workflow_runs": [{"id": 2, "created_at": "2020-01-01T00:00:00Z"}]}));
+        let client = reqwest::Client::new();
+        let auth = GithubAuth::test("fixture-auth");
+        let now_ms = now.timestamp_millis() as u64;
+        let error = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap_err();
+        assert!(error.to_string().contains("listed no event=pull_request&status=success runs"), "{error}");
+        // Newest runs from before the window: the empty listing is a quiet day.
+        github.route(&newest(pulls), json!({"total_count": 9, "workflow_runs": [{"id": 1, "created_at": "2020-01-01T00:00:00Z"}]}));
+        let quiet = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap();
+        assert!(quiet.runs.is_empty());
+        // A listing short of its own total fails too.
+        github.route(&listing(pulls), json!({"total_count": 2, "workflow_runs": [{"id": 3, "created_at": now.to_rfc3339()}]}));
+        let error = workspace_ci_runs(&client, &base, "acme/garden", &auth, Duration::ZERO, now_ms).await.unwrap_err();
+        assert!(error.to_string().contains("listed 1 event=pull_request&status=success runs") && error.to_string().contains("of the 2"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn runs_in_the_last_hour_have_their_artifacts_listed_once_for_flaky_tests() {
+        use super::super::github_workflows::{read_flaky, WorkspaceCi, WorkspaceRun};
+        let (github, base) = FakeGithub::start().await;
+        let base = format!("{base}/repos/acme/garden");
+        let now = chrono::Utc::now();
+        let at = |minutes_ago: i64| (now - chrono::TimeDelta::minutes(minutes_ago)).to_rfc3339();
+        let run = |id: u64, event: &str, minutes_ago: i64| {
+            let branch = if event == "merge_group" { format!("gh-readonly-queue/main/pr-{id}-{}", "e".repeat(40)) } else { "feature".to_owned() };
+            WorkspaceRun::from_run("acme/garden", &json!({"id": id, "name": "Workspace CI",
+                "path": ".github/workflows/fleet.yml", "event": event, "head_branch": branch,
+                "status": "completed", "conclusion": "success", "created_at": at(minutes_ago + 10),
+                "run_started_at": at(minutes_ago + 9), "updated_at": at(minutes_ago),
+                "repository": {"full_name": "acme/garden"}})).unwrap()
+        };
+        let artifacts = |id: u64| format!("/repos/acme/garden/actions/runs/{id}/artifacts?per_page=100");
+        // Two runs in the hour (one a pull request's), one before it.
+        let mut ci = WorkspaceCi { repository: "acme/garden".to_owned(), observed_at_unix_ms: 0,
+            runs: vec![run(1, "merge_group", 5), run(2, "pull_request", 20), run(3, "merge_group", 90)] };
+        github.route(&artifacts(1), json!({"total_count": 3, "artifacts": [{"name": "linux-tests-logs"},
+            {"name": "nextest-flaky-linux-tests-2"}, {"name": "nextest-flaky-linux-tests-shard-3-1"}]}));
+        github.route(&artifacts(2), json!({"total_count": 1, "artifacts": [{"name": "linux-tests-logs"}]}));
+        let mut listed = BTreeMap::from([(99, 4)]);
+        let now_ms = now.timestamp_millis() as u64;
+        let client = reqwest::Client::new();
+        let auth = GithubAuth::test("fixture-auth");
+        read_flaky(&client, &base, &auth, Duration::from_secs(60), &mut ci, &mut listed, now_ms).await;
+        let mut requests = github.take_requests();
+        requests.sort();
+        assert_eq!(requests, [format!("GET {} HTTP/1.1", artifacts(1)), format!("GET {} HTTP/1.1", artifacts(2))]);
+        assert_eq!(ci.runs.iter().map(|run| run.flaky).collect::<Vec<_>>(), [Some(3), Some(0), None]);
+        // A run gone from the hour is pruned, and a listed run is never listed again.
+        assert_eq!(listed, BTreeMap::from([(1, 3), (2, 0)]));
+        read_flaky(&client, &base, &auth, Duration::ZERO, &mut ci, &mut listed, now_ms + 60_000).await;
+        assert!(github.take_requests().is_empty());
+        assert_eq!(ci.runs[0].flaky, Some(3));
+        // A failed listing is tried again on a later poll; the next run waits for it.
+        ci.runs.extend([run(4, "merge_group", 2), run(5, "merge_group", 1)]);
+        read_flaky(&client, &base, &auth, Duration::ZERO, &mut ci, &mut listed, now_ms).await;
+        assert_eq!(github.take_requests(), [format!("GET {} HTTP/1.1", artifacts(5))]);
+        assert_eq!((ci.runs[3].flaky, ci.runs[4].flaky), (None, None));
+        github.route(&artifacts(5), json!({"total_count": 0, "artifacts": []}));
+        github.route(&artifacts(4), json!({"total_count": 1, "artifacts": [{"name": "nextest-flaky-linux-tests-shard-2-5"}]}));
+        read_flaky(&client, &base, &auth, Duration::ZERO, &mut ci, &mut listed, now_ms).await;
+        assert_eq!(github.take_requests().len(), 2);
+        assert_eq!((ci.runs[3].flaky, ci.runs[4].flaky), (Some(5), Some(0)));
         assert!(github.graphql_requests.lock().is_empty());
     }
 
@@ -2581,7 +3022,7 @@ mod tests {
         assert_eq!(failures[2]["failed_jobs"], json!(["daily-perf-load-hog", "daily-perf-load-hog-macos"]));
         assert_eq!(failures[2]["event"], "workflow_dispatch");
         // Only daily-long schedule/dispatch runs have their attempt's jobs read.
-        let requests = github.take_requests();
+        let requests = without_workspace_ci(github.take_requests());
         assert_eq!(requests.len(), 6);
         for path in [&load, &tests_only, &hogs] {
             assert!(requests.contains(&format!("GET {path} HTTP/1.1")));
@@ -2675,7 +3116,7 @@ mod tests {
                 .contains("pullRequests(")
         );
         github.take_requests();
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([
             issue(1, "2026-09-11T00:00:00Z", json!({"node_id": "I_orchid", "state": "closed", "state_reason": "completed"})),
             issue(2, "2026-09-11T00:00:00Z", json!({"node_id": "PR_orchid", "state": "closed", "pull_request": {"merged_at": "2026-09-11T00:00:00Z"},
                 "html_url": "https://github.com/acme/garden/pull/2"}))
@@ -2706,7 +3147,7 @@ mod tests {
                 .iter()
                 .any(|request| request.starts_with("POST"))
         );
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-11T00:00:00Z&per_page=100", json!([]));
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T23:59:59Z&per_page=100", json!([]));
         age_pull_request_check(&base, PULL_REQUEST_CHECK_INTERVAL);
         let final_read = observe_at(
             request(
@@ -2788,7 +3229,7 @@ mod tests {
             .await
             .unwrap();
         github.take_requests();
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([]));
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([]));
         github.resolved_nodes(json!([{"id": "I_orchid", "state": "OPEN", "number": 77,
             "url": "https://github.com/acme/greenhouse/issues/77"}]));
         age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
@@ -2961,7 +3402,7 @@ mod tests {
                 .count(),
             2
         );
-        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-10T00:00:00Z&per_page=100", json!([]));
+        github.route("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100", json!([]));
         age_pull_request_check(&base, SETTLED_PULL_REQUEST_CHECK);
         observe_at(
             request(
@@ -3073,6 +3514,249 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stable_idle_urls_revalidate_and_same_second_updates_are_not_missed() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let issues = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        let comments = "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        let comment = |id: u64, number: u64| json!({
+            "id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{number}"),
+            "html_url": format!("https://github.com/acme/garden/issues/{number}#issuecomment-{id}"),
+            "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": at,
+        });
+        github.route(issues, json!([issue(1, at, json!({}))]));
+        github.route(comments, json!([comment(91, 1)]));
+        // An old cursor has no version maps: upgrades need no migration or backfill.
+        let cursor = json!({"items_since": at, "comments_since": at}).to_string();
+        let token = GithubAuth::test("boundary-token");
+        let spender = "observer/stable-boundary".to_owned();
+        spend_as(spender.clone(), async {
+            let first = observe_at(request(&["comments"], Some(&cursor), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(item(&first.facts, "issues", 1)["recent_comments"][0]["id"], 91);
+            github.take_requests();
+            let idle = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(idle.facts, json!({"repository_id": 7}));
+            assert_eq!(idle.cursor, first.cursor);
+            let requests = std::mem::take(&mut *github.requests.lock());
+            assert_eq!(requests.len(), 3);
+            assert!(requests.iter().all(|request| request.to_ascii_lowercase().contains("if-none-match:")));
+            let usage = github_usage_report().spenders.into_iter()
+                .find(|report| report.spender == spender).unwrap();
+            assert_eq!(usage.not_modified, 3, "every idle endpoint returned 304");
+
+            // GitHub's since is exclusive. Both new records share the previous watermark's
+            // second, but the overlap includes them. Already emitted IDs must not replay.
+            github.route(issues, json!([issue(1, at, json!({})), issue(2, at, json!({}))]));
+            github.route(comments, json!([comment(91, 1), comment(92, 2)]));
+            let updated = observe_at(request(&["comments"], idle.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(items(&updated.facts, "issues").len(), 1);
+            assert_eq!(item(&updated.facts, "issues", 2)["recent_comments"][0]["id"], 92);
+            let next = RepositoryCursor::parse(updated.cursor.as_deref());
+            assert_eq!(next.items_since.as_deref(), Some(at));
+            assert_eq!(next.comments_since.as_deref(), Some(at));
+            let requests = github.take_requests();
+            assert!(requests.iter().any(|request| request == &format!("GET {issues} HTTP/1.1")));
+            assert!(requests.iter().any(|request| request == &format!("GET {comments} HTTP/1.1")));
+            github.route(issues, json!([issue(1, at, json!({"title": "edited within the same second"})), issue(2, at, json!({}))]));
+            let edited = observe_at(request(&["comments"], updated.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(items(&edited.facts, "issues").len(), 1);
+            assert_eq!(item(&edited.facts, "issues", 1)["title"], "edited within the same second");
+            let quiet = observe_at(request(&["comments"], edited.cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            assert_eq!(quiet.facts, json!({"repository_id": 7}));
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn inclusive_overlap_continues_past_a_full_boundary_second() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let issue_start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        let comment_start = "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        for start in [issue_start, comment_start] {
+            for page in 1..=11 {
+                let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+                let values: Vec<_> = (0..100).map(|offset| {
+                    let id = (page - 1) * 100 + offset + 1;
+                    if start == issue_start {
+                        issue(id, at, json!({}))
+                    } else {
+                        json!({"id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{id}"),
+                            "html_url": format!("https://github.com/acme/garden/issues/{id}#issuecomment-{id}"),
+                            "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": at})
+                    }
+                }).collect();
+                github.route(&path, json!(values));
+                if page < 11 {
+                    github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+                }
+            }
+        }
+        let token = GithubAuth::test("pagination-boundary-token");
+        let cursor = json!({"items_since": at, "comments_since": at}).to_string();
+        let first = observe_at(request(&["comments"], Some(&cursor), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(items(&first.facts, "issues").len(), 1000);
+        let cursor = RepositoryCursor::parse(first.cursor.as_deref());
+        assert!(cursor.items_scan.as_ref().unwrap().next.as_deref().unwrap().ends_with("&page=11"));
+        assert!(cursor.comments_scan.as_ref().unwrap().next.as_deref().unwrap().ends_with("&page=11"));
+        github.take_requests();
+        let continued = observe_at(request(&["comments"], first.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(items(&continued.facts, "issues").len(), 100);
+        assert_eq!(item(&continued.facts, "issues", 1100)["recent_comments"][0]["id"], 1100);
+        let cursor = RepositoryCursor::parse(continued.cursor.as_deref());
+        assert!(cursor.items_scan.as_ref().unwrap().next.is_none());
+        assert!(cursor.comments_scan.as_ref().unwrap().next.is_none());
+        let requests = github.take_requests();
+        assert_eq!(requests.len(), 3, "continuations do not replay the first ten pages");
+        assert_eq!(requests.iter().filter(|request| request.contains("&page=11 ")).count(), 2);
+        let replay = observe_at(request(&["comments"], continued.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        assert_eq!(replay.facts, json!({"repository_id": 7}));
+        let reconciled = observe_at(request(&["comments"], replay.cursor.as_deref(), None), &base, Some(&token))
+            .await.unwrap();
+        let cursor = RepositoryCursor::parse(reconciled.cursor.as_deref());
+        assert!(cursor.items_scan.is_none());
+        assert!(cursor.comments_scan.is_none());
+    }
+
+    #[tokio::test]
+    async fn shifted_pages_reconcile_from_the_start_before_committing_the_watermark() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let starts = [
+            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+            "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100",
+        ];
+        let routes = |moved: u64| {
+            let ids: Vec<_> = ((moved + 1)..=1100).chain(1..=moved).collect();
+            for (kind, start) in starts.iter().enumerate() {
+                for (index, ids) in ids.chunks(100).enumerate() {
+                    let page = index + 1;
+                    let path = if page == 1 { (*start).to_owned() } else { format!("{start}&page={page}") };
+                    let values: Vec<_> = ids.iter().map(|&id| {
+                        let updated = if id <= moved { format!("2026-09-10T00:00:0{id}Z") } else { at.to_owned() };
+                        if kind == 0 {
+                            issue(id, &updated, json!({}))
+                        } else {
+                            json!({"id": id, "issue_url": format!("https://api.github.com/repos/acme/garden/issues/{id}"),
+                                "html_url": format!("https://github.com/acme/garden/issues/{id}#issuecomment-{id}"),
+                                "user": {"login": "fern"}, "body": "hello", "created_at": at, "updated_at": updated})
+                        }
+                    }).collect();
+                    github.route(&path, json!(values));
+                    if page < 11 {
+                        github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+                    }
+                }
+            }
+        };
+        routes(0);
+        let token = GithubAuth::test("shifted-pages-token");
+        let cursor = json!({"items_since": at, "comments_since": at}).to_string();
+        let poll = |cursor: Option<String>| {
+            let mut request = request(&["comments"], cursor.as_deref(), None);
+            // Continuation/reconciliation must revalidate despite the ordinary cache TTL.
+            request.every_ms = Some(120_000);
+            observe_at(request, &base, Some(&token))
+        };
+        let first = poll(Some(cursor)).await.unwrap();
+        routes(1); // ID1001 moves into page10; page11 skips it and sees updated ID1.
+        let tail = poll(first.cursor.clone()).await.unwrap();
+        let cursor = RepositoryCursor::parse(tail.cursor.as_deref());
+        assert_eq!(cursor.items_since.as_deref(), Some(at));
+        assert_eq!(cursor.comments_since.as_deref(), Some(at));
+        let repaired = poll(tail.cursor.clone()).await.unwrap();
+        assert_eq!(item(&repaired.facts, "issues", 1001)["recent_comments"][0]["id"], 1001);
+        routes(2); // Another shift during reconciliation must require another stable sweep.
+        let mut latest = poll(repaired.cursor.clone()).await.unwrap();
+        assert_eq!(RepositoryCursor::parse(latest.cursor.as_deref()).items_since.as_deref(), Some(at));
+        let mut complete = false;
+        for _ in 0..6 {
+            github.take_requests();
+            latest = poll(latest.cursor.clone()).await.unwrap();
+            let requests = github.take_requests();
+            for start in starts {
+                assert!(requests.iter().filter(|request| request.starts_with(&format!("GET {start}"))).count() <= 10);
+            }
+            let cursor = RepositoryCursor::parse(latest.cursor.as_deref());
+            if cursor.items_scan.is_none() && cursor.comments_scan.is_none() {
+                assert_eq!(cursor.items_since.as_deref(), Some("2026-09-10T00:00:02Z"));
+                assert_eq!(cursor.comments_since.as_deref(), Some("2026-09-10T00:00:02Z"));
+                complete = true;
+                break;
+            }
+            assert_eq!(cursor.items_since.as_deref(), Some(at));
+            assert_eq!(cursor.comments_since.as_deref(), Some(at));
+        }
+        assert!(complete, "stable page versions eventually commit both watermarks");
+    }
+
+    #[tokio::test]
+    async fn continuously_changing_sweeps_fall_back_to_normal_polling_without_committing() {
+        let (github, base) = FakeGithub::start().await;
+        github.route("/repos/acme/garden", json!({"id": 7}));
+        let at = "2026-09-10T00:00:00Z";
+        let start = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-09T23:59:59Z&per_page=100";
+        for page in 1..=11 {
+            let path = if page == 1 { start.to_owned() } else { format!("{start}&page={page}") };
+            github.route(&path, json!([issue(page, at, json!({}))]));
+            if page < 11 {
+                github.links.lock().insert(path, format!("<{base}{start}&page={}>; rel=\"next\"", page + 1));
+            }
+        }
+        let token = GithubAuth::test("continuous-churn-token");
+        let mut cursor = Some(json!({"items_since": at}).to_string());
+        for sweep in 0..6 {
+            // Every new sweep sees a different page version, even within one timestamp second.
+            github.route(start, json!([issue(1, at, json!({"title": format!("edit {sweep}")}))]));
+            for part in 0..2 {
+                let before = now_ms();
+                let observation = observe_at(request(&["issues"], cursor.as_deref(), None), &base, Some(&token))
+                    .await.unwrap();
+                let state = RepositoryCursor::parse(observation.cursor.as_deref());
+                assert_eq!(state.items_since.as_deref(), Some(at));
+                assert!(state.items_scan.is_some(), "never force-commit an unstable sweep");
+                if sweep >= 2 || (sweep == 1 && part == 1) {
+                    assert!(observation.next_check_unix_ms >= before + 300_000,
+                        "exhausted bursts use the ordinary provider deadline, not a one-second continuation");
+                    assert_eq!(state.items_scan.as_ref().unwrap().unstable_sweeps, IMMEDIATE_RECONCILIATION_SWEEPS);
+                }
+                cursor = observation.cursor;
+            }
+        }
+        // Backoff keeps enough state to converge later; it is not an error or forced commit.
+        for _ in 0..2 {
+            let observation = observe_at(request(&["issues"], cursor.as_deref(), None), &base, Some(&token))
+                .await.unwrap();
+            cursor = observation.cursor;
+        }
+        assert!(RepositoryCursor::parse(cursor.as_deref()).items_scan.is_none());
+    }
+
+    #[test]
+    fn overlap_deduplicates_by_identity_and_updated_at_and_discards_old_versions() {
+        let mut versions = BTreeMap::new();
+        let first = vec![issue(1, "2026-09-10T00:00:00Z", json!({}))];
+        assert_eq!(changed_versions(&mut versions, &first).count(), 1);
+        assert_eq!(changed_versions(&mut versions, &first).count(), 0);
+        let updated = vec![issue(1, "2026-09-10T00:00:01Z", json!({})),
+            issue(2, "2026-09-10T00:00:00Z", json!({}))];
+        assert_eq!(changed_versions(&mut versions, &updated).count(), 2);
+        retain_boundary(&mut versions, Some("2026-09-10T00:00:01Z"));
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions["1"].at, "2026-09-10T00:00:01Z");
+    }
+
+    #[tokio::test]
     async fn one_poll_emits_each_declared_data_type_and_an_unchanged_repository_emits_nothing() {
         let (github, base) = FakeGithub::start().await;
         github.route("/repos/acme/garden", json!({"id": 7}));
@@ -3149,11 +3833,11 @@ mod tests {
         // GraphQL is asked again only because a check is still pending, and not within a minute
         // of the last read.
         github.take_requests();
-        let since = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-04T00:00:00Z&per_page=100";
+        let since = "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since=2026-09-03T23:59:59Z&per_page=100";
         github.route(since, json!([]));
         let comments = format!(
             "/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={}&per_page=100",
-            cursor.comments_since.as_deref().unwrap()
+            inclusive_since(cursor.comments_since.as_deref().unwrap())
         );
         github.route(&comments, json!([]));
         let second = spend_as(
@@ -3257,7 +3941,7 @@ mod tests {
         github.open_pull_requests(json!([opened]));
         let since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([
                 // An old issue closed; a merged pull request; a new pull request; a new issue.
                 issue(1, "2026-09-10T01:00:00Z", json!({"state": "closed", "state_reason": "completed"})),
@@ -3270,7 +3954,7 @@ mod tests {
         );
         let comments_since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={comments_since}&per_page=100"),
+            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={comments_since}&per_page=100", comments_since = inclusive_since(comments_since)),
             json!([
                 {"id": 91, "issue_url": "https://api.github.com/repos/acme/garden/issues/8",
                  "html_url": "https://github.com/acme/garden/pull/8#issuecomment-91",
@@ -3349,7 +4033,7 @@ mod tests {
         github.route("/repos/acme/garden", json!({"id": 7}));
         let since = "2026-09-10T00:00:00Z";
         github.route(
-            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([]),
         );
         let comment = |id: u64, number: u64, at: &str| {
@@ -3359,7 +4043,7 @@ mod tests {
                 "created_at": at, "updated_at": at})
         };
         github.route(
-            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={since}&per_page=100"),
+            &format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(since)),
             json!([
                 comment(92, 8, "2026-09-10T05:02:00Z"),
                 comment(91, 8, "2026-09-10T05:01:00Z"),
@@ -3763,9 +4447,7 @@ mod tests {
             .items_since
             .unwrap();
         github.route(
-            &format!(
-                "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-            ),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since)),
             json!([]),
         );
         github.open_pull_requests(json!([open_pull(2, &"a".repeat(40), "SUCCESS")]));
@@ -3805,9 +4487,7 @@ mod tests {
             .items_since
             .unwrap();
         github.route(
-            &format!(
-                "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-            ),
+            &format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since)),
             json!([issue(
                 3,
                 "2026-09-20T00:00:00Z",
@@ -3860,9 +4540,7 @@ mod tests {
         let since = RepositoryCursor::parse(first.cursor.as_deref())
             .items_since
             .unwrap();
-        let listing = format!(
-            "/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100"
-        );
+        let listing = format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={since}&per_page=100", since = inclusive_since(&since));
         // A new head: the REST listing shows the pull request changed.
         github.route(
             &listing,

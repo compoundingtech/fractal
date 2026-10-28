@@ -51,12 +51,77 @@ RNG stream, so v4's never-trim characterization `[5]` does not apply to it: with
 seed 1597 has no checkpoint trim and the other 16 fixed seeds trim, including seed 5. After merging
 main, regenerate v5 the same way; do not hand-edit the snapshot.
 
-`claims-v6.json` is the serialization of the registry that adds `work.wait-ended` (declared
-waits) on top of version 5, generated with
+`claims-v6.json` captures the merged identity-rename registry, including the durable
+`agent.renamed` and `mission.renamed` facts and their naming-chain fields.
+Regenerate it with
 `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v6.json`.
-v1 to v5 remain unchanged. The kind changes the shared RNG stream, so v5's never-trim
-characterization `[1597]` does not apply to it: with v6 all 17 fixed seeds trim. After
-merging main, regenerate v6 the same way; do not hand-edit the snapshot.
+The simulation selects v6 and records that filename in its audit summary; prior
+corpus versions stay fixed for comparisons.
+
+Mission publications use the owning `Store::apply_as` declaration path. Unlike ordinary
+claims, `mission.published` carries a canonical top-level `MissionSpec` with its identity
+and content-hashed revision; wrapping random schema fields in `ClaimInput` produces a
+body the mission projector cannot read. The generator still draws that kind and all its
+fields from the snapshot, then publishes a valid mission without additional RNG draws.
+The focused publication regression checks its canonical body and replication to the oracle.
+This input bug also exists in main's generic publication generator; it is not a rename
+dispatch bug. In CI run 39562565916, the seed-34 failure details explicitly identify
+`claim_kind: mission.published`, not `mission.renamed`. The rename kinds remain in v6.
+
+With v6 and canonical mission publication inputs, the measured never-trim set is `[34]`.
+All 17 fixed seeds converged; seeds 1, 2, 3, 5, 8, 13, 17, 21, 55, 89, 144, 233, 377,
+610, 987 and 1597 trimmed, while seed 34 did not (16/17 trim coverage). The scoped
+2026-10-21 run used
+`cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`
+through the heavy gate and pinned Nix environment. It passed the canonical-publication
+regression and all convergence oracles; its only two failures were the old v5 trim
+assertions for seeds 34 and 1597. Characterization follows those measured outcomes,
+not an RNG prediction; the exact per-seed equality and majority coverage checks remain.
+
+`claims-v7.json` is the serialization of the registry that adds the system-only claim kind
+`slo.breach-transition` on top of version 6; v1 to v6 remain unchanged for comparisons pinned to
+those corpora. It is the next free corpus slot after the identity-rename registry. After merging
+main, regenerate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v7.json`;
+do not hand-edit the snapshot. The kind changes the shared RNG stream, so v6's never-trim
+characterization `[34]` does not apply: with v7 seeds 2 and 34 do not trim a checkpoint and the
+other 15 fixed seeds do, measured with
+`cargo test -p fractal --locked --test integration convergence:: -- --test-threads=4`.
+
+`claims-v8.json` captures the six durable version-1 deployment audit kinds added
+on top of v7. Regenerate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v8.json`;
+do not hand-edit the snapshot. Versions 1 through 7 stay frozen. The seeded
+generator supplies schema-valid deployment package tuples, bounded RFC3339 issue
+and expiry times, preview/signoff references and STOP host lists, rather than
+generic empty nested objects. A focused regression generates and appends every
+deployment kind through the same path used by random schedules.
+The measured v8 never-trim set is `[13, 34, 144, 987]`: the other 13 of 17 fixed
+seeds trim. Every seed converges, and exact per-seed trim assertions and majority
+coverage checks remain enforced. The characterization run used
+`cargo test -p fractal --test integration convergence:: -- --nocapture --test-threads=4`.
+
+`claims-v9.json` captures the current helper-launcher registry, including
+`agent.launcher-bound`, `agent.helper-launched` and `client.action-result`.
+Versions 1 through 8 stay frozen. Generate v9 from the merged registry with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v9.json`;
+do not hand-edit or overwrite v8. The simulation selects v9 and records its filename
+in audit summaries.
+
+The helper binding, helper launch history and client action receipt kinds use the
+owner-local log. The existing generator and write accounting already handle
+`Retention::Local`: generated inputs go through the native store, but accepted
+local observations do not enter the replicated claim set or the oracle. Their
+`SystemOnly` write policy does not require a generator exclusion or a replicated
+claim fallback; the internal append path is the same path used for other generated
+system observations.
+
+The measured v9 never-trim set is `[3]`: seeds 1, 2, 5, 8, 13, 17, 21, 34, 55,
+89, 144, 233, 377, 610, 987 and 1597 trim (16/17 coverage). All 17 fixed seeds
+converge. Characterization used
+`cargo test -p fractal --test integration convergence:: -- --nocapture --test-threads=4`
+on a gated Linux build host. The first v9 run failed only the five stale v8
+trim expectations; exact per-seed equality and majority trim coverage remain.
 
 Keep the snapshot fixed when comparing revisions. For a future schema change,
 create a new version with `serde_json::to_string_pretty(&fractal_schema::registry().claims)`
@@ -82,3 +147,23 @@ same output directory resumes completed outcomes, including failures; it is only
 valid with the same input snapshot, simulation source and native revision.
 Keep the source and binary hashes with the reports. Never discard a failed
 outcome when resuming an interrupted audit.
+
+`claims-v10.json` captures the merged person-repair registry, adding
+`work.person-reassigned`, `gate.reviewer-reassigned` and `person.rename.completed`.
+Versions 1 through 9 stay frozen. Generate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v10.json`;
+do not hand-edit the snapshot. Slot 10 was selected after fetching current main
+immediately before generation. The simulation and audit summaries select v10.
+With this corpus, all 17 fixed seeds converge and trim a checkpoint, including seed 3;
+the exact `NEVER_TRIMS` set is empty. The remote characterization used
+`cargo test -p fractal --test integration convergence::seed_ -- --nocapture --test-threads=1`.
+That run observed every seed trim; its sole failed assertion was v9's obsolete
+expectation that seed 3 never trims. The per-seed equality remains enforced.
+
+`claims-v11.json` is the serialization of the registry that adds `work.wait-ended` (declared
+waits) on top of version 10, generated with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v11.json`.
+Versions 1 through 10 stay frozen; do not hand-edit the snapshot. The simulation and audit
+summaries select v11. The kind changes the shared RNG stream, so the per-seed characterization
+is measured again: with v11 all 17 fixed seeds converge and trim a checkpoint, so the exact
+`NEVER_TRIMS` set stays empty (`cargo test -p fractal --test integration convergence:: -- --nocapture --test-threads=1`).

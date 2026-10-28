@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { agentHeaderDetail, agentHealth, attentionActionLabel, attentionHeadline, attentionKindLabel, blockedLine, clientDetail, clientTitle, currentWorkSummary, deviceDetail, deviceTitle, missionDetail, missionGroup, missionLabels, missionSteps, olderThanMember, pingPresentation, queuedWorkSummary, smallTalkPresentation } from './presentation.ts';
+import { agentHeaderDetail, agentHealth, attentionActionLabel, attentionHeadline, attentionKindLabel, blockedLine, clientDetail, clientTitle, currentWorkSummary, deviceDetail, deviceTitle, missionLabels, missionSteps, olderThanMember, pingPresentation, queuedWorkSummary, fractalPresentation } from './presentation.ts';
+import { words } from './presentation.ts';
+
+assert.equal(words('st3'), 'ST');
+assert.equal(words('FRACTAL'), 'Fractal');
 
 const now = Date.parse('2026-09-25T08:25:00Z');
 
@@ -12,52 +16,27 @@ assert.deepEqual(attentionHeadline({ count: 0, loaded: false }), { text: 'Alerts
 assert.deepEqual(attentionHeadline({ count: 3, loaded: true, error: 'offline' }), { text: '3 alerts from the last load · refresh failed: offline', warning: true });
 
 
-// (2) Queued work shows how long the next step has been waiting, from the queue st joined into the
+// (2) Queued work shows how long the next step has been waiting, from the queue Fractal joined into the
 // agent's row: no work list is read.
 const route = { id: 'step-run/78cb/route', mission_id: 'mission/fleet/pty-rust/route', mission_run_id: 'mission-run/78cb', path: 'route', state: 'ready', since: '2026-09-24T11:56:00Z', goal: 'Route output' };
 const pty = { id: 'agent/example/pty-rust/standing/example-linux.pty-rust', name: 'fleet/pty-rust/standing/example-linux.pty-rust', next_work_id: route.id, next_work: route, upcoming_work: [route], queued_work_count: 1 };
 assert.equal(queuedWorkSummary(pty, now), 'Next: route · 1 queued · oldest ready 20h');
 assert.equal(queuedWorkSummary({ ...pty, next_work_id: null, next_work: null, upcoming_work: [], queued_work_count: 0 }, now), null);
 assert.equal(queuedWorkSummary({ ...pty, next_work: { ...route, state: 'blocked' }, upcoming_work: [] }, now), 'Next: route · 1 queued');
-// An older st without joined labels still names the next step by its ID.
+// An older Fractal without joined labels still names the next step by its ID.
 assert.equal(queuedWorkSummary({ next_work_id: 'step-run/78cb/route', queued_work_count: 2 }, now), 'Next: route · 2 queued');
 assert.equal(currentWorkSummary({ current_work: [{ ...route, path: 'review/diff', title: null, state: 'claimed' }] }), 'Current: diff (claimed)');
 assert.equal(currentWorkSummary({ current_work: [{ ...route, title: 'Route output', state: 'claimed' }] }), 'Current: Route output (claimed)');
 assert.equal(currentWorkSummary({}), null);
 
-// The mission list groups and describes missions from the steps st joined into each run: no work list.
+// A mission's steps are the ones Fractal joined into its runs: no work list.
 const step = (path, state) => ({ id: `step-run/9f/${path}`, path, state, attempt: 1, since: '2026-09-25T08:00:00Z' });
-const release = { id: 'mission/fleet/app/release', title: 'fleet/app/release', state: 'running', runs: ['mission-run/9f'], visualization: { nodes: [{ kind: 'step' }, { kind: 'step' }, { kind: 'group' }], groups: [] }, run_details: [{ id: 'mission-run/9f', steps: [step('build', 'completed'), step('review', 'claimed')] }] };
+const release = { id: 'mission/fleet/app/release', title: 'fleet/app/release', state: 'running', runs: ['mission-run/9f'], run_details: [{ id: 'mission-run/9f', steps: [step('build', 'completed'), step('review', 'claimed')] }] };
 assert.deepEqual(missionSteps(release).map(s => s.path), ['build', 'review']);
-assert.equal(missionGroup(release), 'Running');
-assert.equal(missionDetail(release), '1 runs · 2 planned steps · review (claimed)');
-const stuck = { ...release, run_details: [{ id: 'mission-run/9f', steps: [step('build', 'claimed'), step('sign', 'blocked')] }] };
-assert.equal(missionGroup(stuck), 'Blocked');
-assert.equal(missionDetail(stuck), '1 runs · 2 planned steps · sign (blocked)');
-assert.equal(missionGroup({ ...release, run_details: [{ id: 'mission-run/9f', steps: [step('approve', 'waiting')] }] }), 'Waiting');
-assert.equal(missionGroup({ ...release, state: 'completed', run_details: [{ id: 'mission-run/9f', steps: null }] }), 'Archive');
-assert.equal(missionGroup({ state: 'draft' }), 'Drafts');
-assert.equal(missionDetail({ runs: [], run_details: [] }), '0 runs');
-const shipped = { runs: ['mission-run/9f'], run_details: [{ id: 'mission-run/9f', steps: [step('gate', 'failed')], outcome: { status: 'completed', previous_status: 'failed', actor: 'person/avery', reason: 'it merged after the gate was fixed', at: '2026-09-25T08:20:00Z' } }] };
-assert.equal(missionDetail(shipped), '1 runs · gate (failed) · set completed (was failed) by person/avery: it merged after the gate was fixed');
 
-// Every contract state is grouped deliberately, with active work ahead of waiting dependencies.
-const expectedGroups = { waiting: 'Waiting', ready: 'Running', claimed: 'Running', blocked: 'Blocked', verifying: 'Running', completed: 'Drafts', failed: 'Blocked', cancelled: 'Drafts', working: 'Running', pending: 'Waiting' };
-for (const [state, expected] of Object.entries(expectedGroups)) {
-  const mission = { ...release, state: 'ready', run_details: [{ id: 'mission-run/9f', steps: [step('review', state)] }] };
-  assert.equal(missionGroup(mission), expected, state);
-  assert.equal(missionDetail(mission), `1 runs · 2 planned steps · review (${state})`);
-}
-for (const state of ['claimed', 'working', 'verifying']) {
-  const mission = { ...release, run_details: [{ id: 'mission-run/9f', steps: [step('build', 'completed'), step('review', state), step('deploy', 'waiting')] }] };
-  assert.equal(missionGroup(mission), 'Running', state);
-  assert.equal(missionDetail(mission), `1 runs · 2 planned steps · review (${state})`);
-}
-assert.equal(missionGroup({ ...stuck, state: 'completed' }), 'Archive');
-
-// Small Talk st joined into a conversation shows who wrote to whom and its title.
-assert.deepEqual(smallTalkPresentation({ message_id: 'message/1', from: 'agent/example/cos/standing/cos', to: 'person/alex', title: 'Release is ready' }), { from: 'COS → alex', text: 'Release is ready' });
-assert.deepEqual(smallTalkPresentation({ message_id: 'message/2', from: 'agent/example/app' }), { from: 'App → someone', text: 'Fractal' });
+// Fractal joined into a conversation shows who wrote to whom and its title.
+assert.deepEqual(fractalPresentation({ message_id: 'message/1', from: 'agent/example/cos/standing/cos', to: 'person/alex', title: 'Release is ready' }), { from: 'COS → alex', text: 'Release is ready' });
+assert.deepEqual(fractalPresentation({ message_id: 'message/2', from: 'agent/example/app' }), { from: 'App → someone', text: 'Fractal' });
 
 
 // (3) A crash-looping seat must stand out rather than read as a normal row.
@@ -110,18 +89,22 @@ assert.deepEqual(pingPresentation('[PING] ← person/alex: Ship it [id:message/a
 assert.deepEqual(pingPresentation('Plain text [id:message/abc]'), { from: null, text: 'Plain text' });
 assert.deepEqual(pingPresentation('No envelope here'), { from: null, text: 'No envelope here' });
 
-// Connected clients: shown as they describe themselves; only an older st build gets the quiet note.
+// Connected clients: shown as they describe themselves; only an older Fractal build gets the quiet note.
 {
-  const phone = { actor: 'person/robin/session/s1', person: 'person/robin', client: 'smalltalk-ios 1.0 (42)', device_id: 'device/d1', device_name: "Robin's phone", member: 'lark', via: 'gateway', connected: true, streams: 2, since: '2026-09-25T08:13:00Z', last_seen: '2026-09-25T08:24:59Z', follows: ['now', 'terminal:terminal/agent/lark/planner'] };
-  assert.equal(clientTitle(phone, 'person/robin/session/s1'), 'smalltalk-ios 1.0 (42) · this phone');
+  const phone = { actor: 'person/robin/session/s1', person: 'person/robin', client: 'fractal-ios 1.0 (42)', device_id: 'device/d1', device_name: "Robin's phone", member: 'lark', via: 'gateway', connected: true, streams: 2, since: '2026-09-25T08:13:00Z', last_seen: '2026-09-25T08:24:59Z', follows: ['now', 'terminal:terminal/agent/lark/planner'] };
+  assert.equal(clientTitle(phone, 'person/robin/session/s1'), 'fractal-ios 1.0 (42) · this phone');
   assert.equal(clientTitle({ ...phone, client: null }, undefined), 'unnamed client');
   assert.equal(clientDetail(phone, now), "person/robin · Robin's phone · gateway · lark · since 12m · follows now, terminal:terminal/agent/lark/planner");
   const gone = { ...phone, actor: 'person/robin', client: 'stui 0.0.9+77d0a13', device_id: undefined, device_name: undefined, via: 'local', connected: false, last_seen: '2026-09-25T08:22:00Z', follows: [] };
   assert.equal(clientDetail(gone, now), 'person/robin · local · lark · seen 3m ago');
   assert.equal(olderThanMember('stui 0.0.9+77d0a13', '0.1.0+1ecae71'), true);
   assert.equal(olderThanMember('st 0.1.0+local.ab12cd3', '0.2.0+1ecae71'), true);
+  assert.equal(olderThanMember('fractal 0.1.0+local.ab12cd3', '0.2.0+1ecae71'), true);
+  assert.equal(olderThanMember('fractal-tui 0.0.9+77d0a13', '0.1.0+1ecae71'), true);
+  assert.equal(olderThanMember('fractal 0.1.0+77d0a13', '0.1.0+1ecae71'), false);
+  assert.equal(olderThanMember('fractal dev', '0.1.0+1ecae71'), false);
   assert.equal(olderThanMember('stui 0.1.0+77d0a13', '0.1.0+1ecae71'), false);
-  assert.equal(olderThanMember('smalltalk-ios 0.0.1 (3)', '0.1.0+1ecae71'), false);
+  assert.equal(olderThanMember('fractal-ios 0.0.1 (3)', '0.1.0+1ecae71'), false);
   assert.equal(olderThanMember('stui dev', '0.1.0+1ecae71'), false);
   assert.equal(olderThanMember('stui 0.0.9+77d0a13', undefined), false);
 }

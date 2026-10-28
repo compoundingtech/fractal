@@ -1,4 +1,4 @@
-// Ported from smalltalk apps/ios/terminalStyle.ts (ANSI palette, 256-colour cube, inverse/dim
+// Ported from Fractal apps/ios/terminalStyle.ts (ANSI palette, 256-colour cube, inverse/dim
 // handling); extended with a design-token palette that follows the host theme.
 
 import type { TerminalColor, TerminalRun } from '@fractal/client/schema'

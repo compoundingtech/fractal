@@ -239,6 +239,7 @@ fn modern_projection_comparison_needs_alignment_but_not_a_legacy_digest() {
     ] {
         let source = node("birch");
         let target = node("cedar");
+        target.capture_divergences(true);
         let mut summary = source.export_replication_summary(FLEET).unwrap();
         summary.projection_digests.clear();
         if modern {

@@ -1,5 +1,53 @@
 use super::*;
 
+#[test]
+fn launch_diagnostic_retains_only_current_attempt_last_twenty_lines() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("app-server.log");
+    let previous = "previous incarnation diagnostic\n";
+    let current = (0..30).map(|i| format!("stderr line {i}\n")).collect::<String>();
+    fs::write(&path, format!("{previous}{current}")).unwrap();
+    let tail = app_server_log_tail(&path, previous.len() as u64).unwrap();
+    assert_eq!(tail.lines().count(), 20);
+    assert!(tail.starts_with("stderr line 10\n"));
+    assert!(tail.ends_with("stderr line 29"));
+    assert!(!tail.contains("previous"));
+    assert_eq!(app_server_log_tail(&path, fs::metadata(&path).unwrap().len()).unwrap(), "");
+}
+
+#[test]
+fn launch_diagnostic_bounds_lossy_utf8_at_a_character_boundary() {
+    let multibyte = "é".repeat(6_000);
+    let tail = diagnostic_output_tail(multibyte.as_bytes());
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.ends_with('é'));
+    assert!(tail.chars().all(|c| c == 'é'));
+
+    let mut invalid = vec![0xff; 8 * 1024];
+    invalid.extend_from_slice("final é".as_bytes());
+    let tail = diagnostic_output_tail(&invalid);
+    assert!(tail.len() <= 8 * 1024);
+    assert!(tail.contains('\u{fffd}'));
+    assert!(tail.ends_with("final é"));
+}
+
+#[test]
+fn protocol_schema_gate_accepts_codex_0164_error_union() {
+    let mut schemas = compatible_protocol_schemas();
+    let error = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo").unwrap();
+    let mut arms = error.as_object_mut().unwrap().remove("oneOf").unwrap();
+    // 0.164.0 also includes a forward-compatible string/object catch-all. It must
+    // not erase the explicitly declared authentication and capacity words.
+    arms.as_array_mut().unwrap().push(json!({"type": ["string", "object"]}));
+    error["anyOf"] = arms;
+    verify_codex_protocol_schemas(&schemas).unwrap();
+    let words = schemas.protocol.pointer_mut("/definitions/CodexErrorInfo/anyOf/0/enum")
+        .unwrap().as_array_mut().unwrap();
+    words.retain(|word| word != "unauthorized");
+    assert!(format!("{:#}", verify_codex_protocol_schemas(&schemas).unwrap_err())
+        .contains("CodexErrorInfo has no 'unauthorized' word"));
+}
+
 // Shared CI runs several workspace suites at once; these waits test event ordering,
 // not a two-second performance bound.
 const TEST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -413,14 +461,14 @@ fn write_fake_codex(
     path
 }
 
-/// The boot canaries' stand-in `codex` (scripts/st3-boot-canaries/stub-codex.py) answers
+/// The boot canaries' stand-in `codex` (scripts/fractal-boot-canaries/stub-codex.py) answers
 /// `generate-json-schema` with these files. They must stay what this gate admits, so a change to
 /// the required methods fails here, with the command that rewrites them.
 #[test]
 fn the_boot_canary_codex_stub_schemas_are_what_the_protocol_gate_admits() {
     let schemas = compatible_protocol_schemas();
     let directory =
-        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3-boot-canaries/codex-schemas");
+        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/fractal-boot-canaries/codex-schemas");
     for (filename, schema) in [
         (
             "codex_app_server_protocol.v2.schemas.json",
@@ -446,7 +494,7 @@ fn the_boot_canary_codex_stub_schemas_are_what_the_protocol_gate_admits() {
             stored.as_ref(),
             Some(schema),
             "{filename} is stale: run `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p fractal-drivers \
-             the_boot_canary_codex_stub_schemas` and commit scripts/st3-boot-canaries/codex-schemas"
+             the_boot_canary_codex_stub_schemas` and commit scripts/fractal-boot-canaries/codex-schemas"
         );
     }
 }
@@ -1545,11 +1593,11 @@ fn offer_round(delivery: &mut CodexInboxDelivery, state: &CodexControlState) -> 
     offers
 }
 
-/// Per-PR contract for the `idle-hold` boot canary (scripts/st3-boot-canaries/run,
+/// Per-PR contract for the `idle-hold` boot canary (scripts/fractal-boot-canaries/run,
 /// `idle_delivery_control`): after an idle period, under a hold, at its release and at its expiry,
 /// the native pump admits exactly one offer for each message and replays none. The gate is fed
 /// what the daemon's hold view reports at each instant of a test clock (`active` is
-/// `held && now < until`, which st3-api-core's
+/// `held && now < until`, which fractal-api-core's
 /// `expiry_release_restart_and_adoption_preserve_graph_authority` proves on the real claim store),
 /// so nothing sleeps. That an idle tick reads no hold at all is
 /// driver_cli's `native_delivery_control_reads_hold_only_while_mail_waits`.
@@ -3076,6 +3124,34 @@ fn control_initializes_before_recording_the_first_thread_only() {
     assert!(state.subscribed());
 }
 
+/// Waits until the persisted control state matches, reading it after each pump event. The pump
+/// persists before it sends, but it can run several frames ahead of the test thread on a loaded
+/// host, so a fixed number of events can all be ones sent before the state the caller waits for.
+fn wait_for_observed_state(
+    state_path: &Path,
+    events: &mpsc::Receiver<ControlEvent>,
+    wanted: impl Fn(&CodexObservedState) -> bool,
+) -> bool {
+    let matches = || {
+        fs::read(state_path).ok().is_some_and(|bytes| {
+            serde_json::from_slice::<CodexControlState>(&bytes)
+                .ok()
+                .is_some_and(|state| wanted(state.observed()))
+        })
+    };
+    let deadline = Instant::now() + TEST_EVENT_TIMEOUT;
+    loop {
+        if matches() {
+            return true;
+        }
+        match events.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => return matches(),
+            Err(mpsc::RecvTimeoutError::Timeout) => return false,
+        }
+    }
+}
+
 #[test]
 fn live_control_request_blocks_until_the_bound_thread_resolves_it() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3153,45 +3229,23 @@ fn live_control_request_blocks_until_the_bound_thread_resolves_it() {
             events_tx,
         )
     });
-    let mut blocked = false;
-    for _ in 0..4 {
-        events_rx.recv_timeout(TEST_EVENT_TIMEOUT).unwrap();
-        if let Ok(bytes) = fs::read(&state_path)
-            && serde_json::from_slice::<CodexControlState>(&bytes)
-                .ok()
-                .is_some_and(|state| {
-                    matches!(
-                        state.observed(),
-                        CodexObservedState::Held {
-                            reason: CodexHoldReason::WaitingOnApproval,
-                            ..
-                        }
-                    )
-                })
-        {
-            blocked = true;
-            break;
-        }
-    }
+    let blocked = wait_for_observed_state(&state_path, &events_rx, |observed| {
+        matches!(
+            observed,
+            CodexObservedState::Held {
+                reason: CodexHoldReason::WaitingOnApproval,
+                ..
+            }
+        )
+    });
     assert!(
         blocked,
         "the control stream did not publish the approval hold"
     );
     release_tx.send(()).unwrap();
-    let mut released = false;
-    for _ in 0..3 {
-        if events_rx.recv_timeout(TEST_EVENT_TIMEOUT).is_err() {
-            break;
-        }
-        if let Ok(bytes) = fs::read(&state_path)
-            && serde_json::from_slice::<CodexControlState>(&bytes)
-                .ok()
-                .is_some_and(|state| matches!(state.observed(), CodexObservedState::Active { .. }))
-        {
-            released = true;
-            break;
-        }
-    }
+    let released = wait_for_observed_state(&state_path, &events_rx, |observed| {
+        matches!(observed, CodexObservedState::Active { .. })
+    });
     assert!(
         released,
         "the matching status did not release the approval hold"
@@ -9216,7 +9270,7 @@ fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
 }
 
 /// Per-PR contract for the `access-auto` and `access-bypass` boot canaries
-/// (scripts/st3-boot-canaries/run, the `access-` block after `scenario`): every managed provider
+/// (scripts/fractal-boot-canaries/run, the `access-` block after `scenario`): every managed provider
 /// launch, fresh and restarted on its saved thread, carries exactly the access-mode flags the
 /// canary reads from the stub providers' `started` receipts. The Codex argv is composed as a
 /// controlled launch composes it: install defaults, the app-server/TUI split, then the TUI's own

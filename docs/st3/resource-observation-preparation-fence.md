@@ -125,16 +125,19 @@ performs BEGIN and a first current_index read before the input closure. It
 cannot join an old same-store request/pin because those were excluded on the
 same thread before seed. Its guard rolls back/releases on every exit, before
 validation is enqueued. TEMP objects could change name resolution differently
-on the writer and reader; the private path permits only the write_clock table
-and the retained heal_replay_base_order table used by canonical replay. Neither
-name shadows a preparation dependency. File-backed initial open runs that replay
-and retains its empty scratch table; rejecting it would disable the optimization.
-Eligibility compares the stored CREATE definitions with the two actual source
-schemas after collapsing whitespace, not names alone. The replay table must also
-be empty. Mismatched columns, extra columns, views, triggers, indexes, unknown
-names or retained replay rows select the old path. The [SQLite schema table](https://www.sqlite.org/schematab.html)
-describes stored CREATE text; the pinned bundled sqlite3EndTable implementation
-constructs it from the object-name token, omitting TEMP and IF NOT EXISTS.
+on the writer and reader; the private path permits the write_clock table,
+the retained heal_replay_base_order table used by canonical replay, and the
+two preparation_work_pending/dirty queue notifier triggers. None shadows a
+preparation dependency. The notifiers only signal the connection-owned Rust flag
+when durable preparation work is inserted; they do not read or change resource
+inputs. File-backed initial open runs replay and retains its empty scratch table.
+Eligibility compares stored CREATE definitions and object types with these exact
+native definitions after collapsing whitespace, not names alone. The replay table
+must also be empty. Mismatched columns, extra columns, views, other or altered
+triggers, indexes, unknown names or retained replay rows select the old path.
+The [SQLite schema table](https://www.sqlite.org/schematab.html) describes stored
+CREATE text; the pinned bundled SQLite implementation constructs it from the
+object-name token, omitting TEMP and IF NOT EXISTS.
 The catalog check and conditional scratch-emptiness query are additional SQL
 cost, not free metadata; later schema changes still invalidate the native cut.
 The file-backed/reopen control requires an actual fast observation, rejects each

@@ -40,7 +40,6 @@ mod nomad_survival;
 mod otel_export;
 mod parked_recovery;
 mod predecessor_ding_migration;
-mod public_repo;
 mod pty;
 mod request_cli;
 mod resource_provider_e2e;

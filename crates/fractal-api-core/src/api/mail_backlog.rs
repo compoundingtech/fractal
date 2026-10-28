@@ -188,6 +188,28 @@ pub async fn cleanup(
 mod tests {
     use super::*;
 
+    #[test]
+    fn backlog_cleanup_command_preserves_the_wire_literal_during_and_after_bootstrap() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        let now = client_now_ms();
+        for complete in [false, true] {
+            state.store.connection.write().execute(
+                "UPDATE local_coordination_backfill SET complete=?1 WHERE singleton=1",
+                [complete],
+            ).unwrap();
+            assert_eq!(state.store.coordination_backfill_status().unwrap().2, complete);
+            assert_eq!(
+                serde_json::to_value(report(&state.store, now).unwrap()).unwrap(),
+                json!({
+                    "count": 0,
+                    "threshold_ms": 3_600_000,
+                    "cleanup_command": "st conversations cleanup --all --older-than 1h",
+                }),
+            );
+        }
+    }
+
     #[tokio::test]
     async fn backlog_cleanup_never_archives_an_unoffered_silent() {
         let root = tempfile::tempdir().unwrap();

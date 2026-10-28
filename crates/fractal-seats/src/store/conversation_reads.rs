@@ -1,4 +1,4 @@
-//! The part of `store::conversation_reads` that moved up from st3-store.
+//! The part of `store::conversation_reads` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 pub use fractal_missions::store::conversation_reads::*;
@@ -191,7 +191,7 @@ mod tests {
         let result = worker.join().unwrap();
         assert!(
             store
-                .smalltalk
+                .fractal
                 .conversation_owners
                 .lock()
                 .unwrap()
@@ -200,7 +200,7 @@ mod tests {
         );
         assert_eq!(*result, oracle(&store, frontier));
         assert_eq!(*store.conversation_owners_at(frontier).unwrap(), *result);
-        assert_eq!(store.smalltalk.conversation_owners.lock().unwrap().len(), 1);
+        assert_eq!(store.fractal.conversation_owners.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -263,6 +263,6 @@ mod tests {
         assert_eq!(store.assistant_conversation_owners_page(None, 0, through).unwrap().len(), 1);
         assert!(store.assistant_conversation_owners_page(Some("agent/zzz"), 3, through).unwrap().is_empty());
         assert!(store.assistant_conversation_owners_page(None, 3, store.index().unwrap() + 1).is_err());
-        assert!(store.smalltalk.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
+        assert!(store.fractal.conversation_owners.lock().unwrap_or_else(PoisonError::into_inner).is_empty());
     }
 }

@@ -6,12 +6,12 @@ parse CLI output or copy the terminal UI or the phone's transcript parser.
 
 The working [example TUI](../../examples/client-tui/) lists agents, follows the selected agent's
 conversation and sends a message. It is a workspace member, built and tested by Linux/macOS
-workspace CI. Its application code is about 400 lines, with no dependency on the `stui` library or the daemon.
+workspace CI. Its application code is about 400 lines, with no dependency on the `fractal-tui` library or the daemon.
 
 ## Run the example first
 
 Use a checkout and the Rust development environment described in the [root README](../../README.md).
-Have st running locally with at least one agent; the [getting-started guide](../getting-started.md)
+Have Fractal running locally with at least one agent; the [getting-started guide](../getting-started.md)
 sets that up. Choose a person already in your fleet; `person/avery` below is an invented example.
 
 ```sh
@@ -21,13 +21,13 @@ cargo run --locked -p fractal-client-tui -- person/avery /tmp/example-st3.sock
 ```
 
 Without an explicit socket, the example passes `ST3_ENDPOINT` to `discover_unix_endpoint`, then
-uses the normal st config and XDG runtime/state discovery. `Client::unix_as` is for the trusted
-local socket, where st allows the local user to select the person. It does not authenticate a
+uses the normal Fractal config and XDG runtime/state discovery. `Client::unix_as` is for the trusted
+local socket, where Fractal allows the local user to select the person. It does not authenticate a
 remote device. For remote access, pair a device and use its credential as described below.
 
 Up/Down selects an agent. Type a single-line message and press Enter to send it to the displayed
 agent. Esc clears the draft or discards an uncertain-send retry; Ctrl-C quits. Discarding a retry
-cannot retract a message st already accepted. The first bounded window contains at most 200
+cannot retract a message Fractal already accepted. The first bounded window contains at most 200
 agents. The conversation follows its end, showing the recent page and saying when earlier
 history exists. This example has no history scrolling, search, terminal attachment, fold toggles,
 read acknowledgements, attachments or persistent cache; the pieces for those are described below.
@@ -47,11 +47,11 @@ Open [main.rs](../../examples/client-tui/src/main.rs) for startup/input and
 | Typed reads, action parameters/fences, errors and streams | [`fractal-client`](../../crates/fractal-client/README.md) | [`@fractal/client`](../../clients/typescript/fractal-client/README.md) |
 | Live joined windows, member rotation and reconnect/resubscribe | [`fractal-feed`](../../crates/fractal-feed/README.md): `run_members`, `Command`, `Update` | Generated client's `collectionStream` and `applyWindow`; the caller owns reconnect/member selection (there is no TS feed package) |
 | Timeline revisions, earlier pages, transcript cleaning and delivery joins | [`fractal-conversation-ui`](../../crates/fractal-conversation-ui/README.md): `Timeline`, `Frame`, `adapt::conversation` | [`@fractal/views`](../../clients/typescript/fractal-views/README.md): `applyConversation`, `applyOlderPage`, `readOlder`, `conversationEntries` |
-| Conversation drawing, folds, selection and pane interactions | Enable `fractal-conversation-ui`'s `ratatui` feature for `Cache`/`Theme`; model-only `State` emits `PaneIntent`s | `st3-views` supplies folding, simplified tool rows and entry types; your renderer draws them |
-| Mission words, precedence, queue state and step identity | `fractal-ui-model::missions::adapt`, borrowing typed projections and caller display policies | Phone-specific mission derivation remains in `apps/ios/missionsView.ts`; it is not part of `st3-views` |
-| Session discovery, Home rows, request/answer formatting | Typed client resources; no single Rust package for all these views | `st3-views`: `sessionView`, `homeView`, `requestView` |
+| Conversation drawing, folds, selection and pane interactions | Enable `fractal-conversation-ui`'s `ratatui` feature for `Cache`/`Theme`; model-only `State` emits `PaneIntent`s | `@fractal/views` supplies folding, simplified tool rows and entry types; your renderer draws them |
+| Mission words, precedence, queue state and step identity | `fractal-ui-model::missions::adapt`, borrowing typed projections and caller display policies | Phone-specific mission derivation remains in `apps/ios/missionsView.ts`; it is not part of `@fractal/views` |
+| Session discovery, Home rows, request/answer formatting | Typed client resources; no single Rust package for all these views | `@fractal/views`: `sessionView`, `homeView`, `requestView` |
 | Private read-only display cache | `fractal-feed::cache` and `model::Model` | Phone's cache remains application code; it is not a shared TS cache API |
-| Device-signing data and reported client name | Typed signature parameters in `fractal-client`; caller owns key/signing; `set_client_name` reports your app | `st3-views`'s `deviceSigning` builds canonical bytes/parameters, and `clientName` formats caller-supplied product/version/build |
+| Device-signing data and reported client name | Typed signature parameters in `fractal-client`; caller owns key/signing; `set_client_name` reports your app | `@fractal/views`'s `deviceSigning` builds canonical bytes/parameters, and `clientName` formats caller-supplied product/version/build |
 
 These are repository source packages, not crates published on crates.io or npm. In a Rust app
 inside this checkout, use path dependencies like the [example manifest](../../examples/client-tui/Cargo.toml).
@@ -102,6 +102,73 @@ it. Shutdown initialization, already-started pagehide transport and the native f
 share one absolute one-second deadline; the native flush receives only the time remaining
 after the manual transport drain. The independently demanded session-trace provider remains lazy.
 
+Configured browsers also export `fractal.input.next_frame` through this same tracer,
+under `service.name=fractal-web` (the TUI uses `fractal`). This is a span-based
+SLI for collector spanmetrics, not a browser histogram or a new metrics endpoint.
+Trusted inputs count only when an owned commit occurs during dispatch
+or its discrete React microtasks. Capture observes the initiating control, its
+`aria-controls`/`aria-owns` targets, and explicitly registered surface regions.
+Interactive sidebar rows (`role=row` with `data-sidebar-tree-key`) own only their
+row subtree and attributes. ArrowLeft/ArrowRight expansion therefore counts the
+row's `aria-expanded` change even when child rows mount as siblings; neither the
+treegrid nor its root is observed.
+The composer registers its own field and **only the final rendered transcript
+turn**. An optional kit `Transcript.tailRef` reports a newly mounted tail into
+the app-owned input window, so Send can count a new turn without observing the
+history container. Trusted field `input` events are native editing commits,
+including value-property changes. Existing overlay hosts are observed with
+`childList: true` only (no subtree, attributes, character data or old values).
+The document, React root and full transcript are never observed by this producer.
+Broad root/history targets are excluded even when referenced by ARIA.
+Effects outside these regions, including delayed async effects after the window,
+do not count; ingest closes ownership before its writes.
+Immediately after `createRoot`, the app registers that container
+with telemetry. The optional kit `PortalContainerRegistrationContext` registers
+every production portal container for its mounted lifetime. `App` owns the Aria
+provider above both the status bar and workspace, with a registered, unstyled
+app-root host. It adds no positioning or stacking context, preserving the
+status-bar changelog's explicit theme and z-index instead of inheriting the
+workspace host's z-index 20. Status overlays cannot fall back to document.body.
+The existing themed workspace host, nested `ThemePortal` hosts, workspace
+bodies, pane layers and error overlays are
+also registered. Shared containers are reference-counted; consumers without this
+context do nothing.
+Same-event completion listeners run after React's native delegated root/portal
+listeners: bubble handles stopped React bubble handlers; capture handles
+`cancelBubble` already set by React capture handlers. Native `stopPropagation`
+does not skip later same-node listeners. Their queued microtask drains after
+React's discrete flush and disconnects before timers or rendering. Window bubble
+provides the same completion for non-React targets. React 19.2.3's scheduling is in
+[ReactFiberRootScheduler.js:265-267,345-346,671-692](https://github.com/facebook/react/blob/v19.2.3/packages/react-reconciler/src/ReactFiberRootScheduler.js#L265-L267);
+the browser's [event-loop microtask checkpoint](https://html.spec.whatwg.org/multipage/webappapis.html#event-loop-processing-model)
+precedes rendering. An older dispatch's queued closure cannot close a newer capture.
+
+There is **no rAF attribution fallback**. A MessageChannel task is the last resort
+if native propagation stops below the root or uses `stopImmediatePropagation`.
+Those unsupported paths may include intervening task mutations; app/kit source
+contains no native instances of these paths (existing stops are React synthetic).
+`makeFrameIngest.flush` additionally drains and disconnects **before** batch writes,
+without reopening for their async React commits. No idle observation occurs.
+DOM-less React commits, native scrolling and value-only changes without a trusted
+editing event do not count.
+The start is the input event timestamp. Event Timing entries bind one-to-one by
+event type and exact timestamp before retaining their interactionId; ambiguous
+matches use the paint fallback rather than cross-matching concurrent inputs.
+The fallback end is rAF after commit followed by a posted task. A later input's commit before
+paint ends the previous committed input as `coalesced`. At page hiding, pagehide,
+unload or telemetry teardown, queued Event Timing entries are first drained through
+the same matching handler; a queued presentation remains `painted`. Only still
+unpainted committed inputs then end as `unacknowledged`.
+Only `painted` is latency-SLI eligible. There is no timer expiry.
+
+Attributes are bounded `input.kind`, `input.action`, `surface` and one final
+`outcome`. Surface is `agents|conversation|tabs|palette|missions|other`; pointer
+events use TUI kind `mouse`. No key text, element identifiers or accessible text
+are exported. Painted spans include `read_to_frame_ms` (event to paint) and
+`accepted_to_frame_ms` (capture-listener entry to paint). `queue_ms`, TUI `mode`
+and TUI `focus` are omitted because their TUI meanings have no equivalent here.
+These input spans are disabled entirely when the traces URL is unset.
+
 ## Connect, follow and send
 
 Rust local clients use `Client::unix` or `unix_as`. A paired Unix gateway uses `unix_gateway`;
@@ -114,7 +181,7 @@ Pass the feed a standard update sender and a Tokio command receiver. Drain updat
 UI loop. An agents `Window` replaces the ordered agent rows; keep selection by resource ID,
 not row index. `Connected` means the socket opened, not that rows loaded: wait for a live
 window before enabling actions. `Offline` preserves the last display while disabling sends.
-`Converse { targets: vec![agent_id] }` asks st to join that agent's transcript and Fractal.
+`Converse { targets: vec![agent_id] }` asks Fractal to join that agent's transcript and Fractal.
 Apply conversation frames through `Timeline`, then feed `adapt::conversation` into `Cache`.
 Do not append frames blindly: entries can be revised, streams can replace their window, and
 an agent can restart into another session. The feed can follow at most three conversations.
@@ -229,5 +296,5 @@ pnpm --filter @fractal/views typecheck
 The example tests use a terminal test backend and a loopback test gateway with the real client
 and feed: they check stable selection, stale/offline behavior, shared transcript rendering,
 subscription composition, fenced message parameters and unchanged idempotency on retry. They
-need no running daemon or paired device. Run server-backed st3 tests outside an agent seat's
+need no running daemon or paired device. Run server-backed Fractal tests outside an agent seat's
 `ST_AGENT` environment, as the repository's contribution constraints require.

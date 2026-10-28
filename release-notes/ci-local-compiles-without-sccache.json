@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/ci-local compiles without sccache: a cache server started inside a local run kept the run's removed home and temporary directory, and every build on the host that shares that server then failed",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "The commands the stages run and the notes they sign are unchanged; only the compiler wrapper is left out, as CI does when its cache is unavailable."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step. A host whose shared cache server was started by an earlier local run should stop that server once (sccache --stop-server); the next build starts a healthy one."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}

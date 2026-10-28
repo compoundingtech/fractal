@@ -1,4 +1,4 @@
-//! The part of `store::conversation_reads` that moved up from st3-store.
+//! The part of `store::conversation_reads` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -27,17 +27,20 @@ const CONVERSATION_CHANGED: &str = "SELECT
     EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index
       WHERE subject=?1 AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_to_order_index
-      WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1
+      WHERE kind='message.sent' AND json_extract(body,'$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
         AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_from_index
-      WHERE kind='message.sent' AND json_extract(body,'$.fields.from')=?1
+      WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
         AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_legacy_to_index
       WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-        AND json_extract(body,'$.to')=?1 AND store_index>?2 AND store_index<=?3)
+        AND json_extract(body,'$.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM claims INDEXED BY claims_message_legacy_from_index
       WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-        AND json_extract(body,'$.from')=?1 AND store_index>?2 AND store_index<=?3)
+        AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
+    OR EXISTS(SELECT 1 FROM main.local_native_delivery_receipts_v2
+      INDEXED BY local_native_delivery_owner_cut_v2
+      WHERE actor IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>?2 AND store_index<=?3)
     OR EXISTS(SELECT 1 FROM local_observations INDEXED BY local_observations_subject_id_index
       WHERE subject=?1 AND id>?4 AND id<=?5)";
 
@@ -78,6 +81,8 @@ fn conversation_owner_from_connection(
     subject: &str,
     through: u64,
 ) -> Result<Option<Owner>> {
+    let subject = fractal_store::store::identities::resolve_reference_conn(connection, subject)?;
+    let subject = subject.as_str();
     let exists: bool = connection.prepare_cached(
         "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND store_index<=?2)",
     )?.query_row(/* sqlite-large-value: allow-for-now lv-he1164e71c552 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![subject, through], |row| row.get(0))?;
@@ -195,10 +200,12 @@ impl ConversationReadsStore for Store {
     fn conversation_changed_at(
             &self, owner: &str, after: u64, through: u64, local_after: u64, local_through: u64,
         ) -> Result<bool> {
+        let connection = self.readers.get();
+        let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
         if after == through && local_after == local_through {
             return Ok(false);
         }
-        Ok(self.readers.get().prepare_cached(/* sqlite-large-value: allow-for-now lv-h3794736069fe owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
+        Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3794736069fe owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ CONVERSATION_CHANGED)?
             .query_row(/* sqlite-large-value: allow-for-now lv-hdcbe3463817e owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ params![owner, after, through, local_after, local_through], |row| row.get(0))?)
     }
 
@@ -211,8 +218,7 @@ impl ConversationReadsStore for Store {
     fn conversation_owners_at(&self, through: u64) -> Result<Arc<Owners>> {
         selected_index(self.index()?, Some(through)).map_err(anyhow::Error::new)?;
         let (generation, previous) = {
-            let cache = self
-                .smalltalk
+            let cache = self.fractal
                 .conversation_owners
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
@@ -225,7 +231,7 @@ impl ConversationReadsStore for Store {
                 .max_by_key(|(at, _)| *at)
                 .map(|(at, owners)| (*at, Arc::clone(owners)));
             (
-                self.smalltalk
+                self.fractal
                     .conversation_owner_generation
                     .load(std::sync::atomic::Ordering::Relaxed),
                 previous,
@@ -291,15 +297,13 @@ impl ConversationReadsStore for Store {
                 pause();
             }
         });
-        let mut cache = self
-            .smalltalk
+        let mut cache = self.fractal
             .conversation_owners
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         // A repair may have cleared the cache while this build released its SQL readers.
         // The generation is changed under this same lock, so an older build cannot republish.
-        if self
-            .smalltalk
+        if self.fractal
             .conversation_owner_generation
             .load(std::sync::atomic::Ordering::Relaxed)
             != generation
@@ -370,6 +374,7 @@ impl ConversationReadsStore for Store {
         let before = before.unwrap_or(i64::MAX as u64);
         let ids = {
             let connection = self.readers.get();
+            let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
             let floor = if limit.is_some() {
                 after.saturating_add(1)
             } else {
@@ -385,22 +390,22 @@ impl ConversationReadsStore for Store {
             };
             connection
                 .prepare_cached(
-                    /* sqlite-large-value: allow-for-now lv-h38124a8abf3f owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
+                    /* sqlite-large-value: allow-for-now lv-h53448c5c25f2 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ "WITH selected AS (
                     SELECT store_index FROM claims INDEXED BY claims_message_to_order_index
-                    WHERE kind='message.sent' AND json_extract(body,'$.fields.to')=?1
+                    WHERE kind='message.sent' AND json_extract(body,'$.fields.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
                       AND store_index>=?2 AND store_index<?3
                     UNION
                     SELECT store_index FROM claims INDEXED BY claims_message_from_index
-                    WHERE kind='message.sent' AND json_extract(body,'$.fields.from')=?1
+                    WHERE kind='message.sent' AND json_extract(body,'$.fields.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1)
                       AND store_index>=?2 AND store_index<?3
                     UNION
                     SELECT store_index FROM claims INDEXED BY claims_message_legacy_to_index
                     WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-                      AND json_extract(body,'$.to')=?1 AND store_index>=?2 AND store_index<?3
+                      AND json_extract(body,'$.to') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>=?2 AND store_index<?3
                     UNION
                     SELECT store_index FROM claims INDEXED BY claims_message_legacy_from_index
                     WHERE kind='message.sent' AND json_type(body,'$.fields') IS NULL
-                      AND json_extract(body,'$.from')=?1 AND store_index>=?2 AND store_index<?3
+                      AND json_extract(body,'$.from') IN (SELECT name FROM identity_names WHERE identity=?1 UNION SELECT ?1) AND store_index>=?2 AND store_index<?3
                  ) SELECT claims.id FROM claims JOIN selected USING(store_index)
                    ORDER BY claims.store_index DESC LIMIT ?4",
                 )?
@@ -417,6 +422,7 @@ impl ConversationReadsStore for Store {
         ) -> Result<Vec<ClaimRecord>> {
         let ids = {
             let connection = self.readers.get();
+            let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
             connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd7107683547f owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ TIMELINE_OWNER_IDS)?
                 .query_map(params![owner, before.unwrap_or(i64::MAX as u64)], |row| {
@@ -510,6 +516,7 @@ impl ConversationReadsStore for Store {
             incarnation: &str,
         ) -> Result<(Option<u128>, Option<u128>)> {
         let connection = self.readers.get();
+        let owner = fractal_store::store::identities::resolve_reference_conn(&connection, owner)?;
         let started: Option<String> = connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-hf0f831e76397 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ &format!(
             "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_incarnation_accepted_index
@@ -797,7 +804,7 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
                 .query_map(params![owner, after, i64::MAX, 0, i64::MAX], |row| row.get::<_, String>(3))?
                 .collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
             for index in ["claims_subject_index", "claims_message_to_order_index", "claims_message_from_index",
-                "claims_message_legacy_to_index", "claims_message_legacy_from_index", "local_observations_subject_id_index"] {
+                "claims_message_legacy_to_index", "claims_message_legacy_from_index", "local_observations_subject_id_index", "local_native_delivery_owner_cut_v2"] {
                 assert!(plan.contains(index), "{plan}");
             }
             assert!(!plan.contains("SCAN claims"), "{plan}");

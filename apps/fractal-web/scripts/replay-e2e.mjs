@@ -4,6 +4,7 @@ import { once } from 'node:events'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
+import { loadWorld } from '@fractal/scenarios'
 
 // Run in the web Nix shell: its Playwright driver and Chromium are also used by the kit gate.
 const started = performance.now()
@@ -11,6 +12,14 @@ const app = fileURLToPath(new URL('..', import.meta.url))
 const scenario = 'first-run-onboarding'
 const sentence = 'The first mission is running. Checking sprout now.'
 const epoch = new Date('2026-10-01T12:00:00.000Z')
+const conversation = loadWorld(scenario, { now: epoch }).slices.conversation
+const threadCreated = conversation.timeline.find(event => event._tag === 'thread-create')
+const sentenceArrives = conversation.timeline.find(event =>
+  (event._tag === 'entries' || event._tag === 'replace') &&
+  event.items.some(item => item.type === 'content' && item.body?.text === sentence))
+assert(threadCreated && sentenceArrives, 'Onboarding must declare its recorded thread and sentence frames')
+assert(threadCreated.at_ms > 2000 && sentenceArrives.at_ms > threadCreated.at_ms,
+  'The recorded conversation must start after Builder appears and before its sentence arrives')
 const violations = []
 const errors = []
 let server, browser, devtools
@@ -145,35 +154,80 @@ try {
   const page = positive.page
   const roster = page.getByRole('navigation', { name: 'Agent roster', exact: true })
   const agent = roster.getByRole('row').filter({ has: page.locator('[data-wf-agent-ref]'), hasText: 'Sprout Builder' })
-  const noFolders = async () => {
-    // Only the adapter's Unfiled grouping row may lack an agent identity in this empty world.
-    const groups = await roster.getByRole('row').filter({ hasNot: page.locator('[data-wf-agent-ref]') })
-      .evaluateAll(rows => rows.map(row => row.getAttribute('data-sidebar-tree-key')))
-    assert(groups.every(key => key === 'wf/unfiled'), `Unexpected folder rows: ${JSON.stringify(groups)}`)
+  const noUserFolders = async () => {
+    // Project and Unfiled groups are generated views, not user-created folders.
+    // User folders keep their arrangement IDs; they have no separate row-key prefix.
+    const folders = await roster.getByRole('row').filter({ hasNot: page.locator('[data-wf-agent-ref]') })
+      .evaluateAll(rows => rows.map(row => row.getAttribute('data-sidebar-tree-key'))
+        .filter(key => key !== 'wf/unfiled' && !key?.startsWith('wf/project/')))
+    assert.deepEqual(folders, [], `Unexpected user folder rows: ${JSON.stringify(folders)}`)
   }
-  // Onboarding creates its conversation at +5s. Keep it unopened until then, without a retry.
+  const agentInProject = async () => {
+    const projectKey = `wf/project/${encodeURIComponent('~/src/sprout')}`
+    const project = roster.locator(`[data-sidebar-tree-key="${projectKey}"]`)
+    await project.getByText('~/src/sprout', { exact: true }).waitFor({ state: 'visible' })
+    const parentKey = await agent.evaluate(row => {
+      const level = Number(row.getAttribute('aria-level'))
+      const rows = [...row.closest('[role="treegrid"]').querySelectorAll('[role="row"]')]
+      for (let index = rows.indexOf(row) - 1; index >= 0; index--) {
+        if (Number(rows[index].getAttribute('aria-level')) < level) return rows[index].getAttribute('data-sidebar-tree-key')
+      }
+      return null
+    })
+    assert.equal(parentKey, projectKey, 'Sprout Builder must appear under its project group')
+  }
+  // Use the adopted recording's frame boundaries for the empty-to-populated transcript proof.
+  const advanceReplayTo = async (offset) => {
+    const elapsed = await page.evaluate(start => Date.now() - start, replayStartedAt)
+    assert(elapsed <= offset, `Replay clock already passed requested offset ${offset}: ${elapsed}`)
+    await page.clock.runFor(offset - elapsed)
+  }
+  const paneResponse = page.waitForResponse(response =>
+    new URL(response.url()).pathname.endsWith('/ConversationPane.tsx'))
   await page.goto(`${origin}/?scenario=${scenario}&open=missions:detail`)
+  await roster.waitFor({ state: 'visible' })
+  const replayStartedAt = await page.evaluate(() => Date.now())
+  assert.equal(replayStartedAt, epoch.getTime() + 1000, 'Shell must mount at the installed pause time without clock advancement')
   // Open replay sockets and publish the initial RAF batch, still well before the +2s frame.
   await page.clock.runFor(100)
-  await roster.waitFor({ state: 'visible' })
   assert.equal(await agent.count(), 0, 'before +2s: Sprout Builder must not exist')
   assert.equal(await page.getByText(sentence, { exact: true }).count(), 0, 'before timed conversation: sentence must not exist')
-  await noFolders()
+  await noUserFolders()
   await page.clock.runFor(2000)
   await page.clock.runFor(32) // Publish the SDK/React animation-frame batch after frame delivery.
   await agent.waitFor({ state: 'visible' })
   assert.equal(await agent.count(), 1, 'after +2s: replay inserts Sprout Builder')
-  await noFolders()
-  await page.clock.runFor(3000)
-  await page.clock.runFor(32)
+  await noUserFolders()
+  await agentInProject()
+  await advanceReplayTo(Math.floor((2000 + threadCreated.at_ms) / 2))
   await agent.click()
   assert(new URL(page.url()).pathname.startsWith('/w/agent/'), 'agent selection must navigate in-app')
   assert.equal(new URL(page.url()).searchParams.get('scenario'), scenario)
-  assert.equal(await page.getByText(sentence, { exact: true }).count(), 0)
-  await page.clock.runFor(2000)
-  await page.clock.runFor(32)
-  await page.getByTestId('transcript-scroll').getByText(sentence, { exact: true }).waitFor({ state: 'visible' })
-  console.log('PASS timed replay: empty roster → Sprout Builder (+2s) → conversation sentence (+7s)')
+  await (await paneResponse).finished()
+  const pane = page.getByTestId('conversation-history-host')
+  const transcript = page.getByTestId('transcript-scroll')
+  while (!await pane.isVisible() || !await transcript.getByTestId('transcript-empty').isVisible()) {
+    const elapsed = await page.evaluate(start => Date.now() - start, replayStartedAt)
+    assert(elapsed + 1 < threadCreated.at_ms,
+      `Real pane must show an empty transcript before +${threadCreated.at_ms}ms (at +${elapsed}ms)`)
+    await page.clock.runFor(1)
+  }
+  assert(await page.evaluate(start => Date.now() - start, replayStartedAt) < threadCreated.at_ms,
+    'Empty transcript must be observed before the recorded thread-creation boundary')
+  assert.equal(await transcript.getByText(sentence, { exact: true }).count(), 0,
+    'The recorded sentence must be absent from the observed empty transcript')
+  await advanceReplayTo(sentenceArrives.at_ms - 1)
+  assert.equal(await transcript.getByText(sentence, { exact: true }).count(), 0,
+    `Recorded sentence must remain absent at +${sentenceArrives.at_ms - 1}ms`)
+  await advanceReplayTo(sentenceArrives.at_ms)
+  // Flush only the queued transport delivery and at most two 16ms SDK/React RAF batches.
+  while (!await transcript.getByText(sentence, { exact: true }).isVisible()) {
+    const elapsed = await page.evaluate(start => Date.now() - start, replayStartedAt)
+    assert(elapsed < sentenceArrives.at_ms + 32, 'Recorded sentence must render within two RAF batches of its frame')
+    await page.clock.runFor(1)
+  }
+  const frameFlushMs = await page.evaluate(start => Date.now() - start, replayStartedAt) - sentenceArrives.at_ms
+  console.log(`PASS timed replay: Sprout Builder (+2s) → observed empty transcript (before +${threadCreated.at_ms}ms) → sentence absent (+${sentenceArrives.at_ms - 1}ms), present (+${sentenceArrives.at_ms}ms; ${frameFlushMs}ms frame flush)`)
   await page.reload()
   await page.clock.runFor(100)
   await roster.waitFor({ state: 'visible' })
@@ -182,8 +236,9 @@ try {
   await page.clock.runFor(2000)
   await page.clock.runFor(32)
   await agent.waitFor({ state: 'visible' })
-  await noFolders()
-  console.log('PASS in-app navigation and reload preserve scenario; onboarding has no folders')
+  await noUserFolders()
+  await agentInProject()
+  console.log('PASS in-app navigation and reload preserve scenario; onboarding has no user folders and groups its agent by project')
   await positive.context.close()
 
   const negative = await context(true)

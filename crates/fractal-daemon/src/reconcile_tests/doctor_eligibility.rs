@@ -1,4 +1,4 @@
-//! Reconciler doctor-eligibility tests; they live in st3-daemon because the API owns the doctor check.
+//! Reconciler doctor-eligibility tests; they live in fractal-daemon because the API owns the doctor check.
 
 #![allow(unused_imports, dead_code)]
 

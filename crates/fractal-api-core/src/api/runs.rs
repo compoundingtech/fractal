@@ -258,10 +258,18 @@ pub async fn mission_overview(
     State(state): State<AppState>,
     Query(query): Query<MissionOverviewQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    let subject = if query.mission.starts_with("mission/") {
+        query.mission
+    } else {
+        format!("mission/{}", query.mission)
+    };
+    let resolved = public_identity(&state.store, crate::store::identities::IdentityKind::Mission, &subject)?;
     blocking_store(move || {
-        state
-            .store
-            .read_snapshot(|_| state.store.mission_overview(&query.mission, 10))
+        state.store.read_snapshot(|_| {
+            let mut overview = state.store.mission_overview(&resolved.identity, 10)?;
+            overview["mission"] = json!(resolved.canonical_id);
+            Ok(overview)
+        })
     })
     .await
     .map(Json)
@@ -328,12 +336,17 @@ pub async fn list_mission_runs(
         (Some(root), None) => blocking_store(move || {
             let mut runs = store.mission_runs_for_root(&root)?;
             annotate_stuck_gates(&store, &mut runs)?;
+            for run in &mut runs { present_mission_run(&store, run)?; }
             Ok(runs)
         })
         .await
         .map(Json),
         (None, Some(mission)) => {
-            blocking_store(move || store.active_mission_runs_for_mission(&mission))
+            blocking_store(move || {
+                let mut runs = store.active_mission_runs_for_mission(&mission)?;
+                for run in &mut runs { present_mission_run(&store, run)?; }
+                Ok(runs)
+            })
                 .await
                 .map(Json)
         }
@@ -364,6 +377,7 @@ pub async fn list_mission_run_tree(
                 return Ok(None);
             };
             annotate_stuck_gates(&store, &mut runs)?;
+            for run in &mut runs { present_mission_run(&store, run)?; }
             Ok(Some(crate::model::MissionRunTreePage {
                 runs,
                 has_more: next_cursor.is_some(),
@@ -396,6 +410,12 @@ fn annotate_stuck_gates(store: &Store, runs: &mut [MissionRunView]) -> anyhow::R
     Ok(())
 }
 
+pub(super) fn present_mission_run(store: &Store, run: &mut MissionRunView) -> Result<(), St3Error> {
+    use crate::store::identities::{IdentityKind, IdentityStore};
+    run.mission = store.resolve_identity(IdentityKind::Mission, &run.mission)?.canonical_id;
+    Ok(())
+}
+
 pub async fn get_mission_run(
     State(state): State<AppState>,
     AxumPath(run): AxumPath<String>,
@@ -407,6 +427,7 @@ pub async fn get_mission_run(
             return Ok(None);
         };
         annotate_stuck_gates(&store, std::slice::from_mut(&mut run))?;
+        present_mission_run(&store, &mut run)?;
         Ok(Some(run))
     })
     .await?
@@ -438,7 +459,7 @@ pub async fn revise_mission_run(
             "a run revision must contain exactly one top-level mission",
         )));
     }
-    if !initial.subjects.is_empty() {
+    if !mission_only_subjects(&initial) {
         return Err(ApiError::bad(St3Error::new(
             "invalid-mission-revision-intent",
             "a run revision can contain only its mission",
@@ -451,6 +472,12 @@ pub async fn revise_mission_run(
     let resolved_kdl =
         resolve_document_references(&request.intent.kdl, &bindings).map_err(ApiError::bad)?;
     let intent = parse_intent(&resolved_kdl, &state.node).map_err(ApiError::bad)?;
+    if !mission_only_subjects(&intent) {
+        return Err(ApiError::bad(St3Error::new(
+            "invalid-mission-revision-intent",
+            "a run revision can contain only its mission",
+        )));
+    }
     let mission_id = current
         .mission
         .strip_prefix("mission/")
@@ -489,19 +516,18 @@ pub async fn revise_mission_run(
         .store
         .validate_revision_seat_carry(&current, replacement)
         .map_err(ApiError::bad)?;
-    let mut publication = intent.clone();
-    publication.subjects.clear();
+    let publication = &intent;
     let mut planned = state
         .store
         .mission(
-            &publication,
+            publication,
             crate::model::IntentInput {
                 kdl: resolved_kdl,
                 source_name: request.intent.source_name,
             },
         )
         .map_err(ApiError::bad)?;
-    publication_refusals(&state, &publication)
+    publication_refusals(&state, publication)
         .await?
         .block(&mut planned);
     if !planned.blockers.is_empty() {
@@ -514,7 +540,7 @@ pub async fn revise_mission_run(
     state
         .store
         .apply_as(
-            &publication,
+            publication,
             &planned.subject_tokens,
             &format!("{}:publish", request.idempotency_key),
             Some(&actor),
@@ -567,6 +593,7 @@ pub async fn revise_mission_run(
         .store
         .mission_provenance(mission_id, &replacement.revision)
         .map_err(ApiError::internal)?;
+    present_mission_run(&state.store, &mut revised.mission_run).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(revised))
 }
@@ -620,6 +647,8 @@ pub async fn set_mission_run_outcome(
         .cached_idempotency_response::<MissionRunView>(&request.idempotency_key)
         .map_err(ApiError::internal)?
     {
+        let mut cached = cached;
+        present_mission_run(&state.store, &mut cached).map_err(ApiError::bad)?;
         return Ok(Json(cached));
     }
     let actor = person_or_agent_actor(&request.actor, "run-outcome-authority-denied")?;
@@ -639,6 +668,8 @@ pub async fn set_mission_run_outcome(
         )
     })
     .await?;
+    let mut outcome = outcome;
+    present_mission_run(&state.store, &mut outcome).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(outcome))
 }

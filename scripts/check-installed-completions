@@ -3,7 +3,7 @@
 
 # Usage: check-installed-completions ST3_PACKAGE
 #
-# Checks the completion stubs an installed st3 package ships (docs/st3/cli-completion/spec.md):
+# Checks the completion stubs an installed Fractal package ships (docs/st3/cli-completion/spec.md):
 # each one resolves st through PATH and completes through it in its shell.
 # No daemon runs here, so subcommands complete and entity arguments offer nothing.
 set -euo pipefail

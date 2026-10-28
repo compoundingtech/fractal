@@ -1,8 +1,9 @@
 //! A parent session's subagent transcripts (client contract `conversation-blocks.v1` §1b, q2).
 //! OMP stores each subagent's transcript beside its parent's, in a directory named after the
 //! parent file: `<parent>.jsonl` -> `<parent>/<task id>.jsonl`. A child session id encodes its
-//! parent and task, so the link a client holds stays resolvable across daemon restarts without
-//! any stored index: conversation content stays volatile and nothing here writes a file.
+//! native parent, task, and root routing session, so gateways route it to the parent's owner
+//! without storing an index. Open or bookmarked links can outlive their generating gateway.
+//! The boundary reader accepts the old two-field encoding; writers emit only three fields.
 use crate::external_sessions::ExternalSession;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde_json::json;
@@ -12,27 +13,77 @@ use std::path::{Path, PathBuf};
 /// working, while staying distinct from every inventoried session id (a plain hash).
 const CHILD_PREFIX: &str = "session/external-child-";
 
-/// The reversible id of a subagent conversation: the parent's external id and the task id,
-/// encoded together. It is stable for the same parent and task, and distinct from every other
-/// session id, because no inventoried id contains the `-child-` infix.
-pub fn child_session_id(parent: &ExternalSession, task_id: &str) -> String {
+/// The reversible id of a subagent conversation, including its root owner's routing key.
+pub fn child_session_id(
+    parent: &ExternalSession,
+    task_id: &str,
+    routing_parent_session_id: &str,
+) -> String {
+    let routing_parent = child_parts(routing_parent_session_id)
+        .map(|parts| parts.routing_parent_session_id)
+        .unwrap_or_else(|| routing_parent_session_id.to_owned());
     format!(
         "{CHILD_PREFIX}{}",
-        URL_SAFE_NO_PAD.encode(json!([parent.id, task_id]).to_string())
+        URL_SAFE_NO_PAD.encode(json!([parent.id, task_id, routing_parent]).to_string())
     )
 }
 
-/// Split a child session id back into `(parent external id, task id)`.
-pub fn child_parts(session_id: &str) -> Option<(String, String)> {
+#[derive(Debug, PartialEq, Eq)]
+pub struct ChildParts {
+    pub external_parent_id: String,
+    pub task_id: String,
+    pub routing_parent_session_id: String,
+}
+
+/// Decode a child link at the boundary, normalizing legacy two-field links to a root routing
+/// key. A routing parent is native or managed, never another child.
+pub fn child_parts(session_id: &str) -> Option<ChildParts> {
     let encoded = session_id.strip_prefix(CHILD_PREFIX)?;
     let decoded = URL_SAFE_NO_PAD.decode(encoded).ok()?;
-    let pair = serde_json::from_slice::<serde_json::Value>(&decoded).ok()?;
-    let parent = pair.get(0)?.as_str()?;
-    let task = pair.get(1)?.as_str()?;
-    if !parent.starts_with("session/external-") || !valid_task_id(task) {
+    let fields = serde_json::from_slice::<Vec<String>>(&decoded).ok()?;
+    let (parent, task, routing_parent) = match fields.len() {
+        3 => {
+            let [parent, task, routing_parent]: [String; 3] = fields.try_into().ok()?;
+            (parent, task, Some(routing_parent))
+        }
+        2 => {
+            let [parent, task]: [String; 2] = fields.try_into().ok()?;
+            (parent, task, None)
+        }
+        _ => return None,
+    };
+    // Nested encodings grow geometrically in bytes. Decode each parent once so work stays
+    // proportional to the link size, without imposing a depth limit absent from the writer.
+    let parent_parts = child_parts(&parent);
+    let routing_parent = routing_parent.unwrap_or_else(|| {
+        parent_parts.as_ref().map_or_else(
+            || parent.clone(),
+            |parts| parts.routing_parent_session_id.clone(),
+        )
+    });
+    let external = |id: &str| {
+        id.strip_prefix("session/external-")
+            .is_some_and(|hash| hash.len() == 24 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    let managed = routing_parent.strip_prefix("session/").is_some_and(|hash| {
+        hash.len() == 24 && hash.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    if !(external(&parent) || parent_parts.is_some())
+        || !valid_task_id(&task)
+        || !(external(&routing_parent) || managed)
+    {
         return None;
     }
-    Some((parent.to_owned(), task.to_owned()))
+    if let Some(parent_parts) = parent_parts
+        && parent_parts.routing_parent_session_id != routing_parent
+    {
+        return None;
+    }
+    Some(ChildParts {
+        external_parent_id: parent,
+        task_id: task,
+        routing_parent_session_id: routing_parent,
+    })
 }
 
 /// A task id must stay one path component: no separators, no traversal, no dot-prefixed name.
@@ -68,13 +119,31 @@ pub fn resolve_child(
     home: Option<&Path>,
     session_id: &str,
 ) -> anyhow::Result<Option<ExternalSession>> {
-    let Some((parent_id, task_id)) = child_parts(session_id) else {
+    let Some(parts) = child_parts(session_id) else {
         return Ok(None);
     };
-    let Some(parent) = crate::external_sessions::find(home, &parent_id)? else {
+    // Managed roots require the owner's binding, not local native discovery.
+    if !parts.routing_parent_session_id.starts_with("session/external-") {
+        return Ok(None);
+    }
+    let parent = if child_parts(&parts.external_parent_id).is_some() {
+        resolve_child(home, &parts.external_parent_id)?
+    } else {
+        crate::external_sessions::find(home, &parts.external_parent_id)?
+    };
+    let Some(parent) = parent else {
         return Ok(None);
     };
-    let Some(transcript) = child_transcript(&parent, &task_id) else {
+    resolve_child_of(&parent, session_id, &parts.task_id)
+}
+
+/// Build a child source after the caller has resolved and verified its parent binding.
+pub fn resolve_child_of(
+    parent: &ExternalSession,
+    session_id: &str,
+    task_id: &str,
+) -> anyhow::Result<Option<ExternalSession>> {
+    let Some(transcript) = child_transcript(parent, task_id) else {
         return Ok(None);
     };
     let metadata = std::fs::symlink_metadata(&transcript)?;
@@ -201,7 +270,7 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(link.is_file(), "the link resolves");
         assert!(child_transcript(&parent, "linked").is_none());
-        let id = child_session_id(&parent, "linked");
+        let id = child_session_id(&parent, "linked", &parent.id);
         assert!(resolve_child(Some(root.path()), &id).unwrap().is_none());
         // A regular child file beside it still resolves.
         assert!(child_transcript(&parent, "task-1").is_none());
@@ -214,11 +283,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let parent = parent(root.path());
         let expected = child_file(&parent, "task-1");
-        let id = child_session_id(&parent, "task-1");
+        let id = child_session_id(&parent, "task-1", &parent.id);
         assert!(id.starts_with("session/external-child-"));
         assert_eq!(
             child_parts(&id),
-            Some((parent.id.clone(), "task-1".to_owned()))
+            Some(ChildParts {
+                external_parent_id: parent.id.clone(),
+                task_id: "task-1".to_owned(),
+                routing_parent_session_id: parent.id.clone(),
+            })
         );
         // The id holds no path separator, so it stays one route segment.
         assert!(!id.trim_start_matches("session/").contains('/'));
@@ -230,7 +303,7 @@ mod tests {
         // Without the file, or for a task that never ran, the id names nothing.
         std::fs::remove_file(&expected).unwrap();
         assert!(resolve_child(Some(root.path()), &id).unwrap().is_none());
-        let missing = child_session_id(&parent, "never-ran");
+        let missing = child_session_id(&parent, "never-ran", &parent.id);
         assert!(
             resolve_child(Some(root.path()), &missing)
                 .unwrap()
@@ -239,5 +312,85 @@ mod tests {
         // Unknown shapes are not child ids at all.
         assert!(child_parts("session/external-notachild").is_none());
         assert!(child_parts("session/external-child-not-base64!").is_none());
+    }
+
+    #[test]
+    fn managed_roots_and_descendants_keep_the_routing_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let mut parent = parent(root.path());
+        let routing = "session/0123456789abcdef01234567";
+        let child = child_session_id(&parent, "task-1", routing);
+        let parts = child_parts(&child).unwrap();
+        assert_eq!(parts.external_parent_id, parent.id);
+        assert_eq!(parts.routing_parent_session_id, routing);
+        assert!(resolve_child(Some(root.path()), &child).unwrap().is_none());
+        parent.id = child.clone();
+        let grandchild = child_session_id(&parent, "task-2", &child);
+        let parts = child_parts(&grandchild).unwrap();
+        assert_eq!(parts.external_parent_id, child);
+        assert_eq!(parts.routing_parent_session_id, routing);
+    }
+
+    #[test]
+    fn legacy_child_links_decode_and_resolve_but_writers_emit_three_fields() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = parent(root.path());
+        let expected = child_file(&parent, "task-1");
+        let legacy = format!("{CHILD_PREFIX}{}", URL_SAFE_NO_PAD.encode(
+            json!([parent.id, "task-1"]).to_string(),
+        ));
+        let parts = child_parts(&legacy).unwrap();
+        assert_eq!(parts.routing_parent_session_id, parent.id);
+        assert_eq!(resolve_child(Some(root.path()), &legacy).unwrap().unwrap().transcript, expected);
+        let descendant = format!("{CHILD_PREFIX}{}", URL_SAFE_NO_PAD.encode(
+            json!([legacy, "task-2"]).to_string(),
+        ));
+        assert_eq!(child_parts(&descendant).unwrap().routing_parent_session_id, parent.id);
+        let current = child_session_id(&parent, "task-1", &legacy);
+        let fields: Vec<String> = serde_json::from_slice(
+            &URL_SAFE_NO_PAD.decode(current.strip_prefix(CHILD_PREFIX).unwrap()).unwrap(),
+        ).unwrap();
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[2], parent.id);
+    }
+
+    #[test]
+    fn malformed_child_ids_are_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = parent(root.path());
+        for payload in [
+            json!([parent.id, "task", parent.id, "extra"]),
+            json!([parent.id, "../escape", parent.id]),
+            json!([parent.id, ".hidden", parent.id]),
+            json!(["session/not-external", "task", parent.id]),
+            json!([parent.id, "task", "session/not-managed"]),
+            json!([parent.id, "task", 123]),
+        ] {
+            let id = format!("{CHILD_PREFIX}{}", URL_SAFE_NO_PAD.encode(payload.to_string()));
+            assert!(child_parts(&id).is_none(), "{payload}");
+        }
+    }
+
+    #[test]
+    fn deeply_nested_legacy_links_decode_each_parent_once() {
+        let root = "session/external-0123456789abcdef01234567";
+        let mut descendant = root.to_owned();
+        for _ in 0..24 {
+            descendant = format!("{CHILD_PREFIX}{}", URL_SAFE_NO_PAD.encode(
+                json!([descendant, "task"]).to_string(),
+            ));
+        }
+        assert_eq!(child_parts(&descendant).unwrap().routing_parent_session_id, root);
+    }
+
+    #[test]
+    fn deeply_nested_current_ids_round_trip_through_the_writer_and_reader() {
+        let root = tempfile::tempdir().unwrap();
+        let mut native = parent(root.path());
+        let routing_root = native.id.clone();
+        for _ in 0..33 {
+            native.id = child_session_id(&native, "task", &routing_root);
+        }
+        assert_eq!(child_parts(&native.id).unwrap().routing_parent_session_id, routing_root);
     }
 }

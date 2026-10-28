@@ -22,6 +22,72 @@ DER = b'invented signing certificate'
 CERT = hashlib.sha1(DER).hexdigest().upper()
 
 
+class Environment(unittest.TestCase):
+    def load(self, environment):
+        installer = importlib.util.module_from_spec(spec)
+        with patch.dict(os.environ, environment, clear=True):
+            spec.loader.exec_module(installer)
+        return installer
+
+    def test_preferred_names_legacy_fallback_and_explicit_empty_values(self):
+        fields = {
+            'MACOS_SIGNING_IDENTITY': ('CERTIFICATE', 'preferred identity', 'legacy identity'),
+            'MACOS_SIGNING_TEAM': ('TEAM', 'PREFERRED', 'LEGACY'),
+            'MACOS_APP_PATH': ('APP', '/preferred/app', '/legacy/app'),
+            'MACOS_BIN_DIR': ('BIN_DIR', '/preferred/bin', '/legacy/bin'),
+            'MACOS_BUNDLE_ID': ('IDENTIFIER', 'com.example.preferred', 'com.example.legacy'),
+            'INSTANCE': ('INSTANCE', 'preferred', 'legacy'),
+        }
+        legacy = {'ST_' + name: old for name, (_, _, old) in fields.items()}
+        preferred = {'FRACTAL_' + name: new for name, (_, new, _) in fields.items()}
+        empty = {'FRACTAL_' + name: '' for name in fields}
+        for mode, environment in [('preferred', legacy | preferred), ('legacy', legacy),
+                                  ('empty', legacy | empty), ('unset', {})]:
+            with self.subTest(mode=mode):
+                installer = self.load(environment)
+                for attribute, new, old in fields.values():
+                    expected = new if mode == 'preferred' else old if mode == 'legacy' else None
+                    if attribute == 'IDENTIFIER' and expected is None:
+                        expected = 'com.compoundingtech.smalltalk'
+                    self.assertEqual(getattr(installer, attribute), expected)
+
+    def test_install_home_prefers_fractal_and_keeps_legacy_and_cli_support(self):
+        cases = [
+            ({'ST_MACOS_INSTALL_HOME': '/legacy/home'}, [], '/legacy/home'),
+            ({'ST_MACOS_INSTALL_HOME': '/legacy/home',
+              'FRACTAL_MACOS_INSTALL_HOME': '/preferred/home'}, [], '/preferred/home'),
+            ({'ST_MACOS_INSTALL_HOME': '/legacy/home',
+              'FRACTAL_MACOS_INSTALL_HOME': ''}, [], '.'),
+            ({'FRACTAL_MACOS_INSTALL_HOME': '/preferred/home'},
+             ['--home', '/cli/home'], '/cli/home'),
+        ]
+        for environment, arguments, expected in cases:
+            with self.subTest(environment=environment, arguments=arguments):
+                installer = self.load(environment)
+                with patch.dict(os.environ, environment, clear=True), \
+                        patch.object(sys, 'argv', ['install-macos'] + arguments), \
+                        patch.object(installer, 'state_root', side_effect=RuntimeError('home selected')) as state:
+                    with self.assertRaisesRegex(RuntimeError, '^home selected$'):
+                        installer.main()
+                state.assert_called_once_with(Path(expected).absolute())
+
+    def test_instance_keeps_existing_bundle_and_service_identities(self):
+        for prefix in ['FRACTAL_', 'ST_']:
+            with self.subTest(prefix=prefix):
+                installer = self.load({prefix + 'INSTANCE': 'try'})
+                self.assertEqual(installer.IDENTIFIER, 'com.compoundingtech.smalltalk.instance.try')
+                self.assertEqual(installer.SERVICES, ['com.compoundingtech.st3.instance.try',
+                                                    'com.compoundingtech.st3.instance.try.replication'])
+
+
+    def test_both_instance_names_reject_invalid_values(self):
+        for prefix in ['FRACTAL_', 'ST_']:
+            for value in ['Try', 'a b', '../x', '-a', 'a--b', 'x' * 25]:
+                with self.subTest(prefix=prefix, value=value):
+                    with self.assertRaisesRegex(SystemExit, 'invalid instance name'):
+                        self.load({prefix + 'INSTANCE': value})
+
+
 class Installer(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -77,6 +143,21 @@ class Installer(unittest.TestCase):
             os.replace(old, staged)
         else:
             os.replace(staged, destination)
+
+    def test_embedded_web_assets_are_signed_and_identified(self):
+        web = self.built['st3'].parent.parent / 'share/fractal-web'
+        web.mkdir(parents=True)
+        (web / 'index.html').write_text('embedded web')
+        (web / 'index.html').chmod(0o444)
+        web.chmod(0o555)
+        self.addCleanup(web.chmod, 0o755)
+        with patch.object(m, 'command', side_effect=self.command):
+            app, _, payload = m.prepare(self.home, self.job, self.built)
+        self.assertEqual((app / 'Contents/share/fractal-web/index.html').read_text(), 'embedded web')
+        self.assertEqual(payload['web/index.html'], m.sha(web / 'index.html'))
+        installed_web = app / 'Contents/share/fractal-web'
+        self.assertTrue(installed_web.stat().st_mode & 0o200)
+        self.assertTrue((installed_web / 'index.html').stat().st_mode & 0o200)
 
     def test_unconfigured_never_searches_keychain_and_signs_ad_hoc(self):
         with patch.object(m, 'command', side_effect=self.command):
@@ -532,9 +613,15 @@ class Installer(unittest.TestCase):
         self.assertIn('NSMicrophoneUsageDescription', info)
 
     def test_upgrade_restores_previous_whole_app(self):
+        web = self.built['st3'].parent.parent / 'share/fractal-web'
+        web.mkdir(parents=True)
+        (web / 'index.html').write_text('embedded web')
         with patch.object(m, 'command', side_effect=self.command), patch.object(m, 'exchange', side_effect=self.exchange):
             app, _, _ = m.prepare(self.home, self.job, self.built)
             m.install(app, self.home, self.job)
+            installed_web = m.fixed(self.home) / 'Contents/share/fractal-web'
+            (installed_web / 'index.html').chmod(0o444)
+            installed_web.chmod(0o555)
             first = {name: m.sha(path) for name, path in m.binaries(m.fixed(self.home)).items()}
             second_job = self.home / 'second'; second_job.mkdir()
             had_app = m.backup(self.home, second_job)
@@ -544,6 +631,8 @@ class Installer(unittest.TestCase):
             self.assertNotEqual(m.sha(m.binaries(m.fixed(self.home))['st3']), first['st3'])
             m.restore(self.home, second_job, had_app)
             self.assertEqual({name: m.sha(path) for name, path in m.binaries(m.fixed(self.home)).items()}, first)
+            self.assertTrue(installed_web.stat().st_mode & 0o200)
+            self.assertTrue((installed_web / 'index.html').stat().st_mode & 0o200)
 
     def test_explicit_installation_home_isolates_plists_and_locks(self):
         service = self.home / 'Library/LaunchAgents' / (m.SERVICES[0] + '.plist')
@@ -632,6 +721,8 @@ class Installer(unittest.TestCase):
         package = self.home / 'package'; package.mkdir()
         shutil.copy2(repo / 'scripts/install-release', package / 'install.sh')
         shutil.copytree(self.source, package / 'bin')
+        (package / 'share/fractal-web').mkdir(parents=True)
+        (package / 'share/fractal-web/index.html').write_text('<!doctype html><title>Fractal</title>')
         second = self.home / 'release-bin'
         subprocess.run([str(package / 'install.sh'), '--bin-dir', str(second)],
                        env=env, check=True, stdout=subprocess.PIPE)

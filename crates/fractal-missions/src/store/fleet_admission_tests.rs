@@ -9,6 +9,65 @@ use super::*;
 use crate::fleet::{MemberKey, MemberState, envelope_signature_message, verify_signature};
 
 
+#[test]
+fn declaration_restart_old_registry_long_lag_does_not_replay_heals() {
+    struct RestoreClock;
+    impl Drop for RestoreClock {
+        fn drop(&mut self) { smallclaims::store::set_thread_clock(None); }
+    }
+    let _clock = RestoreClock;
+    let start = 1_800_000_000_000_u128;
+    smallclaims::store::set_thread_clock(Some(start));
+    let anchor = key();
+    let old_key = key();
+    let new = node("new", Some(&anchor), Some(&anchor));
+    let old = node("old", Some(&old_key), Some(&anchor));
+    let mut legacy = fractal_schema::registry().clone();
+    legacy.claims.get_mut("runtime.observed").unwrap().fields.remove("restarting_from").unwrap();
+    old.set_claim_registry(legacy);
+    new.set_write_clock_at(start).unwrap();
+    old.set_write_clock_at(start).unwrap();
+    admit(&new, "new", &anchor, "anchor", None);
+    admit(&new, "old", &old_key, "invite", None);
+    sync(&new, &old);
+    sync(&old, &new);
+    let subject = "agent/example/relaunch";
+    let initial = append(&new, "runtime.observed", subject,
+        json!({"status":"running", "incarnation_id":"old"}));
+    sync(&new, &old);
+    assert!(admitted(&old, &initial));
+    let marker = append(&new, "runtime.observed", subject,
+        json!({"status":"running", "incarnation_id":"old", "restarting_from":"old"}));
+    let later = note(&new, "Known traffic continues after a new relaunch field");
+    let admission = sync(&new, &old);
+    assert_eq!(admission.unknown, 1);
+    assert_eq!(admission.invalid, 0);
+    assert!(!admitted(&old, &marker));
+    assert!(admitted(&old, &later));
+    sync(&old, &new);
+    let replays_before = FULL_REPLAYS.with(std::cell::Cell::get);
+    let inventory = new.replication_inventory().unwrap().digest;
+    assert_eq!(old.replication_inventory().unwrap().digest, inventory);
+    // Same actual scheduler offsets as #2501: neither one-minute retry windows
+    // nor leaving an older registry in the fleet for three days causes replay.
+    for offset in [0, 60_001, 120_002, 1_200_000, 7_200_000, 86_400_000, 172_800_000, 259_200_000] {
+        smallclaims::store::set_thread_clock(Some(start + offset));
+        new.set_write_clock_at(start + offset).unwrap();
+        old.set_write_clock_at(start + offset).unwrap();
+        for (asker, peer) in [(&new, &old), (&old, &new)] {
+            let summary = peer.export_replication_summary(FLEET).unwrap();
+            asker.receive_replication_exchange_asking(&peer.origin, FLEET, &summary, true).unwrap();
+        }
+        let status = old.replication_status(true, Some(FLEET), &["new".into()]).unwrap();
+        assert_eq!(status.waiting_claims, 1, "the incompatible observation stays visibly waiting");
+        assert_eq!(status.invalid_records, 0);
+        assert_eq!(status.authority_digest, new.replication_status(true, Some(FLEET), &[]).unwrap().authority_digest);
+        assert_eq!(old.replica_records(true).unwrap()[0].error_code.as_deref(), Some("unknown-claim-field"));
+        assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), replays_before, "no actual full replay at {offset}ms");
+        eprintln!("restart-registry lag_ms={offset} waiting=1 full_replays_delta=0");
+    }
+}
+
 /// A member one build behind keeps a newer member's unknown claims, and only an unknown claim
 /// that could bear on runtime authority makes a subject indeterminate. Seen live: a newer
 /// member's `harness.limits` made every seat on it unreachable for terminal attach from an

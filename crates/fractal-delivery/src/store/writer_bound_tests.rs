@@ -18,6 +18,13 @@ fn a_catch_up_exchange_holds_the_writer_one_page_at_a_time() {
     let directory = tempfile::tempdir().unwrap();
     let node = |name: &str| {
         let store = Store::open(&directory.path().join(format!("{name}.sqlite3")), name).unwrap();
+        // The bound is on how much work one writer hold does. With synchronous=FULL a loaded disk's
+        // fsync once made an admit hold 684 ms (13 ms unloaded); durability is not what this checks.
+        store
+            .connection
+            .write()
+            .pragma_update(None, "synchronous", "OFF")
+            .unwrap();
         store.bind_fleet(FLEET).unwrap();
         store
     };

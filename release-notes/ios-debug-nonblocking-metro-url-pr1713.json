@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Avoid a synchronous Metro status probe when resolving the iOS Debug bundle URL",
+  "replay": {
+    "status": "none",
+    "detail": "Debug bundle URL resolution does not change replay, backfill, or stored data."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or fleet coordination changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The iOS app config plugin changes Debug builds to construct the Metro bundle URL locally instead of synchronously probing Metro, avoiding the scene-create watchdog when Metro is unreachable. React Native still loads the bundle asynchronously and presents its normal error UI. Release builds and client/server protocols are unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption or deployment coordination is required for this Debug-only change."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action or data migration is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent state changes or new rollback or roll-forward requirements."
+  }
+}

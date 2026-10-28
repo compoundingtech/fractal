@@ -55,4 +55,4 @@ report_time="$(message_time "$reports")"
 confirmation_time="$(message_time "$confirmations")"
 test "$confirmation_time" -gt "$report_time"
 
-echo "PASS: Small Talk has one kickoff, repeated delegation, one report, and one later confirmation"
+echo "PASS: Fractal has one kickoff, repeated delegation, one report, and one later confirmation"

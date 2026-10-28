@@ -10,44 +10,15 @@ import { EmbraceRuntimeProvider } from '../../assistant-ui/EmbraceRuntime'
 import { SidebarStatus } from '../../assistant-ui/sidebar/SidebarStatus'
 import type { AgentStatus } from '../../assistant-ui/sidebar/model'
 import type { ThreadResource } from '../../assistant-ui/workbench/workbench-model'
-import { accentVars as accent, borderVars as border, colorVars as palette, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
 
 /** A pane tab: an agent conversation carries a status glyph; a tool surface (Changes) does not. */
 export interface PaneTab { readonly key: string; readonly title: string; readonly status?: AgentStatus; readonly statusLabel?: string }
 
-/** Stale is an observation gap, not a failure: the glyph uses the muted tone, never the danger red. */
-const staleTone = stylex.createTheme(tone, { dangerFg: ink.fgMuted })
-/**
- * A roster that is itself last-observed: no glyph may read as live, so every status tone goes muted, and so does the
- * neutral glyph ink (idle, done), leaving one tone; the G3 shape still tells states apart.
- */
-const frozenTone = stylex.createTheme(tone, { runningFg: ink.fgMuted, attention: ink.fgMuted, dangerFg: ink.fgMuted })
-// A StyleX theme redefines every var in its group (unlisted ones fall back to the dark defaults), so the text group is
-// re-pointed at the per-scheme palette, with fgSoft taking the muted value.
-const frozenInk = stylex.createTheme(ink, { fg: palette.fg, fgMuted: palette.fgMuted, fgSoft: palette.fgMuted, sidebarFgMuted: palette.sidebarFgMuted })
-
-/**
- * Every milestone status glyph goes through here, so a status reads the same in the roster, palette, pane tabs and cards.
- * SG-1 with G3 shape cues (RM1-Q6, decided). Kit follow-up: fold the stale → muted mapping into `SidebarStatus` once its
- * open PRs land; this wrapper then goes away.
- */
-export function StatusGlyph({ status, statusLabel, freshness, frozen = false, decorative = false }: {
-  readonly status: AgentStatus
-  readonly statusLabel?: string
-  readonly freshness?: React.ComponentProps<typeof SidebarStatus>['freshness']
-  /** Part of a last-observed snapshot: mute every tone. */
-  readonly frozen?: boolean
-  /** Next to text that already says the status: hidden from assistive tech. */
-  readonly decorative?: boolean
-}) {
-  return <span aria-hidden={decorative || undefined} {...stylex.props(styles.glyph, status === 'stale' && staleTone, frozen && frozenTone, frozen && frozenInk)}>
-    <SidebarStatus status={status} statusLabel={statusLabel} variant="SG-1" discRefinement="G3" freshness={freshness} iconOnly />
-  </span>
-}
-
+/** Pane tabs use the roster's glyph (SG-1 · G3), so status reads consistently across surfaces. */
 export function PaneGlyph({ tab }: { readonly tab: PaneTab }) {
   if (tab.status === undefined) return null
-  return <StatusGlyph status={tab.status} statusLabel={tab.statusLabel} />
+  return <SidebarStatus status={tab.status} statusLabel={tab.statusLabel} variant="SG-1" discRefinement="G3" iconOnly />
 }
 
 export type ThreadView =
@@ -99,7 +70,7 @@ function LastSeen({ activity, at, detail, now }: { readonly activity: string; re
   return <div {...stylex.props(styles.lane)}>
     <p role="status" data-last-seen {...stylex.props(styles.lastSeen)}>
       {/* The sentence says "Last seen"; the glyph is decorative so the live region reads only the sentence. */}
-      <StatusGlyph status="stale" statusLabel="Last seen" decorative />
+      <SidebarStatus status="stale" statusLabel="Last seen" variant="SG-1" discRefinement="G3" iconOnly decorative />
       <span>{`Last seen ${activity} · ${Math.round((now - at) / 1000)} s ago`}</span>
       <span aria-hidden="true" {...stylex.props(styles.sep)}>·</span>
       <code {...stylex.props(styles.code)}>{detail}</code>

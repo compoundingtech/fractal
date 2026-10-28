@@ -128,6 +128,7 @@ const overflowLightDismissPlay = async ({ canvasElement }: { readonly canvasElem
   canvasElement.dataset.changelogFocusProof = 'passed'
 }
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal/App/Changelog', component: ChangelogStoryHarness,
   render: (args) => <ChangelogStoryHarness key={args.mode} {...args} />,
   parameters: { scenario: { _tag: 'contract-fixture', reason: "The catalog has no changelog slice; local release entries exercise seen, loading and failure contracts." },
@@ -143,6 +144,47 @@ const meta = {
   argTypes: { mode: { control: 'select', options: ['unseen', 'seen', 'first', 'loading', 'empty', 'failure'] }, dark: { control: 'boolean' }, width: { control: 'select', options: [1440, 440] } },
 } satisfies Meta<typeof ChangelogStoryHarness>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Acknowledgement1440Dark:contract-fixture',
+  'Acknowledgement1440Light:contract-fixture',
+  'Acknowledgement440Dark:contract-fixture',
+  'Acknowledgement440Light:contract-fixture',
+  'AllStates:contract-fixture',
+  'DesktopAnchor1440Dark:contract-fixture',
+  'DesktopAnchor1440Light:contract-fixture',
+  'DesktopAnchor440Dark:contract-fixture',
+  'DesktopAnchor440Light:contract-fixture',
+  'Empty1440Dark:contract-fixture',
+  'Empty1440Light:contract-fixture',
+  'Empty440Dark:contract-fixture',
+  'Empty440Light:contract-fixture',
+  'FirstVisit1440Dark:contract-fixture',
+  'FirstVisit1440Light:contract-fixture',
+  'FirstVisit440Dark:contract-fixture',
+  'FirstVisit440Light:contract-fixture',
+  'LoadFailure1440Dark:contract-fixture',
+  'LoadFailure1440Light:contract-fixture',
+  'LoadFailure440Dark:contract-fixture',
+  'LoadFailure440Light:contract-fixture',
+  'Loading1440Dark:contract-fixture',
+  'Loading1440Light:contract-fixture',
+  'Loading440Dark:contract-fixture',
+  'Loading440Light:contract-fixture',
+  'OverflowLightDismiss1440Dark:contract-fixture',
+  'OverflowLightDismiss1440Light:contract-fixture',
+  'OverflowLightDismiss440Dark:contract-fixture',
+  'OverflowLightDismiss440Light:contract-fixture',
+  'Seen1440Dark:contract-fixture',
+  'Seen1440Light:contract-fixture',
+  'Seen440Dark:contract-fixture',
+  'Seen440Light:contract-fixture',
+  'Unseen1440Dark:contract-fixture',
+  'Unseen1440Light:contract-fixture',
+  'Unseen440Dark:contract-fixture',
+  'Unseen440Light:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 const visibleStatePlay: NonNullable<Story['play']> = async ({ canvasElement, args }) => {
   const body = within(canvasElement.ownerDocument.body)

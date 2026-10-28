@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "scripts/check-main-ci and scripts/ci-queue-watch count fractal-web among main's required checks, as the live ruleset does: a red fractal-web on a merge-group SHA now fails the main check, and a queue run is finished only when fractal-web has completed too.",
+  "replay": {"status": "none", "detail": "CI scripts and their test only; no claims or projections change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "No API, CLI or wire change. The fractal-web job always runs in merge groups (it passes when no web path changed), so the required set is always present."},
+  "downtime": {"status": "none", "detail": "No runtime code changes."},
+  "manual": {"status": "none", "detail": "No operator step."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

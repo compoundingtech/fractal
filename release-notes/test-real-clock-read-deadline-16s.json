@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The one real-clock read-deadline test idles 16 seconds, one past the ordinary deadline, instead of the full 30; the paused-clock tests still cover the whole wait.",
+  "replay": {"status": "none", "detail": "Test-only change; no claim, replay or projection change."},
+  "schema": {"status": "none", "detail": "No storage or schema change."},
+  "rules": {"status": "none", "detail": "No rule, permission or trust change."},
+  "compatibility": {"status": "none", "detail": "No wire, CLI or client change."},
+  "downtime": {"status": "none", "detail": "Nothing runs differently on installed machines."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "Revert the commit to idle the full 30 seconds again."}
+}

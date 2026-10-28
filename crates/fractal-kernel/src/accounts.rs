@@ -45,6 +45,15 @@ pub struct AccountDecl {
     pub provider: String,
     pub owner: Option<String>,
     pub plan: Option<String>,
+    /// `api-key` when the account pays per token with a key file, else a subscription login.
+    pub auth_type: Option<String>,
+    /// The harness that reads this account's key, when it is not the provider's default one.
+    pub harness: Option<String>,
+    /// What an `api-key` account may spend each calendar month, in whole dollars.
+    pub monthly_credits_usd: Option<u64>,
+    /// Provider labels (`claude/<digest>`) that name this account in older readings and in seats
+    /// that were never launched on it. Opaque digests, never an email or a provider account ID.
+    pub identities: Vec<String>,
     pub logins: Vec<Login>,
 }
 
@@ -53,8 +62,23 @@ impl AccountDecl {
         format!("account/{}", self.name)
     }
 
-    pub fn driver(&self) -> Option<&'static str> {
-        provider_driver(&self.provider)
+    /// The harness this account is used by: the one it names, else its provider's own.
+    pub fn driver(&self) -> Option<&str> {
+        self.harness
+            .as_deref()
+            .or_else(|| provider_driver(&self.provider))
+    }
+
+    pub fn is_api_key(&self) -> bool {
+        self.auth_type.as_deref() == Some("api-key")
+    }
+
+    /// The label this account's usage and limits carry once a seat is launched on it.
+    pub fn label(&self) -> Option<String> {
+        Some(fractal_drivers::account::account_label(
+            self.driver()?,
+            &format!("declared:{}", self.name),
+        ))
     }
 
     /// The directory this account's login lives in on `host`: the login naming the host, else the
@@ -108,6 +132,27 @@ pub fn parse_account(subject: &str, desired: &Value) -> Option<AccountDecl> {
         plan: child(desired, "plan")
             .and_then(first_argument)
             .map(str::to_owned),
+        auth_type: child(desired, "auth-type")
+            .and_then(first_argument)
+            .map(str::to_owned),
+        harness: child(desired, "harness")
+            .and_then(first_argument)
+            .map(str::to_owned),
+        monthly_credits_usd: child(desired, "monthly-credits-usd")
+            .and_then(|node| node.get("arguments")?.as_array()?.first())
+            .and_then(|value| {
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+            }),
+        identities: desired
+            .get("children")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|node| node.get("name").and_then(Value::as_str) == Some("identity"))
+            .filter_map(|node| first_argument(node).map(str::to_owned))
+            .collect(),
         logins,
     })
 }
@@ -178,6 +223,88 @@ pub fn account_by_login<'a>(
     })
 }
 
+/// The login directory a harness uses when nothing sets its login variable.
+pub fn default_login_directory(driver: &str, home: Option<&Path>) -> Option<PathBuf> {
+    match driver {
+        "claude" => Some(home?.join(".claude")),
+        "codex" => Some(home?.join(".codex")),
+        _ => None,
+    }
+}
+
+/// The key file omp reads when its environment names none.
+pub const OMP_DEFAULT_KEY_FILE: &str = "~/.config/anthropic/api-key";
+/// The environment variable that names the key file omp reads instead.
+pub const OMP_KEY_FILE_ENV: &str = "ST_OMP_API_KEY_FILE";
+
+/// The api-key accounts of a key-file harness (omp) that have a login on `host`.
+fn key_file_accounts<'a>(
+    accounts: &'a [AccountDecl],
+    driver: &str,
+    host: &str,
+) -> Vec<&'a AccountDecl> {
+    accounts
+        .iter()
+        .filter(|account| {
+            account.is_api_key()
+                && account.harness.as_deref() == Some(driver)
+                && account.login_for(host).is_some()
+        })
+        .collect()
+}
+
+/// The account a key-file harness's row belongs to when the row names none: the only account that
+/// has a login on `host`, else the one whose login is the default key file, which is what a seat
+/// that names no other file reads.
+pub fn default_key_file_account<'a>(
+    accounts: &'a [AccountDecl],
+    driver: &str,
+    host: &str,
+) -> Option<&'a AccountDecl> {
+    let keyed = key_file_accounts(accounts, driver, host);
+    match keyed.as_slice() {
+        [only] => Some(*only),
+        _ => keyed
+            .into_iter()
+            .find(|account| account.login_for(host) == Some(OMP_DEFAULT_KEY_FILE)),
+    }
+}
+
+/// The declared account an unbound seat runs on at `host`. A harness with a login directory runs
+/// on the account whose login that is: the one its environment sets (`configured`), else the
+/// harness's default. A harness that reads a key file (omp) runs on the account whose key file its
+/// environment names (`configured`); with none named it runs on the account that owns the default
+/// key file, or the only one that has a login on this host.
+pub fn unbound_login_account<'a>(
+    accounts: &'a [AccountDecl],
+    driver: &str,
+    host: &str,
+    configured: Option<&str>,
+    home: Option<&Path>,
+) -> Option<&'a AccountDecl> {
+    if login_environment_name(driver).is_some() {
+        let directory = match configured.filter(|directory| !directory.is_empty()) {
+            Some(directory) => expand_login(directory, home)?,
+            None => default_login_directory(driver, home)?,
+        };
+        return account_by_login(accounts, driver, host, &directory, home);
+    }
+    match configured.filter(|file| !file.is_empty()) {
+        Some(file) => {
+            let file = expand_login(file, home)?;
+            key_file_accounts(accounts, driver, host)
+                .into_iter()
+                .find(|account| {
+                    account
+                        .login_for(host)
+                        .and_then(|login| expand_login(login, home))
+                        .is_some_and(|login| login == file)
+                })
+        }
+        None => default_key_file_account(accounts, driver, host),
+    }
+}
+
 /// What a pooled seat's choice reads of one account.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidate {
@@ -245,6 +372,109 @@ mod tests {
         assert_eq!(find("claude", "birch", "/srv/home-one/.claude-ada-1/"), Some("ada/claude-1"));
         assert_eq!(find("claude", "birch", "/srv/logins/ada-1"), None, "another host's login");
         assert_eq!(find("codex", "alder", "/srv/logins/ada-1"), None, "another harness");
+    }
+
+    #[test]
+    fn an_unbound_seat_runs_on_the_account_of_its_default_login_or_the_key_file_it_reads() {
+        let declare = |name: &str, provider: &str, extra: Vec<Value>, login: Value| {
+            let mut children = vec![
+                json!({"name": "provider", "arguments": [provider]}),
+                login,
+            ];
+            children.extend(extra);
+            parse_account(
+                &format!("account/{name}"),
+                &json!({"name": "account", "arguments": [name], "children": children}),
+            )
+            .unwrap()
+        };
+        let login = |path: &str, host: &str| {
+            json!({"name": "login", "arguments": [path], "properties": {"host": host}})
+        };
+        let accounts = [
+            declare("ada/claude-1", "anthropic", vec![], login("~/.claude", "alder")),
+            declare("ada/claude-2", "anthropic", vec![], login("~/.claude-two", "alder")),
+            declare("ada/codex", "openai", vec![], login("~/.codex", "alder")),
+            declare(
+                "ada/key",
+                "anthropic",
+                vec![
+                    json!({"name": "auth-type", "arguments": ["api-key"]}),
+                    json!({"name": "harness", "arguments": ["omp"]}),
+                    json!({"name": "monthly-credits-usd", "arguments": [200]}),
+                    json!({"name": "identity", "arguments": ["claude/0123456789abcdef"]}),
+                ],
+                login("~/.config/anthropic/api-key", "alder"),
+            ),
+        ];
+        let home = Some(Path::new("/srv/home"));
+        let find = |driver: &str, host: &str, configured: Option<&str>| {
+            unbound_login_account(&accounts, driver, host, configured, home)
+                .map(|account| account.name.as_str())
+        };
+        assert_eq!(find("claude", "alder", None), Some("ada/claude-1"), "the default login");
+        assert_eq!(find("claude", "alder", Some("/srv/home/.claude-two")), Some("ada/claude-2"));
+        assert_eq!(find("claude", "alder", Some("")), Some("ada/claude-1"), "an empty variable is unset");
+        assert_eq!(find("claude", "birch", None), None, "no login on that host");
+        assert_eq!(find("codex", "alder", None), Some("ada/codex"));
+        assert_eq!(find("omp", "alder", None), Some("ada/key"), "the key file its harness reads");
+        assert_eq!(find("omp", "birch", None), None);
+        assert_eq!(find("pi", "alder", None), None);
+
+        let key = &accounts[3];
+        assert!(key.is_api_key());
+        assert_eq!(key.driver(), Some("omp"));
+        assert_eq!(key.monthly_credits_usd, Some(200));
+        assert_eq!(key.identities, ["claude/0123456789abcdef"]);
+        assert_eq!(
+            key.label().unwrap(),
+            fractal_drivers::account::account_label("omp", "declared:ada/key")
+        );
+        assert!(!accounts[0].is_api_key());
+    }
+
+    #[test]
+    fn two_key_accounts_are_told_apart_by_the_key_file_a_seat_reads() {
+        let key = |name: &str, logins: &[(&str, &str)]| {
+            let mut children = vec![
+                json!({"name": "provider", "arguments": ["anthropic"]}),
+                json!({"name": "auth-type", "arguments": ["api-key"]}),
+                json!({"name": "harness", "arguments": ["omp"]}),
+            ];
+            children.extend(logins.iter().map(|(path, host)| {
+                json!({"name": "login", "arguments": [path], "properties": {"host": host}})
+            }));
+            parse_account(
+                &format!("account/{name}"),
+                &json!({"name": "account", "arguments": [name], "children": children}),
+            )
+            .unwrap()
+        };
+        let accounts = [
+            key("ada/key", &[("~/.config/anthropic/api-key", "alder")]),
+            key(
+                "ada/key-two",
+                &[
+                    ("~/.config/anthropic/api-key-2", "alder"),
+                    ("~/.config/anthropic/api-key-2", "birch"),
+                ],
+            ),
+        ];
+        let home = Some(Path::new("/srv/home"));
+        let find = |host: &str, configured: Option<&str>| {
+            unbound_login_account(&accounts, "omp", host, configured, home)
+                .map(|account| account.name.as_str())
+        };
+        // Two keys on a host: the file a seat names picks one, and none named is the default.
+        assert_eq!(find("alder", None), Some("ada/key"));
+        assert_eq!(find("alder", Some("")), Some("ada/key"), "an empty variable is unset");
+        assert_eq!(find("alder", Some("/srv/home/.config/anthropic/api-key-2")), Some("ada/key-two"));
+        assert_eq!(find("alder", Some("/srv/home/.config/anthropic/api-key")), Some("ada/key"));
+        assert_eq!(find("alder", Some("/srv/home/.config/anthropic/api-key-3")), None, "a key no account declares");
+        // Where only one key has a login, it is the answer, and a seat naming no file reads it.
+        assert_eq!(find("birch", None), Some("ada/key-two"));
+        assert_eq!(default_key_file_account(&accounts, "omp", "alder").unwrap().name, "ada/key");
+        assert_eq!(default_key_file_account(&accounts, "omp", "cedar"), None);
     }
 
     #[test]
