@@ -9,7 +9,7 @@ import { makeBackend, type BridgeUpdate } from './backend.ts'
 const snapshot: Snapshot = { id: 'snapshot/fixture', created_at: '2026-10-28T00:00:00Z', host_id: 'host/test', projection_version: 'client-projection.v0', store_index: 1 }
 const id = 'agent/test.acp'
 const sessionId = `fractal-acp:${encodeURIComponent(id)}`
-const entry = (sequence: number, text: string, revision = 1): TimelineEntry => ({ id: `entry/${sequence}`, sequence, revision, timestamp: '2026-10-28T00:00:00Z', role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text } })
+const entry = (sequence: number, text: string, revision = 1): Extract<TimelineEntry, { type: 'content' }> => ({ id: `entry/${sequence}`, sequence, revision, timestamp: '2026-10-28T00:00:00Z', role: 'assistant', type: 'content', final: true, body: { media_type: 'text/plain', text } })
 // Same records as fractal-drivers/src/codex_app_server/tests.rs
 // transcript fixtures (task_started/task_complete with exact native turn_id),
 // wrapped by fractal-store/src/external_sessions.rs push_unrecognized.
@@ -204,5 +204,14 @@ it('refuses rich message blocks instead of silently omitting output', async () =
   await f.submitted
   f.conversation([{ ...entry(4, 'image fallback'), body: { media_type: 'text/plain', text: 'image fallback', blocks: [{ id: 'block/image', kind: 'image', source_type: 'content', payload: {} }] } }])
   await expect(result).rejects.toThrow('non-text blocks')
+  expect(f.isClosed()).toBe(true)
+})
+
+it('refuses an explicit history redaction marker', async () => {
+  const f = fixture()
+  const result = makeBackend({ client: f.client }).prompt(sessionId, 'Work', () => {}, async () => 'reject', new AbortController().signal)
+  await f.submitted
+  f.conversation([{ ...entry(4, ''), type: 'redaction', body: { reason: 'hidden', withheld_bytes: 10 } }])
+  await expect(result).rejects.toThrow('truncated or redacted history')
   expect(f.isClosed()).toBe(true)
 })

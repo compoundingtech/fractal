@@ -22,7 +22,7 @@ An opt-in, out-of-tree ACP v1 stdio agent for [t3code's Local ACP command](https
    - optionally `FRACTAL_ACP_HOST`, `FRACTAL_ACP_MODEL`, `FRACTAL_ACP_EFFORT` to select the managed agent's host/model/reasoning effort.
 5. Select this provider for a project whose absolute workspace path exists on the daemon's agent host. Keep the server and daemon on the same workspace host for this experiment. Use t3code's **Supervised** permission mode when observing approval dialogs; t3code may otherwise answer permissions automatically.
 
-The executable is launched directly, **not through a shell**. Do not enter shell expressions, an `export` prefix, or a combined argument string. Dependency installation is a separate setup step; the stdio command must not print startup banners. stdout is exclusively newline-delimited JSON-RPC; failures go to stderr. The example uses the repository's existing dependencies and adds no package or lockfile entries.
+The executable is launched directly, **not through a shell**. Do not enter shell expressions, an `export` prefix, or a combined argument string. Dependency installation is a separate setup step; the stdio command must not print startup banners. stdout is exclusively newline-delimited JSON-RPC; failures go to stderr. The example uses the repository's existing dependencies and adds no dependencies or lockfile entries. Its private package manifest only selects ESM parsing.
 
 ## Supported surface and boundaries
 
@@ -41,9 +41,10 @@ The typed Fractal conversation feed has entry finalization, **not a correlated t
 This requires an initially idle, **exclusive-writer** agent. The public client API does not expose the managed harness's message-to-accepted-turn ledger. Consequently, correlation against an external writer racing the bridge is not proven; this is not a multi-client-safe product adapter. An interrupted/disconnected feed fails the prompt rather than silently retrying an ambiguously delivered message or claiming completion. Reconnect by loading the same identity once its managed agent is idle.
 
 Output granularity is the daemon's normalized native transcript, not provider token streaming.
-The example maps inline text and tool bodies, not arbitrary rich/image blocks; continued or
-truncated history is rejected rather than presented as complete. Creation waits for an actual
-running/current/idle agent card through the exact-agent collection subscription before returning.
+The example maps inline text and tool bodies. Rich/image message blocks, owner continuations,
+and explicit truncation/redaction markers are rejected rather than silently omitted. Creation
+requires `collection.agents.exact-selector` and waits for an actual running/current/idle agent
+card through that subscription before returning.
 
 ## Checks
 
@@ -55,6 +56,10 @@ pnpm --dir packages/fractal-sdk exec tsc --project ../../examples/t3code-acp-bri
 ```
 
 Protocol tests drive a fake ACP client, including v2→v1 negotiation, assistant/tool streaming, permission replies, cancellation while approval is pending, malformed parameters, unsupported operations, and reconnect/load identity. Backend tests exercise the real generated client with a controlled HTTP/socket transport, following the SDK's existing transport integration-test convention. This is **not** proof of an actual daemon/harness run or t3code UI interoperability. Fractal's existing isolated daemon fixtures are private Rust test helpers; there is no TS-callable local daemon fixture process to reuse here.
+
+A subprocess test also runs the actual Node entrypoint, checks JSON-RPC-only stdout, v2→v1
+initialization, malformed-JSON errors, unsupported-method errors, and clean EOF exit. It does
+not start or connect to a harness.
 
 ## Open questions and recommendation
 

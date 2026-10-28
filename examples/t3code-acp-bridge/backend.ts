@@ -20,7 +20,7 @@ export interface BridgeBackend {
 
 export class BridgeBackendError extends Schema.TaggedError<BridgeBackendError>()('BridgeBackendError', {
   message: Schema.String,
-  cause: Schema.optional(Schema.Defect),
+  cause: Schema.optional(Schema.Unknown),
 }) {}
 
 export interface BackendOptions {
@@ -61,6 +61,7 @@ class Updates {
   map(item: TimelineEntry, replay = false): BridgeUpdate[] {
     const previous = this.entries.get(item.id)
     if (previous !== undefined && previous.revision >= item.revision) return []
+    if (item.type === 'truncation' || item.type === 'redaction') return fail('Native conversation contains truncated or redacted history; cannot claim complete ACP replay')
     if ((item.role === 'assistant' || item.type === 'tool_call' || item.type === 'tool_result') && item.body.blocks?.some((block) => block.continuation !== undefined)) return fail('Native content requires an owner continuation fetch; this bounded inline-text bridge cannot emit it without truncation')
     this.entries.set(item.id, item)
     if (item.type === 'content' && (item.role === 'assistant' || (replay && item.role === 'user'))) {
