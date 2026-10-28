@@ -1418,6 +1418,28 @@ pub const ACTUAL_STATE_CLAIM: &str = "(claims.kind<'harness.' OR claims.kind>='h
      AND claims.kind NOT IN ('intent.desired', 'runtime.readiness-deadline-reached',
                              'reconcile.fault')";
 
+/// The newest of a subject's actual-state claims, which keys its cached actual state. One
+/// range over the subject's index entries would read each of its claims on every call, so this
+/// steps from each kind the subject has to the next and takes the newest claim of each
+/// actual-state kind: a few seeks, however long the subject's history.
+pub(crate) static ACTUAL_STATE_NEWEST: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let kind_is_actual_state = ACTUAL_STATE_CLAIM.replace("claims.kind", "kinds.kind");
+    format!(
+        "WITH RECURSIVE kinds(kind) AS (
+             SELECT MIN(claims.kind) FROM claims INDEXED BY claims_subject_kind_index
+             WHERE claims.subject=?1
+             UNION ALL
+             SELECT (SELECT MIN(claims.kind) FROM claims INDEXED BY claims_subject_kind_index
+                     WHERE claims.subject=?1 AND claims.kind>kinds.kind)
+             FROM kinds WHERE kinds.kind IS NOT NULL
+         )
+         SELECT COALESCE(MAX((SELECT MAX(claims.store_index)
+                              FROM claims INDEXED BY claims_subject_kind_index
+                              WHERE claims.subject=?1 AND claims.kind=kinds.kind)), 0)
+         FROM kinds WHERE kinds.kind IS NOT NULL AND {kind_is_actual_state}"
+    )
+});
+
 // Repaired originals are not live actual-state sources, even if a node retains their
 // claim rows or has trimmed the admission receipt. The digest's repaired-ID set survives
 // receipt cleanup and is maintained transactionally by repair claims. Keep this separate
@@ -6136,15 +6158,7 @@ impl Store {
         // of those identifies it. A write elsewhere in the graph, or a harness report the fold
         // skips (a busy seat writes one every turn), must not re-read and re-parse its history.
         let newest: u64 = connection
-            .prepare_cached(
-                format!(
-                    "SELECT COALESCE(MAX(claims.store_index), 0)
-                     FROM claims INDEXED BY claims_subject_kind_index
-                     WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-                       AND claims.kind NOT LIKE 'harness.%'"
-                )
-                .as_str(),
-            )?
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hd7c27cacf277 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &ACTUAL_STATE_NEWEST)?
             .query_row(/* sqlite-large-value: allow-for-now lv-h2b7668e3f927 owner=fractal_store::store TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0))?;
         if let Some((_, value)) = self.fractal
             .actual_cache
@@ -18848,6 +18862,11 @@ pub fn step_execution_clock_at(
     ))
 }
 
+/// The claim kinds a step's execution timing folds. The cache key and the fold read the same set.
+const STEP_TIMING_KINDS: &str = "'step-run.state','step-run.carried','work.claimed','work.renewed',\
+    'work.progress','work.submitted','work.failed','work.released','work.extended',\
+    'work.person-asked','work.person-done','work.person-cancelled'";
+
 /// A step's step and work events in canonical order, as its execution timing folds them.
 pub fn step_timing_events(
     connection: &Connection,
@@ -18863,11 +18882,10 @@ pub fn step_timing_events(
         .map(|path| (path.to_owned(), subject.to_owned()));
     let key = match &file {
         Some(_) => Some(connection.query_row(
-            "SELECT COALESCE(MAX(store_index), 0), COUNT(*)
+            format!("SELECT COALESCE(MAX(store_index), 0), COUNT(*)
              FROM claims INDEXED BY claims_subject_kind_index
              WHERE subject=?1
-               AND kind IN ('step-run.state','step-run.carried','work.claimed','work.renewed',
-                            'work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-done','work.person-cancelled')",
+               AND kind IN ({STEP_TIMING_KINDS})").as_str(),
             [subject],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
         )?),
@@ -18883,14 +18901,12 @@ pub fn step_timing_events(
     {
         return Ok(events.as_ref().clone());
     }
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h42f5449c246c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha579e98adb61 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1
-           AND claims.kind IN ('step-run.state','step-run.carried','work.claimed','work.renewed',
-                               'work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-done','work.person-cancelled')
+         WHERE claims.subject=?1 AND claims.kind IN ({STEP_TIMING_KINDS})
          ORDER BY CANONICAL_ASC(claims)",
-    ))?;
+    )))?;
     let events = statement
         .query_map([subject], |row| {
             Ok((
