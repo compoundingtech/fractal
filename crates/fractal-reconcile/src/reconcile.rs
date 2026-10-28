@@ -1058,6 +1058,14 @@ pub type WorkWakeObserveHook = Box<dyn FnOnce(&crate::incremental::Incremental, 
 pub type BackgroundEntryHook =
     Arc<dyn Fn(bool, Option<tokio::time::Instant>, smallclaims::sqlite::work::SqliteWork) + Send + Sync>;
 
+/// A cursor a poll recorded facts for that the plugin database did not keep, with the degraded
+/// receipt saying so while that could not be written either.
+#[derive(Clone)]
+struct UnkeptCursor {
+    cursor: Option<String>,
+    receipt: Option<ClaimInput>,
+}
+
 /// Local observation retries never turn unreadable process state into a completed stop.
 struct StopObservationRetry {
     started_at: u128,
@@ -1179,10 +1187,9 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
     /// than the graph (see [`github_plugin_store`]).
     github_plugin: Arc<github_plugin_store::GithubPluginStore>,
-    /// By observer: a cursor a poll recorded facts for that the plugin database did not keep,
-    /// with the degraded receipt saying so when that could not be written either. Every arm of
-    /// the observer keeps it before it asks the provider again.
-    unkept_cursors: Arc<Mutex<HashMap<String, (Option<String>, Option<ClaimInput>)>>>,
+    /// By observer: the cursor its plugin database did not keep. Every arm of the observer keeps
+    /// it before it asks the provider again.
+    unkept_cursors: Arc<Mutex<HashMap<String, UnkeptCursor>>>,
     delayed_restarts: Arc<Mutex<HashMap<String, RestartWake>>>,
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
     /// The kill deadline already logged for each active stop operation.
@@ -16501,7 +16508,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 // the provider is not asked again and the observer stays degraded.
                 let pending = unkept_cursors.lock().unwrap_or_else(PoisonError::into_inner)
                     .get(&observer_subject).cloned();
-                if let Some((pending, receipt)) = pending {
+                if let Some(UnkeptCursor { cursor: pending, receipt }) = pending {
                     if github_plugin.set_cursor(&observer_subject, &spec.resource, pending.as_deref()).is_err() {
                         let current = || armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation);
                         if let Some(receipt) = receipt
@@ -16510,7 +16517,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                             if let Some(entry) = unkept_cursors.lock()
                                 .unwrap_or_else(PoisonError::into_inner).get_mut(&observer_subject)
                             {
-                                entry.1 = None;
+                                entry.receipt = None;
                             }
                             if wrote { signal_changed(&notify, &event_notify); }
                         }
@@ -16674,7 +16681,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                             None => Some(receipt),
                                         };
                                         unkept_cursors.lock().unwrap_or_else(PoisonError::into_inner)
-                                            .insert(observer_subject.clone(), (unkept_cursor, unreceipted));
+                                            .insert(observer_subject.clone(), UnkeptCursor { cursor: unkept_cursor, receipt: unreceipted });
                                     }
                                 }
                             }
