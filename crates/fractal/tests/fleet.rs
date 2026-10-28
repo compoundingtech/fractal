@@ -3405,7 +3405,7 @@ PY
     fi
     rm -f "$registry/$(key "$me" "$2")" ;;
   dial) f="$registry/$(key "$2" "$3")"; [ -f "$f" ] || {{ echo '{{"error":{{"code":"service_not_exposed","class":"fault","message":"no such exposure","peer":null,"service":null}}}}'; exit 69; }}; printf '{{"address":"%s"}}\n' "$(cat "$f")" ;;
-  peers) cat "$registry/peers-$me" 2>/dev/null ;;
+  peers) cat "$registry/peers-$me" 2>/dev/null || true ;;
   send-file) [ ! -f "$registry/fail-send-$me" ] || {{ echo "the receiver refused the file" >&2; exit 1; }}; mkdir -p "$registry/home-$2/inbox/$me" && cp "$3" "$registry/home-$2/inbox/$me/$5" ;;
   probe) [ -f "$registry/$(key "$2" "$3")" ] ;;
   *) exit 1 ;;
