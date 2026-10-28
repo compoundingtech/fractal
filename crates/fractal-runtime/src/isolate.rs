@@ -171,10 +171,12 @@ pub(crate) fn wrap_in(
     environment: Option<&std::collections::BTreeMap<String, String>>,
     capacity: Option<crate::lane::Capacity>,
 ) -> Command {
-    // The expansion flag is systemd 254's, which also supports OOMPolicy on a scope.
+    // Detection sets the expansion flag, so it runs first. The flag is systemd 254's, which also
+    // supports OOMPolicy on a scope.
+    let isolation = mode();
     let expansion_flag = *SCOPE_EXPANSION_FLAG.get().unwrap_or(&true);
     wrap_for_mode(
-        mode(),
+        isolation,
         expansion_flag,
         unit,
         program,
