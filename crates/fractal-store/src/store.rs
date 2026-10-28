@@ -5371,7 +5371,40 @@ impl Store {
         Ok(faults)
     }
 
-    /// Every claim and local observation of `kind` for `subject`, in log order.
+    /// Each claim's acceptance time, read only for claims not read before. A claim's time never
+    /// changes, and a trimmed claim is no longer any status's selected claim, so a kept time is
+    /// never stale; a list that shows each runtime's last change reads only the claims that
+    /// became current since its last fold.
+    pub fn kept_claim_acceptance_times(&self, ids: &[&str]) -> Result<BTreeMap<String, u128>> {
+        let kept = self.extension::<ClaimAcceptanceTimes>();
+        let mut times = BTreeMap::new();
+        let mut missing = Vec::new();
+        {
+            let kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
+            for id in ids {
+                match kept.get(*id) {
+                    Some(time) => {
+                        times.insert((*id).to_owned(), *time);
+                    }
+                    None => missing.push(*id),
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(times);
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        CLAIM_ACCEPTANCE_TIMES_READ.with(|read| read.set(read.get() + missing.len()));
+        let read = self.claim_acceptance_times(&missing)?;
+        let mut kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() + read.len() > CLAIM_ACCEPTANCE_TIMES_LIMIT {
+            kept.clear();
+        }
+        kept.extend(read.iter().map(|(id, time)| (id.clone(), *time)));
+        times.extend(read);
+        Ok(times)
+    }
+
     /// A seat's harness diagnostics in canonical order, without the Claude channel's
     /// attachment reports: those are most of a long-lived seat's diagnostics, and their own
     /// index serves the attachment fence. An append raises the newest index and a checkpoint
@@ -5413,6 +5446,7 @@ impl Store {
         Ok(diagnostics)
     }
 
+    /// Every claim and local observation of `kind` for `subject`, in log order.
     pub fn observations_for(&self, subject: &str, kind: &str) -> Result<Vec<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let mut records = self.claims_for(subject, Some(kind))?;
@@ -18814,6 +18848,11 @@ pub fn step_execution_clock_at(
     ))
 }
 
+/// The claim kinds a step's execution timing folds. The cache key and the fold read the same set.
+const STEP_TIMING_KINDS: &str = "'step-run.state','step-run.carried','work.claimed','work.renewed',\
+    'work.progress','work.submitted','work.failed','work.released','work.extended',\
+    'work.person-asked','work.person-done','work.person-cancelled'";
+
 /// A step's step and work events in canonical order, as its execution timing folds them.
 pub fn step_timing_events(
     connection: &Connection,
@@ -18829,11 +18868,10 @@ pub fn step_timing_events(
         .map(|path| (path.to_owned(), subject.to_owned()));
     let key = match &file {
         Some(_) => Some(connection.query_row(
-            "SELECT COALESCE(MAX(store_index), 0), COUNT(*)
+            format!("SELECT COALESCE(MAX(store_index), 0), COUNT(*)
              FROM claims INDEXED BY claims_subject_kind_index
              WHERE subject=?1
-               AND kind IN ('step-run.state','step-run.carried','work.claimed','work.renewed',
-                            'work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-done','work.person-cancelled')",
+               AND kind IN ({STEP_TIMING_KINDS})").as_str(),
             [subject],
             |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
         )?),
@@ -18849,14 +18887,12 @@ pub fn step_timing_events(
     {
         return Ok(events.as_ref().clone());
     }
-    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h42f5449c246c owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha579e98adb61 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
         "SELECT claims.kind, claims.body, claims.accepted_at_unix_ms
          FROM claims JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1
-           AND claims.kind IN ('step-run.state','step-run.carried','work.claimed','work.renewed',
-                               'work.progress','work.submitted','work.failed','work.released','work.extended','work.person-asked','work.person-done','work.person-cancelled')
+         WHERE claims.subject=?1 AND claims.kind IN ({STEP_TIMING_KINDS})
          ORDER BY CANONICAL_ASC(claims)",
-    ))?;
+    )))?;
     let events = statement
         .query_map([subject], |row| {
             Ok((
@@ -18886,6 +18922,19 @@ pub fn step_timing_events(
         kept.insert(file, (key, Arc::new(events.clone())));
     }
     Ok(events)
+}
+
+/// Claims' acceptance times as read, by claim ID.
+#[derive(Default)]
+struct ClaimAcceptanceTimes(Mutex<HashMap<String, u128>>);
+
+/// Kept acceptance times; past this many the next read starts again.
+const CLAIM_ACCEPTANCE_TIMES_LIMIT: usize = 65_536;
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How many claims' acceptance times this thread read from the store.
+    pub static CLAIM_ACCEPTANCE_TIMES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Each seat's harness diagnostics as last read, under the newest index and the count of them.

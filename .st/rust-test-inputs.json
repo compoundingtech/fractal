@@ -91,6 +91,7 @@
     "docs/st3/client-v0/schemas/operations.json",
     "fixtures/clients/device-signing-v1.json",
     "fixtures/clients/plain-errors-v1.json",
+    "fixtures/clients/stream-sync/frames.json",
     "fixtures/scenarios",
     "scripts/ci-test-paths.rs"
    ]
