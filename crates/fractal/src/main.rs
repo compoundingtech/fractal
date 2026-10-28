@@ -681,8 +681,9 @@ struct FleetInviteArgs {
     /// A code that moves an existing config-peer machine to membership.
     #[arg(long)]
     migrate: bool,
-    /// Send the code to NAME's Fabric inbox instead of showing it.
-    #[arg(long)]
+    /// Send the code to NAME's Fabric inbox instead of showing it. NAME is the Fabric peer
+    /// name or NodeID; the command fails unless Fabric confirms the file arrived.
+    #[arg(long, conflicts_with_all = ["code_only", "code_file"])]
     send_fabric: bool,
     /// Print only the code.
     #[arg(long)]
@@ -702,7 +703,8 @@ struct FleetJoinArgs {
     /// Read the code from this file, and delete the file after a successful join.
     #[arg(long)]
     code_file: Option<PathBuf>,
-    /// Read the code that `fractal fleet invite --send-fabric` put in this machine's Fabric inbox.
+    /// Read the code that `fractal fleet invite --send-fabric` puts in this machine's Fabric inbox,
+    /// waiting up to ten minutes for it to arrive.
     #[arg(long)]
     fabric_inbox: bool,
     /// This machine's name in the fleet.
