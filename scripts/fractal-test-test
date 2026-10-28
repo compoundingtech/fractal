@@ -106,39 +106,64 @@ class PoolTreeTest(unittest.TestCase):
                 git(repo, 'worktree', 'remove', '--force', str(tree))
 
 
-own_cap = st_test.own_cap  # the real reader, before a test replaces it
-
-
 class GovernedTest(unittest.TestCase):
-    """A building check runs in builds.slice unless its caller's own cgroup is already capped (a seat lane or builds.slice)."""
+    """A building check runs in builds.slice unless its caller's own cgroup is already under a memory and a CPU limit."""
 
-    def governed_in(self, cgroup, environment=None):
+    LANE = 'user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/st3-seat-1-0.scope'
+    BUILDS = 'user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope'
+    SEAT = 'user.slice/user-1000.slice/user@1000.service/app.slice/st3-seat-1-0.scope'
+
+    def tree(self, tmp, leaf, limits):
+        """A cgroup v2 tree under TMP whose every level is unlimited but the ones LIMITS names ({level: (memory.max, cpu.max)})."""
+        parts = leaf.split('/')
+        for depth in range(1, len(parts) + 1):
+            cgroup = Path(tmp, 'sys', *parts[:depth])
+            cgroup.mkdir(parents=True, exist_ok=True)
+            memory, cpu = limits.get(parts[depth - 1], ('max', 'max 100000'))
+            cgroup.joinpath('memory.max').write_text(memory + '\n')
+            if cpu is not None:
+                cgroup.joinpath('cpu.max').write_text(cpu + '\n')
+        Path(tmp, 'cgroup').write_text(f'0::/{leaf}\n')
+
+    def governed_in(self, leaf, limits, environment=None):
         with tempfile.TemporaryDirectory() as tmp:
             Path(tmp, 'bus').touch()
-            Path(tmp, 'cgroup').write_text(cgroup)
+            self.tree(tmp, leaf, limits)
+            real = st_test.own_cap
             with mock.patch.dict(os.environ, dict(environment or {}, XDG_RUNTIME_DIR=tmp), clear=True), \
-                    mock.patch.object(st_test, 'own_cap', lambda: own_cap(Path(tmp, 'cgroup'))), \
+                    mock.patch.object(st_test, 'own_cap', lambda: real(Path(tmp, 'cgroup'), Path(tmp, 'sys'))), \
                     mock.patch.object(st_test.shutil, 'which', return_value='/usr/bin/systemd-run'), \
                     contextlib.redirect_stderr(io.StringIO()):
                 return st_test.governed(['check'], 'linux-gate')
 
-    def test_a_laned_or_slice_bound_caller_runs_in_place(self):
-        for cgroup in ('0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-lanes.slice/st3-seat-1-0.scope\n',
-                       '0::/user.slice/user-1000.slice/user@1000.service/builds.slice/run-p1-i1.scope\n'):
-            self.assertEqual(self.governed_in(cgroup), ['check'], cgroup)
+    def assert_scoped(self, governed, why):
+        self.assertIn('--slice=builds.slice', governed, why)
+        self.assertEqual(governed[-1], 'check')
 
-    def test_an_uncapped_caller_is_scoped_whatever_its_environment_says(self):
-        cgroup = '0::/user.slice/user-1000.slice/user@1000.service/app.slice/st3-seat-1-0.scope\n'
-        for environment in ({}, {'BUILDS_SLICE_ACTIVE': '1'}):
-            governed = self.governed_in(cgroup, environment)
-            self.assertIn('--slice=builds.slice', governed, environment)
-            self.assertEqual(governed[-1], 'check')
+    def test_a_capped_lane_or_build_scope_runs_in_place(self):
+        lane = {'st3-seat-1-0.scope': ('268435456', '100000 100000')}
+        self.assertEqual(self.governed_in(self.LANE, lane), ['check'])
+        self.assertEqual(self.governed_in(self.BUILDS, {'builds.slice': ('34359738368', '1000000 100000')}), ['check'])
+
+    def test_an_uncapped_caller_is_scoped_whatever_its_name_or_environment_says(self):
+        self.assert_scoped(self.governed_in(self.SEAT, {}, {'BUILDS_SLICE_ACTIVE': '1'}), 'environment')
+        # A scope in the lanes slice without a lane's limits is not capped.
+        self.assert_scoped(self.governed_in(self.LANE, {}), 'name')
+        # Both limits are needed, at any level: memory alone, or CPU alone, is not a cap.
+        self.assert_scoped(self.governed_in(self.LANE, {'st3-seat-1-0.scope': ('268435456', 'max 100000')}), 'memory only')
+        self.assert_scoped(self.governed_in(self.LANE, {'app-lanes.slice': ('max', '100000 100000')}), 'cpu only')
+        # A cpu controller that is not enabled (no cpu.max) is no CPU limit.
+        self.assert_scoped(self.governed_in(self.LANE, {'st3-seat-1-0.scope': ('268435456', None)}), 'no cpu controller')
+
+    def test_limits_on_different_levels_together_are_a_cap(self):
+        limits = {'app-lanes.slice': ('8589934592', 'max 100000'), 'st3-seat-1-0.scope': ('max', '200000 100000')}
+        self.assertEqual(self.governed_in(self.LANE, limits), ['check'])
 
     def test_an_unreadable_cgroup_is_no_cap(self):
-        self.assertIsNone(own_cap(Path('/nonexistent/cgroup')))
+        self.assertIsNone(st_test.own_cap(Path('/nonexistent/cgroup')))
         with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, 'cgroup').write_text('0::/user.slice/app-lanes.slice-not/x.scope\n')
-            self.assertIsNone(own_cap(Path(tmp, 'cgroup')))
+            Path(tmp, 'cgroup').write_text('0::/\n')
+            self.assertIsNone(st_test.own_cap(Path(tmp, 'cgroup'), Path(tmp, 'sys')))
 
 
 class StTest(unittest.TestCase):
