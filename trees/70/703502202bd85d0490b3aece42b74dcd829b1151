@@ -2,3 +2,7 @@ record 21a6c103951abd39283b8887ca1ae008deba317d typescript-client 0 host/spindle
 record f7026e0f277452ede9dd446203705dc032e61d67 genie-freshness 0 host/spindle 2026-10-28T16:25:24Z
 record d5f397ca6c8c6a4e6e932fb5f6f5e8fa67d69860 ci-script-tests 0 host/spindle 2026-10-28T16:29:17Z
 record d99c7c59c7691dbae7b853c7b42d5f54f61c2344 linux-gate 100 host/spindle 2026-10-28T16:53:03Z
+record 0aa8bd3f02a08616830e0c60dc889986103fa03d rust-tests 0 host/spindle 2026-10-28T17:12:11Z
+record 57ecd656dd59bb4aad04174b5084e37041a5526e rust-tests 0 host/spindle 2026-10-28T17:12:11Z
+record 7217ba290eda67dd1c05287e81fb041250c36cf2 rust-tests 0 host/spindle 2026-10-28T17:12:11Z
+record d7042a077b2fecfac7acf890f649377de17d5742 fractal-web 0 host/spindle 2026-10-28T17:11:02Z
