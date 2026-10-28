@@ -1865,7 +1865,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         // unrelated replication traffic must not keep this wake alive.
                         let before = smallclaims::touched::writes();
                         let failed = match crate::profile::task("task reconcile-pass", || {
-                            let _trigger_span = crate::profile::span(pass_trigger);
+                            let _trigger_span = crate::profile::span_with_io(pass_trigger);
                             this.reconcile_once_with_cause(cause)
                         }) {
                             Err(error) => {
