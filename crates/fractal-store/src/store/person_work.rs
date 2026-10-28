@@ -32,8 +32,9 @@ pub fn structured_request(ask: &ClaimRecord) -> Result<Option<StructuredRequest>
 /// default_deadline` says otherwise.
 pub const DEFAULT_ASK_DEADLINE_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// The `meta` key holding when this node first counted ask deadlines. An ask made before then
-/// carries none, so its deadline counts from then rather than from when it was asked.
+/// The `meta` key holding when this node first counted ask deadlines, the first reconcile pass
+/// after `[asks] deadlines` was turned on. An ask made before then carries none, so its deadline
+/// counts from then rather than from when it was asked.
 pub const ASK_DEADLINES_SINCE: &str = "person_ask_deadlines_since_unix_ms";
 
 /// When this node started counting ask deadlines; zero before it has.
@@ -84,6 +85,16 @@ impl Store {
     pub fn default_ask_deadline_ms(&self) -> u64 {
         self.default_ask_deadline_ms
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Turns ask deadlines on or off (`[asks] deadlines`).
+    pub fn set_ask_deadlines(&self, enabled: bool) {
+        self.ask_deadlines
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn ask_deadlines(&self) -> bool {
+        self.ask_deadlines.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

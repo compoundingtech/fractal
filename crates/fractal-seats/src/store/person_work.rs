@@ -947,6 +947,49 @@ mission "person-work" state="ready" {{
         );
     }
 
+    /// Deadlines are off until `[asks] deadlines` turns them on, because a member on an older
+    /// build keeps a claim with fields it does not know as retryable. While off, no claim
+    /// carries a deadline field, an ask that names a deadline or default is refused, and no ask
+    /// resolves by itself however long it waits.
+    #[test]
+    fn while_deadlines_are_off_nothing_writes_the_new_fields() {
+        let (store, origin, mut input) = fixture();
+        assert!(!store.ask_deadlines());
+        input.request = Some(gateway_decision());
+        for (deadline_ms, default) in [(Some(3_600_000), None), (None, Some("keep-open"))] {
+            let mut named = input.clone();
+            named.deadline_ms = deadline_ms;
+            named.default_answer = default.map(str::to_owned);
+            assert_eq!(store.ask_person(&named).unwrap_err().code, "ask-deadlines-off");
+        }
+        let ask = store.ask_person(&input).unwrap();
+        // A new-run ask, from a requester that holds no claimed work.
+        let (other, other_origin, mut new_run) = fixture();
+        other.set_step_state(&other_origin.subject, "completed", None).unwrap();
+        new_run.request = Some(gateway_decision());
+        new_run.step = None;
+        new_run.new_run = Some("gateway".into());
+        let new_run_ask = other.ask_person(&new_run).unwrap();
+        let far = now_ms() + 365 * u128::from(DEFAULT_ASK_DEADLINE_MS);
+        for (store, subject) in [(&store, &ask.subject), (&other, &new_run_ask.subject)] {
+            assert_eq!(store.reconcile_person_asks_at(far).unwrap(), PersonAskPass::default());
+            let claim = request(&store.readers.get(), subject).unwrap().unwrap();
+            for field in ["deadline_unix_ms", "deadline_ms", "default_answer"] {
+                assert!(claim.body["fields"].get(field).is_none(), "{subject} {field}");
+            }
+            let view = store.step_run(subject).unwrap().unwrap();
+            assert_eq!(view.status, "ready", "{subject}");
+            assert!(view.person_answers.is_empty(), "{subject}");
+            let connection = store.readers.get();
+            let ended: i64 = connection.query_row(
+                "SELECT COUNT(*) FROM claims WHERE kind IN ('work.person-done','work.person-cancelled')",
+                [], |row| row.get(0)).unwrap();
+            assert_eq!(ended, 0, "{subject}");
+            assert_eq!(ask_deadlines_since(&connection).unwrap(), 0);
+        }
+        assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "waiting-person");
+    }
+
     /// Every ask has a deadline. At it, an unanswered structured ask completes with its default
     /// answer, recorded as resolved by the deadline and not by the person: it leaves the
     /// person's home, and the asking step resumes reading that it timed out and which default
@@ -954,6 +997,7 @@ mission "person-work" state="ready" {{
     #[test]
     fn a_structured_ask_resolves_with_its_default_answer_at_its_deadline() {
         let (store, origin, mut input) = fixture();
+        store.set_ask_deadlines(true);
         input.title = "Land the browser gateway?".into();
         input.request = Some(gateway_decision());
         input.deadline_ms = Some(3_600_000);
@@ -1039,6 +1083,7 @@ mission "person-work" state="ready" {{
     #[test]
     fn a_plain_ask_times_out_without_an_answer_at_the_fleet_default_deadline() {
         let (store, origin, mut input) = fixture();
+        store.set_ask_deadlines(true);
         input.default_answer = Some("friday".into());
         assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-default-answer");
         input.default_answer = None;
@@ -1063,6 +1108,7 @@ mission "person-work" state="ready" {{
     #[test]
     fn a_new_run_ask_that_times_out_tells_the_requester_which_default_applied() {
         let (store, origin, mut input) = fixture();
+        store.set_ask_deadlines(true);
         store.set_step_state(&origin.subject, "completed", None).unwrap();
         input.step = None;
         input.new_run = Some("gateway".into());
@@ -1089,11 +1135,11 @@ mission "person-work" state="ready" {{
         assert!(messages[0].content.contains("Answer: Land the gateway (land)"));
     }
 
-    /// An ask an older build made carries no deadline. Counting from when it was asked would
-    /// resolve every old ask at once at deploy, so its deadline counts from when this node
-    /// began counting deadlines.
+    /// An ask made before deadlines were on (by an older build, or while `[asks] deadlines` was
+    /// off) carries no deadline. Counting from when it was asked would resolve every old ask at
+    /// once, so its deadline counts from the first pass that saw deadlines on.
     #[test]
-    fn an_ask_open_at_deploy_counts_its_deadline_from_the_deploy() {
+    fn an_ask_open_when_deadlines_turn_on_counts_its_deadline_from_then() {
         let (store, origin, input) = fixture();
         // The claim and pause exactly as a build without deadlines wrote them.
         let subject = format!("step-run/{}/ask-legacy", generation_id_from_subject(&origin.generation));
@@ -1109,14 +1155,22 @@ mission "person-work" state="ready" {{
             Ok(claim)
         }).unwrap().unwrap();
         let day = DEFAULT_ASK_DEADLINE_MS as u128;
-        let deploy = asked.accepted_at_unix_ms + 10 * 3_600_000;
-        start_counting_ask_deadlines(&store.connection.write(), deploy).unwrap();
-        // A later start does not move the count.
-        start_counting_ask_deadlines(&store.connection.write(), deploy + day).unwrap();
+        // Opening the store starts no count, and nothing counts while deadlines are off.
+        assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), 0);
+        let off = store.reconcile_person_asks_at(asked.accepted_at_unix_ms + 30 * day).unwrap();
+        assert_eq!(off, PersonAskPass::default());
+        assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), 0);
+        store.set_ask_deadlines(true);
+        let on = asked.accepted_at_unix_ms + 10 * 3_600_000;
+        let pass = store.reconcile_person_asks_at(on).unwrap();
+        assert_eq!(pass, PersonAskPass { changed: false, next_deadline: Some(on + day) });
+        assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), on);
+        // A later pass does not move the count.
         let pass = store.reconcile_person_asks_at(asked.accepted_at_unix_ms + day).unwrap();
-        assert_eq!(pass, PersonAskPass { changed: false, next_deadline: Some(deploy + day) });
+        assert_eq!(pass, PersonAskPass { changed: false, next_deadline: Some(on + day) });
+        assert_eq!(ask_deadlines_since(&store.readers.get()).unwrap(), on);
         assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().status, "waiting-person");
-        assert!(store.reconcile_person_asks_at(deploy + day).unwrap().changed);
+        assert!(store.reconcile_person_asks_at(on + day).unwrap().changed);
         let resumed = store.step_run(&origin.subject).unwrap().unwrap();
         assert_eq!(resumed.status, "ready");
         assert_eq!(resumed.person_answers[0].resolved_by.as_deref(), Some("deadline"));

@@ -346,18 +346,23 @@ impl ReconcileConfig {
 /// The deadline an ask gets when it names none and `[asks] default_deadline` is not set.
 pub const DEFAULT_ASK_DEADLINE: &str = "24h";
 
-/// `[asks]`: every ask a person gets has a deadline, at which it resolves by itself with its
-/// default answer. `default_deadline` is the deadline of an ask that names none.
+/// `[asks]`: with `deadlines` on, every ask a person gets has a deadline, at which it resolves
+/// by itself with its default answer. `default_deadline` is the deadline of an ask that names
+/// none.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AsksConfig {
+    /// Off by default. Deadlines add fields to replicated ask claims that a member on an older
+    /// build keeps as retryable and does not show, so they are turned on once every member runs
+    /// a build that reads them. While off, no ask records a deadline and none resolves by one.
+    pub deadlines: bool,
     /// A duration such as `24h` or `3d`, at least `1m` and at most `30d`.
     pub default_deadline: String,
 }
 
 impl Default for AsksConfig {
     fn default() -> Self {
-        Self { default_deadline: DEFAULT_ASK_DEADLINE.into() }
+        Self { deadlines: false, default_deadline: DEFAULT_ASK_DEADLINE.into() }
     }
 }
 

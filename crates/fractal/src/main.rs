@@ -6553,6 +6553,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
     store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?);
+    store.set_ask_deadlines(config.asks.deadlines);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
@@ -18768,6 +18769,7 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
                 store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline"));
+                store.set_ask_deadlines(asks.deadlines);
                 limits = reloaded;
                 last_error = None;
             }

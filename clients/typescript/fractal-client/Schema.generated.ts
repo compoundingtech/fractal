@@ -450,10 +450,10 @@ export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
 
 export const PersonAskParameters = /*#__PURE__*/ (() => Schema.Struct({
-  /** How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured). */
-  "deadline_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(60000)).check(Schema.isLessThanOrEqualTo(2592000000))).annotate({ description: "How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured)." }),
-  /** The request's answer id that applies at the deadline. Absent, the ask resolves as timed out. */
-  "default_answer": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]{0,47}$", "u")))).annotate({ description: "The request's answer id that applies at the deadline. Absent, the ask resolves as timed out." }),
+  /** How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured). Refused with ask-deadlines-off while the fleet has not turned on ask deadlines. */
+  "deadline_ms": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(60000)).check(Schema.isLessThanOrEqualTo(2592000000))).annotate({ description: "How long the person has to answer. Absent, the fleet's default deadline applies (24 hours unless configured). Refused with ask-deadlines-off while the fleet has not turned on ask deadlines." }),
+  /** The request's answer id that applies at the deadline. Absent, the ask resolves as timed out. Refused with ask-deadlines-off while the fleet has not turned on ask deadlines. */
+  "default_answer": optionalKey(Schema.String.check(Schema.isPattern(new RegExp("^[a-z][a-z0-9-]{0,47}$", "u")))).annotate({ description: "The request's answer id that applies at the deadline. Absent, the ask resolves as timed out. Refused with ask-deadlines-off while the fleet has not turned on ask deadlines." }),
   "new_run": optionalKey(Schema.String),
   "person_id": Id,
   "reason": Schema.String,

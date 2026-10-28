@@ -2115,6 +2115,8 @@ pub struct Store {
     pub fractal: Arc<FractalRuntime>,
     /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
+    /// Whether asks get deadlines: `[asks] deadlines`, off by default.
+    pub ask_deadlines: std::sync::atomic::AtomicBool,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2484,7 +2486,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2505,7 +2507,7 @@ impl Store {
         #[cfg(test)]
         let resource_backfill = None;
         Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2518,7 +2520,7 @@ impl Store {
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
         Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
-            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into() })
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into() })
     }
 
     /// Simulate a different build's registry on this node.

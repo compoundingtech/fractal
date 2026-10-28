@@ -1005,6 +1005,7 @@ fn rollout_rechecks_pending_replies_and_the_physical_render_fence() {
 async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
     use futures_util::FutureExt;
     let seat = Seat::new();
+    seat.store.set_ask_deadlines(true);
     let run = seat.work();
     let origin = run.steps[0].subject.clone();
     seat.store

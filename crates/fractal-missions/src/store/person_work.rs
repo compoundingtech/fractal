@@ -68,12 +68,23 @@ const MAX_ASK_DEADLINE_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// When the ask resolves by itself, and the answer that then applies. Every ask has a deadline:
 /// the one it names or the fleet's default. Only a structured request's named answer can be a
 /// default; without one the ask resolves as timed out.
+/// While `[asks] deadlines` is off the ask records none, and one that names a deadline or a
+/// default is refused rather than quietly asked without it.
 fn deadline_and_default(
     input: &PersonAskRequest,
     structured: &Value,
-    default_ms: u64,
+    default_ms: Option<u64>,
     now: u128,
-) -> Result<AskDeadline, St3Error> {
+) -> Result<Option<AskDeadline>, St3Error> {
+    let Some(default_ms) = default_ms else {
+        if input.deadline_ms.is_some() || input.default_answer.is_some() {
+            return Err(St3Error::new(
+                "ask-deadlines-off",
+                "this fleet has not turned on ask deadlines yet ([asks] deadlines), so an ask cannot name a deadline or a default answer",
+            ));
+        }
+        return Ok(None);
+    };
     let deadline_ms = input.deadline_ms.unwrap_or(default_ms);
     if input.deadline_ms.is_some()
         && !(MIN_ASK_DEADLINE_MS..=MAX_ASK_DEADLINE_MS).contains(&deadline_ms)
@@ -92,11 +103,11 @@ fn deadline_and_default(
         }
         StructuredRequest::parse(structured)?.0.check_default(default)?;
     }
-    Ok(AskDeadline {
+    Ok(Some(AskDeadline {
         at: now + u128::from(deadline_ms),
         requested_ms: input.deadline_ms,
         default: input.default_answer.clone(),
-    })
+    }))
 }
 
 /// An ask's deadline: when it resolves, the duration the asker named (absent when the fleet's
@@ -107,8 +118,9 @@ struct AskDeadline {
     default: Option<String>,
 }
 
-/// Adds the deadline and default answer to an ask claim body.
-fn with_deadline(mut body: Value, deadline: &AskDeadline) -> Value {
+/// Adds the deadline and default answer to an ask claim body; nothing while deadlines are off.
+fn with_deadline(mut body: Value, deadline: &Option<AskDeadline>) -> Value {
+    let Some(deadline) = deadline else { return body };
     body["fields"]["deadline_unix_ms"] = json!(deadline.at as u64);
     if let Some(requested) = deadline.requested_ms {
         body["fields"]["deadline_ms"] = json!(requested);
@@ -382,7 +394,7 @@ impl PersonWorkStore for Store {
                 &stable_input
             };
             let structured = canonical_request(input)?;
-            let deadline = deadline_and_default(input, &structured, self.default_ask_deadline_ms(), now)?;
+            let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now)?;
             let named = step(tx, &normalize_step_run(input.step.as_deref().unwrap())).map_err(internal)?
                 .ok_or_else(|| St3Error::new("missing-step-run", "the asking step does not exist"))?;
             // A revision moves a step into the run's new generation, and its worker may still
@@ -641,8 +653,14 @@ impl PersonWorkStore for Store {
             return Ok(PersonAskPass::default());
         }
         let default_ms = self.default_ask_deadline_ms();
+        let deadlines = self.ask_deadlines();
         self.connection.batched(|tx| -> Result<PersonAskPass> {
             let asks = person_asks_for_reconcile(tx)?;
+            // Asks already open when deadlines are turned on count theirs from the first pass
+            // that sees them on, not from when they were asked, so they do not all resolve at once.
+            if deadlines {
+                start_counting_ask_deadlines(tx, now)?;
+            }
             let since = ask_deadlines_since(tx)?;
             let mut pass = PersonAskPass::default();
             let mut ended = 0;
@@ -659,8 +677,9 @@ impl PersonWorkStore for Store {
                     continue;
                 }
                 if current(tx, &ask, now)? {
-                    // The member that took the ask resolves it, so one answer ends it.
-                    if ask.origin != self.origin {
+                    // The member that took the ask resolves it, so one answer ends it. Nothing
+                    // resolves by a deadline while deadlines are off.
+                    if !deadlines || ask.origin != self.origin {
                         continue;
                     }
                     let Some(deadline) = ask_deadline(&ask, since, default_ms) else { continue };
@@ -846,7 +865,7 @@ impl PersonWorkStore for Store {
             ));
         }
         let structured = canonical_request(input)?;
-        let deadline = deadline_and_default(input, &structured, self.default_ask_deadline_ms(), now_ms())?;
+        let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now_ms())?;
         self.connection.batched(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;

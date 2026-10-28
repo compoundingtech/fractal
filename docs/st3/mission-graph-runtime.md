@@ -1024,8 +1024,13 @@ use `--new-run NAME`; claimed work must name `--step`. Repeated keys return the 
 
 #### Deadlines
 
-Every ask has a deadline, so no ask holds its asker forever. `--deadline 4h` (or `deadline_ms`
-on the client `work.ask` action) names one between 1m and 30d. Without it the fleet default
+With `[asks] deadlines` on, every ask has a deadline, so no ask holds its asker forever. The
+option is off by default: deadlines add fields to the replicated `work.person-asked` and
+`work.person-done` claims, which a member on an older build keeps as retryable and does not show
+until it upgrades, so an operator turns it on once every member runs a build that reads them.
+While it is off, no ask records a deadline, an ask that names `--deadline` or `--default` is
+refused with `ask-deadlines-off`, and no ask resolves by itself. `--deadline 4h` (or
+`deadline_ms` on the client `work.ask` action) names one between 1m and 30d. Without it the fleet default
 applies: 24 hours, or `[asks] default_deadline` in the daemon config, which reloads without a
 restart. The ask claim records the absolute `deadline_unix_ms`, so every member shows the same
 deadline. `--default ID` (`default_answer`) names the structured request's answer that applies
@@ -1035,6 +1040,7 @@ none.
 
 ```toml
 [asks]
+deadlines = true           # off by default; turn on once every member runs this build
 default_deadline = "24h"   # 1m to 30d
 ```
 
@@ -1050,10 +1056,11 @@ entry as `timed_out`. A retry with the same idempotency key must name the same d
 `idempotency-conflict`. A person's answer after that is refused with `stale-fence`. The reconciler arms
 one wake for the earliest deadline among the asks it resolves, so nothing polls for them.
 
-An ask made by a build without deadlines carries none. Its deadline is the fleet default counted
-from when this member first ran a build with deadlines (the `person_ask_deadlines_since_unix_ms`
-key in its `meta` table), or from when it was asked, whichever is later. Old asks therefore do
-not all resolve at once on the deploy. An update waits for nobody and has no deadline.
+An ask made by a build without deadlines, or while they were off, carries none. Its deadline is
+the fleet default counted from the first reconcile pass on this member that saw deadlines on (the
+`person_ask_deadlines_since_unix_ms` key in its `meta` table, written once), or from when it was
+asked, whichever is later. Old asks therefore do not all resolve at once when deadlines are
+turned on. An update waits for nobody and has no deadline.
 
 #### Structured requests
 
