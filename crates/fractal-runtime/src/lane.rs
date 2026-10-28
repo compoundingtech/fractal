@@ -34,6 +34,10 @@ pub const LANES_SLICE: &str = "app-lanes.slice";
 
 static ENFORCED: AtomicBool = AtomicBool::new(false);
 
+/// Held by a test while it relies on the switch, which is process-wide.
+#[cfg(test)]
+pub(crate) static TEST_SWITCH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A seat lane's size: how many cores of CPU time and how many bytes of memory it may use.
 #[derive(Clone, Copy, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct Capacity {

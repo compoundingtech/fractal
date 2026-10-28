@@ -123,7 +123,9 @@ build with this change.
 
 Behind the switch, a seat that declares `capacity cores=… memory=…` on its agent (top-level or
 inside a mission) starts in a capped scope, its builds stay inside it, and stopping the seat
-removes the lane. `a_lane_caps_the_task_and_every_child_and_stopping_removes_it`
+removes the lane. `a_laned_harness_runs_in_its_capped_scope_and_stopping_removes_it`
+(`crates/fractal-runtime/src/pty.rs`) shows it for a terminal seat's harness;
+`a_lane_caps_the_task_and_every_child_and_stopping_removes_it`
 (`crates/fractal-runtime/src/process.rs`, skipped without user scopes) shows the caps, that a child
 that left its session stays in the lane and shares its one core, and that the lane is gone after a
 stop; `a_child_over_its_lane_memory_is_killed_and_the_task_keeps_running` (ignored until the guard

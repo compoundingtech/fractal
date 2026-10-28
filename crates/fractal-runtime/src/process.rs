@@ -1102,10 +1102,6 @@ mod tests {
         Duration::from_micros(usec.trim().parse().unwrap())
     }
 
-    /// Held by a test while it relies on the host's lane switch, which is process-wide.
-    #[cfg(target_os = "linux")]
-    static LANE_SWITCH: Mutex<()> = Mutex::new(());
-
     /// Starts `launch` in a lane of one core and 256 MiB; returns the runtime, its generation and
     /// the lane's cgroup.
     #[cfg(target_os = "linux")]
@@ -1114,7 +1110,7 @@ mod tests {
         let mut environment = scope_environment();
         environment.insert(crate::lane::CAPACITY_ENV.into(), lane.to_string());
         let runtime = ExecRuntime::new(root.join("exec"), root.join("logs"));
-        let _switch = LANE_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _switch = crate::lane::TEST_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::lane::set_enforced(true);
         let generation = runtime.spawn("work", &crate::Launch::Shell(launch.into()), root, &environment);
         crate::lane::set_enforced(false);
@@ -1156,7 +1152,7 @@ mod tests {
             crate::lane::CAPACITY_ENV.into(),
             crate::lane::Capacity { cores: 1, memory: 256 << 20 }.to_string(),
         );
-        let switch = LANE_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let switch = crate::lane::TEST_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let generation = unlaned
             .spawn("work", &crate::Launch::Shell("exec sleep 600".into()), off.path(), &environment)
             .unwrap();

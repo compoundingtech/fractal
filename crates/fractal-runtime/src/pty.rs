@@ -2409,6 +2409,59 @@ exit 0
         }
     }
 
+    /// A terminal seat's lane holds its harness (docs/st3/seat-lanes.md): the harness runs in the
+    /// capped scope, never sees the lane's launch key, keeps its builds in place, and stopping the
+    /// session removes the lane.
+    #[test]
+    fn a_laned_harness_runs_in_its_capped_scope_and_stopping_removes_it() {
+        let Some(pty) = scoped_pty() else {
+            eprintln!("skipped: no systemd user scopes or no pty binary");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let runtime = PtyRuntime::new(root.path().join("r")).with_binary(pty.to_string_lossy());
+        let pid_file = root.path().join("harness.pid");
+        let lane = crate::lane::Capacity { cores: 1, memory: 256 << 20 };
+        let environment = BTreeMap::from([
+            ("PATH".into(), std::env::var("PATH").unwrap()),
+            (crate::lane::CAPACITY_ENV.into(), lane.to_string()),
+        ]);
+        let harness = Launch::Argv(vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "echo \"${{BUILDS_SLICE_ACTIVE:-unset}} ${{FRACTAL_SEAT_CAPACITY:-unset}}\" > '{}'; \
+                 echo $$ > '{}'; exec sleep 60",
+                pid_file.with_extension("env").display(),
+                pid_file.display(),
+            ),
+        ]);
+        let switch = crate::lane::TEST_SWITCH.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::lane::set_enforced(true);
+        let spawned = runtime.spawn("laned", &harness, root.path(), &environment, None, &BTreeMap::new(), None);
+        crate::lane::set_enforced(false);
+        drop(switch);
+        spawned.unwrap();
+        let harness = read_pid(&pid_file);
+
+        let work_unit = runtime.session("laned").map(observation).unwrap().unwrap().tags["st3.scope-unit"].clone();
+        assert_eq!(cgroup_leaf(harness), work_unit);
+        assert_eq!(cgroup_file(harness, "cpu.max").trim(), "100000 100000");
+        assert_eq!(cgroup_file(harness, "memory.max").trim(), (256u64 << 20).to_string());
+        assert_eq!(fs::read_to_string(pid_file.with_extension("env")).unwrap().trim(), "1 unset");
+        let cgroup = fs::read_to_string(format!("/proc/{harness}/cgroup")).unwrap();
+        let cgroup = Path::new("/sys/fs/cgroup")
+            .join(cgroup.lines().find_map(|line| line.strip_prefix("0::")).unwrap().trim_start_matches('/'));
+        assert!(cgroup.parent().unwrap().ends_with("app.slice/app-lanes.slice"), "{}", cgroup.display());
+
+        runtime.stop("laned").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cgroup.exists() {
+            assert!(Instant::now() < deadline, "the lane {work_unit} outlived its stopped session");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     #[test]
     fn a_spawned_pty_server_runs_apart_from_its_harness() {
         let Some(pty) = scoped_pty() else {
