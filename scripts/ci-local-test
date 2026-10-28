@@ -361,6 +361,10 @@ class CiLocal(unittest.TestCase):
                 'if [ "$1" = clippy ]; then echo $$ > "$CI_LOCAL_TEST_LOG.clippy"; sleep 60; fi\n'
                 'if [ "$1" = tests ]; then for i in $(seq 100); do [ -s "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; fi\n')
         (self.work / 'scripts/ci-linux').write_text(said)
+        # Every sed the run starts is counted. Stopping the lane once ran one per process on the host for each process of the
+        # lane's tree, which on a loaded host took longer than the 20 s this test waits for the run to exit.
+        (self.bin / 'sed').write_text(f'#!/bin/sh\necho sed >> "$CI_LOCAL_TEST_LOG.sed"\nexec {shutil.which("sed")} "$@"\n')
+        (self.bin / 'sed').chmod(0o755)
         env = {'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
         run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
@@ -380,6 +384,8 @@ class CiLocal(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertFalse(Path(f'/proc/{clippy}').exists(), 'the lane\'s running stage outlived the run')
+        seds = Path(f'{self.log}.sed')
+        self.assertLess(len(seds.read_text().splitlines()) if seds.exists() else 0, 10, 'stopping the lane reads /proc once, without a sed per process')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
