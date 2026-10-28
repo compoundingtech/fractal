@@ -12,4 +12,7 @@ export const storyGlobs: string[] = [
   '../../../apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx',
   // The live roster story replays captured daemon payloads through the SDK decode.
   '../../../apps/fractal-web/src/web/LiveRoster.stories.tsx',
+  // Production module suites; LiveAgentWorkspace.graph.integration.test.ts proves their identity.
+  '../../../apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx',
+  '../../../apps/fractal-web/src/web/ConversationPane.stories.tsx',
 ]

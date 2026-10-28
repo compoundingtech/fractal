@@ -20,6 +20,8 @@ export type Attachment = {
 export type ToolCallStatus = 'running' | 'success' | 'error' | 'interrupted'
 export type ToolResult = {
   readonly content: unknown
+  readonly metadata?: Readonly<Record<string, unknown>>
+  readonly view?: Readonly<Record<string, unknown>>
   readonly mediaType?: string
   readonly isError: boolean
   readonly at: string
@@ -54,10 +56,14 @@ export const backgroundJobStateLabel = (state: BackgroundJobState): string => {
 
 /** Reader rank for grouped job outcomes: failures first, success last, never arrival order. A new state fails typecheck here. */
 const outcomeRank: Record<BackgroundJobState, number> = { failed: 0, running: 1, cancelled: 2, unknown: 3, completed: 4 }
+const compareBackgroundJobStates = (a: BackgroundJobState, b: BackgroundJobState): number => outcomeRank[a] - outcomeRank[b]
+/** Stable reader order without changing the producer's arrival list. */
+export const orderBackgroundJobs = <Job>(jobs: readonly Job[], stateOf: (job: Job) => BackgroundJobState): readonly Job[] =>
+  [...jobs].sort((a, b) => compareBackgroundJobStates(stateOf(a), stateOf(b)))
 export const backgroundJobOutcomeCounts = (states: Iterable<BackgroundJobState>): readonly BackgroundJobOutcomeCount[] => {
   const counts = new Map<BackgroundJobState, number>()
   for (const state of states) counts.set(state, (counts.get(state) ?? 0) + 1)
-  return [...counts].sort(([a], [b]) => outcomeRank[a] - outcomeRank[b]).map(([state, count]) => ({ state, count }))
+  return [...counts].sort(([a], [b]) => compareBackgroundJobStates(a, b)).map(([state, count]) => ({ state, count }))
 }
 export const backgroundJobOutcomeSummary = (outcomes: readonly BackgroundJobOutcomeCount[]): string =>
   outcomes.map(({ state, count }) => `${count} ${backgroundJobStateLabel(state)}`).join(', ')
@@ -130,7 +136,9 @@ export type ConversationItem =
       readonly name: string
       readonly server?: string
       readonly input: unknown
+      readonly view?: Readonly<Record<string, unknown>>
       readonly status: ToolCallStatus
+      readonly skipped?: boolean
       readonly result?: ToolResult
       readonly callSeen: boolean
       readonly at: string
@@ -213,6 +221,14 @@ export type UnsupportedItem = Extract<ConversationItem, { _tag: 'Unsupported' }>
 export type SendState =
   | { readonly _tag: 'Sent' }
   | { readonly _tag: 'Pending' }
-  | { readonly _tag: 'Failed'; readonly reason: { readonly _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }; readonly detail?: string }
-  /** st may have taken the send and has not confirmed it yet; sending it again is safe. */
+  | {
+      readonly _tag: 'Failed'
+      readonly reason: { readonly _tag: 'Rejected' | 'Ungranted' | 'Invalid' | 'Failed' | 'StaleFence' | 'SnapshotUnavailable' }
+      readonly detail?: string
+      /** Full native error code, preserved for diagnosis. */
+      readonly code?: string
+      /** Source-controlled retry policy; when present it decides whether Retry appears. */
+      readonly retryable?: boolean
+    }
+  /** Fractal may have taken the send and has not confirmed it yet; sending it again is safe. */
   | { readonly _tag: 'Unconfirmed'; readonly detail?: string }

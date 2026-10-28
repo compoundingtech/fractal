@@ -31,7 +31,7 @@ describe('native closed transcript boundary', () => {
     expect(project(entry([], { type: 'status', body: { status: 'completed', detail: 'Read finished', blocks: [block('status', { payload: { body_ref: true } })] } })))
       .toMatchObject([{ _tag: 'Status', status: 'completed', detail: 'Read finished' }])
     expect(project(entry([], { type: 'error', body: { message: 'Transcript unreadable', code: 'transcript_read', details: {}, retryable: true, blocks: [block('error', { payload: { body_ref: true } })] } })))
-      .toMatchObject([{ _tag: 'Notice', kind: 'error', text: 'Transcript unreadable', detail: 'transcript_read', retryable: true }])
+      .toMatchObject([{ _tag: 'Notice', kind: 'error', text: 'Transcript unreadable', detail: 'Code: transcript_read', retryable: true }])
   })
   it('keeps internal tool starts out of prose as an inspectable event', () => {
     expect(project(entry([block('status', { visibility: 'internal', view: { type: 'tool_start', call_id: 'call/a', tool: 'bash', started_at: '2026-10-12T12:00:00Z' } })]))).toMatchObject(hiddenEvent({ eventType: 'tool_start' }))
@@ -151,14 +151,14 @@ describe('native closed transcript boundary', () => {
     expect(project(entry([block('job', { view: { type: 'job', jobs: [job] } })]))).toMatchObject([{ _tag: 'Event', title: `Background job ${title}`, notice: { state: outcome, payload: '', raw: '' } }])
   })
   it.each([
-    [[{ id: 'j', state: 'failed' }, { id: 'k', state: 'completed' }], '2 background jobs · 1 failed, 1 completed'],
-    [[{ id: 'j', state: 'unknown' }, { id: 'k', state: 'cancelled' }, { id: 'l', state: 'running' }], '3 background jobs · 1 running, 1 cancelled, 1 status not reported'],
-    [[{ id: 'j', state: 'unknown' }, { id: 'k', state: 'future-state' }], '2 background jobs status not reported'],
-    [[{ id: 'j', state: 'failed (exit 2)' }, { id: 'k', state: 'failed' }], '2 background jobs failed'],
-    [[], '0 background jobs'],
-  ] satisfies readonly (readonly [ViewOf<'job'>['jobs'], string])[])('summarizes every native job outcome', (jobs, title) => {
+    [[{ id: 'j', state: 'failed' }, { id: 'k', state: 'completed' }], '2 background jobs · 1 failed, 1 completed', 'j\nk'],
+    [[{ id: 'j', state: 'unknown' }, { id: 'k', state: 'cancelled' }, { id: 'l', state: 'running' }], '3 background jobs · 1 running, 1 cancelled, 1 status not reported', 'l\nk\nj'],
+    [[{ id: 'j', state: 'unknown' }, { id: 'k', state: 'future-state' }], '2 background jobs status not reported', 'j\nk'],
+    [[{ id: 'j', state: 'failed (exit 2)' }, { id: 'k', state: 'failed' }], '2 background jobs failed', 'j\nk'],
+    [[], '0 background jobs', ''],
+  ] satisfies readonly (readonly [ViewOf<'job'>['jobs'], string, string])[])('summarizes every native job outcome', (jobs, title, text) => {
     expect(viewCases.job({ type: 'job', jobs }, { id: 'native/jobs', at: '2026-10-14T13:00:00Z', text: '', harness: 'omp' })).toMatchObject({
-      _tag: 'Item', item: { _tag: 'Event', title, text: jobs.map(job => job.id).join('\n') },
+      _tag: 'Item', item: { _tag: 'Event', title, text },
     })
   })
   it('orders a mixed group failed, running, cancelled, unknown, completed regardless of arrival', () => {
@@ -168,11 +168,12 @@ describe('native closed transcript boundary', () => {
     const arrivals = [jobs, [...jobs].reverse(), [jobs[4]!, jobs[2]!, jobs[0]!, jobs[3]!, jobs[5]!, jobs[1]!], [jobs[3]!, jobs[1]!, jobs[4]!, jobs[5]!, jobs[2]!, jobs[0]!]]
     for (const arrival of arrivals) {
       const meaning = viewCases.job({ type: 'job', jobs: arrival }, { id: 'native/jobs', at: '2026-10-14T13:00:00Z', text: '', harness: 'omp' })
-      expect(meaning).toMatchObject({ _tag: 'Item', item: { _tag: 'Event', kind: 'background-job', title, text: arrival.map(job => job.name ?? job.id).join('\n'), notice: { _tag: 'BackgroundJobGroup', raw: '' } } })
+      const failed = arrival.filter(job => job.id === 'f' || job.id === 'e').map(job => job.name ?? job.id)
+      expect(meaning).toMatchObject({ _tag: 'Item', item: { _tag: 'Event', kind: 'background-job', title, text: [...failed, 'r', 'c', 'u', 'd'].join('\n'), notice: { _tag: 'BackgroundJobGroup', raw: '' } } })
       // Exact equality: counts never follow arrival order, and no outcome is dropped or merged.
       expect(meaning._tag === 'Item' && meaning.item._tag === 'Event' && meaning.item.notice?._tag === 'BackgroundJobGroup' ? meaning.item.notice.outcomes : undefined).toEqual(outcomes)
     }
-    expect(project(entry([block('job', { view: { type: 'job', jobs: arrivals[2] } })]))).toMatchObject([{ _tag: 'Event', title, notice: { _tag: 'BackgroundJobGroup', outcomes, payload: '- d: completed\n- c: cancelled\n- Fail: failed\n- u: status not reported\n- e: failed\n- r: running', raw: '' } }])
+    expect(project(entry([block('job', { view: { type: 'job', jobs: arrivals[2] } })]))).toMatchObject([{ _tag: 'Event', title, notice: { _tag: 'BackgroundJobGroup', outcomes, payload: '- Fail: failed\n- e: failed\n- r: running\n- c: cancelled\n- u: status not reported\n- d: completed', raw: '' } }])
   })
   it.each([['unknown', 'status not reported'], ['cancelled', 'cancelled'], ['running', 'running'], ['failed', 'failed'], ['failed (exit 2)', 'failed (exit 2)']])('does not let a completed legacy envelope override native %s', (state, title) => {
     const text = '<system-notice>\nBackground job j has completed. Resume your work using the result below.\nLEGACY_PAYLOAD\n</system-notice>'

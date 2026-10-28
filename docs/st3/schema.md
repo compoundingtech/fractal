@@ -1,4 +1,4 @@
-# st3 schema registry
+# Fractal schema registry
 
 This file is generated from `fractal-schema`.
 
@@ -19,7 +19,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `checkpoint-excusal` | `checkpoint-excusal/ID` | no | A person's excusal of an unreachable writer from checkpoints. |
 | `client` | `client/DEVICE` | no | A paired device's server-derived diagnostic identity. |
 | `custom` | `custom/NAMESPACE/NAME` | yes | An extension subject. |
-| `daemon` | `daemon/NODE` | no | An st3 daemon. |
+| `daemon` | `daemon/NODE` | no | A Fractal daemon. |
 | `doc` | `doc/NAME` | no | A named immutable document lineage. |
 | `exec` | `exec/RUN/LOCAL_ID` | no | A mission-run exec runtime. |
 | `external` | `external/PROVIDER/KIND/IDENTITY` | no | An external account or actor, distinct from a native person. |
@@ -32,7 +32,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `host` | `host/NAME` | no | A graph host. |
 | `lane` | `lane/RUN/LOCAL_ID` | no | A mission-run lane: an ordered line of entries its run works through front first. |
 | `loop-run` | `loop-run/GENERATION/PATH` | no | One bounded loop execution. |
-| `message` | `message/ID` | yes | A Small Talk message. |
+| `message` | `message/ID` | yes | A Fractal message. |
 | `mission` | `mission/ID` | no | An immutable mission revision lineage. |
 | `mission-run` | `mission-run/ID` | no | A mission execution. |
 | `observer` | `observer/RUN/LOCAL_ID` | no | A mission-run resource observer. |

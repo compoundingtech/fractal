@@ -17,7 +17,7 @@ This section is written for a person's own agent to read and act on at their req
 
 - **What the modes mean.** Auto keeps the provider's permission checks on. Codex runs in the
   `st-managed` profile described below: it writes the seat's workspace and temporary
-  directories, reaches the st socket and the network, and asks before anything else. Claude
+  directories, reaches the Fractal socket and the network, and asks before anything else. Claude
   runs with `--permission-mode auto`, where the provider's own classifier decides what asks
   (it can ask for reads outside the workspace). Bypass removes the checks for both: Claude
   skips permissions and Codex runs without approvals or a sandbox, so nothing waits for the
@@ -31,7 +31,7 @@ This section is written for a person's own agent to read and act on at their req
   the install mode. The tick adds no second set of levels.
 - **Where the setting lives.** `access_mode` in `~/.config/st3/config.toml` (or the
   Home Manager option `services.smalltalk.accessMode`). Setup writes `auto` when it creates
-  a config. A config without the key reads as `bypass`, and st never adds or rewrites a key it
+  a config. A config without the key reads as `bypass`, and Fractal never adds or rewrites a key it
   did not create, so an existing install stays on bypass until the person asks for a change.
   A seat declared with its own permission options keeps them in either mode. The Codex tick
   lives in the same file as `codex_work_without_asking`; the same rules and restart apply.
@@ -42,7 +42,7 @@ This section is written for a person's own agent to read and act on at their req
   before editing `config.toml`.
 - **How to change it.** Set `access_mode = "auto"` or `access_mode = "bypass"` in that file
   (add the line when it is missing, leave the other keys alone), run `st service restart`
-  (the daemon adopts live seats; see [upgrading st](../site/guides/upgrading.md#install-and-restart-deliberately)),
+  (the daemon adopts live seats; see [upgrading Fractal](../site/guides/upgrading.md#install-and-restart-deliberately)),
   and run `st doctor`: its `harness-access-mode` check names the mode the daemon started with.
   Seats already running keep the permissions they started with until
   `st agents restart AGENT --as PERSON` restarts them.
@@ -70,7 +70,7 @@ plus a remote TUI) on Codex 0.160.1:
 
 - It writes the seat's workspace and the temporary directories and reads everything else. A write to
   the home directory or anywhere else fails with a read-only file system.
-- It reaches the st daemon socket and the network (git and gh over https, package registries). The
+- It reaches the Fractal daemon socket and the network (git and gh over https, package registries). The
   remote TUI that owns the thread flattens the named profile and drops its `network` table, so the
   profile alone leaves the daemon socket at `EPERM`. The driver therefore also passes
   `sandbox_workspace_write.network_access=true`, the one network key that reaches the thread.
@@ -114,12 +114,12 @@ branch's pull request with `gh`; a st-delivered mission step counts as that auth
 those actions and nothing else. It names what stays unauthorized: the default branch, another seat's
 branch, deleting remote branches, merging or closing pull requests, and any other remote or repository.
 With it the push succeeded 10 times in 10. The wording matters ("the operator authorized" was rejected)
-and is a behavior of that model version; `scripts/st3-codex-minimal-eval/push-check` re-runs the probe.
+and is a behavior of that model version; `scripts/fractal-codex-minimal-eval/push-check` re-runs the probe.
 Nothing is opted in by this change; opting a seat in is the operator's decision, made in its declaration.
-st does not restrict who may publish that declaration: in [free mode](../site/reference/configuration.md#free-mode) any person
+Fractal does not restrict who may publish that declaration: in [free mode](../site/reference/configuration.md#free-mode) any person
 or agent may publish a seat declaration as itself, so an agent that can publish can write this entry into a
 declaration, including its own. The control is review of the declarations before they are published,
-not an st check. The "not authorized" list is advice to a model and was not tested adversarially. The real boundary is
+not a Fractal check. The "not authorized" list is advice to a model and was not tested adversarially. The real boundary is
 branch protection on the repository the seat pushes to (someone should decide whether to enable a ruleset on a repository before a seat that works there opts in): a seat whose `origin` has none can push any branch
 it creates there, and mission steps can carry text from untrusted places (issue and pull request
 snapshots), which this permission turns into authorization for those actions only. Because Codex refuses
@@ -130,7 +130,7 @@ declared permissions the launch fails closed (the driver does not guess that the
 replace it) and says so: `saved Codex resume binding has no persisted rollout for thread ...`. Give the
 seat one turn on its previous declaration, which saves the thread, then restart it on the new one.
 
-The live eval `evals/st3/codex-minimal-access` and `scripts/st3-codex-minimal-eval/resume-check` (a
+The live eval `evals/fractal/codex-minimal-access` and `scripts/fractal-codex-minimal-eval/resume-check` (a
 restart between two turns, checking the thread id, the daemon socket, the network and the refused
 write) are paid and run by hand; no CI gate proves the real launch path. The argv tests and the
 sandbox tests are the CI evidence.
@@ -148,7 +148,7 @@ outside-workspace `/tmp` write, so neither is mistaken for sandbox enforcement p
 A Claude seat's workspace is admitted before launch (the trust dialog is accepted in the seat's Claude
 config). That step also approves the servers named in the workspace's `.mcp.json`, because Claude asks
 for each of them with a dialog that `--dangerously-skip-permissions` skips and `--permission-mode auto`
-does not; left alone, the dialog stops startup before any MCP server connects, so the st channel never
+does not; left alone, the dialog stops startup before any MCP server connects, so the Fractal channel never
 attaches and the seat shows `claude-channel-unattached`. A server listed in the project's
 `disabledMcpjsonServers` stays disabled.
 
@@ -166,7 +166,7 @@ an unattended seat on "Read outside the working directories" (a release builder 
 overnight). The default allows reads under `~/src`, `/var/tmp` (and `/private/var/tmp`, where macOS resolves it, since the rule does not rely on Claude resolving the symlink) and `/nix/store`, plus, for a workspace under a directory literally named `github.com` that is outside `~/src` (a Mac's `~/Developer/github.com/org/repo`), that `github.com` tree, strictly inside the home directory. Any other workspace layout adds nothing. It denies reads of credential and login paths
 (`~/.ssh`, `~/.config/gh`, `~/.config/fabric`, `~/.config/sekrets`, `~/.sekrets`, `~/.claude-accounts`,
 `~/.claude/.credentials.json`, `~/.claude.json`, `~/.codex/auth.json`, `~/.codex/config.toml`, `~/.npmrc`,
-st's keys and accounts directories and `~/.config/st3`), and deny wins over allow. Every other read, and
+Fractal's keys and accounts directories and `~/.config/st3`), and deny wins over allow. Every other read, and
 every write and command, stays with the classifier and still asks. This is a default for auto-mode Claude
 seats applied at launch, so a running seat takes it at its next start. A seat that declares its own
 permission options (`--permission-mode`, `--dangerously-skip-permissions`) keeps them and gets nothing

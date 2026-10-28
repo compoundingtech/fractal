@@ -36,7 +36,7 @@ const limit = ({ reading, window, slot, now }: {
     limitId: window,
     label: window === '5h' ? '5-hour' : 'Weekly',
     shortLabel: window,
-    // st does not declare a governing limit or a ranked summary inventory.
+    // Fractal does not declare a governing limit or a ranked summary inventory.
     summaryRole: 'unknown',
     summarySlot: slot,
     scope: { class: 'account' },
@@ -61,14 +61,14 @@ export const projectNativeQuota = (input: unknown, now: number):
   | { readonly _tag: 'failed'; readonly failure: QuotaFailure } => {
   const decoded = Schema.decodeUnknownResult(NativeEnvelope)(input)
   if (Result.isFailure(decoded)) return { _tag: 'failed', failure: {
-    kind: 'incompatible', reason: `incompatible st usage.period: ${decoded.failure.message}`,
+    kind: 'incompatible', reason: `incompatible Fractal usage.period: ${decoded.failure.message}`,
   } }
   const period = decoded.success.value
   if (period.limits === undefined) return { _tag: 'failed', failure: {
-    kind: 'unavailable', reason: 'This st usage.period response does not report account limits.',
+    kind: 'unavailable', reason: 'This Fractal usage.period response does not report account limits.',
   } }
   if (period.limits.some((reading) => iso(reading.measured_at_unix_ms) === undefined)) {
-    return { _tag: 'failed', failure: { kind: 'incompatible', reason: 'st usage.period observation time is not representable.' } }
+    return { _tag: 'failed', failure: { kind: 'incompatible', reason: 'Fractal usage.period observation time is not representable.' } }
   }
   const fromReading = (reading: UsageLimit, name?: string): QuotaAccount => {
     const observedAt = new Date(reading.measured_at_unix_ms).toISOString()
@@ -88,7 +88,7 @@ export const projectNativeQuota = (input: unknown, now: number):
       limits: [limit({ reading, window: 'weekly', slot: 'pressure-1', now }),
         limit({ reading, window: '5h', slot: 'pressure-2', now })],
       // The period's default 24h spend is not seven-day spend or per-account ledger history.
-      usage7d: { basis: 'not reported by st usage.period' },
+      usage7d: { basis: 'not reported by Fractal usage.period' },
     }
   }
   // An api-key account has no provider limit to read: its budget is what it may spend this month.

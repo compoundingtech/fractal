@@ -11,22 +11,27 @@ const text = (value: unknown): string => {
   return Object.entries(value).map(([key, item]) => key === 'text' && typeof item === 'string' ? item : text(item)).join(' ')
 }
 
+type Entry = WireSlice<'conversation'>['state']['threads'][number]['items'][number]
+const isSourceRow = (entry: Entry) => entry.type === 'tool_call'
+  || entry.type === 'content' && (entry.role === 'user' || entry.role === 'assistant') && typeof entry.body.text === 'string'
+
+// Mirrors Transcript independently: the newest six source rows plus the latest user prompt.
 const Tail = ({ omit = false }: { readonly omit?: boolean }) => {
   const conversation = useScenarioSlice('conversation')
   if (conversation.loading) return <p>Loading conversation</p>
   return <div>{conversation.state.threads.map(thread => {
-    const starts = thread.items.flatMap((entry, index) => entry.type === 'content' && entry.role === 'user' ? [index] : [])
-    const start = starts.length <= 6 ? 0 : starts.at(-2) ?? 0
-    const entries = thread.items.slice(start).filter(entry => entry.type === 'content')
+    const rows = thread.items.filter(isSourceRow)
+    const latestPrompt = rows.filter(entry => entry.type === 'content' && entry.role === 'user').at(-1)
+    const mounted = rows.length <= 6 ? rows : rows.filter((entry, index) => index >= rows.length - 6 || entry === latestPrompt)
+    const entries = mounted.filter(entry => entry.type === 'content')
     return <section key={thread.agent}>{(omit ? [] : entries).map(entry => <p key={entry.id}>{text(entry.body)}</p>)}</section>
   })}</div>
 }
 
-// Transcript.tsx uses initialTailCount={2}; EmbraceScrollViewport's historyBatchSize=4 mounts <=6 turns whole.
-const scenario = { _tag: 'slices', slices: ['conversation'], world: 'long-debug-rabbit-hole', window: { _tag: 'tail', turns: 2, historyBatch: 4 } } satisfies ScenarioStoryParameter
+// Transcript.tsx exports transcriptMountedWindow = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount } (6).
+const scenario = { _tag: 'slices', slices: ['conversation'], world: 'long-debug-rabbit-hole', window: { _tag: 'sourceRows', rows: 6 } } satisfies ScenarioStoryParameter
 const meta = { title: 'Mounted window proof', render: () => <Tail />, parameters: { scenario } } satisfies Meta
 
-type Entry = WireSlice<'conversation'>['state']['threads'][number]['items'][number]
 const sourceWorld = scenarios.loadWorld('fleet-mid-refactor', { now: scenarios.ANCHOR_MS })
 const sourceThread = sourceWorld.slices.conversation.state.threads[0]
 if (sourceThread === undefined) throw new Error('Mounted-window proof requires a source thread')
@@ -48,10 +53,15 @@ const withEntries = (items: readonly Entry[], check: () => void): void => {
   try { check() } finally { lookup.mockRestore() }
 }
 
-const Rows = ({ tail = false }: { readonly tail?: boolean }) => {
+const answer = (index: number): Entry => ({
+  ...sourceContent, id: `entry/answer-${index}`, sequence: 100 + index, role: 'assistant', body: { media_type: 'text/plain', text: `Window boundary answer ${index}` },
+})
+
+/** Renders the given entries' content markers: all of them, or only the newest `last`. */
+const Rows = ({ last, select }: { readonly last?: number; readonly select?: (items: readonly Entry[]) => readonly Entry[] }) => {
   const conversation = useScenarioSlice('conversation')
   return <div>{conversation.state.threads.flatMap(thread => {
-    const items = tail ? thread.items.slice(-2) : thread.items
+    const items = select !== undefined ? select(thread.items) : last === undefined ? thread.items : thread.items.slice(-last)
     return items.map(entry => <p key={entry.id}>{entry.type === 'content' ? text(entry.body) : ''}</p>)
   })}</div>
 }
@@ -69,9 +79,9 @@ describe('story-declared mounted conversation window', () => {
     expect(result.failures).toContainEqual(expect.objectContaining({ _tag: 'DataDependence', slice: 'conversation', message: expect.stringContaining('does not render expected marker') }))
   })
 
-  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid tail count %s', turns => {
-    const result = scenarioStoryCheck({ parameters: { scenario: { ...scenario, window: { _tag: 'tail', turns, historyBatch: 4 } } } }, meta)
-    expect(result.failures).toContainEqual(expect.objectContaining({ _tag: 'MountedWindow', message: 'tail window turns must be a positive safe integer' }))
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('rejects invalid source-row count %s', rows => {
+    const result = scenarioStoryCheck({ parameters: { scenario: { ...scenario, window: { _tag: 'sourceRows', rows } } } }, meta)
+    expect(result.failures).toContainEqual(expect.objectContaining({ _tag: 'MountedWindow', message: 'sourceRows window rows must be a positive safe integer' }))
   })
 
   it('rejects a window that selects zero entries', () => {
@@ -106,33 +116,41 @@ describe('story-declared mounted conversation window', () => {
     expect(result.checks.find(item => item.check === 3)?._tag).toBe('Passed')
   })
 
-  it('mounts all six turns at the short-conversation boundary, but only the tail at seven', () => {
+  it('mounts all six source rows at the short-conversation boundary, but only the newest six at seven', () => {
+    const missing = expect.objectContaining({ _tag: 'DataDependence', message: expect.stringContaining('does not render expected marker') })
     for (const count of [6, 7]) withEntries(Array.from({ length: count }, (_, index) => prompt(index)), () => {
-      const complete = scenarioStoryCheck({ render: () => <Rows tail={count === 7} /> }, meta)
-      expect(complete.failures).toEqual([])
-      const tailOnly = scenarioStoryCheck({ render: () => <Rows tail /> }, meta)
-      if (count === 6) expect(tailOnly.failures).toContainEqual(expect.objectContaining({
-        _tag: 'DataDependence', message: expect.stringContaining('does not render expected marker'),
-      }))
-      else expect(tailOnly.failures).toEqual([])
+      expect(scenarioStoryCheck({ render: () => <Rows /> }, meta).failures).toEqual([])
+      expect(scenarioStoryCheck({ render: () => <Rows last={6} /> }, meta).failures).toEqual([])
+      // No whole-mount slack: one row fewer than the bound always misses a mounted marker.
+      expect(scenarioStoryCheck({ render: () => <Rows last={5} /> }, meta).failures).toContainEqual(missing)
     })
   })
 
-  it('counts an assistant-only or tool-only prefix as one turn before the first user turn', () => {
+  it('counts an assistant-only or tool-only prefix as a source row outside the newest six', () => {
     const assistant: Entry = { ...sourceContent, id: 'entry/window-prefix', role: 'assistant', body: { media_type: 'text/plain', text: 'Prefix assistant marker' } }
     for (const prefix of [assistant, sourceTool]) {
       const items = [prefix, ...Array.from({ length: 6 }, (_, index) => prompt(index))]
       withEntries(items, () => {
-        // Six user prompts plus the prefix is seven turns, so only two prompts mount.
-        expect(scenarioStoryCheck({ render: () => <Rows tail /> }, meta).failures).toEqual([])
+        // The prefix plus six prompts is seven source rows, so only the six prompts mount.
+        expect(scenarioStoryCheck({ render: () => <Rows last={6} /> }, meta).failures).toEqual([])
       })
     }
   })
 
-  it('rejects a nonempty window excluding every marker in a marker-bearing conversation', () => {
-    const items = Array.from({ length: 7 }, (_, index) => prompt(index, index < 5 ? `Excluded marker ${index}` : ''))
+  it('requires the latest user prompt above the newest six rows of its long turn, without the rows between', () => {
+    const items = [prompt(0), ...Array.from({ length: 9 }, (_, index) => answer(index))]
     withEntries(items, () => {
-      const result = scenarioStoryCheck({ render: () => <Rows tail /> }, meta)
+      expect(scenarioStoryCheck({ render: () => <Rows select={entries => entries.length === 0 ? [] : [entries[0]!, ...entries.slice(-6)]} /> }, meta).failures).toEqual([])
+      expect(scenarioStoryCheck({ render: () => <Rows last={6} /> }, meta).failures).toContainEqual(expect.objectContaining({
+        _tag: 'DataDependence', message: expect.stringContaining('does not render expected marker'),
+      }))
+    })
+  })
+
+  it('rejects a nonempty window excluding every marker in a marker-bearing conversation', () => {
+    const items = Array.from({ length: 7 }, (_, index) => prompt(index, index === 0 ? 'Excluded marker 0' : ''))
+    withEntries(items, () => {
+      const result = scenarioStoryCheck({ render: () => <Rows last={6} /> }, meta)
       expect(result.failures).toContainEqual(expect.objectContaining({
         _tag: 'MountedWindow', message: 'mounted window excludes every conversation marker',
       }))

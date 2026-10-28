@@ -1,5 +1,5 @@
 /**
- * `@fractal/sdk/effect`: the st client-v0 transport for wf, as one Effect service.
+ * `@fractal/sdk/effect`: the Fractal client-v0 transport for the web app, as one Effect service.
  *
  * One collections socket carries every follow (`socket.ts`). Each follow is a scoped
  * `Stream<FollowEvent<A>>` decoded tolerantly at this edge with Fractal's generated codecs, so
@@ -75,7 +75,7 @@ import {
   initialFreshness,
   transitionFreshness,
 } from './freshness.ts'
-import { type ConnectionState, type St3Diagnostic, makeChannel } from './socket.ts'
+import { type ConnectionState, type FractalDiagnostic, makeChannel } from './socket.ts'
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'
 import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, type DecodedAgent, type DecodedResource, type Undecodable } from './resourceDecode.ts'
 export { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent, type Open, type DecodedAgent, type DecodedUsageSummary, type DecodedResource, type ResourceDecodeDiagnostic, type DecodeDiagnosticCounts, type Undecodable, type Unrecognized, type UnrecognizedLeaf } from './resourceDecode.ts'
@@ -99,6 +99,30 @@ export {
   FOLLOW_SUBSCRIBE_SPAN,
   type FirstFrameOutcome,
 } from './firstFrame.ts'
+export {
+  PTY_SUBPROTOCOL,
+  PtyFrame,
+  PtyProtocolError,
+  encodePtyFrame,
+  makePtyFrameReader,
+  type PtyTarget,
+  type PtyMode,
+  type PtySize,
+  PtyAttachFailure,
+  type PtyAttachment,
+  requestPtyAttachment,
+  ptyStreamUrl,
+  type PtyState,
+  type PtyEvent,
+  ptyBackoffMillis,
+  ptyTransition,
+  ptyFallback,
+  type PtySocket,
+  type PtySocketFactory,
+  type PtyOutput,
+  type PtySession,
+  openPtySession,
+} from './pty.ts'
 
 // Arrangement windows use the generated owner-scoped subscribeArrangements API.
 
@@ -129,7 +153,7 @@ type AdvertisedEnvelope = {
 }
 type CollectionName = Parameters<CollectionStream['subscribe']>[1]
 
-export type { ConnectionState, St3Diagnostic } from './socket.ts'
+export type { ConnectionState, FractalDiagnostic } from './socket.ts'
 export {
   type FollowFreshness,
   type FreshnessEvent,
@@ -275,8 +299,8 @@ export interface ConversationChunk {
 }
 
 /** Scoped collection follows and gateway state carried by one shared socket. */
-export class St3 extends Context.Service<
-  St3,
+export class Fractal extends Context.Service<
+  Fractal,
   {
     readonly connection: Stream.Stream<ConnectionState>
     /** Synchronously send a going-away close, then pause automatic reconnect. */
@@ -326,7 +350,7 @@ export class St3 extends Context.Service<
     /** Socket reachability is not Live: only a successfully decoded data frame establishes it. */
     readonly gatewaySyncStatus: Stream.Stream<SyncStatus>
   }
->()('@fractal/sdk/St3') {}
+>()('@fractal/sdk/Fractal') {}
 
 /** A caller-owned socket that can answer an identical initial subscribe without another send. */
 export interface AdoptedCollections {
@@ -337,11 +361,11 @@ export interface AdoptedCollections {
 }
 
 /** Optional host policy. The neutral SDK neither reads browser globals nor evicts hidden views. */
-export class St3Platform extends Context.Service<St3Platform, {
+export class FractalPlatform extends Context.Service<FractalPlatform, {
   readonly socket?: CollectionSocketFactory
   readonly takeEarlyCollections?: () => AdoptedCollections | undefined
   readonly admission?: (options: { readonly cap: number; readonly conversationSlots?: number }) => Admission<string>
-}>()('@fractal/sdk/St3Platform') {}
+}>()('@fractal/sdk/FractalPlatform') {}
 
 /** A typed decoder and an existing collection selector; no new wire collection or transport. */
 export interface FollowDescriptor<TResource> {
@@ -359,7 +383,7 @@ export const collectionWindow = (
 ): FollowDescriptor<DecodedResource> => ({ spec, decodeRow: decodeResourceRow })
 
 /** Gateway configuration and transport seams for the scoped SDK layer. */
-export interface St3Options {
+export interface FractalOptions {
   /** Gateway origin; the browser passes its own origin (the dev proxy or the serving gateway). */
   readonly baseUrl: string
   /** Bearer credential resolved for every HTTP request and socket open; never an actor selector. */
@@ -381,7 +405,7 @@ export interface St3Options {
   /** Test seam: HTTP reads and actions. */
   readonly fetch?: typeof fetch
   /** Authoritative transitions and frame work, without coupling the SDK to a metrics library. */
-  readonly onDiagnostics?: (event: St3Diagnostic) => void
+  readonly onDiagnostics?: (event: FractalDiagnostic) => void
   /** Called with the wire id after a follow's subscribe command is sent on an open WebSocket; includes resubscribe sends. */
   readonly onSubscribeSent?: (id: string) => void
   /** Actual-send callback with the canonical followKey; includes queued-open and resubscribe sends. */
@@ -519,9 +543,9 @@ const tracedStream = (
   }
 }
 
-const make = (options: St3Options) =>
+const make = (options: FractalOptions) =>
   Effect.gen(function* () {
-    const platform = Option.getOrUndefined(yield* Effect.serviceOption(St3Platform))
+    const platform = Option.getOrUndefined(yield* Effect.serviceOption(FractalPlatform))
     /** A subscribe's own attempt context while the client issues it; otherwise the caller's. */
     let outbound: TraceContext | undefined
     const client = new FractalClient({
@@ -566,7 +590,7 @@ const make = (options: St3Options) =>
       const adopted = early?.consume()
       if (adopted !== undefined) currentSocket = adopted
       else if (freshSocket !== undefined) currentSocket = freshSocket(url, protocols, headers)
-      else throw new TypeError('St3 requires a collections socket factory or a St3Platform layer')
+      else throw new TypeError('Fractal requires a collections socket factory or a FractalPlatform layer')
       return currentSocket
     }
     const followKeys = new Map<string, string>()
@@ -1081,7 +1105,7 @@ const make = (options: St3Options) =>
                 return decodeScreen(frame.value)
               } catch {
                 // The schema failure quotes the frame, which carries screen text: log fixed text only.
-                console.warn('st3 terminal screen did not decode')
+                console.warn('Fractal terminal screen did not decode')
                 return undefined
               }
             },
@@ -1090,7 +1114,7 @@ const make = (options: St3Options) =>
         },
       })
 
-    return St3.of({
+    return Fractal.of({
       connection: SubscriptionRef.changes(channel.connection),
       suspendSockets: () => {
         // Send synchronously before Effect interruption/finalization or document teardown.
@@ -1228,4 +1252,4 @@ const make = (options: St3Options) =>
   })
 
 /** The SDK for the life of the layer: one socket, opened on build, closed on release. */
-export const St3Live = (options: St3Options) => Layer.effect(St3, make(options))
+export const FractalLive = (options: FractalOptions) => Layer.effect(Fractal, make(options))

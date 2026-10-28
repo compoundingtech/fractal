@@ -6,12 +6,12 @@ import {
 
 // Documents on the phone read through the client's one path to a document (document.get,
 // documents.list and document-references.get) and the shared view in @fractal/views, as
-// stui and web do. Read-only: nothing here edits or publishes, and the text is shown as written.
+// The Fractal terminal UI and web do. Read-only: nothing here edits or publishes, and the text is shown as written.
 
 /** The client reads a document view needs; null while the phone is offline. */
 export type DocumentReader = Pick<FractalClient, 'documentGet' | 'documentsList' | 'documentReferencesGet'>;
 
-/** Whether this st serves documents to the phone: true, false (an older st, or not granted), or null before it has said. */
+/** Whether this Fractal version serves documents to the phone: true, false (an older Fractal, or not granted), or null before it has said. */
 export function documentsServed(caps: Pick<Capabilities, 'capabilities'> | null | undefined): boolean | null {
   if (!caps) return null;
   return caps.capabilities.some(capability => capability.id === 'documents' && capability.version >= 1 && capability.state === 'granted');
@@ -50,7 +50,7 @@ export async function nextDocumentPage(reader: DocumentReader | null, list: Docu
   }
 }
 
-/** The documents a message, mission, run or step names, each once in the order st gives them. */
+/** The documents a message, mission, run or step names, each once in the order Fractal gives them. */
 export async function referencedDocuments(reader: DocumentReader | null, subjects: readonly string[], signal?: AbortSignal): Promise<{ references: DocumentReference[]; failed: DocumentUnavailable | null }> {
   if (!reader) return { references: [], failed: 'remote-unavailable' };
   const references: DocumentReference[] = [];
@@ -77,7 +77,7 @@ export function followDocument(trail: readonly string[], reference: string): Fol
   return count ? { kind: 'back', count } : { kind: 'stay' };
 }
 
-/** When a version was bound to its name, as a date and time on this phone, or null when st does not say. */
+/** When a version was bound to its name, as a date and time on this phone, or null when Fractal does not say. */
 export function changedAt(unixMs: number | null): string | null {
   if (unixMs === null) return null;
   const at = new Date(unixMs);

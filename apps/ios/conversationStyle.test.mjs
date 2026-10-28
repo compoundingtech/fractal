@@ -6,8 +6,8 @@ import { COLLAPSED_TOOL_LINES, folds, HOME_LEGEND } from '@fractal/views';
 import { tokenColor } from './conversationStyle.ts';
 import { inLight, lightPalette, lightTheme, palette, theme } from './theme.ts';
 
-// stui writes the drawing rules; the phone draws from the same file. Every colour it names must
-// be one of the phone's theme tokens, and the phone's fold must match stui's.
+// The Fractal terminal UI writes the drawing rules; the phone draws from the same file. Every colour it names must
+// be one of the phone's theme tokens, and the phone's fold must match the Fractal terminal UI's.
 const rules = JSON.parse(readFileSync(new URL('../../fixtures/clients/conversation-style.json', import.meta.url), 'utf8'));
 const tokens = [];
 const walk = (value, key) => {
@@ -109,7 +109,7 @@ test('the conversation follows the system appearance live instead of a fixed Moc
 
   const app = readFileSync(new URL('./App.tsx', import.meta.url), 'utf8');
   assert.match(app, /name="Conversation" component=\{ConversationScreen\} options=\{\{ \.\.\.schemeOptions,/, 'the native header follows too');
-  assert.match(app, /schemeSurface \? stuiNavigation\[scheme\]/);
+  assert.match(app, /schemeSurface \? fractalNavigation\[scheme\]/);
 });
 
 test('one subscription reads the system appearance, and every scope derives from it', () => {

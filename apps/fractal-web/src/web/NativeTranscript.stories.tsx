@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, within } from 'storybook/test'
+import { expect, userEvent, waitFor, within } from 'storybook/test'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { decodeConversationChunk } from '@fractal/sdk/effect'
 import { assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme, compositionLightTheme } from '@fractal/ui/assistant-ui'
@@ -56,11 +56,18 @@ export const scenarioExemptions: readonly string[] = [
 type Story = StoryObj<typeof meta>
 const assertNative: NonNullable<Story['play']> = async ({ canvasElement }) => {
   const canvas = within(canvasElement)
+  const history = await canvas.findByTestId('transcript-history-controls', {}, { timeout: 60000 })
+  const initialIds = canvas.getAllByTestId('transcript-turn').flatMap(turn => turn.dataset.sourceIds?.split(' ').filter(Boolean) ?? [])
+  await expect(initialIds).toHaveLength(6)
+  await expect(initialIds).toEqual(Array.from({ length: 6 }, (_, index) => `timeline-entry/native-proof/${records.length - 6 + index}`))
+  await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
+  await waitFor(() => expect(history).toHaveAttribute('data-state', 'complete'))
   await expect(await canvas.findByText('Last response: last-model · 84 tokens · $0.025', {}, { timeout: 60000 })).toBeInTheDocument()
   await expect(canvas.getByText('Last response: tool-owner-model · 96 tokens · $0.012')).toBeInTheDocument()
   await expect(canvas.getByText('Last response: error-owner-model · 108 tokens · $0')).toBeInTheDocument()
-  await expect(canvas.getByText(/Synthetic response interrupted[\s\S]*Retryable/)).toBeInTheDocument()
+  await expect(canvas.getByText(/Synthetic response interrupted[\s\S]*Code: retry[\s\S]*Can be retried/)).toBeInTheDocument()
   await expect(canvas.getByText('4 background jobs · 1 failed, 1 cancelled, 1 status not reported, 1 completed')).toBeInTheDocument()
+  await expect(canvas.getByText(/^Failed check\s+Cancelled check\s+Unreported check\s+Completed check$/)).toBeInTheDocument()
   await expect(canvas.queryByText('Last response: first-model · 42 tokens · $0.01')).toBeNull()
   await expect(canvas.queryByText(/body_ref/)).toBeNull()
   await expect(canvas.queryByTestId('live-work')).toBeNull()

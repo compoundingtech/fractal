@@ -90,6 +90,12 @@ class ReviewRisk(unittest.TestCase):
         self.assertEqual(self.rules(result)["skip-and-signing-machinery"], "medium")
         self.assertEqual(self.rules(result)["workflows"], "medium")
 
+    def test_the_canonical_runner_keeps_the_signing_machinery_risk_floor(self):
+        self.write("scripts/fractal-test", "#!/bin/sh\n")
+        result = self.risk()
+        self.assertEqual(result["level"], "medium")
+        self.assertEqual(self.rules(result)["skip-and-signing-machinery"], "medium")
+
     def test_a_policy_file_under_st_is_medium_but_trusted_keys_in_source_are_high(self):
         self.write(".st/crate-cut.json", "{}\n")
         result = self.risk()

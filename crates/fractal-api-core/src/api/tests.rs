@@ -1,3 +1,5 @@
+#[path = "agents_publication_tests.rs"]
+mod agents_publication_tests;
 mod roster_fresh;
 
 #[cfg(any(test, feature = "test-support"))]
@@ -831,6 +833,18 @@ fn owner_cursor_expiry_remains_a_typed_retryable_gateway_error() {
     assert_eq!(unavailable.code, "remote-unavailable");
     assert_eq!(unavailable.details["reason"], "transport-error");
     assert_eq!(unavailable.details["owner_host_id"], "host/owner");
+}
+
+#[test]
+fn peer_too_old_keeps_upgrade_guidance_at_the_gateway() {
+    let message = "This host runs an older Fractal version; update it to open subagent conversations.";
+    let error = remote_read_error("host/owner", crate::peer::ClientReadRejected::new(
+        "peer-too-old", StatusCode::UNPROCESSABLE_ENTITY, message,
+    ).into());
+    assert_eq!(error.code, "peer-too-old");
+    assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(error.message, message);
+    assert_eq!(error.details["owner_host_id"], "host/owner");
 }
 
 #[test]
@@ -3452,6 +3466,212 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     let error: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(error["code"], "foreign-agent-actor");
     assert!(!state.store.desired_subjects().unwrap().iter().any(|item| item.kind == "subscription"));
+}
+
+async fn repair_actor_apply_request(
+    app: Router,
+    bound_actor: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/v1/repair/apply-attributed")
+        .header("content-type", "application/json");
+    if let Some(actor) = bound_actor {
+        request = request.extension(BoundAgent(actor.into()));
+    }
+    let response = app.oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+    (status, value)
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_refuses_foreign_agent_and_person_before_token_handling() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for actor in ["agent/foreign", "person/operator"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = repair_actor_apply_request(
+            app.clone(),
+            Some("agent/own"),
+            json!({"token":"not-a-repair-token","actor":actor}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor", "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_requires_present_nonempty_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for body in [
+        json!({"token":"not-a-repair-token"}),
+        json!({"token":"not-a-repair-token","actor":null}),
+        json!({"token":"not-a-repair-token","actor":""}),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = repair_actor_apply_request(
+            app.clone(), Some("agent/own"), body.clone(),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor", "{body}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_own_actor_reaches_token_validation_and_daemon_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let before = state.store.index().unwrap();
+    let (status, refusal) = repair_actor_apply_request(
+        app.clone(),
+        Some("agent/own"),
+        json!({"token":"not-a-repair-token","actor":"agent/own"}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert_eq!(refusal["code"], "invalid-repair-token");
+    assert_eq!(state.store.index().unwrap(), before);
+
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    assert_eq!(plan["items"], json!([]));
+    let token = plan["token"].as_str().unwrap();
+    let (status, result) = repair_actor_apply_request(
+        app,
+        Some("agent/own"),
+        json!({"token":token,"actor":"agent/own"}),
+    ).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["applied"], 0);
+    assert!(result["receipt_claim_id"].is_null(), "{result}");
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn repair_actor_unbound_router_supports_legacy_token_only_apply() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let before = state.store.index().unwrap();
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    assert_eq!(plan["items"], json!([]));
+    let token = plan["token"].as_str().unwrap();
+    let (status, result) = json_request(app, "/v1/repair/apply", json!({"token":token})).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["applied"], 0);
+    assert!(result["receipt_claim_id"].is_null(), "{result}");
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn repair_actor_bound_router_refuses_legacy_apply_with_or_without_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let token = plan["token"].as_str().unwrap();
+    // Both the handler and the daemon's outer binding guard must close the legacy path.
+    for app in [
+        app.clone(),
+        app.layer(from_fn_with_state(state.store.clone(), guard_bound_actor)),
+    ] {
+        for body in [
+            json!({"token":token}),
+            json!({"token":token,"actor":"agent/own"}),
+        ] {
+            let before = state.store.index().unwrap();
+            let response = app.clone().oneshot(Request::builder()
+                .method("POST")
+                .uri("/v1/repair/apply")
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let refusal: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor", "{body}: {refusal}");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_unbound_router_refuses_supplied_actor_without_daemon_binding() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    for actor in ["agent/own", "person/operator", ""] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = repair_actor_apply_request(
+            app.clone(), None, json!({"token":"not-a-repair-token","actor":actor}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor", "{actor}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn repair_actor_unbound_router_refuses_attributed_token_only_apply() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let before = state.store.index().unwrap();
+    let (status, plan) = get_request(app.clone(), "/v1/repair").await;
+    assert_eq!(status, StatusCode::OK, "{plan}");
+    let token = plan["token"].as_str().unwrap();
+    let (status, refusal) = repair_actor_apply_request(app, None, json!({"token":token})).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert_eq!(refusal["code"], "foreign-agent-actor");
+    assert_eq!(state.store.index().unwrap(), before);
+}
+
+#[tokio::test]
+async fn repair_actor_attributed_route_fails_closed_against_legacy_only_daemon() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let handler_calls = calls.clone();
+    // An older daemon accepts the token but silently ignores the unknown actor field.
+    let app = Router::new().route("/v1/repair/apply", post(
+        move |Json(body): Json<Value>| async move {
+            assert!(body["token"].is_string());
+            handler_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Json(json!({"applied":1}))
+        },
+    ));
+    let body = json!({"token":"legacy-token","actor":"agent/own"});
+    let response = app.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri("/v1/repair/apply-attributed")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let response = app.oneshot(Request::builder()
+        .method("POST")
+        .uri("/v1/repair/apply")
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -12450,4 +12670,68 @@ mission "overview-renamed" state="ready" {
             serde_json::to_value(&expected.mission_provenance).unwrap(),
         );
     }
+}
+
+#[test]
+fn agent_card_shows_current_incarnation_background_jobs() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let source = r#"
+version 2
+mission "agent-jobs" state="ready" {
+  goal "Exercise harness background jobs."
+  agent "worker" { workspace "/tmp"; harness "omp" {} }
+  step "queued" { assigned-to "agent/${ST_MISSION_RUN}/worker" }
+}
+"#;
+    let intent = parse_intent(source, "node").unwrap();
+    let planned = store.mission(&intent, crate::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    store.apply(&intent, &planned.subject_tokens, "agent-jobs-source").unwrap();
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "agent-jobs".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "agent-jobs-run".into(),
+    }).unwrap();
+    materialize_run_agents(&state, &run);
+    let worker = format!("agent/{}/worker", run.id);
+    let append = |kind: &str, fields: Value| {
+        store.append_claim(&ClaimInput {
+            subject: worker.clone(), kind: kind.into(),
+            actor: (kind == "harness.observed").then(|| worker.clone()),
+            fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    };
+    let card = || client_agent_resources(&store, false, "snapshot", store.index().unwrap())
+        .unwrap().into_iter().find(|card| card["id"] == worker).unwrap();
+    append("runtime.observed", json!({"status":"running","runtime_id":"node.worker","incarnation_id":"one"}));
+    assert!(card()["background_jobs"].is_null());
+    for count in [2, 0] {
+        append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":count}));
+        assert_eq!(card()["background_jobs"], count);
+    }
+    append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one"}));
+    assert!(card()["background_jobs"].is_null());
+    append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"one","background_jobs":3}));
+    append("runtime.observed", json!({"status":"running","runtime_id":"node.worker","incarnation_id":"two"}));
+    assert!(card()["background_jobs"].is_null());
+    append("harness.observed", json!({"state":"idle","driver":"omp","incarnation_id":"two","background_jobs":1}));
+    assert_eq!(card()["background_jobs"], 1);
+    let fault = crate::model::AttentionRequest {
+        reviewer: "person/test".into(), title: "Mailbox unavailable".into(),
+        reason: "The current mailbox lost delivery custody.".into(), severity: "error".into(),
+        targets: vec![worker.clone()], actor: "daemon/runtime".into(),
+        idempotency_key: "agent-jobs-mailbox-loss".into(),
+    };
+    let episode = "attention/agent-jobs-mailbox";
+    store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
+    assert_eq!(card()["harness_state"], "indeterminate");
+    assert!(card()["background_jobs"].is_null(), "a mailbox availability fence clears the count");
+    store.recover_operational_failure(episode, "authenticated replay control", "agent-jobs-repaired").unwrap();
+    assert_eq!(card()["background_jobs"], 1);
+    append("harness.observed", json!({"state":"ended","driver":"omp","incarnation_id":"two","background_jobs":1}));
+    assert!(card()["background_jobs"].is_null());
 }

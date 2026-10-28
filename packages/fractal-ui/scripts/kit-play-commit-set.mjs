@@ -75,6 +75,8 @@ export const KIT_CASE_OVERRIDES = new Map([
   // Portal theme inheritance must run in light as well as dark on every commit.
   ['fractal-ui-sidebar-milestone-agent-row--native-overlays-themed', FULL],
 ])
+const APP_MODULE_STATES = ['loading', 'empty', 'populated', 'failed-tool', 'offline', 'unavailable', 'scripted-repair']
+export const APP_MODULE_SUITE_IDS = ['fractal-app-liveagentworkspace', 'fractal-app-conversationpane'].flatMap(suite => APP_MODULE_STATES.map(state => `${suite}--${state}`))
 export const APP_CASE_OVERRIDES = new Map([
   // Collapse removes the production sidebar separator while a drag is held at this measured viewport.
   ['fractal-narrow-layout--sidebar-drag-unmount-cleanup', [['dark', 1100], ['light', 1100]]],
@@ -83,6 +85,9 @@ export const APP_CASE_OVERRIDES = new Map([
   ['fractal-narrow-layout--breakpoint-density-coarse', [['dark', 899], ['dark', 900], ['light', 899], ['light', 900]]],
   // Pointer and Escape dismissal restore the opening trigger in tablet and phone drawers.
   ['fractal-narrow-layout--drawer-focus-return', [['dark', 899], ['light', 440]]],
+  // The production module suites prove each availability state mounts the real module; none depends on width
+  // or scheme, so each state runs once, dark at desktop width (14 merge cases rather than 56).
+  ...APP_MODULE_SUITE_IDS.map(id => [id, [['dark', 1440]]]),
 ])
 // The production build includes both inventories; every named story remains required.
 export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])

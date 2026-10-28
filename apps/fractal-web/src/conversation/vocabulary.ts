@@ -1,7 +1,7 @@
 import type { TimelineBlock, TimelineEntry, TimelineView, UnknownCase } from '@fractal/client/schema'
 import { Match } from 'effect'
 import type { ConversationItem, HarnessNotice } from './model.ts'
-import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
+import { backgroundJobOutcomeCounts, backgroundJobOutcomeSummary, backgroundJobStateLabel, orderBackgroundJobs } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-data/model.ts'
 import { q101OmpEnvelopeStopgap } from './q101OmpEnvelopeStopgap.ts'
 
 export type Equals<TA, TB> = (<T>() => T extends TA ? 1 : 2) extends (<T>() => T extends TB ? 1 : 2) ? true : false
@@ -69,8 +69,9 @@ export const viewCases = {
     const only = outcomes.length === 1 ? outcomes[0]!.state : undefined
     const summary = backgroundJobOutcomeSummary(outcomes)
     const title = only !== undefined ? `${view.jobs.length} background jobs ${backgroundJobStateLabel(only)}` : `${view.jobs.length} background jobs${summary === '' ? '' : ` · ${summary}`}`
-    const payload = view.jobs.map(job => `- ${job.name ?? job.id}: ${backgroundJobStateLabel(jobOutcome(job))}`).join('\n')
-    return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title, text: view.jobs.map(job => job.name ?? job.id).join('\n'), sender: sender(ctx), data: {}, notice: { _tag: 'BackgroundJobGroup', outcomes, payload, raw: '' } })
+    const orderedJobs = orderBackgroundJobs(view.jobs, jobOutcome)
+    const payload = orderedJobs.map(job => `- ${job.name ?? job.id}: ${backgroundJobStateLabel(jobOutcome(job))}`).join('\n')
+    return item({ _tag: 'Event', id: ctx.id, at: ctx.at, kind: 'background-job', title, text: orderedJobs.map(job => job.name ?? job.id).join('\n'), sender: sender(ctx), data: {}, notice: { _tag: 'BackgroundJobGroup', outcomes, payload, raw: '' } })
   },
   irc: (view, ctx) => {
     const parsed = stopgap(ctx)

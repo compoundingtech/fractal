@@ -548,22 +548,19 @@ impl Daemon {
     }
 
     fn state(root: &Path, node: &str) -> AppState {
-        AppState {
-            owning_person: None,
-            store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0_u64).0,
-            node: node.into(),
-            state_dir: root.into(),
-            pty_root: root.join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: Some(root.join("native")),
-            planner_default: Default::default(),
-            assistant_receipts: Default::default(),
-        }
+        AppState { owning_person: None,
+        store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: node.into(),
+        state_dir: root.into(),
+        pty_root: root.join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.join("native")),
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
     fn socket(&self) -> PathBuf {
@@ -693,7 +690,7 @@ impl Daemon {
         let mut fence = self.fence(WORKER).await;
         fence.mission_generation = Some(work.generation);
         fence.step_definition = Some(work.definition_hash);
-        fence.attempt = Some(work.attempt);
+        fence.attempt = Some(u64::from(work.attempt));
         fence.readiness_epoch = Some(u64::from(work.readiness_epoch));
         fence.runtime_incarnation = Some("4242:fixture".into());
         fence
@@ -861,6 +858,7 @@ async fn dispatch(
         "mission.approve-revision" => mission_approve_revision, "mission.cancel" => mission_cancel,
         "mission.cancel-revision" => mission_cancel_revision, "mission.revise" => mission_revise,
         "mission.start" => mission_start, "pairing.revoke" => pairing_revoke,
+        "private-notes.write" => private_notes_write,
         "review.approve" => review_approve, "review.reject" => review_reject, "review.request-changes" => review_request_changes,
         "runtime.context-clear" => runtime_context_clear, "runtime.reset" => runtime_reset,
         "runtime.restart" => runtime_restart, "runtime.signal" => runtime_signal, "runtime.stop" => runtime_stop,
@@ -5898,7 +5896,7 @@ async fn custom_reply_survives_fences_cli_and_daemon_restarts() {
     let manifest = daemon.root.path().join("garden-review.json");
     std::fs::write(
         &manifest,
-        include_str!("../../../examples/st3/custom-review.json"),
+        include_str!("../../../examples/fractal/custom-review.json"),
     )
     .unwrap();
     let registered = cli_value(
@@ -6113,7 +6111,7 @@ async fn decision_tree_manifest_cards_fences_retries_damage_and_restarts() {
     let manifest = daemon.root.path().join("decision-tree.json");
     std::fs::write(
         &manifest,
-        include_str!("../../../examples/st3/decision-tree.json"),
+        include_str!("../../../examples/fractal/decision-tree.json"),
     )
     .unwrap();
     let registered = cli_value(
@@ -6542,7 +6540,7 @@ async fn image_file_reference_manifest_registers_validates_replicates_and_restar
         fields[name] = value;
         malformed.push(fields);
     }
-    let source = include_str!("../../../examples/st3/image-file-reference.json");
+    let source = include_str!("../../../examples/fractal/image-file-reference.json");
     reference_manifest_proof(source, good.clone(), malformed).await;
     // The media type is optional; the hash and file identity remain required.
     let mut without_media = good;
@@ -6582,7 +6580,7 @@ async fn onepassword_field_reference_manifest_registers_validates_replicates_and
     ] {
         malformed.push(json!({"locator":locator}));
     }
-    let source = include_str!("../../../examples/st3/onepassword-field-reference.json");
+    let source = include_str!("../../../examples/fractal/onepassword-field-reference.json");
     reference_manifest_proof(
         source,
         json!({"locator":"op://garden-vault/seed-service/token"}),

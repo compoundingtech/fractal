@@ -18,6 +18,7 @@ pub mod attention;
 pub mod delivery;
 pub mod deploy;
 pub mod evidence;
+pub mod agents_publication;
 pub mod missions;
 pub mod seats;
 pub mod helper_launchers;
@@ -1637,7 +1638,10 @@ pub fn runtime_view_entry(
         head,
         candidate,
         &mut || desired_row_at(connection, subject, Some(store_index)),
-        &mut |of| latest_actual_at(connection, of, Some(store_index)),
+        &mut |of| latest_actual_fields_at(
+            connection, of, Some(store_index),
+            if of.starts_with("mission-run/") { &["status", "mode"] } else { &["status"] },
+        ),
         &mut |owner| subject_head_at(connection, owner, store_index),
     )
 }
@@ -1781,7 +1785,11 @@ pub fn subject_status_at(
         .as_ref()
         .and_then(|row| row.member.as_deref())
         .and_then(|value| serde_json::from_str::<crate::model::MemberSpec>(value).ok());
-    let actual = latest_actual_at(connection, subject, at_index)?;
+    let actual = if matches!(claims, ClaimsReduction::Runtime) {
+        latest_actual_fields_at(connection, subject, at_index, RUNTIME_PROJECTION_FIELDS)?
+    } else {
+        latest_actual_at(connection, subject, at_index)?
+    };
     let (actual_claim, actual_origin, actual_origin_conflict) = selected_actual_source_at(
         connection,
         subject,
@@ -1862,7 +1870,10 @@ pub fn subject_status_at(
     };
     assemble_subject_status(
         connection, subject, at_index, inputs,
-        &mut |owner| latest_actual_at(connection, owner, at_index),
+        &mut |owner| latest_actual_fields_at(
+            connection, owner, at_index,
+            if owner.starts_with("mission-run/") { &["status", "mode"] } else { &["status"] },
+        ),
     ).map(Some)
 }
 
@@ -4183,7 +4194,7 @@ impl Store {
         &self,
         token: &str,
     ) -> Result<OperationalRepairResult, St3Error> {
-        self.apply_operational_repair_with_legacy_starts(token, &[])
+        self.apply_operational_repair_with_legacy_starts(token, &[], None)
     }
 
     /// Rechecks the complete evidence-bound plan inside the normal writer fence.
@@ -4191,6 +4202,7 @@ impl Store {
         &self,
         token: &str,
         native_evidence: &[Value],
+        bound_actor: Option<&str>,
     ) -> Result<OperationalRepairResult, St3Error> {
         let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
@@ -4418,12 +4430,18 @@ impl Store {
                 "operation_id": item.details["operation"]["id"],
                 "native_evidence": item.details["native_evidence"],
             })).collect::<Vec<_>>();
-        let reason = if closures.is_empty() {
-            "applied the exact graph-authorized operational repair plan".to_owned()
-        } else {
-            format!("applied the exact graph-authorized operational repair plan; legacy runtime start closures: {}",
-                serde_json::to_string(&closures).map_err(internal)?)
-        };
+        // Keep the legacy four-field receipt and daemon author: old peers classify
+        // repair.applied as SystemOnly. Caller attribution is JSON inside reason,
+        // before the existing trailing closures JSON consumed by older readers.
+        let mut reason = "applied the exact graph-authorized operational repair plan".to_owned();
+        if let Some(actor) = bound_actor {
+            use std::fmt::Write as _;
+            write!(&mut reason, "; bound caller: {}", json!({"actor": actor})).map_err(internal)?;
+        }
+        if !closures.is_empty() {
+            reason.push_str("; legacy runtime start closures: ");
+            reason.push_str(&serde_json::to_string(&closures).map_err(internal)?);
+        }
         let receipt = append_claim_tx(
             &transaction,
             &self.origin,
@@ -5354,6 +5372,47 @@ impl Store {
     }
 
     /// Every claim and local observation of `kind` for `subject`, in log order.
+    /// A seat's harness diagnostics in canonical order, without the Claude channel's
+    /// attachment reports: those are most of a long-lived seat's diagnostics, and their own
+    /// index serves the attachment fence. An append raises the newest index and a checkpoint
+    /// trim lowers the count, so diagnostics kept under the same key, read from the kind index
+    /// alone, are the same; a pass reads the bodies again only when one was added or trimmed.
+    pub fn harness_diagnostics(&self, subject: &str) -> Result<Arc<Vec<ClaimRecord>>> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let key: (u64, u64) = self.readers.get().query_row(
+            "SELECT COALESCE(MAX(store_index), 0), COUNT(*) FROM claims INDEXED BY claims_subject_kind_index
+             WHERE subject=?1 AND kind='harness.diagnostic'",
+            [subject],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let kept = self.extension::<HarnessDiagnostics>();
+        if let Some((_, diagnostics)) = kept
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(subject)
+            .filter(|(at, _)| *at == key)
+        {
+            return Ok(diagnostics.clone());
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        HARNESS_DIAGNOSTIC_READS.with(|reads| reads.set(reads.get() + 1));
+        let mut diagnostics = self.claims_for(subject, Some("harness.diagnostic"))?;
+        diagnostics.retain(|claim| {
+            !matches!(
+                claim.body.pointer("/fields/code").and_then(Value::as_str),
+                Some("claude-channel-attached" | "claude-channel-unattached" | "claude-channel-initialized")
+            )
+        });
+        let diagnostics = Arc::new(diagnostics);
+        let mut kept = kept.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if kept.len() >= ACTUAL_CACHE_LIMIT {
+            kept.clear();
+        }
+        kept.insert(subject.to_owned(), (key, diagnostics.clone()));
+        Ok(diagnostics)
+    }
+
     pub fn observations_for(&self, subject: &str, kind: &str) -> Result<Vec<ClaimRecord>> {
         smallclaims::touched::note_read(|| subject.to_owned());
         let mut records = self.claims_for(subject, Some(kind))?;
@@ -8716,7 +8775,11 @@ fn publish_changed_harness_state_tx(
             .get("fields")
             .and_then(Value::as_object)
             .is_some_and(|previous| {
-                fields.iter().all(|(name, value)| {
+                // Unlike sparse status axes, the count belongs only to this report.
+                // Dropping it must publish an unknown count rather than retain old jobs.
+                previous.get("background_jobs").and_then(Value::as_u64)
+                    == fields.get("background_jobs").and_then(Value::as_u64)
+                    && fields.iter().all(|(name, value)| {
                     matches!(name.as_str(), "observed_at_ms" | "observed_since_ms" | "status_transition")
                         || previous.get(name) == Some(value)
                 })
@@ -10341,6 +10404,25 @@ pub fn identity_actual_source_at(
     subject: &str,
     through: u64,
 ) -> Result<(Option<String>, Option<String>, bool)> {
+    let desired = desired_row_at(connection, subject, Some(through))?;
+    let member = desired.as_ref().and_then(|row| row.member.as_deref())
+        .and_then(|member| serde_json::from_str::<crate::model::MemberSpec>(member).ok());
+    selected_actual_source_at(
+        connection, subject, Some(through), member.as_ref().map(|member| member.host.as_str()),
+    )
+}
+
+pub fn selected_actual_source_at(
+    connection: &Connection,
+    subject: &str,
+    at_index: Option<u64>,
+    desired_host: Option<&str>,
+) -> Result<(Option<String>, Option<String>, bool)> {
+    let through = at_index.unwrap_or(i64::MAX as u64);
+    if subject.starts_with("arrangement/") {
+        return Ok((arrangements::arrangement_at(connection, subject, through)?
+            .and_then(|value| value["revision"].as_str().map(str::to_owned)), None, false));
+    }
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h2c10d26c43e2 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
         "WITH RECURSIVE origins(origin) AS (
             SELECT (SELECT origin FROM claims INDEXED BY claims_runtime_origin_accepted_index
@@ -10384,14 +10466,11 @@ pub fn identity_actual_source_at(
         let (id, _, origin, _) = parsed.into_iter().next().expect("one runtime source");
         return Ok((Some(id), Some(origin), false));
     }
-    let desired = desired_row_at(connection, subject, Some(through))?;
-    let member = desired.as_ref().and_then(|row| row.member.as_deref())
-        .and_then(|member| serde_json::from_str::<crate::model::MemberSpec>(member).ok());
     let rows = parsed.iter().map(|(id, kind, origin, body)| {
         (id.as_str(), kind.as_str(), origin.as_str(), body)
     }).collect::<Vec<_>>();
     let (id, origin, rivals) = select_actual_source(
-        &rows, member.as_ref().map(|member| member.host.as_str()),
+        &rows, desired_host,
     ).expect("runtime sources are nonempty");
     let rivals = rivals.iter().map(String::as_str).collect::<Vec<_>>();
     let conflict = !rivals.is_empty()
@@ -10399,55 +10478,6 @@ pub fn identity_actual_source_at(
     Ok((Some(id), Some(origin), conflict))
 }
 
-pub fn selected_actual_source_at(
-    connection: &Connection,
-    subject: &str,
-    at_index: Option<u64>,
-    desired_host: Option<&str>,
-) -> Result<(Option<String>, Option<String>, bool)> {
-    let at_index = at_index.unwrap_or(i64::MAX as u64);
-    if subject.starts_with("arrangement/") {
-        return Ok((arrangements::arrangement_at(connection, subject, at_index)?.and_then(|v| v["revision"].as_str().map(str::to_owned)), None, false));
-    }
-    // Canonical order, not arrival order, so every node holding these claims selects the same
-    // source. Only claims about the subject's actual state can be selected or conflict, so the
-    // read leaves out its harness reports.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hcd8a9be75153 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-        "SELECT claims.id, claims.kind, claims.origin,
-                CASE WHEN claims.kind='runtime.observed' THEN claims.body END
-         FROM claims INDEXED BY claims_subject_kind_index
-         JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM} AND claims.store_index<=?2
-           AND {UNREPAIRED_CLAIM}
-         ORDER BY {CANONICAL_ORDER}"
-    ))?;
-    let rows = statement
-        .query_map(params![subject, at_index], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?
-                    .and_then(|body| serde_json::from_str::<Value>(&body).ok())
-                    .unwrap_or(Value::Null),
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    let rows = rows
-        .iter()
-        .map(|(id, kind, origin, body)| (id.as_str(), kind.as_str(), origin.as_str(), body))
-        .collect::<Vec<_>>();
-    let Some((selected_id, selected_origin, rivals)) = select_actual_source(&rows, desired_host)
-    else {
-        return Ok((None, None, false));
-    };
-    // Another host's observation conflicts unless the selected claim descends from it. Only then
-    // does the walk need the subject's whole causal history, harness reports included.
-    let rivals = rivals.iter().map(String::as_str).collect::<Vec<_>>();
-    let runtime_conflict = !rivals.is_empty()
-        && !subject_descends_from_all(connection, subject, at_index, &selected_id, &rivals)?;
-    Ok((Some(selected_id), Some(selected_origin), runtime_conflict))
-}
 
 /// The selected actual-state claim of `(id, kind, origin, runtime body)` rows in canonical
 /// order, its origin, and the rival observations it must descend from to hold alone.
@@ -10614,6 +10644,76 @@ pub fn latest_actual_at(
             Ok((kind, serde_json::from_str::<Value>(&body)?))
         })())
     }))
+}
+
+const RUNTIME_PROJECTION_FIELDS: &[&str] =
+    &["status", "runtime_id", "incarnation_id", "terminal", "reachability", "reason"];
+
+/// Resolve only the requested actual fields, newest first, including explicit nulls and
+/// omitted state-transition fields. Keep the index cursor open while reading bodies so
+/// both statements share one read cut without retaining discarded history.
+fn latest_actual_fields_at(
+    connection: &Connection,
+    subject: &str,
+    at_index: Option<u64>,
+    fields: &[&str],
+) -> Result<Option<Value>> {
+    debug_assert!(fields.len() < usize::BITS as usize);
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5911198f6cf3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+        "SELECT claims.store_index FROM claims INDEXED BY claims_actual_accepted_index
+         JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
+           AND claims.kind NOT LIKE 'harness.%'
+           AND +claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
+         ORDER BY {CANONICAL_ORDER_DESC}"
+    ))?;
+    let mut rows = statement.query(params![subject, at_index.unwrap_or(i64::MAX as u64)])?;
+    let mut bodies = connection.prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
+    let mut actual = serde_json::Map::new();
+    let mut resolved = 0_usize;
+    let complete = (1_usize << fields.len()) - 1;
+    let mut seen = false;
+    let registry = fractal_schema::registry();
+    while resolved != complete {
+        let Some(row) = rows.next()? else { break; };
+        seen = true;
+        let index: u64 = row.get(0)?;
+        let (kind, body): (String, String) =
+            bodies.query_row(/* sqlite-large-value: allow-for-now lv-ha1002d83b7ac owner=fractal_store::store TODO=trace-statement-and-value-representation */ [index], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        #[cfg(any(test, feature = "test-support"))]
+        ACTUAL_HISTORY_BODIES_DECODED.with(|count| count.set(count.get() + 1));
+        let value: Value = serde_json::from_str(&body)?;
+        let incoming = value.get("fields").unwrap_or(&value);
+        let Some(incoming) = incoming.as_object() else { continue; };
+        // Attribution receipts do not replace observed runtime fields.
+        if kind == "resource.observed"
+            && incoming.get("kind").and_then(Value::as_str).is_some_and(carries_opener)
+            && incoming.get("attribution_only") == Some(&Value::Bool(true))
+        {
+            continue;
+        }
+        let transition = registry.claim(&kind)
+            .filter(|spec| spec.cardinality == fractal_schema::Cardinality::StateTransition);
+        let mut incoming = match value {
+            Value::Object(mut body) => match body.remove("fields") {
+                Some(Value::Object(fields)) => fields,
+                None => body,
+                _ => continue,
+            },
+            _ => continue,
+        };
+        for (index, field) in fields.iter().enumerate() {
+            let bit = 1_usize << index;
+            if resolved & bit != 0 { continue; }
+            if let Some(value) = incoming.remove(*field) {
+                actual.insert((*field).into(), value);
+                resolved |= bit;
+            } else if transition.is_some_and(|spec| spec.fields.contains_key(*field)) {
+                resolved |= bit;
+            }
+        }
+    }
+    Ok(seen.then_some(Value::Object(actual)))
 }
 
 /// A subject's actual state from already parsed claims in canonical order. It takes
@@ -11033,6 +11133,7 @@ fn update_prompt_fence(
         blocked_on: Some("human".into()),
         ask: None,
         input_buffer: None,
+        background_jobs: None,
         exit: None,
         claim,
         since_unix_ms: at.parse()?,
@@ -11092,6 +11193,7 @@ fn claude_attachment_fence(
         blocked_on: Some("channel".into()),
         ask: None,
         input_buffer: None,
+        background_jobs: None,
         exit: None,
         claim,
         since_unix_ms: at.parse()?,
@@ -11226,6 +11328,7 @@ pub fn harness_fold_at(
             blocked_on: None,
             ask: None,
             input_buffer: None,
+            background_jobs: None,
             exit: None,
             claim,
             since_unix_ms: observed_at.parse()?,
@@ -11267,6 +11370,7 @@ pub fn harness_fold_at(
                     blocked_on: Some("human".into()),
                     ask: None,
                     input_buffer: None,
+                    background_jobs: None,
                     exit: None,
                     claim,
                     since_unix_ms: time.parse()?,
@@ -11323,6 +11427,7 @@ pub fn harness_fold_at(
                 blocked_on: Some("human".into()),
                 ask: None,
                 input_buffer: None,
+                background_jobs: None,
                 exit: None,
                 claim,
                 since_unix_ms: observed_at_unix_ms.parse::<u128>()?,
@@ -11405,7 +11510,8 @@ pub fn harness_fold_at(
         if current.is_none()
             && let Some(state) = fields.get("state").and_then(Value::as_str)
         {
-            current = Some((state.to_owned(), claim, observed_at_unix_ms, key));
+            let jobs = crate::model::CurrentHarnessView::reported_background_jobs(state, fields);
+            current = Some((state.to_owned(), claim, observed_at_unix_ms, key, jobs));
         }
         if matches!(fields.get("state").and_then(Value::as_str), Some("ended" | "indeterminate")) {
             optional.entry("blocked_on").or_insert(None);
@@ -11459,7 +11565,7 @@ pub fn harness_fold_at(
         .transpose()?
     } else { None };
     let harness_key = match (&work_activity, current.as_ref()) {
-        (Some(_), Some((_, claim, _, key))) => Some(match key {
+        (Some(_), Some((_, claim, _, key, _))) => Some(match key {
             Some(key) => key.clone(),
             None => canonical::claim_key(connection, claim)?,
         }),
@@ -11469,7 +11575,7 @@ pub fn harness_fold_at(
         && include_work_activity
         && key > runtime_key
         && !seat_status::permission_blocked(
-            current.as_ref().map(|(state, _, _, _)| state.as_str()),
+            current.as_ref().map(|(state, ..)| state.as_str()),
             optional.get("blocked_on").and_then(|v| v.as_deref()),
             optional.get("ask").and_then(|v| v.as_deref()),
         )
@@ -11484,13 +11590,14 @@ pub fn harness_fold_at(
             blocked_on: None,
             ask: None,
             input_buffer: None,
+            background_jobs: None,
             exit: None,
             claim,
             since_unix_ms: observed_at_unix_ms.parse::<u128>()?,
             observed_at_unix_ms: observed_at_unix_ms.parse::<u128>()?,
         }));
     }
-    let Some((mut state, claim, observed_at_unix_ms, _)) = current else {
+    let Some((mut state, claim, observed_at_unix_ms, _, background_jobs)) = current else {
         return Ok(None);
     };
     if seat_status::permission_blocked(
@@ -11520,6 +11627,7 @@ pub fn harness_fold_at(
         blocked_on: optional.remove("blocked_on").flatten(),
         ask: optional.remove("ask").flatten(),
         input_buffer: optional.remove("input_buffer").flatten(),
+        background_jobs,
         exit: optional.remove("exit").flatten(),
         claim,
         since_unix_ms: observed_at_unix_ms,
@@ -18780,6 +18888,18 @@ pub fn step_timing_events(
         kept.insert(file, (key, Arc::new(events.clone())));
     }
     Ok(events)
+}
+
+/// Each seat's harness diagnostics as last read, under the newest index and the count of them.
+#[derive(Default)]
+struct HarnessDiagnostics(Mutex<HashMap<String, KeptDiagnostics>>);
+
+type KeptDiagnostics = ((u64, u64), Arc<Vec<ClaimRecord>>);
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    /// How often this thread read a seat's harness diagnostic bodies.
+    pub static HARNESS_DIAGNOSTIC_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Each step's timing events by database file and subject, under the newest index and the

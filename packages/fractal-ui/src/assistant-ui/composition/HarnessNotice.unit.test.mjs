@@ -32,7 +32,7 @@ const { UnsupportedRecord } = await server.ssrLoadModule('/src/assistant-ui/comp
 const { Transcript } = await server.ssrLoadModule('/src/assistant-ui/composition/Transcript.tsx')
 const { EmbraceRuntimeProvider, RuntimeAdoptedIds } = await server.ssrLoadModule('/src/assistant-ui/EmbraceRuntime.tsx')
 const { convertConversationItem } = await server.ssrLoadModule('/src/assistant-ui/embrace-converter.ts')
-const { backgroundJobOutcomeCounts } = await server.ssrLoadModule('/src/assistant-ui/embrace-data/model.ts')
+const { backgroundJobOutcomeCounts, orderBackgroundJobs } = await server.ssrLoadModule('/src/assistant-ui/embrace-data/model.ts')
 
 const unsupported = {
   _tag: 'Unsupported', id: 'unsupported/example', harness: 'omp', recordKind: 'model_usage',
@@ -114,7 +114,15 @@ test('grouped job outcomes read failed, running, cancelled, unknown, completed f
   const states = ['completed', 'unknown', 'failed', 'cancelled', 'running', 'failed']
   const ordered = [{ state: 'failed', count: 2 }, { state: 'running', count: 1 }, { state: 'cancelled', count: 1 }, { state: 'unknown', count: 1 }, { state: 'completed', count: 1 }]
   const permutations = list => list.length <= 1 ? [list] : list.flatMap((head, index) => permutations([...list.slice(0, index), ...list.slice(index + 1)]).map(rest => [head, ...rest]))
-  for (const arrival of permutations(states)) assert.deepEqual(backgroundJobOutcomeCounts(arrival), ordered)
+  for (const arrival of permutations(states)) {
+    assert.deepEqual(backgroundJobOutcomeCounts(arrival), ordered)
+    const jobs = Object.freeze(arrival.map((state, id) => Object.freeze({ id, state })))
+    const result = orderBackgroundJobs(jobs, job => job.state)
+    assert.deepEqual(result.map(job => job.state), ['failed', 'failed', 'running', 'cancelled', 'unknown', 'completed'])
+    assert.deepEqual(result.filter(job => job.state === 'failed'), jobs.filter(job => job.state === 'failed'))
+    assert.deepEqual(jobs.map(job => job.state), arrival)
+    for (const job of result) assert.equal(job, jobs[job.id])
+  }
   assert.deepEqual(backgroundJobOutcomeCounts([]), [])
 })
 for (const scheme of ['dark', 'light']) test(`${scheme} subagent and job outcomes share one presentation`, async () => {

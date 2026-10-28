@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The fractal-web lane on this machine, for a note signed here (scripts/st-test, a lane in .st/required-lanes.json). Run inside the
+# The fractal-web lane on this machine, for a note signed here (scripts/fractal-test, a lane in .st/required-lanes.json). Run inside the
 # web dev shell: `nix develop .#web -c bash scripts/ci-local-web`.
 #
 # It runs what CI's fractal-web-execution job runs (scripts/ci-web-shell-test, then scripts/ci-fractal-web), as ONE shard that covers
@@ -34,7 +34,7 @@ done < <(env -0)
 # Neither a seat's command recorder (inside the account's st state) nor the account's own tool wrappers (~/.local/bin: the host's
 # build admission front doors for nix, npm and cargo) stay on PATH: a CI runner has neither, and a wrapper that execs "the next
 # nix on PATH" loops forever under a test that puts its own nix stub first (scripts/ci-web-shell-test). The run is already
-# governed: st-test starts it under one heavy-slot ticket in builds.slice.
+# governed: fractal-test starts it under one heavy-slot ticket in builds.slice.
 st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
 account_bin=$HOME/.local/bin
 kept=()

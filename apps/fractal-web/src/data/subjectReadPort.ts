@@ -470,7 +470,7 @@ export const gatewaySubjectReads = ({
     }),
     agentDeclaration: fromGetter({
       decode: Native.decodeUnknownSync(Native.AgentDeclaration),
-      // Explicitly redacted: st replaces every env value before rendering the canonical KDL.
+      // Explicitly redacted: Fractal replaces every env value before rendering the canonical KDL.
       getter: ({ client, ref }) => client.agentDeclarationGet(ref, undefined, false),
     }),
     missionDefinition: fromGetter({
