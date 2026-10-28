@@ -70,7 +70,7 @@ impl WaitKind {
     pub fn heading(self) -> &'static str {
         match self {
             WaitKind::Ask => "waiting on a person",
-            WaitKind::SeatDown => "seat stopped or down",
+            WaitKind::SeatDown => "agent stopped or down",
             WaitKind::NoProgress => "claimed, no progress",
             WaitKind::Unclaimed => "ready, nobody claims it",
             WaitKind::Hold => "held",

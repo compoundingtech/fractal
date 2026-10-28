@@ -1223,8 +1223,8 @@ enum MissionViewCommand {
         #[arg(long)]
         quiet: Option<String>,
     },
-    /// Every blocked run in the fleet, one line each, grouped by cause: an ask on a person, a
-    /// seat stopped or down, a claim with no progress, a ready step nobody claims, a hold.
+    /// Every blocked run in the fleet, one line each, grouped by cause: an ask on a person, an
+    /// agent stopped or down, a claim with no progress, a ready step nobody claims, a hold.
     ///
     /// Reads the same published lists as `missions waiting-on`; a run is blocked when a step
     /// is stuck, or when nothing in it moves and a step waits on a person or a hold.
