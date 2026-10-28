@@ -768,7 +768,7 @@
       "trust_levels": [
         "fleet"
       ],
-      "enforce": false,
+      "enforce": true,
       "events": [
         "pull_request"
       ],
@@ -798,7 +798,6 @@
             "flake_lock_sha256": "flake.lock"
           },
           "trust_levels": [
-            "fleet",
             "host",
             "agent",
             "queue"
