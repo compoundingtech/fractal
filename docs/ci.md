@@ -231,10 +231,10 @@ New test files and paths are checked automatically by `genie-freshness` on each 
 merge group. A guard failure names each file and line and points its author to `test_env!`
 and these repair instructions; it does not allow the raw path through.
 If `genie-freshness` reports `unrelocated test paths: FILE:LINE`, replace the raw test path
-at that location with `test_env!("CARGO_BIN_EXE_st3-fixture")`,
+at that location with `test_env!("CARGO_BIN_EXE_fractal-fixture")`,
 `test_env!("CARGO_MANIFEST_DIR")` or `test_env!("CARGO_TARGET_TMPDIR")`, as appropriate.
 Use `test_env!("CARGO_MANIFEST_DIR", "/relative/fixture")` instead of a `concat!` fixture
-path, and `test_bin!("st3-fixture")` instead of `cargo_bin!`. The integration test root and
+path, and `test_bin!("fractal-fixture")` instead of `cargo_bin!`. The integration test root and
 test-enabled libraries already import `scripts/ci-test-paths.rs`; a separate test target
 must import that helper with `#[macro_use]` and a `#[path = "..."]` relative to its source
 file. Keep the original fixture, executable, arguments and assertions. Run
@@ -311,7 +311,7 @@ not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, hold
 lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
-Fractal integration fixtures use the separate `st3-fixture` executable, built automatically by
+Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by
 the test-only `test-support` dev dependency. It captures an isolated Bash environment,
 reads only the fixture HOME's `.bash_profile`, preserves the fixture PATH, and ignores the
 launching seat's process ancestry. The production `st3` target has no runtime flag or

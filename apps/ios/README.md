@@ -125,9 +125,17 @@ without phone access:
 python3 apps/ios/scripts/release_delivery.py \
   --repo "$SOURCE_REPO" --state "$DELIVERY_STATE" \
   --expected-origin "$TRUSTED_ORIGIN_URL" --trusted-commit "$REVIEWED_FULL_SHA" \
-  --device "$ST_IOS_DEVICE" --team "$ST_IOS_TEAM" \
+  --device "$FRACTAL_IOS_DEVICE" --team "$FRACTAL_IOS_TEAM" \
   --developer-dir "$DEVELOPER_DIR" --build-only
 ```
+
+<!-- LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032 -->
+Delivery options and push configuration prefer `FRACTAL_IOS_*` variables, with
+the corresponding `ST_IOS_*` spelling as a fallback only when the preferred name
+is absent. Explicitly empty delivery values remain empty (and are rejected where
+the option requires a value); an empty push flag disables push. Command-line
+delivery options still win.
+<!-- LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 
 The script starts nothing by itself: delivery runs only when a separately
 configured host scheduler invokes it, and this repository ships no scheduler.
@@ -135,9 +143,9 @@ configured host scheduler invokes it, and this repository ships no scheduler.
 The default ref is protected `origin/main`. The device owner must approve
 the tracked branch and its protection before scheduling delivery; repository
 maintainers own branch protection. Supply the exact approved origin URL with
-`--expected-origin` / `ST_IOS_EXPECTED_ORIGIN`, and an independently reviewed
+`--expected-origin` / `FRACTAL_IOS_EXPECTED_ORIGIN`, and an independently reviewed
 full 40-character bootstrap commit with `--trusted-commit` /
-`ST_IOS_TRUSTED_COMMIT`. These must come from trusted operator configuration,
+`FRACTAL_IOS_TRUSTED_COMMIT`. These must come from trusted operator configuration,
 not the fetched ref. The script refuses an origin mismatch before fetching,
 and refuses any fetched commit not descended from its persisted `trusted_head`
 (initially the bootstrap commit), before inspecting manifests or running code.
@@ -149,7 +157,7 @@ This deliberately refuses historical ref rewinds and divergent branch
 switches. Rollback must be a new reviewed revert commit descended from the
 last trusted head. There is no signature check; the origin pin and ancestry
 boundary do not make a malicious maintainer-approved fast-forward safe.
-Do not point the script at a contributor branch. `--ref` / `ST_IOS_REF`
+Do not point the script at a contributor branch. `--ref` / `FRACTAL_IOS_REF`
 accepts a valid branch (`origin/<branch>` or local) or a full commit SHA,
 subject to that same ancestry boundary. Remote branches are fetched directly
 from the source repository's approved `origin`; the source checkout is never
@@ -164,7 +172,7 @@ drops the workspace setting; it does not sandbox tracked `.pnpmfile.cjs`,
 `.npmrc`, or explicitly invoked build scripts. Persistent `node_modules`,
 native inputs, and DerivedData can be poisoned by an untrusted ref; clear
 those caches before resuming trusted builds after such exposure.
-Use `--build-only` or `ST_IOS_BUILD_ONLY=1` to prepare a signed artifact while
+Use `--build-only` or `FRACTAL_IOS_BUILD_ONLY=1` to prepare a signed artifact while
 phone access is held. Installation and launch require the caller to supply
 `AGENT_ACTION_APPROVAL=deploy`; without it, the signed artifact is retained
 and no phone command runs. Remove `--build-only` and supply that approval
@@ -173,7 +181,7 @@ reused without rebuilding. Before signing, the generated app's `Info.plist` rece
 Git revision as `StBuildCommit` and the revision's commit count as
 `CFBundleVersion`. The artifact's `success.json` records both. Compare its
 `build_version` with `devicectl device info apps --bundle-id
-com.compoundingtech.fractal --device "$ST_IOS_DEVICE" --json-output -` to
+com.compoundingtech.fractal --device "$FRACTAL_IOS_DEVICE" --json-output -` to
 verify the installed build independently of pairing or proof-only UI.
 <!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
@@ -243,7 +251,7 @@ installed version; an artifact with a lower version is rebuilt instead.
 A pending artifact for other content is dropped, never installed.
 An unsuccessful build cannot be installed. A failed content key is retried
 after 15 minutes, then after 30, doubling up to six hours (`--build-backoff`
-or `ST_IOS_BUILD_BACKOFF` sets the first delay in seconds); new content, such
+or `FRACTAL_IOS_BUILD_BACKOFF` sets the first delay in seconds); new content, such
 as a fix, revert, or input change, builds on the next tick. A successful build is retained
 until installation and launch both succeed; an unreachable or locked phone
 is retried on the next tick without rebuilding. While the ref cannot be
@@ -267,7 +275,7 @@ delivery takes priority even if the app is running. With five-minute polling,
 this leaves time within the one-hour delivery target for installation; build,
 admission, provisioning, and device failures remain visible rather than being
 reported as delivered. No launch uses `--terminate-existing`.
-Use `--max-deferral` or `ST_IOS_MAX_DEFERRAL` to configure that courtesy window;
+Use `--max-deferral` or `FRACTAL_IOS_MAX_DEFERRAL` to configure that courtesy window;
 zero is appropriate for a coordinated proof when the phone is not being used.
 
 Every invocation records outcomes to `outcomes.jsonl` and stdout; each build
@@ -298,7 +306,7 @@ A readback contradicting the cached installed version also invalidates the
 cached installed-content identity, while retaining the monotonic version floor.
 No device query runs under `--build-only` or without caller deploy approval.
 Optionally set both `--notify-from` and `--notify-to` (or
-`ST_IOS_NOTIFY_FROM`/`ST_IOS_NOTIFY_TO`) to send state changes with
+`FRACTAL_IOS_NOTIFY_FROM`/`FRACTAL_IOS_NOTIFY_TO`) to send state changes with
 `fractal conversations send`: each newly installed commit, a new build failure,
 or device unavailability lasting over one hour (once until recovery).
 A notification carries only the outcome, time, commit, build version, and
@@ -353,9 +361,9 @@ There is no Expo push service.
 Ordinary prebuilds retain their previous signing requirements and do not gain `aps-environment`.
 Expo automatically applies installed notification plugins, so `plugins/withoutPush.js` reserves
 the notification plugin's run-once identity without changing native configuration. To opt in,
-run `ST_IOS_PUSH=1 pnpm exec expo prebuild --platform ios --clean --no-install`, then install pods
+run `FRACTAL_IOS_PUSH=1 pnpm exec expo prebuild --platform ios --clean --no-install`, then install pods
 and build as usual. The flag applies the real `expo-notifications` plugin and its development
-entitlement. Keep `ST_IOS_PUSH=1` set for subsequent prebuilds, Metro, bundle exports and Xcode build
+entitlement. Keep `FRACTAL_IOS_PUSH=1` set for subsequent prebuilds, Metro, bundle exports and Xcode build
 invocations for that target: its Expo runtime configuration also gates native token acquisition.
 A paid Apple Developer membership and Push Notifications enabled for the app's bundle identifier are required for
 physical-device APNs registration; retain signing material only in local configuration.
