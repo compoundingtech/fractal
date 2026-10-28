@@ -609,6 +609,48 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
 
+    def test_a_ci_local_check_s_time_limit_counts_from_when_ci_local_starts(self):
+        self.commit('b.txt', 'two')
+        # 3 s of waiting (its dev shell's admission, say) before ci-local starts, then 1 s of running: within a 2 s limit.
+        late = 'sleep 3; echo "ci-local: stage logs in /x"; sleep 1'
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', command=['sh', '-c', late, 'scripts/ci-local'])
+        self.assertEqual(code, 0, out + err)
+        self.assertRegex(out, r'waited [2-4]s before ci-local started \(admission, dev shell\) \(not counted against --time-limit\)')
+        statement, = self.statements()
+        self.assertRegex(json.dumps(statement), r'"pre_start_s": "[2-4]"')  # the note records the wait
+        # Once ci-local has started the limit holds as before: 3 s of running is over it.
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '2', '--rerun',
+                                          command=['sh', '-c', 'echo "ci-local: stage logs in /x"; sleep 3', 'scripts/ci-local'])
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'demo +timed out')
+
+    def test_a_ci_local_check_silent_before_it_starts_is_stopped(self):
+        self.commit('b.txt', 'two')
+        started = time.monotonic()
+        with mock.patch.object(st_test, 'SILENCE_LIMIT', 1):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', command=['sh', '-c', 'sleep 30', 'scripts/ci-local'])
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'demo +timed out .*stopped after 1s without output before ci-local started')
+        self.assertLess(time.monotonic() - started, 25)
+
+    def test_a_ci_local_check_that_waits_past_its_queue_limit_before_it_starts_is_stopped_even_while_it_prints(self):
+        self.commit('b.txt', 'two')
+        chatty = 'while true; do echo still waiting for admission; sleep 0.2; done'  # never silent, never starts
+        started = time.monotonic()
+        with mock.patch.object(st_test, 'SILENCE_LIMIT', 600):
+            code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '60', '--queue-limit', '1',
+                                              command=['sh', '-c', chatty, 'scripts/ci-local'])
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'demo +timed out .*stopped after waiting 1s \(--queue-limit\) before ci-local started')
+        self.assertNotIn('without output', out)
+        self.assertLess(time.monotonic() - started, 25)
+
+    def test_ci_local_still_prints_the_line_its_time_limit_starts_at_after_its_load_gate(self):
+        source = (ROOT / 'scripts/ci-local').read_text()
+        marker = 'echo "' + st_test.CI_LOCAL_STARTED.decode()
+        self.assertIn(marker, source)
+        self.assertLess(source.index('waiting: load1'), source.index(marker))  # ci-local's own load wait comes before it: waiting, not running
+
     def test_the_waits_for_a_build_slot_have_a_limit_of_their_own(self):
         self.commit('b.txt', 'two')
         wait = 'echo "wait $(date +%s) tests" >> "$CI_LOCAL_QUEUE_LOG"; sleep 30'
@@ -1872,7 +1914,7 @@ class StTest(unittest.TestCase):
 
     def test_a_streamed_check_keeps_the_time_limit_and_is_not_held_by_what_it_left_behind(self):
         self.commit('b.txt', 'two')
-        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sh', '-c', 'echo before; sleep 30', 'scripts/ci-local'])
+        code, out, err = self.run_st_test('--check', 'demo', '--time-limit', '1', command=['sh', '-c', 'echo "ci-local: stage logs in x"; sleep 30', 'scripts/ci-local'])
         self.assertEqual(code, 1, out + err)
         self.assertRegex(out, r'demo +timed out')
         self.assertEqual(self.runs()[-1]['exit'], 1)
