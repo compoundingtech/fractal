@@ -605,6 +605,47 @@ CI=1 pnpm --dir apps/fractal-web exec vitest run src/data/inventory-transport.un
 pnpm --filter fractal-web typecheck
 ```
 
+## Focused local checks
+
+From the repository root, batch both web/UI typechecks and explicitly selected app
+tests into one check-lane admission:
+
+```sh
+python3 scripts/web-check check src/web/sidebarRow.unit.test.ts
+```
+
+With a warm shell, `check` prepares megarepo members and the frozen pnpm installation
+before requesting a slot. `prepare` performs only that warm setup and fails closed
+without building when the rooted profile is missing (including a broken symlink).
+With a cold shell, `check` requests admission first, realizes the profile inside
+the slot, then prepares dependencies and runs the batch. Cold realizations are
+serialized across all cache keys, with one local Nix build job and no remote
+builders. `run FILE...` and the internal `cold-run FILE...` payload require a caller
+that already owns a check slot. Neither runs browsers or a full test suite.
+Every batch runs both typechecks and the selected tests and fails if any phase fails.
+
+The shared shell profile lives under `$XDG_CACHE_HOME/fractal-web-check/v1` (default
+`~/.cache`) and is keyed by the tracked Nix definitions plus `flake.lock`, not the
+worktree path. `.devenv/gc/devshell` links to this rooted profile. Warm preparation
+and the check payload open that profile offline with builds and substitution
+disabled; they never evaluate the flake. A changed Nix input takes the admitted
+cold path if its profile is not already realized.
+
+TypeScript writes incremental state to `.devenv/web-check/*.tsbuildinfo`. Successful
+batches publish seed files under the shared cache, keyed by the pnpm lock and
+project configs. Preparation copies those into a new worktree at the same relative
+depth; TypeScript validates source versions and compiler options before reusing
+them. A main-worktree batch can therefore prime later PR worktrees. Type state is
+an optimization, never a success receipt: the compiler and tests always execute.
+Delete `.devenv/web-check` to force a cold compiler run; remove the shared cache
+entry and run `check FILE...` again to rebuild a shell under admission. Cold builds
+consume the slot's hold time and may take longer than warm checks. Existing package
+scripts and CI remain unchanged.
+
+The root `//:typecheck` Buck target covers the TypeScript clients only. There are no
+app/UI BUCK files, so this wrapper does not claim Buck action-cache hits for these
+checks or skip test execution on the basis of a previous result.
+
 ## Fractal web roster lifecycle
 
 The generated client-v0 `Agent` schema models lifecycle as an optional open enum:
