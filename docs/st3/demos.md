@@ -23,7 +23,9 @@ nothing.
 A demo erases only an instance a demo made. The first play marks the instance with a
 `.st-demo` file in `~/.st-instance/NAME`. If the instance already holds a graph, an interface
 cache or a config without that mark, the play lists them and stops without touching anything.
-Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's:
+Play in a new instance instead, or pass `--reset` to erase them and make the instance the demo's.
+The mark stays, so every later play erases the instance without asking: keep a marked instance
+for demos only.
 
 ```sh
 st --instance demo demo play --reset examples/demos/release-day.kdl

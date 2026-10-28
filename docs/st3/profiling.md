@@ -225,6 +225,12 @@ snapshots open past the target now. `waiting` counts callers waiting for the wri
 waiting for admission, and `threads` counts this process's threads, in all and by name. `st
 doctor` prints it as `slo/writer-hold`.
 
+A writer hold over 1 s also logs one WARN line when it ends, "a write held the store's writer
+over 1 s", so a stall can be attributed from the daemon's log after the hour has passed. It
+names the same holder (`holder`, `client`, `at`), with `kind`, `held_ms`, `writes`, `stages`
+(a staged lend's time by stage, or `-`) and `waited_ms`, how long that holder waited for the
+writer before its hold began.
+
 Three more fields show what keeps the WAL from recycling:
 - `read_loans` lists every read loan now, grouped by the route label of the read budget it works
   under (`(no budget)` for background work). Each route gives `checkouts`,

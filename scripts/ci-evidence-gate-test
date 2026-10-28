@@ -257,6 +257,42 @@ class ManifestPrefetch(unittest.TestCase):
             self.assertFalse(lacks('Cargo.toml') or lacks('crates/one/Cargo.toml') or lacks('.st/rust-test-inputs.json'))
             self.assertTrue(lacks('crates/one/lib.rs'), 'only the manifests and the inputs file, never the whole tree')
 
+    def test_a_head_behind_main_gets_its_older_manifests_too(self):
+        # CI's clone is blob-less and has main's history, so it advertises commits whose trees hold the head's older manifests, and a
+        # server with bitmaps leaves those blobs out ("did not send all necessary objects": #4039's rust-tests gate, run 40440348206).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            env = dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null', GIT_AUTHOR_NAME='t',
+                       GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
+            git = lambda cwd, *args: subprocess.run(['git', '-C', str(cwd), *args], check=True, capture_output=True, env=env).stdout.decode()
+            upstream = root / 'upstream'
+            (upstream / 'crates/one').mkdir(parents=True)
+            (upstream / 'Cargo.toml').write_text('[workspace]\nmembers = ["crates/one"]\n')
+            (upstream / 'crates/one/Cargo.toml').write_text('[package]\nname = "one"\nversion = "0.1.0"\n')
+            git(root, 'init', '-q', '-b', 'main', str(upstream))
+            git(upstream, 'add', '.')
+            git(upstream, 'commit', '-q', '-m', 'head')
+            head = git(upstream, 'rev-parse', 'HEAD').strip()
+            (upstream / 'crates/one/Cargo.toml').write_text('[package]\nname = "one"\nversion = "0.2.0"\n')
+            git(upstream, 'commit', '-q', '-am', 'main moves on')
+            git(upstream, 'config', 'uploadpack.allowFilter', 'true')
+            git(upstream, 'config', 'uploadpack.allowAnySHA1InWant', 'true')
+            git(upstream, 'repack', '-adbq')  # reachability bitmaps, as GitHub serves: they count the old manifest as the client's
+            clone = root / 'clone'
+            git(root, 'clone', '-q', '--filter=blob:none', '--no-checkout', f'file://{upstream}', str(clone))
+            base = git(clone, 'rev-parse', 'HEAD').strip()
+            lacks = lambda path: subprocess.run(['git', '-C', str(clone), 'cat-file', '-e', f'{head}:{path}'], capture_output=True,
+                                                env=dict(env, GIT_NO_LAZY_FETCH='1')).returncode != 0
+            self.assertTrue(lacks('crates/one/Cargo.toml'))
+            here = os.getcwd()
+            os.chdir(clone)
+            try:
+                with mock.patch.dict(os.environ, env):
+                    self.assertEqual(gate.prefetch_manifests(head, base), 'ok')
+            finally:
+                os.chdir(here)
+            self.assertFalse(lacks('Cargo.toml') or lacks('crates/one/Cargo.toml'))
+
 
 class ProtectedPaths(unittest.TestCase):
     def test_a_comparison_that_cannot_be_made_counts_as_a_change(self):
@@ -1307,6 +1343,22 @@ class EndToEnd(unittest.TestCase):
                 self.assertNotEqual(self.assertRuns(base, check='fractal-web')['outcome'], 'satisfied')
                 self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=2, inputs={**shard_inputs, **shard})
                 self.assertNotEqual(self.assertRuns(base, check='fractal-web')['outcome'], 'satisfied')
+        # A merge queue signs each shard's own note as well as the whole run's, under the same tree or input key, and the newest is
+        # often a shard's (#4042's fractal-web gate, run 40456158952: refused as missing_input). A passing shard never decides; a
+        # failing one does; passing shards alone are no note.
+        shard = {**shard_inputs, 'kit_shard': '1', 'kit_shard_count': '4', 'kit_play_set': 'all', 'app_test_set': 'all'}
+        base, commit, tree, lock = self.wrapper_scenario()
+        self.wrapper_note(commit, tree, lock, check='fractal-web')
+        self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=1, inputs=shard,
+                          drop=('shard_results', 'kit_inputs'))
+        fields, _ = self.run_gate(base, check='fractal-web', EVENT_NAME='pull_request')
+        self.assertEqual((fields['outcome'], fields['decision']), ('satisfied', 'skip'))
+        self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=2, exit_code=1, inputs=shard,
+                          drop=('shard_results', 'kit_inputs'))
+        self.assertEqual(self.assertRuns(base, check='fractal-web', EVENT_NAME='pull_request')['reason'], 'check_failed')
+        base, commit, tree, lock = self.wrapper_scenario()
+        self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, inputs=shard, drop=('shard_results', 'kit_inputs'))
+        self.assertEqual(self.assertRuns(base, check='fractal-web', EVENT_NAME='pull_request')['outcome'], 'no_note')
         # The whole-check note of a pull request's one shard satisfies the check; without any of its extra inputs it does not.
         base, commit, tree, lock = self.wrapper_scenario()
         self.wrapper_note(commit, tree, lock, check='fractal-web')
