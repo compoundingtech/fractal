@@ -1121,6 +1121,10 @@ would run them.
 **`shard_inputs`** names a sharded job's inputs: `count` (1 to 16) and `results`.
 - `results` must read `0=success,1=success,...` for every shard.
 - `pull_request_count`, when given, is the only count a note from a `pull_request` run may carry.
+- `index`, when given, names the input only one shard's own note carries (fractal-web: `kit_shard`). Such a note is a part of a run, not
+  its verdict. When the latest record is chosen, a passing part is passed over, and a failing part still decides (`check_failed`). Passing
+  parts alone are `no_record`. The merge queue signs every shard's note beside the whole run's, under the same tree and input key, and
+  the newest of them was often a shard's: refused as `missing_input`, it hid the whole run's note from pull requests that shared the key.
 
 The fractal-web note's per-shard results come from the matrix's single result, which GitHub reports as success only when every shard
 succeeded. On pull requests the matrix has one shard. `ci-evidence-signing-test` holds every shard count in the workflow to the

@@ -1400,6 +1400,22 @@ class EndToEnd(unittest.TestCase):
                 self.assertNotEqual(self.assertRuns(base, check='fractal-web')['outcome'], 'satisfied')
                 self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=2, inputs={**shard_inputs, **shard})
                 self.assertNotEqual(self.assertRuns(base, check='fractal-web')['outcome'], 'satisfied')
+        # A merge queue signs each shard's own note as well as the whole run's, under the same tree or input key, and the newest is
+        # often a shard's (#4042's fractal-web gate, run 40456158952: refused as missing_input). A passing shard never decides; a
+        # failing one does; passing shards alone are no note.
+        shard = {**shard_inputs, 'kit_shard': '1', 'kit_shard_count': '4', 'kit_play_set': 'all', 'app_test_set': 'all'}
+        base, commit, tree, lock = self.wrapper_scenario()
+        self.wrapper_note(commit, tree, lock, check='fractal-web')
+        self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=1, inputs=shard,
+                          drop=('shard_results', 'kit_inputs'))
+        fields, _ = self.run_gate(base, check='fractal-web', EVENT_NAME='pull_request')
+        self.assertEqual((fields['outcome'], fields['decision']), ('satisfied', 'skip'))
+        self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, seconds=2, exit_code=1, inputs=shard,
+                          drop=('shard_results', 'kit_inputs'))
+        self.assertEqual(self.assertRuns(base, check='fractal-web', EVENT_NAME='pull_request')['reason'], 'check_failed')
+        base, commit, tree, lock = self.wrapper_scenario()
+        self.wrapper_note(commit, tree, lock, check='fractal-web', argv=FRACTAL_WEB_SHARD_ARGV, inputs=shard, drop=('shard_results', 'kit_inputs'))
+        self.assertEqual(self.assertRuns(base, check='fractal-web', EVENT_NAME='pull_request')['outcome'], 'no_note')
         # The whole-check note of a pull request's one shard satisfies the check; without any of its extra inputs it does not.
         base, commit, tree, lock = self.wrapper_scenario()
         self.wrapper_note(commit, tree, lock, check='fractal-web')
