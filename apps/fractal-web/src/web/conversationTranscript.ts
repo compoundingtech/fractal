@@ -12,6 +12,7 @@ import { ConversationItem, type RunStatus, type SendState } from '../conversatio
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { sendFailureDetail } from './composerSend.ts'
+import { toolKindFor } from '../conversation/toolClassification.ts'
 
 /** Unknown protocol events are hidden by default; mixed messages retain an explicit body disclosure. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
@@ -52,23 +53,25 @@ const isPrompt = (item: KitConversationItem): item is KitTextItem & { readonly r
 
 const isOmittedItem = (item: ConversationItem): boolean => item._tag === 'UnknownEvent' && item.mixedContent !== true
 
-/** The host owns work-log classification: how a tool reads, runs or edits. */
-const toolKindFor = (name: string): WorkKind => {
-  const tool = name.toLowerCase()
-  if (/(?:^|[/_.-])(?:bash|sh|shell|exec|execute|run|command|eval|task|infra)(?:$|[/_.-])/.test(tool)) return 'run'
-  return /(?:edit|write|patch|apply)/.test(tool) ? 'edit' : 'read'
+
+/** Fallback titles when the call records no human intent; read/run/edit keep their established wording. */
+const kindTitles: Readonly<Record<Exclude<WorkKind, 'unknown'>, string>> = {
+  read: 'Reading information', run: 'Running a command', edit: 'Updating a file', search: 'Searching',
+  subagent: 'Delegating work', web: 'Browsing the web', decision: 'Asking for a decision', todo: 'Updating the plan',
+  wait: 'Waiting', message: 'Sending a message', schedule: 'Scheduling work', 'terminal-input': 'Sending terminal input', skill: 'Using a skill',
 }
 
 /** Human intent belongs in the header; raw paths and commands remain on the source tool item. */
 const toolSummary = (item: Extract<KitConversationItem, { _tag: 'ToolCall' }>): string => {
+  if (item.skipped) return 'Skipped'
   const input = typeof item.input === 'object' && item.input !== null ? item.input : {}
   for (const key of ['i', 'title', 'description']) {
     const value = key in input ? Reflect.get(input, key) : undefined
     if (typeof value === 'string' && value.trim().length > 0 && !/(?:[a-z]+:\/\/|\/[\w.-]+\/)/i.test(value))
       return value.trim().replace(/\s+/g, ' ').slice(0, 100)
   }
-  return toolKindFor(item.name) === 'run' ? 'Running a command'
-    : toolKindFor(item.name) === 'edit' ? 'Updating a file' : 'Reading information'
+  const kind = toolKindFor(item)
+  return kind === 'unknown' ? item.name : kindTitles[kind]
 }
 
 const activeRunStatuses: Record<RunStatus, boolean> = { queued: true, running: true, waiting: true, completed: false, failed: false, cancelled: false }
@@ -137,7 +140,7 @@ export const prepareTranscriptTurns = (
       if (caption !== undefined) senderCaptions[item.id] = caption
     }
     const work = workLogTurnFromItems(prompt === undefined ? turnItems : [prompt, ...turnItems], {
-      kindFor: toolKindFor,
+      kindFor: (name, call) => toolKindFor(call ?? name),
       ...workFactsFor(first.at ?? '', turnItems),
       ...(first.at === undefined ? {} : { startedAt: first.at }),
       ...(turns.length === 0 && !options.firstTurnComplete ? { completeHistory: false } : {}),

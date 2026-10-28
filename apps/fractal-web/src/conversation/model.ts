@@ -180,6 +180,7 @@ export const ConversationItem = Schema.TaggedUnion({
     server: Schema.optional(Schema.String),
     input: Schema.Unknown,
     status: ToolCallStatus,
+    skipped: Schema.optional(Schema.Boolean),
     result: Schema.optional(ToolResult),
     callSeen: Schema.Boolean,
     at: Schema.String,

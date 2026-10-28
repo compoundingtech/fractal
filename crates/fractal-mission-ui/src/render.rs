@@ -367,7 +367,7 @@ const NOBODY: &str = "nobody";
 /// How wide a step's owner reads, with or without its agent id.
 fn owner_width(step: &fractal_ui_model::missions::Step, identity: bool) -> usize {
     match (step.human_owner(), &step.owner_id) {
-        (Some(name), Some(id)) if identity => {
+        (Some(name), Some(id)) if identity && name != id => {
             text::width(name) + text::width(" · ") + text::width(id)
         }
         (Some(name), _) => text::width(name),
