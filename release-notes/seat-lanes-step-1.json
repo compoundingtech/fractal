@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Seat lanes, step 1: an agent (top-level or in a mission) may declare `capacity cores=N memory=\"SIZE\"`. On a Linux host whose config sets `lanes = \"on\"`, that seat's scope starts in app.slice/app-lanes.slice with CPUQuota, MemoryMax, MemorySwapMax (a quarter of the memory), OOMPolicy=continue and TasksMax, and its builds stay inside it (BUILDS_SLICE_ACTIVE and a lane-private sccache socket; scripts/st-test's builds.slice wrapper honors BUILDS_SLICE_ACTIVE). Seats without a declaration, and every seat on a host with the switch off, run as before.",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, event or replay change; the member record gains an optional field."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "MemberSpec gains optional `capacity` (omitted when absent, so existing records and revisions are unchanged); the install config gains optional `lanes` (on|off)."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "The agent declaration accepts a `capacity` child (cores=, memory=), at most once; it is refused with bind-terminal."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "An older member reading a laned record drops the field and runs the seat without a lane. An older CLI refuses a file that declares `capacity`; an older daemon refuses a config that sets `lanes` (deny_unknown_fields), so set it only on hosts that run this build."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing changes until a host sets `lanes = \"on\"` and a seat declares `capacity`; a lane applies at the seat's next start."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Before a host turns lanes on, its admission guard must count only OOM kills outside lanes: oom_kill(user-UID.slice) minus oom_kill(app.slice/app-lanes.slice) (docs/st3/seat-lanes.md, The host guard). Operations has been asked."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Remove `lanes` from config.toml (or set it to \"off\") and restart the daemon; laned seats run without a lane from their next start."
+  }
+}
