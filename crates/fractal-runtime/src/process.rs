@@ -292,8 +292,32 @@ impl ExecRuntime {
     fn observe_exited_group(
         &self,
         id: &str,
-        generation: ExecGeneration,
+        mut generation: ExecGeneration,
     ) -> Result<ExecObservation> {
+        // The leader can become a zombie after observe's first try_wait. Reap any
+        // child we still own before making its exit durable, including when its
+        // descendants keep the group running.
+        if generation.exit_code.is_none() && generation.exit_signal.is_none() {
+            let owned_exit = {
+                let mut children = self
+                    .owned_children
+                    .lock()
+                    .expect("exec child mutex poisoned");
+                let status = children
+                    .get_mut(&generation.pid)
+                    .map(Child::wait)
+                    .transpose()?;
+                if status.is_some() {
+                    children.remove(&generation.pid);
+                }
+                status
+            };
+            if let Some(status) = owned_exit {
+                generation.exit_code = status.code();
+                generation.exit_signal = exit_signal(&status);
+                self.write_generation(id, &generation)?;
+            }
+        }
         match observe_exited_group(generation)? {
             ExecObservation::Exited(mut generation) => {
                 generation.group_exited = true;
@@ -908,6 +932,77 @@ mod tests {
             }
         }
         panic!("the exec did not exit");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn reaps_an_owned_child_before_committing_its_terminal_record() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let release_path = root.path().join("release");
+        let release_name = std::ffi::CString::new(release_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(release_name.as_ptr(), 0o600) }, 0);
+        let generation = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "read release < \"$1\"; exit 7".into(),
+                    "sh".into(),
+                    release_path.to_str().unwrap().into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(release_path)
+            .unwrap();
+        // Hold the child alive through observe's first status probe, then make it exit
+        // before the process-identity probe. The FIFO and pidfd make the race deterministic.
+        assert!(
+            runtime
+                .owned_children
+                .lock()
+                .unwrap()
+                .get_mut(&generation.pid)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        let exited = unsafe { OwnedFd::from_raw_fd(fd as i32) };
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        let mut event = libc::pollfd {
+            fd: exited.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(unsafe { libc::poll(&mut event, 1, -1) }, 1);
+        assert_ne!(event.revents & libc::POLLIN, 0);
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+
+        let observed = runtime.observe_exited_group("work", generation).unwrap();
+        let ExecObservation::Exited(ended) = observed else {
+            panic!("unexpected exec observation: {observed:?}");
+        };
+        assert_eq!(ended.exit_code, Some(7));
+        assert_eq!(ended.exit_signal, None);
+        assert!(ended.group_exited);
+        assert!(runtime.owned_children.lock().unwrap().is_empty());
+        let reopened = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(
+            reopened.observe("work").unwrap(),
+            Some(ExecObservation::Exited(ended))
+        );
     }
 
     #[test]
