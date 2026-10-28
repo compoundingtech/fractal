@@ -686,7 +686,7 @@ struct FleetInviteArgs {
     #[arg(long, conflicts_with_all = ["code_only", "code_file"])]
     send_fabric: bool,
     /// Print only the code.
-    #[arg(long, conflicts_with = "code_file")]
+    #[arg(long)]
     code_only: bool,
     /// Write the code to a new 0600 file instead of printing it.
     #[arg(long)]

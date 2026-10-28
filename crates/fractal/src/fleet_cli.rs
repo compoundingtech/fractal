@@ -249,13 +249,15 @@ fn write_code_file(path: &std::path::Path, code: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let name = path
         .file_name()
-        .and_then(|name| name.to_str())
         .with_context(|| format!("{} does not name a file", path.display()))?;
     let directory = match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         _ => PathBuf::from("."),
     };
-    let temporary = directory.join(format!(".{name}.{}.tmp", std::process::id()));
+    let mut temporary_name = std::ffi::OsString::from(".");
+    temporary_name.push(name);
+    temporary_name.push(format!(".{}.tmp", std::process::id()));
+    let temporary = directory.join(temporary_name);
     let written = (|| -> Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -343,12 +345,19 @@ fn wait_for_fabric_inbox_code(
             eprintln!("Waiting for a join code in this machine's Fabric inbox…");
             announced = true;
         }
-        // Any event, or the deadline, means look again.
-        if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = woken.recv_timeout(remaining)
-        {
-            anyhow::bail!("the watch on the Fabric inbox stopped");
+        // Any event, or the deadline, means look again. A watch that reports an error may not
+        // report the code either, so it ends the wait.
+        let mut events = match woken.recv_timeout(remaining) {
+            Ok(event) => vec![event],
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!("the watch on the Fabric inbox stopped")
+            }
+        };
+        events.extend(woken.try_iter());
+        for event in events {
+            event.context("the watch on the Fabric inbox failed")?;
         }
-        while woken.try_recv().is_ok() {}
     }
 }
 
@@ -606,14 +615,17 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             };
             let mut created = create(via).await?;
             if let Err(error) = bootstrap_fabric_invite(endpoint, adapter.as_deref(), &mut created).await {
-                // `auto` still has the member's other endpoints when Fabric cannot pair.
-                let fallback = if args.via == "auto" && !args.migrate {
-                    invite_via("auto", &member_endpoints(&client, &config.node).await?, false).ok()
-                } else {
-                    None
-                };
+                // Revoke first, so nothing that fails below leaves the undelivered invite open.
                 let (error, revoked) = revoke_undelivered(&client, &created.invite, &person, error).await;
-                let Some(fallback) = fallback.filter(|_| revoked) else {
+                if !revoked || args.via != "auto" || args.migrate {
+                    return Err(error);
+                }
+                // `auto` still has the member's other endpoints when Fabric cannot pair.
+                let endpoints = match member_endpoints(&client, &config.node).await {
+                    Ok(endpoints) => endpoints,
+                    Err(lookup) => return Err(error.context(format!("{lookup:#}"))),
+                };
+                let Ok(fallback) = invite_via("auto", &endpoints, false) else {
                     return Err(error);
                 };
                 eprintln!("{error:#}; inviting over {fallback} instead.");
