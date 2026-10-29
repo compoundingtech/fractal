@@ -10470,6 +10470,13 @@ impl<R: RuntimeControl> Reconciler<R> {
             let Some(view) = views.get(step.spec.path.as_str()).copied() else {
                 continue;
             };
+            // A gate process that exits while its step is evaluated is seen running by the gate
+            // and ended by the liveness check after it, and its answer would be cancelled unread.
+            // A cancelled finally step must have had no live process before its evaluation too.
+            let ended_before_evaluation = run.phase == "final-cancelled"
+                && view.agentless
+                && view.status == "working"
+                && !self.step_has_live_process(&view.subject)?;
             // One step that fails records a fault on that step. The run's other steps and its
             // status are still evaluated.
             let step_changed = self
@@ -10838,6 +10845,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // and declarations. Once it only waits on evidence, cancellation must not hold
             // the mission's active-run slot until the step's execution budget expires.
             if step_changed == Some(false)
+                && ended_before_evaluation
                 && run.phase == "final-cancelled"
                 && view.agentless
                 && view.status == "working"
@@ -17847,13 +17855,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 });
             }
             // A runner that posted its verdict but never exits still has the gate's time limit.
-            let timed_out = self
+            let time_limit_at = self
                 .store
                 .latest_claim(&result_subject, Some("gate.requested"))?
-                .is_some_and(|requested| {
-                    now_ms().saturating_sub(requested.accepted_at_unix_ms)
-                        >= u128::from(time_limit_ms)
+                .map(|requested| {
+                    requested.accepted_at_unix_ms.saturating_add(u128::from(time_limit_ms))
                 });
+            let timed_out = time_limit_at.is_some_and(|at| now_ms() >= at);
             smallclaims::touched::note_read(|| format!("exec:{runtime_id}"));
             match self.runtime.observe_exec(&runtime_id)? {
                 Some(observation) if observation.status == "running" && !timed_out => {
@@ -17869,6 +17877,11 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return Ok(GateOutcome::Pending);
                 }
                 Some(observation) if observation.status == "indeterminate" && !timed_out => {
+                    // Nothing marks the gate while the runner's status stays unknown, so it is
+                    // due again when its time limit passes.
+                    if let Some(at) = time_limit_at {
+                        smallclaims::touched::note_due(at);
+                    }
                     return Ok(GateOutcome::Pending);
                 }
                 _ => {}
@@ -19848,6 +19861,7 @@ pub mod tests {
     mod first_readiness_tests;
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
+    mod final_cancel_gate_exit;
     mod gate_on_demand;
     mod github_watch_selection;
     mod helper_launcher;
@@ -20257,11 +20271,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(observed_pty_status(&observation), "running");
     }
 
+    /// The exec a hook waits for, and what happens right after that exec is next observed.
+    type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+        /// Runs once, right after the named exec is next observed: its process ends just then.
+        after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         logs: Mutex<HashMap<String, String>>,
@@ -20504,7 +20523,19 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
                 !self.failed_observes.lock().unwrap().contains(runtime_id),
                 "fake observe failed"
             );
-            Ok(self.execs.lock().unwrap().get(runtime_id).cloned())
+            let observed = self.execs.lock().unwrap().get(runtime_id).cloned();
+            let after = {
+                let mut after = self.after_observe_exec.lock().unwrap();
+                if after.as_ref().is_some_and(|(id, _)| id == runtime_id) {
+                    after.take()
+                } else {
+                    None
+                }
+            };
+            if let Some((_, after)) = after {
+                after();
+            }
+            Ok(observed)
         }
         fn start(&self, member: &MemberSpec) -> Result<()> {
             self.starts.lock().unwrap().push(member.runtime_id.clone());
@@ -28174,6 +28205,86 @@ mission "proof" state="ready" {{
         assert!(
             runtime.stops.lock().unwrap().contains(&runtime_id)
                 || runtime.kills.lock().unwrap().contains(&runtime_id)
+        );
+    }
+
+    #[test]
+    fn an_llm_gate_with_an_indeterminate_runner_is_due_at_its_time_limit() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = r#"
+            version 2
+
+              mission "proof" state="ready" {
+                goal "Complete mission proof."
+                step "review" {
+                  title "A held-out gate accepts the result"
+                  gate "review" type="llm" {
+                    model "claude-sonnet"
+                    host "node"
+                    workspace "."
+                    tools "shell"
+                    token-budget 10
+                    time-limit "1h"
+                    prompt "Inspect the result."
+                  }
+                }
+              }
+
+        "#;
+        apply_source(&store, source, "mission-llm-indeterminate");
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "proof".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-llm-indeterminate".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(),
+            runtime.clone(),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        reconciler.reconcile_once().unwrap();
+        let (runtime_id, result_subject) = {
+            let members = runtime.started_members.lock().unwrap();
+            let gate = members
+                .iter()
+                .find(|member| member.driver.as_deref() == Some("llm-gate"))
+                .unwrap();
+            (
+                gate.runtime_id.clone(),
+                gate.environment["ST_GATE_SUBJECT"].clone(),
+            )
+        };
+        // The runner's status can't be read. Nothing marks the gate while that lasts, so the
+        // run must be due again when the gate's time limit passes.
+        runtime.execs.lock().unwrap().insert(
+            runtime_id.clone(),
+            RuntimeObservation {
+                runtime_id: runtime_id.clone(),
+                terminal: false,
+                status: "indeterminate".into(),
+                exit_code: None,
+                incarnation_id: Some("gate-run".into()),
+            },
+        );
+        reconciler.reconcile_once().unwrap();
+        let requested = store
+            .latest_claim(&result_subject, Some("gate.requested"))
+            .unwrap()
+            .unwrap()
+            .accepted_at_unix_ms;
+        assert_eq!(
+            reconciler.incremental.next_due(&run.subject),
+            Some(requested + 3_600_000),
+            "the run is due when the gate's time limit passes"
         );
     }
 
