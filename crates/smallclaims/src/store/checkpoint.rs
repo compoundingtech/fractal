@@ -387,7 +387,13 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
     envelopes: &[EnvelopeTombstone],
     claims: &[ClaimTombstone],
 ) -> Result<()> {
+    // Where the ledger is the authority, it holds what was deleted, in the deleting transaction:
+    // a chunk that rolls back, or a cut that never trims, retires nothing a peer could learn.
+    let authoritative = super::retired::authoritative(transaction)?;
     for claim in claims {
+        if authoritative {
+            super::retired::retire_claim_tx(transaction, &claim.id)?;
+        }
         if let Some(operation) = &claim.operation_id {
             transaction
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-h571c64003cb6 owner=smallclaims::store::checkpoint TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM operations WHERE id=?1 AND canonical_claim_id=?2")?
@@ -402,6 +408,9 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h9c4197a62adb owner=smallclai
             .execute(/* sqlite-large-value: allow-for-now lv-hbda25652774a owner=smallclaims::store::checkpoint TODO=trace-statement-and-value-representation */ [&claim.id])?;
     }
     for envelope in envelopes {
+        if authoritative {
+            super::retired::retire_envelope_tx(transaction, &envelope.writer, envelope.sequence, &envelope.envelope_hash)?;
+        }
         let batch: Option<String> = transaction
             .prepare_cached(
                 "SELECT batch_id FROM replica_envelopes

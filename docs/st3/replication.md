@@ -1296,7 +1296,9 @@ members until a person excuses it. No claim family is trimmed locally yet.
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
 the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
-recorded, was not a deletion and leaves it. Admission then refuses a retired envelope or claim from
+recorded, was not a deletion and leaves it. From then on an identity enters the ledger only as it is
+deleted, in the deleting transaction, never when a cut records it: a cut that stops before trimming,
+or a chunk that rolls back, retires nothing a peer could learn. Admission then refuses a retired envelope or claim from
 any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
 peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
 held. It still syncs everything else with every peer as before. Turning the setting off stops
