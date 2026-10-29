@@ -1,7 +1,6 @@
-# The root remains a package while the legacy fractal-legacy-runner runner is present.
-# Shared release identity lives in workspace.package so retiring fractal-legacy-runner does not
-# change the current binaries' release stamps.
+# Release identity is shared by the current workspace packages.
 [workspace]
+resolver = "3"
 members = [
   "examples/client-tui",
   "components/github-issue",
@@ -57,7 +56,6 @@ members = [
 ]
 default-members = [
   "examples/client-tui",
-  ".",
   "crates/agent-spec",
   "crates/smallclaims",
   "crates/fractal-build-stamp",
@@ -182,80 +180,3 @@ opt-level = 3
 debug = 0
 debug-assertions = true
 overflow-checks = true
-
-[package]
-name = "fractal-legacy-runner"
-version.workspace = true
-edition = "2024"
-description = "Harness-agnostic runner: reconcile a unified catalog+inbox folder of rendered agent specs, keep their ptys running, and deliver messages by moving inbox files."
-license = "MIT"
-# Every file in tests/ is a module of one test binary; see tests/integration.rs.
-autotests = false
-
-[[bin]]
-name = "st2"
-path = "src/main.rs"
-
-[lib]
-name = "fractal_legacy_runner"
-path = "src/lib.rs"
-
-[[test]]
-name = "integration"
-path = "tests/integration.rs"
-
-# These set process-wide environment variables, so each stays a test binary of its own.
-[[test]]
-name = "agent_resource"
-path = "tests/agent_resource.rs"
-
-[[test]]
-name = "driver_expansion"
-path = "tests/driver_expansion.rs"
-
-[[test]]
-name = "event_e2e"
-path = "tests/event_e2e.rs"
-
-[[test]]
-name = "resource_profile_supervisor_e2e"
-path = "tests/resource_profile_supervisor_e2e.rs"
-
-[dependencies]
-# Sync by design: the runner is I/O-light (shell-outs to `pty` plus a
-# folder watch + a sleep), so no tokio. Deps grow per milestone; M0 needs only parse + CLI.
-agent-spec = { path = "crates/agent-spec" }
-# The build identity: only the binary packages depend on it (see crates/fractal-build-stamp).
-fractal-build-stamp = { path = "crates/fractal-build-stamp" }
-fractal-drivers = { path = "crates/fractal-drivers" }
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
-kdl = "6"
-libc = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-fractal-resource-protocol = { package = "fractal-resource-protocol", path = "crates/fractal-resource-protocol" }
-fractal-resource-providers = { path = "crates/fractal-resource-providers", optional = true }
-fractal-resource-wasip2 = { path = "crates/fractal-resource-wasip2", optional = true, features = ["runtime"] }
-fractal-wire = { package = "fractal-wire", path = "crates/fractal-wire" }
-tempfile = "3"
-tracing = "0.1"
-
-[dev-dependencies]
-libc = "0.2"
-parking_lot = "0.12"
-
-[features]
-# Sandbox wasm resource-profile resolvers (`agent-spec/profile_wasm`). Off by default: the
-# runner binary carries no wasmtime unless a build opts in.
-wasm-resolver = ["agent-spec/wasm-resolver", "fractal-drivers/wasm-resolver"]
-# Typed Component Model resource providers. This is the sole feature that admits Wasmtime for
-# observation; default members and the default fractal-legacy-runner binary remain Wasmtime-free.
-wasip2-provider-runtime = [
-  "wasm-resolver",
-  "dep:fractal-resource-providers",
-  "dep:fractal-resource-wasip2",
-  "fractal-drivers/wasip2-provider-runtime",
-]

@@ -8,6 +8,7 @@ The root [README](../../README.md) introduces the product and links its guides.
 Use these documents for implementation details:
 
 - [Architecture](design.md) defines the stable system shape.
+- [Native runtime invariants](invariants.md) names the current delivery, harness and lifecycle proof obligations.
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.

@@ -1,4 +1,4 @@
-//! OpenTelemetry export for st2, per `docs/vrs/06-observability/`.
+//! OpenTelemetry export helpers for retained catalog-runner clients.
 //!
 //! Zero-overhead no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set; the exporters then ship
 //! OTLP/HTTP JSON to the fleet's local Alloy forwarder (normally `127.0.0.1:4318`). The process

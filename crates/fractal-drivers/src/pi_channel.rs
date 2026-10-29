@@ -776,8 +776,7 @@ fn state_observation(frame: &Value) -> Option<harness_state::Observation> {
 const PROVIDER_AUTH_REASON: &str = "providerAuth";
 
 /// omp's own error-classification bitfield, as `errorId` carries it on the assistant message whose
-/// `stopReason` is `error` (omp's `qe` flags, measured on omp 18.1.7 — see
-/// `docs/vrs/06-omp-driver/.experiments/2026-09-05-omp-provider-credential-rejection.md`).
+/// `stopReason` is `error` (omp's `qe` flags, measured on omp 18.1.7).
 ///
 /// Only the five flags this classifier needs are named. Reading the field at all is what keeps st2
 /// out of provider prose: omp already did the classification, and its own credential-invalidating
@@ -2078,8 +2077,7 @@ mod tests {
         );
     }
 
-    /// The measured omp 18.1.7 classifications, one row per case in
-    /// `docs/vrs/06-omp-driver/.experiments/2026-09-05-omp-provider-credential-rejection.md`.
+    /// The measured omp 18.1.7 classifications, retained one row per captured case below.
     ///
     /// This is the oracle that keeps st2 out of provider prose. Every 4xx here reaches `AuthFailed`
     /// — omp sets it from the words `401`, `403`, and `forbidden` as readily as from a status — so

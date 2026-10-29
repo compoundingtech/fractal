@@ -7,8 +7,8 @@ Use invented people, host names, and paths in this public repository. Run
 `python3 scripts/check-public-repo` before opening a pull request.
 
 For Fractal claims, missions, replication, runtime ownership, or recovery, start with the
-[documentation index](st3/README.md). For st2 lifecycle, messaging, teardown, or presence,
-read and preserve the proofs in [st2 invariants](st2/invariants.md).
+[documentation index](st3/README.md) and preserve the applicable proofs in
+[native runtime invariants](st3/invariants.md).
 
 ## CLI actor contract
 
@@ -483,7 +483,6 @@ wording consistent when both describe the same change.
 | `crates/fractal-ui-model`, `crates/fractal-conversation-ui` | Shared mission and conversation presentation. |
 | `clients`, `apps/ios` | TypeScript/Swift clients and the iOS app. |
 | `crates/fractal-migrate` | Migration tooling. |
-| `src`, `tests` | Legacy st2 package and its integration tests. |
 | `components`, `evals`, `fixtures` | Provider components, evals, and proof fixtures. |
 | `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |

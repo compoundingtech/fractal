@@ -3266,8 +3266,8 @@ mod tests {
 
     // ---- harness context: frames captured verbatim from OpenCode 1.18.25 (HC-R13) -------------
     //
-    // Every constant below is one `data:` payload of the credential-free lab run recorded in
-    // `docs/vrs/08-harness-context/spec.md` §opencode, unedited. The version the frames were
+    // Every constant below is an unedited `data:` payload of the credential-free lab run.
+    // The version the frames were
     // captured against is asserted from the frames themselves — `session.updated` carries
     // `info.version` — so a bump that changes the numerator, the denominator, or the shape of the
     // join fails here rather than silently publishing a differently-meaning number.

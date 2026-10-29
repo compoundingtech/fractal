@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Retire the root catalog runner and keep current native proofs and CI inputs.",
+  "replay": {
+    "status": "none",
+    "detail": "No Fractal claim, projection, replay or migration implementation changes. The native delivery-state translator remains with both seven-day zero-count prerequisites and its separate ratified rollback decision."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database or claim schema changes; only legacy source, documentation and eval fixtures are removed."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or fleet admission changes. Current native invariants retain shared driver proofs and reference the landed stop, status-line and four real-systemd scope controls."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The root fractal-legacy-runner package, st2 executable/library and their Nix package/check outputs are removed. Current Fractal CLI, client protocol and stored formats remain. CI now archives the current workspace without the root-only selector; producer/consumer identity remains bound to the same source, run, successful attempt, tools, recipe and file digests. Provider and executor runtime tests continue through checks.wasip2-resource-providers, while checks.provider-components builds their component fixtures; the old st2-prefixed component package aliases are removed."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Removing source and build outputs does not stop running daemons or harnesses or change their persisted files. Existing release and restart procedures still apply."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Source or Nix consumers that explicitly selected the legacy root package or st2-prefixed package outputs must select the current Fractal packages or the retained component fixture check. Legacy catalog workflows are retired; this change performs no automatic migration or identity reset. Current Fractal installations need no extra step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No state conversion or recovery operation is added. Retain existing backup and compatibility procedures; old tool availability is not permission to run an older build on newer state. The retained delivery-state migration cannot be removed without its separately recorded fleet evidence and rollback decision."
+  }
+}

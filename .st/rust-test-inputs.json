@@ -11,7 +11,6 @@
   "scripts/ci-linux",
   "scripts/ci-nextest",
   "scripts/ci-nextest-flaky",
-  "scripts/ci-nextest-targets",
   "scripts/ci-rustc-wrapper",
   "scripts/rust-test-keys",
   "scripts/fractal_test_process.py"
@@ -45,8 +44,7 @@
     "examples/fractal",
     "fixtures",
     "scripts",
-    "slo",
-    "src/main.rs"
+    "slo"
    ]
   },
   "fractal-api-client-v0": {
@@ -132,8 +130,7 @@
     "fixtures/clients/transcripts/native-omp-run.json",
     "fixtures/clients/transcripts/noise.json",
     "fixtures/clients/transcripts/omp-parity.expected.json",
-    "fixtures/clients/transcripts/omp-parity.json",
-    "src"
+    "fixtures/clients/transcripts/omp-parity.json"
    ]
   },
   "fractal-daemon": {
@@ -203,8 +200,7 @@
     ".github/workflows/daily-long.yml",
     ".github/workflows/fleet.yml",
     ".github/workflows/perf.yml",
-    "scripts/ci-test-paths.rs",
-    "src/main.rs"
+    "scripts/ci-test-paths.rs"
    ]
   },
   "fractal-github-issue-component": {
@@ -225,19 +221,6 @@
     "crates/fractal-daemon/hooks/claude-statusline.sh",
     "crates/fractal-daemon/hooks/omp-channel.ts",
     "crates/fractal-daemon/hooks/pi-channel.ts"
-   ]
-  },
-  "fractal-legacy-runner": {
-   "extra": [
-    "AGENTS.md",
-    "crates",
-    "docs/st2/invariants.md",
-    "docs/vrs",
-    "examples/native/agent-claude.kdl",
-    "examples/native/agent-codex.kdl",
-    "scripts/ci-test-paths.rs",
-    "scripts/conflict-census-test",
-    "templates/bus.st2.md"
    ]
   },
   "fractal-migrate": {
@@ -368,6 +351,12 @@
     "docs/st3/client-v0/fixtures/terminal-screen.json",
     "fixtures/clients",
     "fixtures/scenarios/fleet-mid-refactor",
+    "fixtures/scenarios/fleet-mid-refactor/attention.json",
+    "fixtures/scenarios/fleet-mid-refactor/conversation.json",
+    "fixtures/scenarios/fleet-mid-refactor/details.json",
+    "fixtures/scenarios/fleet-mid-refactor/roster.json",
+    "fixtures/scenarios/fleet-mid-refactor/sync.json",
+    "fixtures/scenarios/fleet-mid-refactor/terminal.json",
     "scripts/ci-test-paths.rs",
     "slo"
    ]

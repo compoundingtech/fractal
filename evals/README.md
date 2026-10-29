@@ -173,8 +173,6 @@ Commit the report with the run evidence. Do not leave the only report in termina
 ## Validation
 
 ```sh
-st2 eval ./evals/st2/license-mit
-st2 eval ./evals/st2/network-smoke
 cargo test -p fractal --test integration examples::
 ```
 

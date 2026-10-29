@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for name in module.FILES:
         (directory / name).write_bytes(name.encode())
     current = dict(source='a' * 40, tree='b' * 40, run='123', attempt='2', platform='x86_64',
-                   nextest='same nextest', rustc='same rustc', recipe='same recipe', paths='same paths', targets='same targets')
+                   nextest='same nextest', rustc='same rustc', recipe='same recipe', paths='same paths')
     manifest = dict(version=2, standalone_model=True, identity=current, workspace='/producer/source',
                     files={name: module.digest(directory / name) for name in module.FILES})
     module.verify(manifest, current, directory, "2")
@@ -56,27 +56,6 @@ with tempfile.TemporaryDirectory() as tmp:
         pass
     else:
         raise AssertionError('missing archive accepted')
-# Workspace membership is authoritative; an existing legacy member must retain all
-# three integration targets, while its absence needs no stale nextest predicates.
-target_loader = importlib.machinery.SourceFileLoader('targets', str(ROOT / 'scripts/ci-nextest-targets'))
-target_spec = importlib.util.spec_from_loader(target_loader.name, target_loader)
-targets_module = importlib.util.module_from_spec(target_spec)
-target_loader.exec_module(targets_module)
-legacy = dict(id='legacy', name='fractal-legacy-runner', targets=[
-    dict(name=name, kind=['test']) for name in ('integration', 'agent_resource', 'driver_expansion')])
-assert 'package(=fractal-legacy-runner)' in targets_module.selection(dict(workspace_members=['legacy'], packages=[legacy]))
-assert targets_module.selection(dict(workspace_members=['shared'], packages=[
-    dict(id='shared', name='fractal-drivers', targets=[])])) == 'all()'
-# A same-named dependency outside the workspace must not impose legacy test selection.
-assert targets_module.selection(dict(workspace_members=['shared'], packages=[legacy])) == 'all()'
-try:
-    targets_module.selection(dict(workspace_members=['legacy'], packages=[
-        {**legacy, 'targets': legacy['targets'][:-1]}]))
-except ValueError:
-    pass
-else:
-    raise AssertionError('an existing legacy member silently lost integration coverage')
-
 print('Archive identity controls passed: source/tree/run/attempt/platform/tools/recipes, manifest version, selected workspace targets, hashes and missing bytes')
 
 # Exercise the actual build/consume entry points with a fake nextest, never a compiler/test binary.
@@ -94,8 +73,6 @@ args = sys.argv[1:]
 with open(os.environ['CALLS'], 'a') as stream: stream.write(json.dumps(args) + '\\n')
 if args == ['nextest', '--version']:
     print('cargo-nextest fixture')
-elif args[:1] == ['metadata']:
-    print(json.dumps({'workspace_members': ['fractal-legacy-runner'], 'packages': [{'id': 'fractal-legacy-runner', 'name': 'fractal-legacy-runner', 'targets': [{'name': name, 'kind': ['test']} for name in ('integration', 'agent_resource', 'driver_expansion')]}]}))
 elif args[:2] == ['nextest', 'archive']:
     Path(args[args.index('--archive-file') + 1]).write_bytes(json.dumps(args).encode())
 elif args[:1] == ['test']:
@@ -136,8 +113,7 @@ else:
     groups = [command for command in commands if 'archive' in command]
     assert ['bash', 'scripts/ci-linux', 'conversation-model'] in commands
     assert len(groups) == 1 and '--workspace' in groups[0] and '--exclude' not in groups[0]
-    assert groups[0][groups[0].index('-E') + 1] == 'not package(=fractal-legacy-runner) or (kind(test) and (binary(=integration) or binary(=agent_resource) or binary(=driver_expansion)))'
-    assert not any('-p' in command and 'fractal-legacy-runner' in command for command in commands)
+    assert groups[0][groups[0].index('-E') + 1] == 'all()'
     produced = dict(line.split('=', 1) for line in outputs.read_text().splitlines())
     produced_manifest = json.loads((scratch / 'ci-test-archives/manifest.json').read_text())
     assert produced_manifest['byte_sizes'] == {name: (scratch / 'ci-test-archives' / name).stat().st_size for name in module.FILES}

@@ -1048,8 +1048,8 @@ members of the aggregate read: the whole of `.github` (workflows, the clippy and
 scripts and their tests), `fixtures` and `templates`. A pull request that changes none of those paths (documentation outside
 `docs/st2`, `docs/st3` and `docs/vrs`, `apps`, `packages`, `release-notes`, `AGENTS.md`, `README*`) has the same key as a tree
 on which the whole gate passed. `slo` (`include_str!` of `slo/targets.toml` into the Fractal crate), `evals` (the example and graph tests read `evals/fractal`),
-`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st2` (`tests/invariants.rs` includes
-`docs/st2/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
+`claude-channel` and `plugins` (the plugin files `include_bytes!`d into fractal-drivers) and `docs/st3` (`crates/fractal/tests/invariants.rs` includes
+`docs/st3/invariants.md`) are declared because Rust sources open them; a committed-policy test fails when any literal `include_str!`,
 `include_bytes!` or `include!` path in the Rust sources resolves outside the declared inputs. `release-notes` is deliberately not declared: the Rust sources only name `release-notes` as an
 artifact name, and `upgrade-impact`, which reads the fragments, always runs. The one file under `apps` the Rust tests read at run time is declared by name
 (`apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf`, opened by a test in `crates/fractal-daemon/src/attach_image.rs`). The scan misses paths a test builds at run time, so
@@ -1855,7 +1855,7 @@ carry; run by hand, `ci-local` fetches main itself and never trusts a local ref,
 `evidence-wrap --input NAME=VALUE` adds is recorded the same way; it refuses the names it sets itself. Each stage is the `scripts/ci-linux` stage as its CI job runs it, after building and
 installing the rendered hooks as the job's test-archive setup does, in a home of its own. HOME and the XDG state, config, data
 and cache directories are a scratch directory that is removed afterwards, and no st variable (`ST_*`, `ST2_*`, `ST3_*` and,
-since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST2_OTELITE_BIN`, `ST3_OTELITE_BIN` and
+since the rename, `FRACTAL_*`: a seat's live endpoint and identity; kept are the dev shell's own `ST3_OTELITE_BIN` and
 `FRACTAL_OTELITE_BIN` when they name a store path, the collector CI's OTLP export tests run against), GitHub, SSH agent, evidence or sekrets variable reaches the stage, so the daemons and harnesses its tests start cannot read or write the account's Fractal state, harness
 configuration or credentials, and no PATH entry inside the account's Fractal state stays. Kept from the account: the cargo and
 rustup homes (the dependency cache), `XDG_RUNTIME_DIR` with the session bus, where the build admission shim queues, and the

@@ -2252,13 +2252,10 @@ fn archive_cancels_staged_ownership_without_submit_or_repaste() {
 }
 
 // -----------------------------------------------------------------------------------------
-// SPIKE — producer-side event supersede against staged payload ownership.
+// Producer-side event supersede against staged payload ownership.
 //
-// Supersede is the one genuinely new semantic in
-// `docs/vrs/.experiments/2026-08-20-pipes-event-model-differentiation.md`, and it archives an
-// inbox item *from outside DING*, possibly while DING already owns that item's payload in a
-// composer. These two tests are the seam: if either fails, the differentiated event model's
-// main earned semantic is unsafe and the design collapses back to unification.
+// Supersede archives an inbox item from outside DING, possibly while DING owns its payload
+// in a composer. These tests preserve that staged-ownership boundary.
 // -----------------------------------------------------------------------------------------
 
 /// A real catalog with one agent-owned stream.

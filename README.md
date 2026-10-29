@@ -171,4 +171,3 @@ Run `pnpm check:fractal-coverage` in
 `bun apps/fractal-web/scripts/replay-transcript.ts DIRECTORY...` to audit saved timeline pages.
 
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.
-This repository also carries the previous generation; see [its guide](README.st2.md).

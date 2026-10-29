@@ -134,28 +134,21 @@ fail-fast = false
 retries = { count = 2, backoff = "fixed", delay = "30s", jitter = false }
 status-level = "fail"
 final-status-level = "flaky"
-# The gate covers fractal, fractal-runtime, fractal-drivers and the other shared crates, and the st2 test
-# files. It leaves out st2-only code: st2's own unit tests (none of its remaining modules is
-# used by st3), its catalog, eval-run, resync, nomad-survival, event and resource-profile
-# supervisor tests, and fractal-drivers' catalog, resync and resource-profile supervisor modules.
-# `transport_isolation` needs real systemd user scopes; the daily isolation-vm lane runs it in a
-# NixOS VM. The cost check and the load test (`daemon_cost`, `daemon_load`) run in their own
+# The gate covers the current workspace. It leaves out the retained fractal-drivers
+# catalog, resync and resource-profile supervisor library modules. Current scope controls
+# need real systemd user scopes and run in the daily isolation VM.
+# The cost check and the load test (`daemon_cost`, `daemon_load`) run in their own
 # perf jobs (scripts/ci-perf). Only the in-memory targets-file linkage unit and the cost
 # check's route coverage and route-inventory units also run here: they start no daemon or load,
 # and a new route without a cost probe then fails in its own pull request. See docs/ci.md.
 # The outbound-only real-network timing check also runs once in perf-cost. Its strict
 # convergence and redundant-connection windows stay separate from required deterministic
 # backoff and inbound/route interruption controls.
-# scripts/ci-nextest preserves the retained binary selection in one workspace invocation.
-# Its filters control execution; Cargo still compiles excluded workspace test targets.
+# scripts/ci-nextest runs the current workspace in one invocation. Its filters control
+# execution; Cargo still compiles test targets containing excluded test cases.
 default-filter = '''
 not (
   ((package(=fractal) or package(=fractal-daemon) or package(=fractal-api-client-v0) or package(=fractal-api-mailbox) or package(=fractal-attention) or package(=fractal-delivery) or package(=fractal-missions) or package(=fractal-seats) or package(=fractal-evidence) or package(=fractal-github) or package(=fractal-seats-base) or package(=fractal-delivery-base) or package(=fractal-missions-base) or package(=fractal-github-base) or package(=fractal-secrets) or package(=fractal-api-core) or package(=fractal-reconcile) or package(=fractal-peer) or package(=fractal-store)) and test(/^messaging_faults::link_minutes$/))
-  or (package(=fractal-legacy-runner) and (
-    kind(lib) or kind(bin)
-    or binary(=event_e2e) or binary(=resource_profile_supervisor_e2e)
-    or test(/^(catalog_[^:]*|eval_run_e2e|nomad_survival|resync[^:]*|supervisor_auto_archive|transport_isolation)::/)
-  ))
   or (package(=fractal-drivers) and kind(lib)
     and test(/^(catalog[^:]*|resync|resource_profile_supervisor)::/))
   or ((package(=fractal) or package(=fractal-daemon) or package(=fractal-api-client-v0) or package(=fractal-api-mailbox) or package(=fractal-attention) or package(=fractal-delivery) or package(=fractal-missions) or package(=fractal-seats) or package(=fractal-evidence) or package(=fractal-github) or package(=fractal-seats-base) or package(=fractal-delivery-base) or package(=fractal-missions-base) or package(=fractal-github-base) or package(=fractal-secrets) or package(=fractal-api-core) or package(=fractal-reconcile) or package(=fractal-peer) or package(=fractal-store)) and test(/^daemon_(cost|load)::/)

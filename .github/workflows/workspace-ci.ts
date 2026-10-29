@@ -433,7 +433,7 @@ export const testArchiveProducer = {
 }
 
 /**
- * isolation-vm's work: the retained st2 controls and current-runtime scope proofs need a real systemd user manager, which the
+ * isolation-vm's work: the current-runtime scope proofs need a real systemd user manager, which the
  * runner image lacks, so a NixOS VM runs the shared producer's prebuilt test binary and compiles nothing; a
  * second VM runs the sekrets gateway. Workspace CI and the daily long-lane run share these steps.
  */

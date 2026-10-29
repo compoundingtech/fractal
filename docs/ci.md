@@ -189,7 +189,7 @@ real Cargo and benign stand-in commands; it compiles no Rust.
 
 - `linux-tests` and `linux-tests-shard-2`: prepare the provider component fixtures, build the
   selected test executables with dev/test debug info and incremental compilation disabled,
-  and install matching hooks directly from the built st2 executable. They run complementary
+  and install matching hooks through the built `ci-hooks-install` helper. They run complementary
   nextest hash partitions with eight test threads each. The profile's default filter still
   selects the gate scope (see [gate scope](#gate-scope));
 - `linux-clippy`: `cargo clippy --workspace --all-targets --locked`, the standalone conversation
@@ -202,7 +202,7 @@ real Cargo and benign stand-in commands; it compiles no Rust.
 The primary test job proves that the two actual nextest inventories are disjoint and their union
 equals the full selected suite. The explicit zero-retry mail canaries run in a parallel job. The primary also
 runs the standalone conversation model feature check. The second shard runs the remaining
-workspace and st2 tests on independent Namespace CPUs. `linux-gate` requires both shards;
+workspace tests on independent Namespace CPUs. `linux-gate` requires both shards;
 failure, cancellation or skipping either shard fails the gate. Each shard retains passing test
 durations in its logs, and the primary saves `ci-logs/test-partitions.json` with the tested SHA
 and all three inventories.
@@ -493,26 +493,18 @@ still cannot increase. Run the ratchet's focused regression proofs with
 The gate covers Fractal and the code Fractal uses. The `ci` profile's `default-filter` in
 `.config/nextest.toml` selects it on every event, with no path filter or scheduled full run:
 
-- every test of the other workspace crates: Fractal, fractal-client, fractal-client-codegen, fractal-schema,
-  fractal-migrate, Fractal TUI (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
-  harness state and sessions st3 and st2 share) and the shared and resource-provider crates;
-- st2's integration test files, apart from those below.
+- the current workspace crates: Fractal, its daemon/domain/client packages, Fractal TUI,
+  fractal-runtime, fractal-drivers, and the shared and resource-provider libraries.
 
-It leaves out st2-only tests: st2's own unit tests (none of its remaining modules is used by
-st3), the fractal-drivers `catalog*`, `resync` and `resource_profile_supervisor` modules, and st2's
-`catalog_*`, `nomad_survival`, `event_e2e`, `eval_run_e2e`, `resync*`, `supervisor_auto_archive`
-and `resource_profile_supervisor_e2e` tests. No CI job runs these. Clippy still checks the whole
-workspace. List the selection with `bash scripts/ci-nextest list`.
+The default filter leaves out the retained fractal-drivers `catalog*`, `resync` and
+`resource_profile_supervisor` library modules. Daily-only and performance groups keep
+their separate lanes. Clippy still checks the whole workspace. List the selection
+with `bash scripts/ci-nextest list`.
 
-`scripts/ci-nextest` uses workspace metadata for binary selection
-(`bash scripts/ci-nextest run --no-run`) and execution on Linux and macOS. One workspace
-invocation retains every non-st2 binary and, while st2 remains a workspace member, its
-`integration`, `agent_resource` and `driver_expansion` test targets. Caller filtersets intersect
-that binary selection. The unchanged `ci` profile keeps fail-fast disabled and any test failure
-fails the stage. Collection compiles workspace targets, including excluded legacy binaries
-while st2 remains a member; the filters preserve execution coverage rather than avoid compilation.
-Matching rendered hooks are installed by a CI binary that calls the driver
-library directly, rather than by the legacy runner CLI.
+`scripts/ci-nextest` builds and runs the current workspace on Linux and macOS.
+Caller filtersets intersect that workspace selection. The `ci` profile keeps
+fail-fast disabled and any test failure fails the stage. Matching rendered hooks
+are installed by `ci-hooks-install`, which calls the shared driver library directly.
 
 Outside GitHub Actions on Linux, `scripts/ci-nextest run` keeps the tests' temporary files in a
 per-run directory `/dev/shm/st-nextest.XXXXXX` (removed when the run ends) when `TMPDIR` is unset,
@@ -535,9 +527,9 @@ existing scope.
 ### Current-product boundary
 
 Every required Linux stage runs `scripts/check-fractal-boundary-test` and
-`scripts/check-fractal-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
+`scripts/check-fractal-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate fractal_legacy_runner`
 in st3/Fractal TUI, plus direct, renamed or indirect workspace dependencies on st2 (including
-optional and target-specific dependencies). st2 remains independently buildable/testable.
+optional and target-specific dependencies). The retired runner is not a workspace package.
 
 The Claude no-st2 seat eval and all five harness boot canaries inspect fresh seat processes
 for `ST2_*` exports and st2 program/path references. They also inspect generated state, home
@@ -554,11 +546,8 @@ both generations continue to coordinate with Claude's own config lock.
 
 ### Isolation VM
 
-`tests/transport_isolation.rs` proves that a task st2 starts in its own systemd user scope
-survives a SIGKILL of its supervisor's cgroup, for both exec and pty tasks. The managed-agent
-color contract also checks environment propagation through a real user scope, including a
-PTY restart. The current runtime adds three ignored tests in the `fractal-runtime` package's
-`scope_cascade` binary:
+Four current-runtime controls cover the surviving work-scope obligations. Three
+ignored tests live in the `fractal-runtime` package's `scope_cascade` binary:
 
 | Test | Guarantee |
 | --- | --- |
@@ -574,25 +563,24 @@ survives. The test remains ignored in ordinary CI; the VM explicitly selects it 
 `fractal_runtime` binary, `lib` kind and full name. This execution does not authorize production
 activation of the retirement primitive.
 
-All seven controls need a real systemd user manager, which Namespace's runner image does not
+All four controls need a real systemd user manager, which Namespace's runner image does not
 boot. They run in a NixOS VM (`nix/transport-isolation-vm.nix`) in the daily `daily-isolation-vm`
 job (`daily-long.yml`):
 
 1. Probe `/dev/kvm`: the job fails unless KVM can create a VM. Namespace offers nested
    virtualization on `linux/amd64`. QEMU is configured with `forceAccel`, and the test checks
    `systemd-detect-virt` reports `kvm`, so it never falls back to emulation.
-2. The producer prebuilds the preserved workspace selection into one archive, including the
-   existing st2 integration binary and executable plus the fractal-runtime `scope_cascade` and
-   library binaries.
+2. The producer prebuilds the current workspace into one archive, including the
+   fractal-runtime `scope_cascade` and library binaries.
 3. The job builds the VM test driver from the flake and runs it on the runner. The VM boots
-   NixOS with a lingering user, copies in the archive, extracts it at the checkout's path (the
-   st2 test binary has its executable's path compiled in) and runs the seven controls with
-   nextest as a transient service of that user's systemd manager. The VM compiles nothing.
+   NixOS with a lingering user, copies in the archive and extracts it at the producer checkout's
+   path for its package working directories. It runs the four controls through nextest as a
+   transient service of that user's systemd manager. The VM compiles nothing.
 
-The archive inventory must match the seven exact package, binary, kind and test identities.
+The archive inventory must match the four exact package, binary, kind and test identities.
 Both listing and execution use `--run-ignored all`, and execution sets retries to zero.
-The JUnit report must contain exactly those seven distinct successful results, with no missing,
-extra, skipped, rerun or flaky result. All seven tests must run and pass, with no isolation
+The JUnit report must contain exactly those four distinct successful results, with no missing,
+extra, skipped, rerun or flaky result. All four tests must run and pass, with no isolation
 opt-out. The job summary records the KVM probe and each phase's elapsed time.
 
 ### TypeScript client
@@ -1083,13 +1071,6 @@ To build and test with the assertions (what the daily run does), set both lines:
 
 What only exists or only means something with them:
 
-- The `ST2_TEST_*` fault and pause seams of the st2 catalog, event, message and agent publish code
-  (`crates/fractal-drivers`, `src/`) are compiled under `cfg(debug_assertions)`. The st2 tests that drive
-  them carry `#[cfg_attr(not(debug_assertions), ignore = "...")]`: they are listed as ignored in the
-  default profile and run in the assertions profile (`tests/agent_presentation.rs`,
-  `tests/agent_publish.rs`, `tests/agent_resource.rs`, `tests/message_cli.rs`,
-  `tests/stream_authoring_cli.rs`, `tests/catalog_apply.rs`, `tests/catalog_diff.rs`,
-  `tests/event_e2e.rs`).
 - The daemon benchmark and load tests (`daemon_bench`, `first_sync`, `daemon_load`) skipped in any
   build that was not optimized by testing `cfg!(debug_assertions)`; they now ask
   `fractal_daemon::test_support::optimized_build()` (the executable is under `target/release/`).
@@ -1306,8 +1287,7 @@ only for the exact saved Git SHA with a clean checkout, so a retry does not rebu
 unchanged sources merely because checkout refreshed their timestamps. Changed or dirty sources
 still take Cargo's normal validation path; the embedded source revision remains real.
 For a clean checkout Performance passes its actual full SHA as `AGENT_SPEC_REVISION`.
-The build-identity script (crates/fractal-build-stamp, which only the st2 and st3 binaries depend on,
-so no library rebuilds for a new commit) tracks that explicit value instead of unrelated Git
+The build-identity script in crates/fractal-build-stamp tracks that explicit value instead of unrelated Git
 index/ref timestamps. The CLI stamp still derives its real revision and commit time from Git.
 Dirty checkouts continue to derive their identity from Git.
 PR snapshots also remain for seven days, outside the shared dependency-cache pool.

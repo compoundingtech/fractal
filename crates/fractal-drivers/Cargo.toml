@@ -2,7 +2,7 @@
 name = "fractal-drivers"
 version = "0.1.0"
 edition = "2024"
-description = "Harness drivers, native delivery, and catalog support shared by st2 and Fractal"
+description = "Native harness drivers, delivery and state for Fractal"
 license = "MIT"
 autotests = false
 
@@ -51,7 +51,7 @@ path = "tests/integration.rs"
 # runner binary carries no wasmtime unless a build opts in.
 wasm-resolver = ["agent-spec/wasm-resolver"]
 # Typed Component Model resource providers. This is the sole feature that admits Wasmtime for
-# observation; default members and the default fractal-legacy-runner binary remain Wasmtime-free.
+# observation; the default driver build remains Wasmtime-free.
 wasip2-provider-runtime = [
   "wasm-resolver",
   "dep:fractal-resource-providers",

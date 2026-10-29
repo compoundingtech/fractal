@@ -135,10 +135,10 @@ class CiLocal(unittest.TestCase):
             self.assertNotIn('RUSTC_WRAPPER', env)
             self.assertNotIn('CARGO_BUILD_RUSTC_WRAPPER', env)
             for name in ('ST_AGENT', 'ST3_ENDPOINT', 'FRACTAL_ENDPOINT', 'FRACTAL_AGENT', 'ST2_HOME', 'GH_TOKEN', 'GITHUB_TOKEN',
-                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST3_OTELITE_BIN'):
+                         'SSH_AUTH_SOCK', 'EVIDENCE_PUSH_TOKEN', 'SEKRETS_PROFILE', 'ST2_OTELITE_BIN', 'ST3_OTELITE_BIN'):
                 self.assertNotIn(name, env)
             # The dev shell's collector for the OTLP export tests stays, as in CI; the same name pointing anywhere else does not.
-            self.assertEqual((env.get('ST2_OTELITE_BIN'), env.get('FRACTAL_OTELITE_BIN')), ('/nix/store/x-otelite/bin/otelite',) * 2)
+            self.assertEqual(env.get('FRACTAL_OTELITE_BIN'), '/nix/store/x-otelite/bin/otelite')
             # Kept: the dependency cache, the build admission's runtime directory, and the saved dev shell environment.
             # CARGO_REAL is the dev shell's cargo: not the shim first on PATH, not the cargo in the account's home.
             self.assertEqual((env['CARGO_HOME'], env['RUSTUP_HOME'], env['CARGO_REAL'], env['XDG_RUNTIME_DIR']),

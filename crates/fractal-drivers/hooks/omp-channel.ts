@@ -1,8 +1,8 @@
 // st native message delivery for the omp harness.
 //
 // Forked from pi-channel.ts: omp is pi-family and loads the same extension shape, but the two
-// diverge where it matters (measured 2026-08-25, omp v18.0.3 — see
-// docs/vrs/06-omp-driver/.experiments/). omp has no `agent_settled` event, so terminal
+// diverge where it matters (measured 2026-08-25, omp v18.0.3; maintained reference:
+// docs/st3/omp.md). omp has no `agent_settled` event, so terminal
 // `agent_end` polls `ctx.isIdle()` until proven idle; structured `ask` tool events and approval events
 // carry the blocked-on-human axis pi cannot express; and a failed turn carries omp's own typed
 // error classification, which this asset forwards raw because st — not the asset — decides what
@@ -174,7 +174,7 @@ type AgentEndFrame = {
  * verdict, exactly as it owns delivery policy, so this asset never decides what an auth failure
  * is. `errorStatus` is deliberately not carried — the status code classifies nothing (three of
  * the four measured 403s are not credential rejections) and omp already prefixes it to the prose.
- * Measured on omp 18.1.7; see `docs/vrs/06-omp-driver/.experiments/`.
+ * Measured on omp 18.1.7; see `docs/st3/omp.md` for native error transport.
  */
 type ProviderError = {
   reason: string;
