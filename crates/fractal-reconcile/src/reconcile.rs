@@ -5492,13 +5492,12 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         incarnation: &str,
     ) -> Result<Option<crate::model::ClaimRecord>> {
-        Ok(self
-            .store
+        self.store
             .newest_claim_where(subject, "runtime.observed", |claim| {
                 claim_incarnation(claim) == Some(incarnation)
                     && claim.body.pointer("/fields/status").and_then(Value::as_str)
                         == Some("running")
-            })?)
+            })
     }
 
     fn prepare_fresh_context(
