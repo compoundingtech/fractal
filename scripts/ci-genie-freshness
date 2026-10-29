@@ -26,4 +26,5 @@ python3 scripts/check-public-repo
 python3 scripts/check-native-names
 # Every lane's definition_paths cover what its commands execute or read (the whole tree; ci-script-tests' copy sees only its inputs).
 python3 scripts/lane-definition-closure --check
+node --test scripts/native-connector-bootstrap.test.mjs
 genie --check

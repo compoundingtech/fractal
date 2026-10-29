@@ -714,6 +714,7 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         Some(((), timer))
     });
     let mut stream_control = StreamControl::new(native.then(|| peer.clone()));
+    stream_control.outgoing_peer = Some(peer.clone());
     stream_control.primary_peer = (peer.transport == "claude-channel").then(|| (peer.clone(), primary_wrapper));
     let stream = stream_with_timers_inner(state.clone(), fence.clone(), socket, raw_snapshot, safety, heartbeat, stream_control);
     #[cfg(not(feature = "test-support"))]
@@ -811,6 +812,7 @@ impl Drop for StreamProof {
 
 struct StreamControl {
     peer: Option<NativeDeliveryPeer>,
+    outgoing_peer: Option<NativeDeliveryPeer>,
     primary_peer: Option<(NativeDeliveryPeer, Option<fractal_drivers::claude_process::Process>)>,
     #[cfg(any(test, feature = "test-support"))]
     dirty_gate: Option<Arc<FixtureDirtyGate>>,
@@ -824,7 +826,7 @@ struct StreamControl {
 
 impl StreamControl {
     fn new(peer: Option<NativeDeliveryPeer>) -> Self {
-        Self { peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None,
+        Self { outgoing_peer: peer.clone(), peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None,
             #[cfg(test)] report_started: None,
             #[cfg(test)] report_blocking_started: None,
             #[cfg(test)] legacy_report_dispatch: false }
@@ -841,6 +843,29 @@ async fn stream_with_timers_inner<F, S, H>(
 {
     let peer = control.peer;
     let primary_peer = control.primary_peer;
+    let outgoing_proof = if let Some(outgoing_peer) = control.outgoing_peer {
+        let checked_state = state.clone();
+        let checked_fence = fence.clone();
+        let native = peer.is_some();
+        match crate::api::read_deadline::spawn_blocking(move || {
+            outgoing_peer.require_kernel()?;
+            if let Some(owner) = checked_state.store.mailbox_lease_authority(&checked_fence)? {
+                fractal_api_core::api::native_role::capture_admitted_process_role(
+                    &checked_state, &checked_fence, &outgoing_peer, &owner,
+                ).map(OutgoingProof::Native)
+            } else if native {
+                Err(St3Error::new("stale-mailbox-session", "outgoing native stream has no admitted lease"))
+            } else {
+                // Explicit argv channels retain their existing protocol, not native authority.
+                outgoing_peer.peer_process.ok_or_else(|| St3Error::new(
+                    "native-role-unavailable", "outgoing channel kernel identity unavailable",
+                )).map(OutgoingProof::Kernel)
+            }
+        }).await {
+            Ok(Ok(proof)) => Some(Arc::new(proof)),
+            _ => return,
+        }
+    } else { None };
     let _pushed = ForgetPushed(fence.clone());
     futures_util::pin_mut!(safety, heartbeat);
     let since = client_now_ms();
@@ -999,11 +1024,12 @@ async fn stream_with_timers_inner<F, S, H>(
             if let Some(seat) = seat {
                 let bytes = serde_json::to_vec(&seat).unwrap_or_default();
                 if bytes != previous_seat {
-                    if send(
+                    if send_proven(
                         &mut socket,
                         &Frame::Seat {
                             seat: Box::new(seat),
                         },
+                        outgoing_proof.as_ref(),
                     )
                     .await
                     .is_err()
@@ -1026,7 +1052,7 @@ async fn stream_with_timers_inner<F, S, H>(
             crate::silent::release(&mut messages);
             let bytes = serde_json::to_vec(&messages).unwrap_or_default();
             if fence.component == "delivery" && bytes != previous_mailbox {
-                if send(&mut socket, &Frame::Mailbox { messages })
+                if send_proven(&mut socket, &Frame::Mailbox { messages }, outgoing_proof.as_ref())
                     .await
                     .is_err()
                 {
@@ -1035,7 +1061,7 @@ async fn stream_with_timers_inner<F, S, H>(
                 previous_mailbox = bytes;
             }
             if fence.component == "delivery" && replay_supported && !replay_challenge_sent {
-                if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
+                if send_proven(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }, outgoing_proof.as_ref()).await.is_err() { return; }
                 replay_challenge_sent = true;
             }
             if fence.component == "delivery" {
@@ -1047,11 +1073,12 @@ async fn stream_with_timers_inner<F, S, H>(
                     .filter(|o| o.holds_intake() && o.old_incarnation == fence.incarnation)
                     .map(|o| o.id);
                 if drain != previous_drain {
-                    if send(
+                    if send_proven(
                         &mut socket,
                         &Frame::Drain {
                             operation: drain.clone(),
                         },
+                        outgoing_proof.as_ref(),
                     )
                     .await
                     .is_err()
@@ -1104,7 +1131,7 @@ async fn stream_with_timers_inner<F, S, H>(
                             attached: value.0,
                             delivery_epoch: value.1,
                         };
-                        if send(&mut socket, &frame).await.is_err() {
+                        if send_proven(&mut socket, &frame, outgoing_proof.as_ref()).await.is_err() {
                             return;
                         }
                         if attachment_sent.is_none() {
@@ -1227,7 +1254,7 @@ async fn stream_with_timers_inner<F, S, H>(
                             attachment_due = true;
                         }
                         if fence.component == "delivery" && replay_supported && !previous_mailbox.is_empty() && !replay_challenge_sent {
-                            if send(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }).await.is_err() { return; }
+                            if send_proven(&mut socket, &Frame::Replay { nonce: replay_nonce.clone() }, outgoing_proof.as_ref()).await.is_err() { return; }
                             replay_challenge_sent = true;
                         }
                         if recorded && replay_proven.is_none() && replay_challenge_sent
@@ -1370,6 +1397,30 @@ async fn finish_fenced(socket: &mut WebSocket, frame: &Frame) {
     .await;
 }
 
+enum OutgoingProof {
+    Native(fractal_api_core::api::native_role::ProcessRoleProof),
+    Kernel(fractal_runtime::PeerProcessIdentity),
+}
+
+impl OutgoingProof {
+    fn validate(&self) -> Result<(), St3Error> {
+        match self {
+            Self::Native(proof) => proof.validate(),
+            Self::Kernel(kernel) => kernel.validate().map_err(|error| {
+                St3Error::new("stale-mailbox-session", format!("outgoing connector generation ended: {error:#}"))
+            }),
+        }
+    }
+}
+
+async fn send_proven(socket: &mut WebSocket, frame: &Frame, proof: Option<&Arc<OutgoingProof>>) -> anyhow::Result<()> {
+    if let Some(proof) = proof {
+        let proof = Arc::clone(proof);
+        crate::api::read_deadline::spawn_blocking(move || proof.validate()).await??;
+    }
+    send(socket, frame).await
+}
+
 async fn send(socket: &mut WebSocket, frame: &Frame) -> anyhow::Result<()> {
     tokio::time::timeout(
         Duration::from_secs(15),
@@ -1468,6 +1519,52 @@ mod tests {
             let _ = pid;
             None
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn retained_outgoing_stream_cannot_publish_after_its_connector_generation_exits() {
+        struct Connector(std::process::Child);
+        impl Drop for Connector {
+            fn drop(&mut self) { let _ = self.0.kill(); let _ = self.0.wait(); }
+        }
+        let mut connector = Connector(std::process::Command::new("sleep").arg("60").spawn().unwrap());
+        let proof = Arc::new(OutgoingProof::Kernel(
+            fixture_direct_peer_process(connector.0.id()).unwrap(),
+        ));
+        let publish_next = Arc::new(tokio::sync::Notify::new());
+        let next = Arc::clone(&publish_next);
+        let (result, mut results) = tokio::sync::mpsc::unbounded_channel();
+        let app = Router::new().route("/stream", get(move |websocket: WebSocketUpgrade| {
+            let proof = Arc::clone(&proof);
+            let next = Arc::clone(&next);
+            let result = result.clone();
+            async move {
+                websocket.on_upgrade(move |mut socket| async move {
+                    send_proven(&mut socket, &Frame::Mailbox { messages: vec![] }, Some(&proof)).await.unwrap();
+                    next.notified().await;
+                    let blocked = send_proven(
+                        &mut socket, &Frame::Replay { nonce: "must-not-publish".into() }, Some(&proof),
+                    ).await.is_err();
+                    let _ = result.send(blocked);
+                })
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+        let first = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap().unwrap().unwrap();
+        assert!(matches!(first, Message::Text(raw) if matches!(serde_json::from_str::<Frame>(&raw).unwrap(), Frame::Mailbox { .. })));
+        // The transport remains held by the fixture after its authenticated generation exits,
+        // as with an inherited descriptor. No incoming report is required to stop publication.
+        connector.0.kill().unwrap();
+        connector.0.wait().unwrap();
+        publish_next.notify_one();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(5), results.recv()).await.unwrap(), Some(true));
+        let terminal = tokio::time::timeout(Duration::from_secs(5), socket.next()).await.unwrap();
+        assert!(!matches!(terminal, Some(Ok(Message::Text(_)))), "no data frame may follow connector exit");
+        server.abort();
     }
 
     struct AdmittedPtyFixture {
@@ -3443,7 +3540,7 @@ mod tests {
                                             receiver.recv().await.map(|()| ((), receiver))
                                         },
                                     ),
-                                    StreamControl { peer, primary_peer: None, dirty_gate: Some(fixture_gate),
+                                    StreamControl { outgoing_peer: peer.clone(), peer, primary_peer: None, dirty_gate: Some(fixture_gate),
                                         report_started: None, report_blocking_started: None, legacy_report_dispatch: false },
                                 )
                             })

@@ -96,21 +96,21 @@ enum ProcessWitness {
 }
 
 /// Process-only continuation of an already canonical lease, with no runtime inventory reads.
-pub struct ProcessRoleProof<'a> {
-    peer: &'a NativeDeliveryPeer,
-    provider: &'a str,
+pub struct ProcessRoleProof {
+    kernel: fractal_runtime::PeerProcessIdentity,
+    claude: bool,
     dir: PathBuf,
     witness: Option<ProcessWitness>,
 }
 
-impl ProcessRoleProof<'_> {
+impl ProcessRoleProof {
     /// Safe to call while the canonical harness ownership lock is already held.
     pub fn validate(&self) -> Result<(), St3Error> {
-        self.peer.require_kernel()?;
+        self.kernel.validate().map_err(|error| refused(format!("admitted connector kernel generation ended: {error:#}")))?;
         match &self.witness {
             Some(ProcessWitness::Native(witness)) => witness.revalidate().map_err(internal),
             Some(ProcessWitness::Claude(witness)) => witness.revalidate().map_err(internal),
-            None => require_absent_witness(&self.dir, self.provider),
+            None => require_absent_witness(&self.dir, if self.claude { "claude" } else { "native" }),
         }
     }
 }
@@ -125,9 +125,9 @@ fn require_absent_witness(dir: &std::path::Path, provider: &str) -> Result<(), S
 
 /// The caller supplies the exact canonical owner and retains its existing durable fence check.
 /// A recorded launch is authoritative; malformed or departed generations cannot use legacy.
-pub fn capture_admitted_process_role<'a>(
-    state: &AppState, fence: &Fence, peer: &'a NativeDeliveryPeer, owner: &'a Authority,
-) -> Result<ProcessRoleProof<'a>, St3Error> {
+pub fn capture_admitted_process_role(
+    state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer, owner: &Authority,
+) -> Result<ProcessRoleProof, St3Error> {
     peer.require_kernel()?;
     if owner.pid != peer.pid || process(peer.pid)?.birth != owner.process_token {
         return Err(refused("admitted connector generation changed"));
@@ -144,12 +144,23 @@ pub fn capture_admitted_process_role<'a>(
         ).map_err(internal)?))
     } else {
         let wrapper = native_connector::wrapper(&dir).map_err(internal)?;
+        // Codex's pre-provider mailbox uses a sequence-zero capability; its launch witness
+        // still authenticates the supervisor's actual claimed session and sequence.
+        let bootstrap = if owner.provider == "codex" && owner.sequence == 0 {
+            Some(native_connector::incarnation(&dir, wrapper, &owner.provider).map_err(internal)?)
+        } else { None };
+        let (session, sequence) = bootstrap.as_ref()
+            .map(|(session, sequence)| (session.as_str(), *sequence))
+            .unwrap_or((&owner.session, owner.sequence));
         Some(ProcessWitness::Native(native_connector::capture(
             &dir, wrapper, peer.pid, &owner.provider, connector_role(wrapper, peer, &fence.component),
-            &owner.session, owner.sequence,
+            session, sequence,
         ).map_err(internal)?))
     };
-    let proof = ProcessRoleProof { peer, provider: &owner.provider, dir, witness };
+    let proof = ProcessRoleProof {
+        kernel: peer.peer_process.as_ref().ok_or_else(|| refused("accepted connector kernel identity absent"))?.clone(),
+        claude: owner.provider == "claude", dir, witness,
+    };
     proof.validate()?;
     Ok(proof)
 }
