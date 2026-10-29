@@ -792,6 +792,14 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(replication::replication_checkpoint_need),
         )
         .route(
+            "/v1/internal/replication/answers",
+            post(replication::replication_answers),
+        )
+        .route(
+            "/v1/internal/replication/answers-check",
+            post(replication::replication_answers_check),
+        )
+        .route(
             "/v1/internal/replication/checkpoint-adopt",
             post(replication::replication_checkpoint_adopt)
                 .layer(DefaultBodyLimit::max(crate::peer::MAX_MANIFEST_BYTES)),
