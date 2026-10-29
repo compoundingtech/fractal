@@ -1956,8 +1956,10 @@ the offline peer has no history; the startup barrier and durable occurrence dedu
 Schedules declaring a standby keep positive comparisons blocking even when stale, on both
 primary and standby. Placement/ownership changes retain the same conservative policy:
 if any retained schedule declaration names another primary, declares a standby, or differs
-in owner run/generation/step, stale positive counts still block. This deliberately includes
-completed historical moves and removed standbys rather than guessing when a move is settled.
+in owner run or declaring step, stale positive counts still block. A new generation of
+the same owning run with the same declaring step (including no step) is a revision, not
+an ownership change. This deliberately includes completed historical moves and removed
+standbys rather than guessing when a move is settled.
 Staged or conflicting owned-set changes remain fenced by the existing ownership guard,
 including at the due callback. No elapsed timeout grants takeover authority.
 
