@@ -131,7 +131,8 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
   unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
-  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (20,000).
+  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (45,000), and an
+  optional `reason` that says why (JSON has no comments).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
 
 **Whole trees.** A tree's records are deleted together or not at all, and a live tree's never; an input key's index
@@ -163,6 +164,10 @@ run in the same repository took 68 s, 56 s of it projecting 2,350 input keys.
 6,452 on 196 main trees within 3 days (12,904 refs), 241 on the trees of 193 open pull requests, and 92 on 183 other
 branch tips within 14 days. That is over the old cap of 5,000, so every daily run exited 3; `cap_records` is 20,000,
 about 2.5 times that live set. The plan leaves 15,541 refs.
+
+**Measured 2026-10-29**, the first run that kept every live tree's per-crate `rust-tests` keys: 57,529 refs, 28,790
+records. The live set was 21,518 records (7,399 crate keys of 532 live trees among them), over the cap of 20,000, so the
+run exited 3. `cap_records` is 45,000, about twice that live set.
 
 **On the remote.** A dead group goes whole or not at all. First go the names whose record keeps another name in its
 own group: a note beside its tag, a migrated or duplicate first-layout name. No record leaves any group, so no verdict
