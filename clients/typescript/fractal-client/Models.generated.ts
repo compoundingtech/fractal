@@ -1552,6 +1552,7 @@ export type ErrorCode = (
   | "peer-too-old"
   | "validation-failed"
   | "idempotency-conflict"
+  | "legacy-action-receipt-untrusted"
   | "issuer-required"
   | "suspend-authored-session-selection"
   | "stale-fence"
