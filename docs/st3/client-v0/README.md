@@ -2621,7 +2621,9 @@ continuation is already pinned to its first page's cut.
 A card-faults read that reaches its deadline does not stop publication. Other card fields
 are current; each affected card keeps its previous `fault`, including a known null value.
 A card with no previous value reports `"fault status unknown"` in that same field. The next
-refresh retries those faults even if no claim changed.
+refresh retries those faults even if no claim changed. The refresher's card-faults read is
+bounded by 25 ms of query CPU time, with a one-second wall backstop for a stalled page read,
+so a scheduling pause on a loaded host does not reach its deadline.
 
 ### Immutable current publications
 
