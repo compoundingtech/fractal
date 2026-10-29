@@ -1481,6 +1481,25 @@ fn one_repair_that_cannot_be_applied_is_named_and_the_rest_apply() {
     );
 }
 
+/// Measures the writer holds of applying repairs on a private store copy supplied by the
+/// operator: how many repairs each hold covered, and the longest hold.
+#[test]
+#[ignore = "requires ST_REPAIR_HOLD_BENCH_STORE, a private writable store copy"]
+fn repair_hold_benchmark() {
+    let path = std::env::var("ST_REPAIR_HOLD_BENCH_STORE").unwrap();
+    let store = Store::open(std::path::Path::new(&path), "repair-bench").unwrap();
+    for run in 0..5 {
+        let started = std::time::Instant::now();
+        let (changed, holds) = smallclaims::windows::holds::holds_during(|| {
+            store.apply_replication_repairs().unwrap()
+        });
+        eprintln!("{}", json!({
+            "run": run, "changed": changed, "pages": holds.pages_of("applied repairs"),
+            "longest_hold_us": holds.longest.as_micros(), "call_us": started.elapsed().as_micros(),
+        }));
+    }
+}
+
 #[test]
 fn structural_replication_advances_from_healthy_frontier() {
     let store = Store::open_memory("node").unwrap();
