@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Test only: the daemon restart tests stop their API by dropping its runtime, so a request accepted just before the stop can no longer answer from the graph afterwards, as it cannot when a real daemon exits; a test checks that a connection the fixture accepted before the stop gets no answer after it",
+  "summary": "Test only: the daemon restart tests stop their API by dropping its runtime, so a request accepted just before the stop can no longer answer from the graph afterwards, as it cannot when a real daemon exits; a test holds a request in its handler through the stop and checks the connection closes without an answer",
   "replay": {"status": "none", "detail": "Test change only; no replay or recovery behavior changes."},
   "schema": {"status": "none", "detail": "No schema or persistent data changes."},
   "rules": {"status": "none", "detail": "No checkpoint or coordinated upgrade changes."},

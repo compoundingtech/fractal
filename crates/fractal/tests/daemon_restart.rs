@@ -93,6 +93,12 @@ impl Daemon {
         self.serve(app, native).await;
     }
 
+    /// The API `start` serves, with `routes` added to it.
+    async fn start_with_routes(&mut self, routes: axum::Router) {
+        let app = fractal_daemon::api::router(self.state()).merge(routes);
+        self.serve(app, false).await;
+    }
+
     // The API serves on a runtime of its own. Dropping it at `stop` ends every connection the
     // way exiting the daemon does: upgraded WebSocket connections, and requests still in flight.
     // Aborting only the listener would leave those tasks alive, and a request accepted just
@@ -949,47 +955,61 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     );
 }
 
-/// One request on a kept-alive connection, read through the end of its body; `None` when the
-/// daemon closed the connection instead of answering.
-fn keep_alive_get(stream: &mut std::os::unix::net::UnixStream, path: &str) -> Option<String> {
+/// How a request ended: the first bytes of an answer, or a close before any.
+#[derive(Debug, PartialEq)]
+enum Ending {
+    Answered(String),
+    Closed,
+}
+
+/// Send one request and wait up to 10 s for it to end. A timeout fails the test: it shows
+/// neither an answer nor a close.
+fn request_ending(socket: &Path, path: &str) -> Ending {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
     stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: st3\r\n\r\n").ok()?;
-    let mut head = Vec::new();
-    let mut byte = [0u8; 1];
-    while !head.ends_with(b"\r\n\r\n") {
-        match stream.read(&mut byte) {
-            Ok(1) => head.push(byte[0]),
-            _ => return None,
-        }
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: st3\r\n\r\n").unwrap();
+    let mut buffer = [0u8; 4096];
+    match stream.read(&mut buffer) {
+        Ok(0) => Ending::Closed,
+        Ok(read) => Ending::Answered(String::from_utf8_lossy(&buffer[..read]).into_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ending::Closed,
+        Err(error) => panic!("the request was neither answered nor closed: {error}"),
     }
-    let head = String::from_utf8_lossy(&head).into_owned();
-    let length = head
-        .lines()
-        .find_map(|line| {
-            let line = line.to_ascii_lowercase();
-            line.strip_prefix("content-length:").map(|value| value.trim().parse().unwrap())
-        })
-        .unwrap_or(0);
-    let mut body = vec![0u8; length];
-    stream.read_exact(&mut body).ok()?;
-    Some(head + &String::from_utf8_lossy(&body))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_stopped_daemon_answers_nothing_on_a_connection_it_accepted_before() {
+async fn a_stopped_daemon_cannot_answer_a_request_it_was_already_handling() {
     if fractal_daemon::test_support::supervise_test() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(directory.path());
-    daemon.start().await;
-    let mut stream = std::os::unix::net::UnixStream::connect(&daemon.socket).unwrap();
-    let answer = keep_alive_get(&mut stream, "/v1/health").unwrap();
-    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
-    // The connection was accepted and served before the stop. An exited daemon cannot answer on
-    // it, so the restart tests' outage must not either.
+    // A handler that says it has started, then waits until the test lets it answer.
+    let (entered, handler_entered) = std::sync::mpsc::channel::<()>();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = {
+        let release = release.clone();
+        axum::routing::get(move || {
+            let (entered, release) = (entered.clone(), release.clone());
+            async move {
+                let _ = entered.send(());
+                release.acquire().await.unwrap().forget();
+                "answered after the stop"
+            }
+        })
+    };
+    daemon.start_with_routes(axum::Router::new().route("/test/held", held)).await;
+    let socket = daemon.socket.clone();
+    let client = std::thread::spawn(move || request_ending(&socket, "/test/held"));
+    tokio::task::spawn_blocking(move || handler_entered.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the held handler starts");
     daemon.stop().await;
-    assert_eq!(keep_alive_get(&mut stream, "/v1/health"), None);
+    // A handler that outlived the stop answers now: stopping only the listener left it running.
+    release.add_permits(1);
+    let ending = tokio::task::spawn_blocking(move || client.join().unwrap()).await.unwrap();
+    assert_eq!(ending, Ending::Closed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
