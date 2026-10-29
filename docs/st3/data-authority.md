@@ -92,7 +92,8 @@ re-admission) stores and counts nothing; a repair that deletes a claim and inser
 it again. The totals are node-local: they are not replicated, not part of any digest, and not in
 backups; a restore stores its claims again, counts them, and starts a new series. The exporter
 sends them as `st_claims_stored_total` and `st_claim_body_bytes_stored_total`, cumulative sums
-labelled `kind` and `writer` from `claims_stored_since_unix_ms` in `meta`, whenever they changed.
+labelled `kind` and `writer`, whenever they changed; each series starts when the node first stored
+that kind from that writer.
 
 Claude and Codex response token buckets are `harness.timeline` usage observations. They retain
 the turn ID, model, agent, mission run, and step on the producing node. `local_usage_responses` remembers
@@ -266,6 +267,7 @@ order from the same admitted claims.
 | `local_glass_head_pending` | Local | Glass-head projection work queue. |
 | `local_idle_messages` | Local | Disposable message delivery and source-wake index, maintained by claim writes and backfilled in bounded startup batches. Excluded from replicated projection digests. |
 | `local_latest_slots` | Local | Local latest-retention publication slots and pending local observation pointers. |
+| `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |
 | `local_mailbox_argv_bindings` | Local | Launch-argv binding evidence for native mailbox ownership. |
 | `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |

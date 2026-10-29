@@ -681,7 +681,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h1cdb7cb4b95b owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h23ab0c9cf546 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1353,17 +1353,20 @@ CREATE TABLE IF NOT EXISTS local_latest_slots (
 -- the totals, so the OpenTelemetry exporter reports a true storage rate from them. An ignored
 -- INSERT OR IGNORE (a duplicate, or a retired claim refused) stores nothing and counts nothing;
 -- a repair that deletes and inserts a claim again counts it again. Node-local: never replicated,
--- in no digest, and not in backups (a restore stores its claims again and counts them).
+-- in no digest, and not in backups (a restore stores its claims again and counts them). Each
+-- row's since_unix_ms is when this node first stored that kind from that writer. This schema runs
+-- on every open, so it only creates; it writes no rows.
 CREATE TABLE IF NOT EXISTS claims_stored (
     kind TEXT NOT NULL,
     writer TEXT NOT NULL,
+    since_unix_ms INTEGER NOT NULL,
     claims INTEGER NOT NULL,
     bytes INTEGER NOT NULL,
     PRIMARY KEY (kind, writer)
 ) WITHOUT ROWID;
-INSERT OR IGNORE INTO meta(key, value) VALUES('claims_stored_since_unix_ms', CAST(strftime('%s','now') AS INTEGER) * 1000);
 CREATE TRIGGER IF NOT EXISTS claims_stored_insert AFTER INSERT ON claims BEGIN
-    INSERT OR IGNORE INTO claims_stored(kind, writer, claims, bytes) VALUES(NEW.kind, NEW.origin, 0, 0);
+    INSERT OR IGNORE INTO claims_stored(kind, writer, since_unix_ms, claims, bytes)
+    VALUES(NEW.kind, NEW.origin, CAST(strftime('%s','now') AS INTEGER) * 1000, 0, 0);
     UPDATE claims_stored SET claims=claims+1, bytes=bytes+length(CAST(NEW.body AS BLOB))
     WHERE kind=NEW.kind AND writer=NEW.origin;
 END;
@@ -11175,24 +11178,21 @@ impl crate::otlp::ObservationSource for Store {
         })
     }
 
-    fn claims_stored(&self) -> Result<(u128, Vec<crate::otlp::StoredClaims>)> {
+    fn claims_stored(&self) -> Result<Vec<crate::otlp::StoredClaims>> {
         let connection = self.readers.get();
-        let since = connection
-            .query_row("SELECT value FROM meta WHERE key='claims_stored_since_unix_ms'", [], |row| row.get::<_, String>(0))
-            .optional()?
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
-        let mut statement = connection
-            .prepare_cached("SELECT kind, writer, claims, bytes FROM claims_stored ORDER BY kind, writer")?;
+        let mut statement = connection.prepare_cached(
+            "SELECT kind, writer, since_unix_ms, claims, bytes FROM claims_stored ORDER BY kind, writer",
+        )?;
         let rows = statement.query_map([], |row| {
             Ok(crate::otlp::StoredClaims {
                 kind: row.get(0)?,
                 writer: row.get(1)?,
-                claims: row.get::<_, i64>(2)?.max(0) as u64,
-                bytes: row.get::<_, i64>(3)?.max(0) as u64,
+                since_unix_ms: row.get::<_, i64>(2)?.max(0) as u128,
+                claims: row.get::<_, i64>(3)?.max(0) as u64,
+                bytes: row.get::<_, i64>(4)?.max(0) as u64,
             })
         })?;
-        Ok((since, rows.collect::<Result<Vec<_>, _>>()?))
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 

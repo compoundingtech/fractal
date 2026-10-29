@@ -33,17 +33,19 @@ pub trait ObservationSource: Send + Sync + 'static {
         self: Arc<Self>,
         cursor: u64,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
-    /// When the source started counting stored claims (Unix milliseconds), and its totals per
-    /// kind and writing node since then. The totals grow as claims are stored and never fall
-    /// when claims are deleted.
-    fn claims_stored(&self) -> Result<(u128, Vec<StoredClaims>)>;
+    /// The source's totals of stored claims per kind and writing node, each from when it first
+    /// stored that pair. The totals grow as claims are stored and never fall when claims are
+    /// deleted.
+    fn claims_stored(&self) -> Result<Vec<StoredClaims>>;
 }
 
-/// The claims of one kind from one writing node stored since counting started, and their body bytes.
+/// The claims of one kind from one writing node stored since `since_unix_ms`, when this node first
+/// stored that pair, and their body bytes.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StoredClaims {
     pub kind: String,
     pub writer: String,
+    pub since_unix_ms: u128,
     pub claims: u64,
     pub bytes: u64,
 }
@@ -141,14 +143,14 @@ impl OtlpExporter {
     /// Send the source's claim-write totals as cumulative counters when they changed. The source
     /// counts each claim as it is stored, so trim deleting it later does not change the rate.
     async fn export_claims_stored<S: ObservationSource>(&self, store: &Arc<S>) -> Result<()> {
-        let (since, writes) = {
+        let writes = {
             let store = store.clone();
             tokio::task::spawn_blocking(move || smallclaims::task_cpu::blocking("observations.export", || store.claims_stored())).await??
         };
         if writes.is_empty() || *self.claims_sent.lock().unwrap() == writes {
             return Ok(());
         }
-        let metrics = otlp_claims_stored_metrics(&self.node, &writes, since, smallclaims::store::now_ms());
+        let metrics = otlp_claims_stored_metrics(&self.node, &writes, smallclaims::store::now_ms());
         self.send(&self.metrics_url, &metrics).await?;
         *self.claims_sent.lock().unwrap() = writes;
         Ok(())
@@ -501,16 +503,16 @@ fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
 }
 
 /// Claims stored on this node per kind and writing node, and their body bytes, as cumulative
-/// counters from `since` (Unix milliseconds). Both label sets are bounded: kinds by the schema,
-/// writers by the fleet's members.
-fn otlp_claims_stored_metrics(node: &str, writes: &[StoredClaims], since: u128, now: u128) -> Value {
-    let (started, ended) = ((since * 1_000_000).to_string(), (now.max(since + 1) * 1_000_000).to_string());
+/// counters, each from when that pair was first stored. Both label sets are bounded: kinds by the
+/// schema, writers by the fleet's members.
+fn otlp_claims_stored_metrics(node: &str, writes: &[StoredClaims], now: u128) -> Value {
     let points = |value: fn(&StoredClaims) -> u64| {
         writes
             .iter()
             .map(|write| {
                 json!({
-                    "startTimeUnixNano": started, "timeUnixNano": ended,
+                    "startTimeUnixNano": (write.since_unix_ms * 1_000_000).to_string(),
+                    "timeUnixNano": (now.max(write.since_unix_ms + 1) * 1_000_000).to_string(),
                     "asInt": value(write).to_string(),
                     "attributes": [
                         attribute("kind", json!({ "stringValue": write.kind })),
