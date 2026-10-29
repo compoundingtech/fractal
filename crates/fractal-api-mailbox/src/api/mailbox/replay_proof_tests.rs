@@ -259,7 +259,7 @@ fn retained_native_role_survives_store_reopen_without_minting_a_capability() {
     ).unwrap();
     let before = bindings();
     let index = state.store.index().unwrap();
-    assert_eq!(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap(), Some(fence.clone()));
+    assert_eq!(serde_json::to_value(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap()).unwrap(), serde_json::to_value(Some(&fence)).unwrap());
     assert!(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, "title").unwrap().is_none());
     fractal_api_core::api::native_role::capture(&state, &fence, &peer).unwrap().validate().unwrap();
     assert_eq!(state.store.mailbox_lease_authority(&fence).unwrap(), Some(owner.clone()));
@@ -277,7 +277,7 @@ fn retained_native_role_survives_store_reopen_without_minting_a_capability() {
     assert_eq!(bindings(), before);
 
     connection.execute(
-        "UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1 AND component=?2",
+        /* sqlite-large-value: allow-for-now lv-hc223c025deb1 owner=fractal_api_mailbox::api::mailbox::replay_proof_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_mailbox_leases SET revoked=1 WHERE subject=?1 AND component=?2",
         rusqlite::params![fence.subject, fence.component],
     ).unwrap();
     assert!(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap().is_none());
@@ -304,6 +304,6 @@ fn retained_native_role_cannot_promote_a_changed_provider_session_or_sequence() 
         assert!(proof.validate().is_err());
         assert!(fractal_api_core::api::native_role::capture(&state, &fence, &peer).is_err());
         assert_eq!(state.store.mailbox_lease_authority(&fence).unwrap(), Some(owner));
-        assert_eq!(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap(), Some(fence));
+        assert_eq!(serde_json::to_value(state.store.current_mailbox_fence(&fence.subject, &fence.incarnation, &fence.component).unwrap()).unwrap(), serde_json::to_value(Some(&fence)).unwrap());
     }
 }

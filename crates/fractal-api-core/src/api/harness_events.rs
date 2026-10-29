@@ -28,6 +28,11 @@ pub async fn publish(
     let kind = request.claim.kind.clone();
     let peer = peer.0;
     let (record, changed, transition) = blocking_action(move || {
+        // Preserve the canonical stale-runtime refusal before resolving any role evidence
+        // for the requested generation. The append transaction checks this fence again.
+        crate::store::check_harness_event_runtime(
+            &store.readers.get(), &request.claim.subject, Some(&request.runtime_incarnation),
+        )?;
         let fence = crate::mailbox::Fence::new(
             &request.claim.subject, &request.runtime_incarnation, "events",
         );

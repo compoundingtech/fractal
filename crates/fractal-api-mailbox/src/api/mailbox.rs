@@ -1600,9 +1600,10 @@ mod tests {
             root: state.state_dir.join("drivers"), agent_dir: dir.clone(),
             session_dir: state.state_dir.join("sessions"),
         };
+        let environment: BTreeMap<_, _> = paths.environment(name).into_iter().collect();
         runtime.spawn(&member.runtime_id,
             &fractal_runtime::Launch::Argv(vec!["sleep".into(), "300".into()]),
-            &state.state_dir, &paths.environment(name), None, &BTreeMap::new(), None).unwrap();
+            &state.state_dir, &environment, None, &BTreeMap::new(), None).unwrap();
         let physical = runtime.snapshot().unwrap().into_iter()
             .find(|observation| observation.name == member.runtime_id).unwrap();
         let incarnation = format!("{}:{}", physical.pid.unwrap(), physical.created_at.unwrap());

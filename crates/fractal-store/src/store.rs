@@ -21253,10 +21253,9 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
     Ok(())
 }
 
-/// Record an observation of `local` retention on this node only. It gets no batch, no
-/// envelope and no idempotency row, and it never replicates. A repeated idempotency key
-/// returns the first observation. The record's ID starts with `local-observation/`.
-fn check_harness_event_runtime(
+/// Require this seat's exact current running runtime for a native event publication.
+/// API preflight uses the same typed refusal as the mandatory writer-transaction guard.
+pub fn check_harness_event_runtime(
     connection: &Connection,
     subject: &str,
     runtime: Option<&str>,
@@ -21282,14 +21281,6 @@ fn check_harness_event_runtime(
         ));
     }
     Ok(())
-}
-
-fn append_local_observation_fenced(
-    graph: &GraphStore,
-    input: &ClaimInput,
-    event_runtime: Option<&str>,
-) -> Result<(ClaimRecord, bool), St3Error> {
-    append_local_observation_checked(graph, input, event_runtime, None)
 }
 
 fn append_local_observation_checked(

@@ -2389,7 +2389,9 @@ async fn drive_codex_native(
                     };
                     let _ = replacement.exec(subject, &root, &resume);
                     loop_state = resume.loop_state;
-                    task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, ProviderStart::Adopt(session));
+                    task = spawn_codex_provider(
+                        client, subject, &paths, &state_dir, &argv, ProviderStart::Adopt(session), None,
+                    );
                     completion_announced = false;
                     continue;
                 }
