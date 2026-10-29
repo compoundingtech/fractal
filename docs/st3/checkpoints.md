@@ -196,9 +196,9 @@ agree on a checkpoint only when they run the same rules. In summary:
 | `runtime.action.*` with no actor, `render.applied`, `runtime.readiness-deadline-reached` | subject (and action, incarnation, status) | the newest; only claims dated at least five days before the cut go |
 | `sekret.called`, `sekret.exited`, `sekret.refused`, `sekret.changed` written before they became local observations | subject | the newest; only claims dated at least five days before the cut go |
 | `harness.limits` | subject | the newest; the newest reading the account fold accepts, and any accepted at the same time; every reading measured within an hour of the newest reading of its account group (driver, account, declared account, weekly or five-hour only) across every seat |
-| `harness.todo.observed` | subject | the newest (a rule that predates its description line) |
+| `harness.todo.observed` | subject | the newest |
 | `runtime.reconcile-decision` | subject, decision key | the newest of each key; the reconciler asks whether a key was recorded, reads the newest member-reconcile decision and the subject's newest |
-| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut (rules version 18, following #1473's allocated 17); the resolution is durable (see [Harness questions](harness-questions.md)) |
+| `harness-question.observed` | subject | every observation while pending; newest observation indefinitely once resolved at least a day before the cut; the resolution is durable (see [Harness questions](harness-questions.md)) |
 | `harness.usage`, response rollups | subject, incarnation, model, account, run, step, host | the last snapshot of each UTC hour in the seven days before the cut, the newest snapshot before that window, and the newest of all |
 | `harness.usage`, session cumulative | subject, incarnation | the newest and the last claim of the largest total |
 | `harness.usage`, context occupancy | subject, incarnation | the newest |
