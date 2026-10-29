@@ -440,8 +440,14 @@ class FlipReady(unittest.TestCase):
         self.assertIn('1 runs where a host note disagreed with the real job', entry['why_not'])
 
     def test_the_rust_tests_flip_trusts_host_and_agent_notes_for_pull_requests_and_no_ci_note(self):
-        text = (self.repo / flip.POLICY).read_text()
+        committed = (self.repo / flip.POLICY).read_text()
+        # The shadow entry the flip started from (2026-10-28): not enforced, and the wrapper also trusting fleet (CI) notes.
+        shadow = json.loads(committed)
+        shadow['checks']['rust-tests']['enforce'] = False
+        shadow['checks']['rust-tests']['kinds']['wrapper']['trust_levels'] = ['fleet', 'host', 'agent', 'queue']
+        text = json.dumps(shadow, indent=2) + '\n'
         new, entry = flip.flip_policy(text, 'rust-tests')
+        self.assertEqual(json.loads(new), json.loads(committed))                            # the committed policy is exactly this flip
         self.assertTrue(entry['enforce'])
         self.assertEqual(entry['kinds']['wrapper']['trust_levels'], ['host', 'agent', 'queue'])
         self.assertEqual(entry['kinds']['wrapper']['by_level']['queue']['events'], ['merge_group'])   # queue notes never cover a pull request
