@@ -119,9 +119,10 @@ fn apply(store: &Store, write: &Write, n: usize) {
         .unwrap();
 }
 
-/// Every answer the readers of these kinds give: the whole graph, each observer's newest
-/// observation (what resources and reconcile read), each seat's current harness, and each seat's
-/// status history.
+/// Every answer the readers of these kinds give: the whole graph, each observer's and resource's
+/// newest observation (what resources and reconcile read), each resource's observations newest
+/// first (what a GitHub watch walks back to find when a pull request left the merge queue), each
+/// seat's current harness, and each seat's status history.
 fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let connection = store.readers.get();
     let mut seats = Vec::new();
@@ -130,6 +131,20 @@ fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
         seats.push(format!("observer/watch-{observer}: {:?}", newest.map(|claim| claim.body)));
         let newest = store.latest_claim(&format!("resource/pr/{observer}"), Some("resource.observed")).unwrap();
         seats.push(format!("resource/pr/{observer}: {:?}", newest.map(|claim| claim.body)));
+        let walked = connection
+            .prepare(
+                "SELECT accepted_at_unix_ms, json_extract(body, '$.fields.state') FROM claims
+                 WHERE subject=?1 AND kind='resource.observed'
+                 ORDER BY length(accepted_at_unix_ms) DESC, accepted_at_unix_ms DESC, store_index DESC",
+            )
+            .unwrap()
+            .query_map([format!("resource/pr/{observer}")], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        seats.push(format!("resource/pr/{observer} walked back: {walked:?}"));
     }
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
@@ -162,7 +177,7 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
     assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
     assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
-    assert_eq!(claims_of(&store, "resource.observed"), 1, "the newest of the resource stays");
+    assert_eq!(claims_of(&store, "resource.observed"), 10, "resource observations stay whole");
     let retired: i64 = store
         .readers
         .get()
@@ -293,6 +308,28 @@ fn local_trim_leaves_harness_observations_whole() {
     let before = answers(&store, context.now_unix_ms);
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
     assert_eq!(claims_of(&store, "harness.observed"), harness);
+    assert_eq!(claims_of(&store, "observer.observed"), 1);
+    assert_eq!(answers(&store, context.now_unix_ms), before);
+}
+
+/// A GitHub watch finds when a pull request left the merge queue by walking the request's
+/// observations back to the watch's last wake, which can be before the cut. The audited
+/// `resource.observed` rule keeps only the newest, so local trim leaves the kind whole until a
+/// rule keeps that history.
+#[test]
+fn local_trim_leaves_resource_observations_whole() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    for (n, state) in [0, 0, 2, 0].into_iter().enumerate() {
+        apply(&store, &Write::Resource { resource: 0, state }, n);
+    }
+    for n in 4..20 {
+        apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
+    }
+    let before = answers(&store, context.now_unix_ms);
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    assert_eq!(claims_of(&store, "resource.observed"), 4);
     assert_eq!(claims_of(&store, "observer.observed"), 1);
     assert_eq!(answers(&store, context.now_unix_ms), before);
 }

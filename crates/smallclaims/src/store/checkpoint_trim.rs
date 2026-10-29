@@ -22,11 +22,12 @@ use crate::replication::InventoryCheckpoint;
 
 /// The kinds a member that trims locally drops, each by its audited rule in
 /// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
-/// same from the full and the trimmed log. A kind joins only with such a test. Envelopes go
-/// whole, so `resource.observed` comes with `observer.observed`: observers write them in the
-/// same batches. The audited `harness.observed` rule stays out: dropping a credential transition
-/// moves the `since` of a seat's needs-login state, which no projection digest covers.
-pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed", "resource.observed"];
+/// same from the full and the trimmed log. A kind joins only with such a test. Two audited rules
+/// stay out because a reader reads the history they drop, which no projection digest covers:
+/// `harness.observed`, where a dropped credential transition moves the `since` of a seat's
+/// needs-login state, and `resource.observed`, where a GitHub watch finds when a pull request left
+/// the merge queue by walking its observations back.
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed"];
 
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
