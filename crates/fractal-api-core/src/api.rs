@@ -1844,6 +1844,9 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "identity-cycle"
+        | "identity-occupied"
+        | "identity-retired-source"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
         | "invalid-custody-successor"
@@ -1855,6 +1858,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "validation-failed"
         | "idempotency-conflict"
         | "idempotency-key-expired"
+        | "legacy-action-receipt-untrusted"
         | "issuer-required"
         | "suspend-authored-session-selection"
         | "arrangement-exists"
