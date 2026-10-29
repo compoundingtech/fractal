@@ -6,3 +6,4 @@ record 91a77fbb9bbedc46df60a2e072768b75ff034d44 typescript-client 0 fleet/ci 202
 record a0cc5b8f4ce05d826133f15729c8ed96e05766bc linux-clippy 0 fleet/ci 2026-10-28T21:27:59Z
 record ec84f43c7abb2841ccff2bdb66d6fd017e0e1130 linux-tests 0 fleet/ci 2026-10-28T21:29:58Z
 record f3d85932418977557bccd3f34c6cfcd53aecc4d9 ci-script-tests 0 fleet/ci 2026-10-28T21:25:57Z
+gc 2026-10-29T03:57:31+00:00 567a284ac1b3190c84a41e8e626c0b0a68987330d76933c4d4e9e05925b563df
