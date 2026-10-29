@@ -378,6 +378,9 @@ async fn collect_sql_pages(
     query: ClientListQuery,
     request_time: u128,
 ) -> Vec<Value> {
+    // A commit folds selectors for at most 10 ms of wall time; on a loaded host a message can
+    // still be pending, and the first page would be cut below the snapshot it was asked for.
+    while state.store.maintain_client_message_selectors().unwrap() {}
     let snapshot = new_client_snapshot(state);
     let mut continuation = query.clone();
     let mut items = Vec::new();
