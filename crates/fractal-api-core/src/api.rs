@@ -116,6 +116,7 @@ mod github_watch;
 pub mod harness_events;
 pub mod mailbox;
 pub mod mail_backlog;
+pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
