@@ -621,10 +621,28 @@ impl Store {
     ) -> Result<BTreeSet<String>> {
         let mut known = {
             let connection = self.readers.get();
+            // Both primary keys start with the writer, so step from one writer to the next with
+            // a seek each. A DISTINCT reads every envelope's index entry instead, which on a large
+            // node is hundreds of megabytes a call.
             connection
                 .prepare_cached(
-                    "SELECT DISTINCT writer FROM replica_envelopes
-                     UNION SELECT DISTINCT writer FROM checkpoint_envelopes",
+                    /* sqlite-large-value: allow-for-now lv-h0c33f43323e7 owner=smallclaims::store::checkpoint_agreement TODO=trace-statement-and-value-representation */ "WITH RECURSIVE
+                         replica(writer) AS (
+                             SELECT MIN(writer) FROM replica_envelopes
+                             UNION ALL
+                             SELECT (SELECT MIN(writer) FROM replica_envelopes
+                                     WHERE writer>replica.writer)
+                             FROM replica WHERE replica.writer IS NOT NULL
+                         ),
+                         checkpoint(writer) AS (
+                             SELECT MIN(writer) FROM checkpoint_envelopes
+                             UNION ALL
+                             SELECT (SELECT MIN(writer) FROM checkpoint_envelopes
+                                     WHERE writer>checkpoint.writer)
+                             FROM checkpoint WHERE checkpoint.writer IS NOT NULL
+                         )
+                     SELECT writer FROM replica WHERE writer IS NOT NULL
+                     UNION SELECT writer FROM checkpoint WHERE writer IS NOT NULL",
                 )?
                 .query_map([], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<BTreeSet<_>>>()?
