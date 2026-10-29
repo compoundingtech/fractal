@@ -6118,20 +6118,25 @@ fn claim_walk_note(store: &Store, subject: &str) -> String {
 /// nothing to move, so only the walk can bring a claim over. Returns the queries sent.
 fn walk_to_the_end(source: &Store, target: &Store, fleet: &str) -> Vec<crate::replication::ClaimRangeQuery> {
     let first = target
-        .receive_replication_exchange("source", fleet, &source.export_replication_summary(fleet).unwrap())
+        .receive_replication_exchange(&source.origin, fleet, &source.export_replication_summary(fleet).unwrap())
         .unwrap();
-    let Some(comparison) = first.claim_ranges.filter(|comparison| !comparison.same) else {
+    let Some(comparison) = first.claim_ranges.filter(|comparison| !all_same(comparison)) else {
         return Vec::new();
     };
-    let mut walk = ClaimWalk::new(&comparison.pair);
+    let mut walk = if comparison.same {
+        ClaimWalk::finished(&comparison.pair)
+    } else {
+        ClaimWalk::new(&comparison.pair)
+    };
+    walk.follow_retired(&comparison);
     let mut queries = Vec::new();
     while let Some(query) = walk.next_query() {
-        assert!(queries.len() < 32, "a walk ends");
+        assert!(queries.len() < 64, "a walk ends");
         queries.push(query.clone());
         let mut inventory = source.export_replication_summary(fleet).unwrap().inventory;
         inventory.claim_range_query = Some(query);
         let answer = source.export_replication_exchange(fleet, &inventory).unwrap();
-        let receipt = target.receive_replication_exchange("source", fleet, &answer).unwrap();
+        let receipt = target.receive_replication_exchange(&source.origin, fleet, &answer).unwrap();
         target.validate_replication_backlog().unwrap();
         if let Some(comparison) = &receipt.claim_ranges {
             walk.absorb(comparison);
@@ -6284,4 +6289,143 @@ async fn a_claim_walk_runs_over_the_signed_peer_route() {
     assert!(fetched, "tops, leaves, IDs and the claim fit in one exchange's round trips");
     assert!(target.claim_by_id(&lacking).unwrap().is_some());
     server.abort();
+}
+
+fn retire_claim_ids(store: &Store, ids: &[String]) {
+    let connection = store.connection.write();
+    for id in ids {
+        connection
+            .execute(
+                &format!(
+                    /* sqlite-large-value: allow-for-now lv-hbdb013909404 owner=smallclaims::sync::worker_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO retired_claim_ids(id) VALUES ({})",
+                    crate::store::retired::identity_sql("?1")
+                ),
+                [id],
+            )
+            .unwrap();
+    }
+}
+
+fn local_trim_member(origin: &str, fleet: &str) -> Store {
+    let store = plain_memory(origin).unwrap();
+    store.bind_fleet(fleet).unwrap();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    store
+}
+
+/// Push everything `from` holds to `to`, as an older build or a first sync does, whatever
+/// `to`'s inventory lists.
+fn push_all(from: &Store, from_name: &str, to: &Store, fleet: &str) {
+    let push = from.export_replication_exchange(fleet, &ReplicationInventory::default()).unwrap();
+    to.receive_replication_exchange(from_name, fleet, &push).unwrap();
+    to.validate_replication_backlog().unwrap();
+}
+
+fn retired_summary(store: &Store) -> Option<crate::replication::ClaimRangeDigest> {
+    store.claim_range_summary().unwrap().retired.and_then(|retired| retired.retained)
+}
+
+#[test]
+fn members_that_trim_locally_learn_each_others_retired_claims_by_walking_ranges() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d1";
+    let source = local_trim_member("source", fleet);
+    let target = local_trim_member("target", fleet);
+    // Retired IDs spread over many leaves, and one claim the target still holds.
+    let held = claim_walk_note(&target, "note/held-at-target");
+    let mut retired: Vec<String> = (0..100u32)
+        .map(|n| {
+            use sha2::Digest as _;
+            hex::encode(sha2::Sha256::digest(n.to_be_bytes()))
+        })
+        .collect();
+    retired.push(held.clone());
+    retire_claim_ids(&source, &retired);
+    fold_claim_ranges(&[&source, &target]);
+    assert!(retired_summary(&source).is_some(), "a member that trims locally summarizes its retired IDs");
+
+    let queries = walk_to_the_end(&source, &target, fleet);
+    assert!(queries.iter().any(|query| query.retired.is_some()), "{queries:?}");
+    assert!(queries.iter().all(|query| query.claims.is_empty()), "a retired ID is recorded, never fetched");
+    let connection = target.readers.get();
+    for id in &retired {
+        assert!(crate::store::retired::claim_retired(&connection, id).unwrap(), "{id}");
+    }
+    drop(connection);
+    fold_claim_ranges(&[&target]);
+    assert_eq!(retired_summary(&target), retired_summary(&source));
+    // What it learned it neither serves nor takes back.
+    assert!(target.envelopes_carrying_claims(std::slice::from_ref(&held)).unwrap().is_empty());
+
+    // An ordinary member neither sends its retired IDs nor learns a peer's.
+    let ordinary = plain_memory("ordinary").unwrap();
+    ordinary.bind_fleet(fleet).unwrap();
+    ordinary.import_retired_identities_paced(|_| {}).unwrap();
+    fold_claim_ranges(&[&ordinary]);
+    assert!(retired_summary(&ordinary).is_none());
+    walk_to_the_end(&source, &ordinary, fleet);
+    assert!(!crate::store::retired::claim_retired(&ordinary.readers.get(), &retired[0]).unwrap());
+}
+
+#[test]
+fn a_fresh_member_joining_from_trimmed_members_ends_with_the_same_answers() {
+    let fleet = "7c0a1d2e-3f40-4a5b-8c6d-7e8f90a1b2d2";
+    // A member on an older build, or one that has not trimmed: it still holds what the others
+    // deleted, and pushes everything it holds.
+    let holder = plain_memory("holder").unwrap();
+    holder.bind_fleet(fleet).unwrap();
+    let kept: Vec<String> = (0..12).map(|n| claim_walk_note(&holder, &format!("note/kept-{n}"))).collect();
+    let deleted: Vec<String> = (0..4).map(|n| claim_walk_note(&holder, &format!("note/superseded-{n}"))).collect();
+
+    // The first trimmed member deleted them, and with them their envelopes, which carried
+    // nothing else; the second learns that only from the first.
+    let oak = local_trim_member("oak", fleet);
+    retire_claim_ids(&oak, &deleted);
+    holder.seal_local_batches().unwrap();
+    for id in &deleted {
+        let (writer, sequence, hash): (String, u64, String) = holder
+            .readers
+            .get()
+            .query_row(
+                "SELECT envelopes.writer, envelopes.sequence, envelopes.envelope_hash
+                 FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
+                 WHERE claims.id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        crate::store::retired::retire_envelope_tx(&oak.connection.write(), &writer, sequence, &hash).unwrap();
+    }
+    push_all(&holder, "holder", &oak, fleet);
+    let elm = local_trim_member("elm", fleet);
+    push_all(&oak, "oak", &elm, fleet);
+    fold_claim_ranges(&[&oak, &elm]);
+    walk_to_the_end(&oak, &elm, fleet);
+    for id in &deleted {
+        assert!(crate::store::retired::claim_retired(&elm.readers.get(), id).unwrap(), "elm learned {id}");
+    }
+    push_all(&holder, "holder", &elm, fleet);
+
+    // A fresh member joins from the trimmed members, then meets the holder.
+    let fresh = local_trim_member("fresh", fleet);
+    push_all(&elm, "elm", &fresh, fleet);
+    fold_claim_ranges(&[&elm, &fresh]);
+    walk_to_the_end(&elm, &fresh, fleet);
+    push_all(&holder, "holder", &fresh, fleet);
+    fold_claim_ranges(&[&holder, &oak, &elm, &fresh]);
+    walk_to_the_end(&holder, &fresh, fleet);
+
+    for member in [&oak, &elm, &fresh] {
+        for id in &kept {
+            assert!(member.claim_by_id(id).unwrap().is_some(), "{id}");
+        }
+        for id in &deleted {
+            assert!(member.claim_by_id(id).unwrap().is_none(), "{} re-admitted {id}", member.origin);
+        }
+    }
+    let answers = |store: &Store| store.claim_range_summary().unwrap();
+    assert_eq!(answers(&fresh).retained, answers(&oak).retained, "the same claims");
+    assert_eq!(answers(&elm).retained, answers(&oak).retained);
+    assert_eq!(retired_summary(&fresh), retired_summary(&oak), "the same deletions");
+    assert_ne!(answers(&holder).retained, answers(&oak).retained, "control: the holder differs");
 }

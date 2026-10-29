@@ -149,6 +149,24 @@ pub fn envelope_refused(
             && envelope_retired(connection, writer, sequence, envelope_hash)?))
 }
 
+/// Record an envelope identity as retired.
+pub fn retire_envelope_tx(
+    connection: &Connection,
+    writer: &str,
+    sequence: u64,
+    envelope_hash: &str,
+) -> Result<()> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            /* sqlite-large-value: allow-for-now lv-hca2b050ed4fb owner=smallclaims::store::retired TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO retired_envelopes(writer, sequence, envelope_hash)
+             VALUES (?1, ?2, {})",
+            identity_sql("?3")
+        )
+    });
+    connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hd45d8b1edb9e owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ &QUERY)?.execute(/* sqlite-large-value: allow-for-now lv-h254df5a61bd9 owner=smallclaims::store::retired TODO=trace-statement-and-value-representation */ params![writer, sequence, envelope_hash])?;
+    Ok(())
+}
+
 /// The checkpoint states whose tombstones are committed deletions. A checkpoint still
 /// `recording` (or sealed or verified) has deleted nothing.
 const COMMITTED: &str = "('trimming', 'trimmed')";
