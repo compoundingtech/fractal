@@ -49,8 +49,10 @@ signing key within reach: code in that tree runs here. That is the cooperative t
 ("Host keys"); do not run it on a branch you would not run by hand.
 
 Each check's --time-limit counts only the time it runs: the waits for a host build slot that scripts/ci-local reports as they happen
-(CI_LOCAL_QUEUE_LOG) extend it, up to --queue-limit seconds of waiting in all, so a busy host's queue cannot use up a check's time. The
-summary row says how long a check waited.
+(CI_LOCAL_QUEUE_LOG) extend it, up to --queue-limit seconds of waiting in all, so a busy host's queue cannot use up a check's time. A
+scripts/ci-local check's time counts only from ci-local's own start (its `ci-local: stage logs in` line, after its load gate): before it,
+the build admission of its `nix develop` and the dev shell are waiting, which no queue log records, and only SILENCE_LIMIT seconds without
+any output stop it. The note records that wait as the input pre_start_s. The summary row says how long a check waited, and for what.
 
 Every run that gets as far as its summary appends one JSON line (version 1: start, end and total seconds, host, tree, the checks, every
 summary row and, when scripts/ci-local printed its stage table, linux-gate's stages) to ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl,
@@ -1470,6 +1472,10 @@ STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\
 STREAM_GRACE = 5
 QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
 LIMIT_POLL = 1.0  # how often a check's limit is read again while it runs
+# scripts/ci-local prints this once its own host-load gate has let it start, before its setup: a ci-local check's --time-limit counts from
+# here. Before it the check waits (build admission for its `nix develop`, the dev shell, ci-local's load gate) and only SILENCE_LIMIT bounds it.
+CI_LOCAL_STARTED = b'ci-local: stage logs in '
+SILENCE_LIMIT = 1800  # seconds without any output, before a ci-local check has started, after which it is stopped (a waiting build-admission prints every 60 s)
 
 
 def queued_seconds(path, now=None):
@@ -1506,20 +1512,47 @@ def queued_seconds(path, now=None):
 
 class Limit:
     """A check's time limit that counts only the time it runs: `seconds` of running, plus the build-slot waits read from `queue_log`
-    (queued_seconds), of which at most `queue_limit` seconds in all."""
+    (queued_seconds), of which at most `queue_limit` seconds in all.
 
-    def __init__(self, seconds, queue_log=None, queue_limit=QUEUE_LIMIT):
+    With `begins_at` (bytes the check prints once it really starts, CI_LOCAL_STARTED) the running time counts only from that output on
+    (`output` is given every chunk the check prints): what comes before it is waiting, admission for its dev shell included, which no
+    queue log records (2026-10-27: a linux-gate spent its whole 7200 s before ci-local started and was stopped with its tests passing). Until
+    then `silence` seconds without any output stop it (`silent` is then True), and so does waiting longer than `queue_limit` in all (`waited_out`):
+    a wedged admission prints every 60 s and is never silent. `pre_start` is the waiting time."""
+
+    def __init__(self, seconds, queue_log=None, queue_limit=QUEUE_LIMIT, begins_at=None, silence=None):
         self.seconds, self.queue_log, self.queue_limit = seconds, queue_log, queue_limit
-        self.started = time.monotonic()
+        self.started = self.heard = time.monotonic()
+        self.begins_at, self.tail, self.pre_start, self.silent, self.waited_out = begins_at, b'', 0.0, False, False
+        self.silence = SILENCE_LIMIT if silence is None else silence
+
+    def output(self, chunk):
+        """The check printed `chunk`: it is not silent, and when `begins_at` is in it, its running time starts now."""
+        now = self.heard = time.monotonic()
+        if self.begins_at:
+            seen = self.tail + chunk
+            if self.begins_at in seen:
+                self.pre_start, self.started, self.begins_at = now - self.started, now, None
+            else:
+                self.tail = seen[-len(self.begins_at):]
 
     def queued(self):
         return queued_seconds(self.queue_log) if self.queue_log else 0.0
 
     def remaining(self):
         """Seconds left before the check is over its limit (0 or less once it is): running time or waiting time, whichever ends first."""
+        if self.begins_at:  # not started yet: silence ends it, and so does a wait past queue_limit
+            now = time.monotonic()
+            quiet, waiting = self.silence - (now - self.heard), self.queue_limit - (now - self.started)
+            self.silent, self.waited_out = quiet <= 0, waiting <= 0 < quiet
+            return min(quiet, waiting)
         queued = self.queued()
         ran = time.monotonic() - self.started - queued
         return min(self.seconds - ran, self.queue_limit - queued)
+
+    def waiting(self):
+        """Seconds the check has waited before it started: so far, while it has not."""
+        return time.monotonic() - self.started if self.begins_at else self.pre_start
 
 
 def wait_limited(process, limit):
@@ -1547,9 +1580,13 @@ def run_limited(argv, limit, **options):
 
 
 def queue_note(limit):
-    """What the summary row adds about the check's build-slot waits, or ''."""
-    queued = round(limit.queued())
-    return f'; waited {queued}s for build slots (not counted against --time-limit)' if queued else ''
+    """What the summary row adds about the check's waits before it started and for build slots, or ''."""
+    queued, waited = round(limit.queued()), round(limit.waiting())
+    notes = ([f'stopped after {limit.silence:g}s without output before ci-local started'] if limit.silent else []) + \
+            ([f'stopped after waiting {limit.queue_limit:g}s (--queue-limit) before ci-local started'] if limit.waited_out else []) + \
+            ([f'waited {waited}s before ci-local started (admission, dev shell)'] if waited else []) + \
+            ([f'waited {queued}s for build slots'] if queued else [])
+    return f'; {", ".join(notes)} (not counted against --time-limit)' if notes else ''
 
 
 def ci_local_stages(path):
@@ -1571,11 +1608,12 @@ def ci_local_stages(path):
     return stages
 
 
-def streamed(argv, log, timeout, **options):
+def streamed(argv, log, timeout, pre_start=None, **options):
     """`argv`'s exit code (124 once `timeout`, seconds or a Limit, has run out), with its output (stdout and stderr, as one) copied as it comes both to this terminal, unchanged,
     and to the file `log`, so the summary can read what it printed. subprocess.run's own semantics otherwise: past the timeout the process
     itself is killed (not its group: what it started is left as before) and waited for, and any error here (TERM's exit included) kills it
-    too. Once it exited, what it left behind holding the pipe gets STREAM_GRACE seconds, then the pipe is closed."""
+    too. Once it exited, what it left behind holding the pipe gets STREAM_GRACE seconds, then the pipe is closed. When the Limit waits for the
+    check to start (begins_at), the seconds it waited are written to the file `pre_start` once it has."""
     sys.stdout.flush()
     raw = getattr(sys.stdout, 'buffer', None)
     decode = codecs.getincrementaldecoder('utf-8')(errors='replace').decode
@@ -1592,6 +1630,10 @@ def streamed(argv, log, timeout, **options):
                 if not chunk:
                     break
                 kept.write(chunk)
+                waiting = limit.begins_at is not None
+                limit.output(chunk)
+                if waiting and limit.begins_at is None and pre_start:
+                    Path(pre_start).write_text(f'{round(limit.pre_start)}\n')
                 if raw:
                     raw.write(chunk)
                     raw.flush()
@@ -1888,16 +1930,22 @@ def main(argv):
                 if name == WEB:
                     wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                 started = time.monotonic()
-                limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit)
+                streams = output is None and CI_LOCAL in LOCAL[name]
+                limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
                 environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
+                pre_start = Path(scratch) / f'pre-start-{name}.txt'
+                if streams and takes_input_files(tools['evidence-wrap']):
+                    # The seconds it waited before ci-local started, recorded in the note: written once it has started (read after it ends).
+                    pre_start.write_text('')
+                    wrap += ['--input-file', f'pre_start_s={pre_start}']
                 command = wrap + ['--'] + LOCAL[name]
                 print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
                 command = governed(command, name) if name in BUILDS else command
-                if output is None and CI_LOCAL in LOCAL[name]:
+                if streams:
                     # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
                     # so the run's record can carry the stages.
                     log = Path(scratch) / f'{name}-output.log'
-                    code = streamed(command, log, limit, cwd=directory, env=environment)
+                    code = streamed(command, log, limit, cwd=directory, env=environment, pre_start=pre_start)
                     stages[:] = ci_local_stages(log)
                 else:
                     code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,

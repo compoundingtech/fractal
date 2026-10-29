@@ -299,7 +299,11 @@ def prefetch_manifests(revision, base):
     missing = [oid for oid in wanted if OID.match(oid) and run('git', 'cat-file', '-e', oid, env={'GIT_NO_LAZY_FETCH': '1'}).returncode != 0]
     if not missing:
         return 'none'
-    return 'ok' if run('git', 'fetch', '--no-tags', '-q', 'origin', *missing).returncode == 0 else 'failed'
+    # No negotiation: the clone has main's commits but not their blobs, and a server with bitmaps would leave out every manifest that
+    # an advertised commit reaches, which is each one main changed since the branch point. The lazy fetch of a partial clone asks the
+    # same way.
+    return 'ok' if run('git', '-c', 'fetch.negotiationAlgorithm=noop', 'fetch', '--no-tags', '-q', 'origin', *missing).returncode == 0 \
+        else 'failed'
 
 
 def fetch_member_notes(verifier, base, check, repository, revision='HEAD'):

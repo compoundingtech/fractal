@@ -2267,12 +2267,13 @@ impl Ui {
         // No label at the left: the bar starts at what is live (Nathan, 2026-10-06).
         let mut spans = vec![Span::styled(" ", bar(theme::strong(theme::ACCENT)))];
         let (glyph, word, color) = match &self.world.link {
-            Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged", theme::RED),
-            Link::Live if !self.world.stale.is_empty() => ("◐", "stale", theme::YELLOW),
-            Link::Live if !self.world.behind.is_empty() => ("◐", "behind", theme::YELLOW),
-            Link::Live => ("●", "live", theme::GREEN),
-            Link::Connecting => (self.spinner(), "connecting", theme::YELLOW),
-            Link::Offline(_) => ("○", "offline", theme::RED),
+            Link::Live if !self.world.diverged.is_empty() => ("⚠", "diverged".to_owned(), theme::RED),
+            // Stale says which list: the word alone sent the person hunting for why.
+            Link::Live if !self.world.stale.is_empty() => ("◐", stale_word(&self.world.stale), theme::YELLOW),
+            Link::Live if !self.world.behind.is_empty() => ("◐", "behind".to_owned(), theme::YELLOW),
+            Link::Live => ("●", "live".to_owned(), theme::GREEN),
+            Link::Connecting => (self.spinner(), "connecting".to_owned(), theme::YELLOW),
+            Link::Offline(_) => ("○", "offline".to_owned(), theme::RED),
         };
         let link_text = format!("{glyph} {word}");
         // The connection opens what is known of it: this machine, or why it is not reached.
@@ -4423,6 +4424,17 @@ fn visible_tabs(widths: &[u16], current: usize, room: u16) -> (usize, usize) {
         last += 1;
     }
     (first, last)
+}
+
+/// The bar's word while lists st stopped serving are shown from their last copy: `stale · Agents`,
+/// or `stale · Agents +1` for more. Each reason is `List: why`; clicking the word says the why.
+fn stale_word(stale: &[String]) -> String {
+    let first = stale.first().map_or("", |why| why.split(':').next().unwrap_or(why));
+    match stale.len() {
+        0 => "stale".to_owned(),
+        1 => format!("stale · {first}"),
+        count => format!("stale · {first} +{}", count - 1),
+    }
 }
 
 #[cfg(test)]

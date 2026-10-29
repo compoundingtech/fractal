@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A write that holds the store's writer for more than 1 s logs one line naming its holder, how long it held the writer and how long it waited",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Writes commit exactly as before; only a log line is added after a long hold ends."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or stored-format change. The new WARN line carries holder (the request route or daemon task), client (the caller), at (the code location that asked), kind (batch or lend), held_ms, waited_ms, writes and stages."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back removes the log line; nothing else changes."
+  }
+}

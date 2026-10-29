@@ -1193,6 +1193,11 @@ pub struct Reconciler<R = NativeRuntime> {
     /// index of the subject's newest declaration it was read from.
     declared_checkouts: Mutex<HashMap<String, (u64, Option<(Checkout, String)>)>>,
     materialized_mission_generations: Mutex<BTreeSet<String>>,
+    /// Held while mission runs are evaluated, by a pass or by `evaluate_changed_mission_runs`, so
+    /// no run is evaluated twice at once.
+    mission_evaluation: Mutex<()>,
+    /// How far `evaluate_changed_mission_runs` has read the change feed, apart from the passes.
+    mission_reads_cursor: Mutex<Option<(u64, i64)>>,
     /// Found launch evidence is immutable for one origin and incarnation. Missing evidence
     /// is checked again on a subject change or the existing full-pass safety interval.
     launched_members: Mutex<HashMap<(String, String, String), LaunchEvidence>>,
@@ -1391,6 +1396,8 @@ impl Reconciler<NativeRuntime> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            mission_evaluation: Mutex::new(()),
+            mission_reads_cursor: Mutex::new(None),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -1554,6 +1561,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            mission_evaluation: Mutex::new(()),
+            mission_reads_cursor: Mutex::new(None),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -7701,13 +7710,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         launch: &MemberSpec,
     ) -> Option<String> {
         let driver = crate::accounts::harness_driver(&subject.desired)?;
-        let configured = crate::accounts::login_environment_name(driver).and_then(|variable| {
-            launch
-                .environment
-                .get(variable)
-                .cloned()
-                .or_else(|| std::env::var(variable).ok())
-        });
+        // A harness with a login directory names it in that variable; omp names the key file it
+        // reads in its own.
+        let configured = crate::accounts::login_environment_name(driver)
+            .or_else(|| (driver == "omp").then_some(crate::accounts::OMP_KEY_FILE_ENV))
+            .and_then(|variable| {
+                launch
+                    .environment
+                    .get(variable)
+                    .cloned()
+                    .or_else(|| std::env::var(variable).ok())
+            });
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let accounts = self.store.declared_accounts().ok()?;
         crate::accounts::unbound_login_account(
@@ -9797,6 +9810,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_mission_runs_pass(&self) -> Result<()> {
+        // Before reading what changed: a mark set while `evaluate_changed_mission_runs` evaluated
+        // the run would be cleared when that evaluation finished.
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.incremental.observe(&self.store)?;
         // A gate runner's exit is not a claim: look again at the runners evaluations wait on.
         self.incremental.observe_execs(|runtime_id| {
@@ -9807,10 +9826,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .map(|observation| observation.status)
         });
         let ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
-        self.evaluate_mission_run_ids(ids)
+        self.evaluate_mission_run_ids_held(ids)
     }
 
     pub fn evaluate_mission_run_ids(&self, ids: Vec<String>) -> Result<()> {
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.evaluate_mission_run_ids_held(ids)
+    }
+
+    /// [`Self::evaluate_mission_run_ids`], with `mission_evaluation` already held.
+    fn evaluate_mission_run_ids_held(&self, ids: Vec<String>) -> Result<()> {
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
         let mut changed = false;
@@ -9836,85 +9864,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 continue;
             }
-            let cpu_started = crate::incremental::thread_cpu();
-            let wrote_mark = smallclaims::touched::wrote_len();
-            let mut due = None;
-            let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
-                smallclaims::touched::record_due(|| {
-                    self.isolate("mission-run", &subject, || {
-                        let (run, mission) = self.store.mission_run_for_evaluation(id)?;
-                        active_generations.insert(run.generation.clone());
-                        active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
-                        // From the view the evaluation started with: a write it makes changes subjects
-                        // it read, so the next pass evaluates it again and takes the new times.
-                        due = crate::incremental::run_due(&run, now_ms());
-                        // Telling a run's reporter never holds the run back or fails it.
-                        match self.run_report(&run.subject).and_then(|report| {
-                            report
-                                .map(|report| self.report_run(&run, &report, now_ms()))
-                                .transpose()
-                        }) {
-                            Ok(None) => {
-                                // A run whose reporter was cleared has nobody left to fail.
-                                if let Err(error) = self.close_fault(
-                                    &run.subject,
-                                    run_report::REPORT_FAULT_SCOPE,
-                                    "the run reports to nobody",
-                                ) {
-                                    eprintln!("st3: run report for {}: {error:#}", run.subject);
-                                }
-                            }
-                            Ok(Some(stalls_at)) => {
-                                due = [due, stalls_at].into_iter().flatten().min();
-                            }
-                            Err(error) => {
-                                if let Err(error) = self.record_fault(
-                                    &run.subject,
-                                    run_report::REPORT_FAULT_SCOPE,
-                                    Err(error),
-                                ) {
-                                    eprintln!("st3: run report for {}: {error:#}", run.subject);
-                                }
-                            }
-                        }
-                        let evaluated = self.evaluate_active_mission_run(&run, mission);
-                        // Recovery is diagnostic too: admission and execution writes come first.
-                        if (!first_readiness_pending(&run)
-                            || now_ms().saturating_sub(first_readiness_since(&run))
-                                < FIRST_READINESS_FAULT_AFTER_MS)
-                            && let Err(error) = self.close_fault(
-                                &run.subject,
-                                FIRST_READINESS_FAULT_SCOPE,
-                                "the run no longer has an overdue first-readiness wait",
-                            )
-                        {
-                            eprintln!(
-                                "st3: first-readiness recovery for {}: {error:#}", run.subject
-                            );
-                        }
-                        evaluated
-                    })
-                })
-            });
-            due = match (due, armed) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-            changed |= evaluated.unwrap_or(false);
-            crate::performance::record_evaluation(
-                "mission-run",
+            changed |= self.evaluate_one_mission_run(
+                id,
                 needed,
-                crate::incremental::thread_cpu().saturating_sub(cpu_started),
+                false,
+                &mut active_generations,
+                &mut active_steps,
             );
-            if !needed {
-                let wrote = smallclaims::touched::wrote_since(wrote_mark);
-                // Rows that are not claims or observations (caches, capabilities) change no
-                // graph state a later pass would have to catch up with.
-                if !wrote.is_empty() {
-                    self.incremental_correction("mission-run", &subject, &reads, &wrote);
-                }
-            }
-            self.incremental.evaluated(&subject, reads, due);
         }
         self.incremental.retain(
             "mission-run/",
@@ -9960,6 +9916,174 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.signal_changed();
         }
         Ok(())
+    }
+
+    /// Evaluate one run and remember what it read. `active_only` skips a run that has ended since
+    /// the last pass listed the active runs.
+    fn evaluate_one_mission_run(
+        &self,
+        id: &str,
+        needed: bool,
+        active_only: bool,
+        active_generations: &mut BTreeSet<String>,
+        active_steps: &mut BTreeSet<String>,
+    ) -> bool {
+        let subject = format!("mission-run/{id}");
+        let cpu_started = crate::incremental::thread_cpu();
+        let wrote_mark = smallclaims::touched::wrote_len();
+        let mut due = None;
+        let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::record_due(|| {
+                self.isolate("mission-run", &subject, || {
+                    let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    if active_only
+                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
+                    {
+                        return Ok(false);
+                    }
+                    active_generations.insert(run.generation.clone());
+                    active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
+                    // From the view the evaluation started with: a write it makes changes subjects
+                    // it read, so the next pass evaluates it again and takes the new times.
+                    due = crate::incremental::run_due(&run, now_ms());
+                    // Telling a run's reporter never holds the run back or fails it.
+                    match self.run_report(&run.subject).and_then(|report| {
+                        report
+                            .map(|report| self.report_run(&run, &report, now_ms()))
+                            .transpose()
+                    }) {
+                        Ok(None) => {
+                            // A run whose reporter was cleared has nobody left to fail.
+                            if let Err(error) = self.close_fault(
+                                &run.subject,
+                                run_report::REPORT_FAULT_SCOPE,
+                                "the run reports to nobody",
+                            ) {
+                                eprintln!("st3: run report for {}: {error:#}", run.subject);
+                            }
+                        }
+                        Ok(Some(stalls_at)) => {
+                            due = [due, stalls_at].into_iter().flatten().min();
+                        }
+                        Err(error) => {
+                            if let Err(error) = self.record_fault(
+                                &run.subject,
+                                run_report::REPORT_FAULT_SCOPE,
+                                Err(error),
+                            ) {
+                                eprintln!("st3: run report for {}: {error:#}", run.subject);
+                            }
+                        }
+                    }
+                    let evaluated = self.evaluate_active_mission_run(&run, mission);
+                    // Recovery is diagnostic too: admission and execution writes come first.
+                    if (!first_readiness_pending(&run)
+                        || now_ms().saturating_sub(first_readiness_since(&run))
+                            < FIRST_READINESS_FAULT_AFTER_MS)
+                        && let Err(error) = self.close_fault(
+                            &run.subject,
+                            FIRST_READINESS_FAULT_SCOPE,
+                            "the run no longer has an overdue first-readiness wait",
+                        )
+                    {
+                        eprintln!(
+                            "st3: first-readiness recovery for {}: {error:#}", run.subject
+                        );
+                    }
+                    evaluated
+                })
+            })
+        });
+        due = match (due, armed) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        crate::performance::record_evaluation(
+            "mission-run",
+            needed,
+            crate::incremental::thread_cpu().saturating_sub(cpu_started),
+        );
+        if !needed {
+            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            // Rows that are not claims or observations (caches, capabilities) change no
+            // graph state a later pass would have to catch up with.
+            if !wrote.is_empty() {
+                self.incremental_correction("mission-run", &subject, &reads, &wrote);
+            }
+        }
+        self.incremental.evaluated(&subject, reads, due);
+        evaluated.unwrap_or(false)
+    }
+
+    /// Evaluate the runs whose last evaluation read a subject that changed since, such as a
+    /// baseline's resource or a step they depend on, without waiting for a pass. A pass reaches
+    /// mission runs once, after its other stages, so on a slow host a run that a change makes
+    /// ready would wait for the rest of the pass running then and most of the next. It reads the
+    /// change feed with its own cursor and marks nothing, so a pass's evaluation running at the
+    /// same time cannot clear a mark it set. Leaves full passes, due times and runs no pass has
+    /// evaluated yet to the pass. Returns how many runs it evaluated and whether any wrote.
+    pub fn evaluate_changed_mission_runs(&self) -> Result<(usize, bool)> {
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut cursor = self
+            .mission_reads_cursor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (next, changed_runs) =
+            self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
+        *cursor = Some(next);
+        let mut active_generations = BTreeSet::new();
+        let mut active_steps = BTreeSet::new();
+        let mut changed = false;
+        for subject in &changed_runs {
+            let Some(id) = subject.strip_prefix("mission-run/") else {
+                continue;
+            };
+            let _clock = smallclaims::store::clock_snapshot();
+            changed |= self.evaluate_one_mission_run(
+                id,
+                true,
+                true,
+                &mut active_generations,
+                &mut active_steps,
+            );
+        }
+        Ok((changed_runs.len(), changed))
+    }
+
+    /// Follow the post-commit feed and evaluate the runs each change touched; see
+    /// [`Self::evaluate_changed_mission_runs`]. A run that wrote wakes the pass, which carries
+    /// its effects on (seats, wake messages) and tells clients when it ends.
+    pub async fn follow_mission_reads(self: Arc<Self>) {
+        let mut changes = self.event_notify.subscribe();
+        // Look once at the start too, for what committed before this subscribed.
+        changes.mark_changed();
+        loop {
+            if changes.changed().await.is_err() {
+                return;
+            }
+            changes.borrow_and_update();
+            let changed = self
+                .blocking(|this| {
+                    crate::profile::task("task mission-reads", || {
+                        this.recording_writes(|| this.evaluate_changed_mission_runs())
+                    })
+                })
+                .await;
+            match changed {
+                Ok((_, true)) => {
+                    crate::reconcile_telemetry::record_wake(
+                        crate::reconcile_telemetry::WakeCause::Reconciler,
+                        None,
+                    );
+                    self.notify.notify_one();
+                }
+                Ok((_, false)) => {}
+                Err(error) => eprintln!("st3: evaluating the runs a change touched: {error:#}"),
+            }
+        }
     }
 
     /// An evaluation of `subject` wrote although nothing it read had changed and nothing was due:
@@ -21493,6 +21617,122 @@ version 2
                 .unwrap()
                 .contains("source is clean")
         );
+    }
+
+    /// A run blocked on a step baseline of `resource/allocation` being "resumed", evaluated by
+    /// skipping passes until it is blocked and nothing it read changes.
+    fn run_paused_on_its_allocation(
+        store: Arc<Store>,
+    ) -> (Arc<Store>, Arc<Reconciler<FakeRuntime>>, String) {
+        let source = r#"
+            version 2
+              resource "allocation" { kind "custom.st3.document-source" }
+              resource "elsewhere" { kind "custom.st3.document-source" }
+
+              mission "paused" state="ready" {
+                goal "Work only once the allocation resumes."
+
+                  agent "worker" { workspace "/tmp"; command "true"; restart "never" }
+
+                step "fix" {
+                  baseline "allocation resumed" {
+                    field "state" "resource/allocation" is "resumed"
+                  }
+                }
+              }
+
+        "#;
+        apply_source(&store, source, "paused-mission");
+        observe_state(&store, "resource/allocation", "paused", "allocation-paused");
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "paused".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "paused-run".into(),
+            })
+            .unwrap();
+        let reconciler = Arc::new(
+            Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            )
+            .skipping_unneeded(true),
+        );
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let blocked = store.mission_run(&run.id).unwrap().unwrap().steps[0].clone();
+        assert_eq!(blocked.status, "blocked");
+        assert_eq!(
+            blocked.blocked_reason.as_deref(),
+            Some("step baseline `allocation resumed` does not hold")
+        );
+        (store, reconciler, run.id)
+    }
+
+    fn observe_state(store: &Store, subject: &str, state: &str, key: &str) {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::String(state.into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_change_to_a_baselines_resource_readies_its_step_without_waiting_for_a_pass() {
+        let (store, reconciler, run) =
+            run_paused_on_its_allocation(Arc::new(Store::open_memory("node").unwrap()));
+        let fix = || store.mission_run(&run).unwrap().unwrap().steps[0].clone();
+        let before = fix();
+        // A claim no run read evaluates no run.
+        observe_state(&store, "resource/elsewhere", "resumed", "elsewhere-resumed");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+
+        // No pass runs: the resource's own claim names the run that read it.
+        observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (1, true));
+        let ready = fix();
+        assert_eq!((ready.status.as_str(), ready.blocked_reason.as_deref()), ("ready", None));
+        assert_eq!(ready.readiness_epoch, before.readiness_epoch + 1);
+        assert_eq!(ready.attempt, before.attempt, "the step is not reset");
+    }
+
+    #[tokio::test]
+    async fn the_post_commit_feed_wakes_the_runs_a_change_touched() {
+        // On disk, so this test's reads wait for the follower's writes rather than fail.
+        let root = tempfile::tempdir().unwrap();
+        let (store, reconciler, run) = run_paused_on_its_allocation(Arc::new(
+            Store::open(&root.path().join("store.sqlite"), "node").unwrap(),
+        ));
+        let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
+        observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        // What a write through the API does after it commits.
+        reconciler.event_notify.send_modify(|generation| *generation += 1);
+        let ready = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let step = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
+                if step.status == "ready" {
+                    return step;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the step is ready without a pass");
+        assert_eq!(ready.blocked_reason, None);
+        follower.abort();
     }
 
     #[test]

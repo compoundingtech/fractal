@@ -655,7 +655,8 @@
           "shard_inputs": {
             "count": "kit_shard_count",
             "results": "shard_results",
-            "pull_request_count": 1
+            "pull_request_count": 1,
+            "index": "kit_shard"
           },
           "input_order": {
             "kit_inputs": [

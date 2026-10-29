@@ -249,6 +249,9 @@ struct Conversing {
     /// When to subscribe again after a failure; `None` while subscribed.
     retry_at: Option<Instant>,
     failures: usize,
+    /// When it began failing without a page in between: a failure st or the feed retries is
+    /// said only once it has lasted `REPORT_AFTER`.
+    failing_since: Option<Instant>,
 }
 
 /// The terminal being followed.
@@ -652,7 +655,7 @@ async fn connected(
                 let received = std::time::Instant::now();
                 *failures = 0;
                 match event {
-                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more } => {
+                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         // A frame already on its way when the window was left: the socket was
                         // heard from, but nothing of the window comes back.
@@ -660,8 +663,7 @@ async fn connected(
                             continue;
                         }
                         *failures = 0;
-                        window_retries.loaded(window);
-                        pending_reports.cancel(window);
+                        window_loaded(&mut window_retries, &mut pending_reports, window);
                         let rows = windows.entry(window).or_default();
                         rows.clear();
                         rows.extend(items.into_iter().map(|item| (item.header().id.clone(), item)));
@@ -669,13 +671,12 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more } => {
+                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
                         }
-                        window_retries.loaded(window);
-                        pending_reports.cancel(window);
+                        window_loaded(&mut window_retries, &mut pending_reports, window);
                         let rows = windows.entry(window).or_default();
                         for id in removes {
                             rows.remove(&id);
@@ -688,7 +689,8 @@ async fn connected(
                     // st keeps a conversation's subscription and retries it itself; it says why
                     // so the last copy shown can say it is stale (the owner's host is away).
                     CollectionEvent::Resync { id, code, message: Some(message) } if id.starts_with(CONVERSATION) => {
-                        let Some(current) = conversing.iter().find(|current| current.id == id) else { continue };
+                        let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
+                        if !current.failed_long(Instant::now()) { continue; }
                         let message = fractal_client::human_message(code.as_ref(), &message);
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent: false }).is_err() {
                             return Ended::Closed;
@@ -702,25 +704,16 @@ async fn connected(
                         if let Some(window) = Window::from_id(&id)
                             && !(left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
                         {
-                            if matches!(window, Window::Inventory(_)) {
-                                if let Some(message) = message {
-                                    let plain = fractal_client::human_message(code.as_ref(), &message);
-                                    pending_reports.report(window, Instant::now(), plain);
-                                }
-                                continue;
-                            }
-                            // Said once, with st's own reason when it gave one (its source is
-                            // not ready); the retries are quiet until the window loads.
-                            let first = window_retries.failed(window, Instant::now());
-                            if first && let Some(message) = message {
-                                let message = fractal_client::human_message(code.as_ref(), &message);
-                                pending_reports.report(window, Instant::now(), message);
-                            }
+                            // An inventory too: st keeps reading it, but a read that then finds
+                            // nothing new sends nothing, so unless it is asked for again its
+                            // reason would stand until the list next changed.
+                            let reason = message.map(|message| fractal_client::human_message(code.as_ref(), &message));
+                            window_failed(&mut window_retries, &mut pending_reports, window, Instant::now(), reason);
                         }
                     }
                     CollectionEvent::Conversation { id, session_id, replace, items, has_more, header, .. } => {
                         let Some(current) = conversing.iter_mut().find(|current| current.id == id) else { continue };
-                        current.failures = 0;
+                        current.served();
                         if updates.send(Update::Conversation { target: current.target.clone(), session_id, replace, has_more, items, header }).is_err() {
                             return Ended::Closed;
                         }
@@ -734,6 +727,7 @@ async fn connected(
                         if !permanent {
                             current.retry_at = Some(Instant::now() + retry_delay(current.failures));
                             current.failures += 1;
+                            if !current.failed_long(Instant::now()) { continue; }
                         }
                         if updates.send(Update::ConversationFailed { target: current.target.clone(), code, message, permanent }).is_err() {
                             return Ended::Closed;
@@ -749,11 +743,8 @@ async fn connected(
                                 pending_reports.report(window, Instant::now(), plain);
                                 continue;
                             }
-                            // Said once, and only if it lasts; the retries are quiet until it loads.
-                            if window_retries.failed(window, Instant::now()) {
-                                let message = fractal_client::human_message(code.as_ref(), &message);
-                                pending_reports.report(window, Instant::now(), message);
-                            }
+                            let reason = fractal_client::human_message(code.as_ref(), &message);
+                            window_failed(&mut window_retries, &mut pending_reports, window, Instant::now(), Some(reason));
                         } else if following.as_ref().is_some_and(|current| current.subscription == id)
                             && let Err(error) = fail_following(client, stream, updates, following, code, message).await
                         {
@@ -883,13 +874,14 @@ async fn connected(
                     if window == Window::Missions && !*missions {
                         continue;
                     }
-                    let result = if window == Window::Arrangements {
-                        match sidebar_person {
+                    let result = match window {
+                        Window::Arrangements => match sidebar_person {
                             Some(person) => stream.subscribe_arrangements(window.id(), person, window.limit(), None).await,
                             None => continue,
-                        }
-                    } else {
-                        stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+                        },
+                        Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory) => continue,
+                        Window::Inventory(inventory) => inventory.subscribe(stream).await,
+                        _ => stream.subscribe(window.id(), window.id(), window.limit(), None, None).await,
                     };
                     if let Err(error) = result {
                         return Ended::Dropped(error.to_string());
@@ -921,6 +913,21 @@ fn jitter(wait: Duration) -> Duration {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| u64::from(since.subsec_nanos()) % 1000);
     wait.mul_f64(spread as f64 / 2000.0)
+}
+
+/// `window` failed at `now` in a way that may mend: it is asked for again after a wait that grows,
+/// and st's reason for its first failure since it last loaded is said only once it has lasted.
+/// The retries are quiet until it loads.
+fn window_failed(retries: &mut WindowRetries, reports: &mut PendingReports, window: Window, now: Instant, reason: Option<String>) {
+    if retries.failed(window, now) && let Some(reason) = reason {
+        reports.report(window, now, reason);
+    }
+}
+
+/// `window` was served: its wait and any reason held for it are moot.
+fn window_loaded(retries: &mut WindowRetries, reports: &mut PendingReports, window: Window) {
+    retries.loaded(window);
+    reports.cancel(window);
 }
 
 /// Why a window is not being served, held until it has lasted `REPORT_AFTER`: a window that
@@ -1181,7 +1188,22 @@ impl Conversing {
             target,
             retry_at: None,
             failures: 0,
+            failing_since: None,
         }
+    }
+
+    /// It failed at `now` in a way that is retried: whether it has kept failing, with no page in
+    /// between, for `REPORT_AFTER`. A read st restarts because its list moved under it (a cursor
+    /// gap, an expired page cursor) mends within that and is never put in front of the person.
+    fn failed_long(&mut self, now: Instant) -> bool {
+        let since = *self.failing_since.get_or_insert(now);
+        now.duration_since(since) >= REPORT_AFTER
+    }
+
+    /// A page arrived: whatever was failing has mended.
+    fn served(&mut self) {
+        self.failures = 0;
+        self.failing_since = None;
     }
 }
 
@@ -1496,6 +1518,101 @@ mod tests {
             retries.failed(Window::Agents, start),
             "after loading, a failure is said again"
         );
+    }
+
+    /// What a fake link does at a moment: st restarts the window's read, or serves it.
+    #[derive(Clone, Copy)]
+    enum Link {
+        Resync,
+        Served,
+    }
+
+    /// Replays `events` (seconds after the start) of one window through the feed's bookkeeping,
+    /// waking every 100 ms as its loop would, until `until` seconds. Returns each reason said and
+    /// the moments the window was asked for again.
+    fn replay(window: Window, events: &[(f64, Link)], until: f64) -> (Vec<(f64, String)>, Vec<f64>) {
+        let start = Instant::now();
+        let mut retries = WindowRetries::default();
+        let mut reports = PendingReports::default();
+        let (mut said, mut asked) = (Vec::new(), Vec::new());
+        let mut events = events.iter().peekable();
+        let mut tick = 0.0;
+        while tick <= until {
+            let now = start + Duration::from_secs_f64(tick);
+            while let Some((_, link)) = events.next_if(|(at, _)| *at <= tick) {
+                match link {
+                    Link::Resync => window_failed(&mut retries, &mut reports, window, now, Some("st hit a problem: the read exceeded its server deadline".into())),
+                    Link::Served => window_loaded(&mut retries, &mut reports, window),
+                }
+            }
+            asked.extend(retries.due(now).into_iter().map(|_| tick));
+            said.extend(reports.due(now).into_iter().map(|(_, reason)| (tick, reason)));
+            tick += 0.1;
+        }
+        (said, asked)
+    }
+
+    #[test]
+    fn an_inventory_whose_read_st_restarts_is_asked_for_again_and_a_flap_says_nothing() {
+        // Nathan, 2026-10: the bar kept flipping from stale to live. An inventory (the machines
+        // list) whose read st restarted was never asked for again; st's next good read found
+        // nothing new and sent nothing, so its reason went up after 20 s and stood until the list
+        // next changed. Each restart of its read must ask for it again and say nothing while it
+        // mends.
+        let machines = Window::Inventory(Inventory::Machines);
+        let mut flap = Vec::new();
+        for cycle in 0..12 {
+            let at = f64::from(cycle) * 25.0;
+            flap.push((at, Link::Resync));
+            // Asked again after a second or so, st serves it with a snapshot.
+            flap.push((at + 2.0, Link::Served));
+        }
+        let (said, asked) = replay(machines, &flap, 300.0);
+        assert!(said.is_empty(), "a read that mends is never put in front of the person: {said:?}");
+        assert_eq!(asked.len(), 12, "each restarted read is asked for again, once: {asked:?}");
+    }
+
+    #[test]
+    fn a_window_that_stays_unserved_is_said_once_and_asked_for_again_without_a_busy_loop() {
+        // st restarts the read every 1.5 s while it cannot serve it, for five minutes.
+        let flap = (0..200).map(|tick| (f64::from(tick) * 1.5, Link::Resync)).collect::<Vec<_>>();
+        for window in [Window::Agents, Window::Inventory(Inventory::Machines)] {
+            let (said, asked) = replay(window, &flap, 300.0);
+            assert_eq!(said.len(), 1, "{window:?}: said once: {said:?}");
+            assert!((REPORT_AFTER.as_secs_f64()..REPORT_AFTER.as_secs_f64() + 0.2).contains(&said[0].0), "{window:?}: once it has lasted: {said:?}");
+            assert!(said[0].1.contains("server deadline"), "in st's words: {said:?}");
+            // The waits grow to 30 s: about a dozen asks in five minutes, never one per resync.
+            assert!(asked.len() <= 16, "{window:?}: asked {} times: {asked:?}", asked.len());
+            assert!(asked.windows(2).all(|pair| pair[1] - pair[0] >= 0.9), "{window:?}: {asked:?}");
+        }
+    }
+
+    #[test]
+    fn a_conversation_whose_read_st_restarts_says_nothing_until_it_has_lasted() {
+        // Nathan, 2026-10: "roster changed" kept showing: a conversation whose read st restarted
+        // (its list moved under it) said "the list changed while it was being read" at once,
+        // and the next page took it away again.
+        let start = Instant::now();
+        let mut current = Conversing::new("agent/tester".into());
+        let mut said = Vec::new();
+        // A restart every 1.5 s, and a page every 9 s between them, for five minutes.
+        for tick in 0..200 {
+            let at = start + Duration::from_millis(tick * 1500);
+            if tick % 6 == 5 {
+                current.served();
+            } else if current.failed_long(at) {
+                said.push(tick);
+            }
+        }
+        assert!(said.is_empty(), "a read that keeps mending says nothing: {said:?}");
+
+        // One that stays wrong is said once it has lasted, and the next page clears it.
+        let mut current = Conversing::new("agent/tester".into());
+        assert!(!current.failed_long(start));
+        assert!(!current.failed_long(start + REPORT_AFTER - Duration::from_millis(1)));
+        assert!(current.failed_long(start + REPORT_AFTER));
+        current.served();
+        assert!(!current.failed_long(start + REPORT_AFTER * 2), "a page starts the clock over");
     }
 
     fn api_error(code: ErrorCode, message: &str) -> ClientError {
