@@ -881,6 +881,15 @@ use super::*;
 
     #[test]
     fn export_read_loan_writer_wait_holds_no_reader() {
+        // The writer-wait count is process-wide; in its own process only this export waits.
+        const NAME: &str = "api::read_deadline::tests::export_read_loan_writer_wait_holds_no_reader";
+        if std::env::var("ST_EXPORT_WRITER_WAIT_TEST").as_deref() != Ok("1") {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--nocapture"])
+                .env("ST_EXPORT_WRITER_WAIT_TEST", "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("claims.sqlite");
         let store = Arc::new(super::super::Store::open(&path, "node").unwrap());
@@ -909,8 +918,14 @@ use super::*;
             done.send(response.status()).unwrap();
         });
         waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Check once the export waits for the writer, past its sealing and snapshot reads.
+        let asked = std::time::Instant::now();
+        while smallclaims::windows::holds::report()["waiting"]["writer"] == 0 {
+            assert!(asked.elapsed() < Duration::from_secs(10), "the export never asked for the writer");
+            std::thread::sleep(Duration::from_millis(1));
+        }
         // The writer is unavailable, but the export must not pin reader capacity or WAL.
-        assert!(answer.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(answer.try_recv().is_err());
         assert_eq!(store.readers.live_read_report().live_checkouts, 0);
         let checkpoint = rusqlite::Connection::open(&path).unwrap();
         let report = smallclaims::sqlite::checkpoint_wal_report(&checkpoint).unwrap();
