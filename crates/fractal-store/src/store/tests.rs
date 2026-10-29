@@ -8618,6 +8618,46 @@ fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
     assert_eq!(host_total(), tokens);
 }
 
+/// Context occupancy replicates when it moves 5 or more points of the window from the replicated
+/// reading, on a compaction, or when the seat ends, not at every turn end: occupancy was 359 of 1528
+/// harness claims in three fleet hours (2026-10-29). Thirty turns that each add a point replicate 6
+/// readings, not 30, and the host's card reads the newest at once.
+#[test]
+fn context_occupancy_replicates_when_it_moves_five_points_not_every_turn() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let occupancy = |used: u64, compactions: u64, at: u128| {
+        let mut reading = harness_usage(subject, "context_occupancy", used, compactions);
+        reading.fields.insert("context_window_tokens".into(), json!(200_000));
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap() / 2_000)
+            .collect::<Vec<_>>()
+    };
+    let card = || store.usage_summaries_at(&[subject.to_owned()], None).unwrap()[subject]
+        .context.as_ref().unwrap().used_tokens.unwrap() / 2_000;
+    let mut at = start;
+    for turn in 1..=30 {
+        state("working", at);
+        occupancy(turn * 2_000, 0, at + 1_000);
+        state("idle", at + 60_000);
+        assert_eq!(card(), turn, "the host reads its newest occupancy at once");
+        at += 400_000;
+    }
+    assert_eq!(replicated(), [1, 6, 11, 16, 21, 26], "the first, then each 5 points");
+    occupancy(4_000, 1, at);
+    assert_eq!(replicated(), [1, 6, 11, 16, 21, 26, 2], "a compaction replicates at once");
+    occupancy(10_000, 1, at + 1_000);
+    state("ended", at + 2_000);
+    assert_eq!(replicated(), [1, 6, 11, 16, 21, 26, 2, 5], "the end replicates the last");
+}
+
 /// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
 /// rest repeated the previous claim exactly, one per five-minute interval. An hour of the same
 /// reading every minute replicates once, and a reading that changes still replicates.
