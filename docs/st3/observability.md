@@ -23,7 +23,8 @@ current coverage. Budget limits are requirements, not claims of measured complia
   identity, including signals from the observations exporter.
 - **O11Y-R14 Bounded metrics and attributes:** Fractal exposes a bounded rate, error, duration, and
   saturation metric set with at most 2,000 active series per daemon. Agent, session, message,
-  terminal, attachment, and lease ids are forbidden in metric labels and `span.label`.
+  terminal, attachment, and lease ids are forbidden in metric labels and `span.label`,
+  except for the fleet-bounded `st.agent` delivery-health axis documented below.
   Capabilities and their hashes are forbidden in every signal.
 - **O11Y-R15 Trace propagation:** W3C `traceparent` and `tracestate` propagate end to end across
   Fractal HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
@@ -354,6 +355,9 @@ values map to `other`; routes are matched templates, not raw paths.
 | Replication `peer` | Fleet node membership |
 | Allocator heap `state` | `allocated`, `free`, `mmapped`, `arena`, `releasable` |
 | Projection `collection` | `missions`, `agents`, `attention`, else `other` |
+| Delivery `st.agent` | Full declared subject of each managed agent owned by the local host |
+| Delivery `st.delivery.state` | `live`, `stale`, `refused` |
+| Delivery `st.delivery.reason` | Empty unless refused; the fixed refusal-code vocabulary below |
 
 `ClientClass::as_str` defines the closed `st3.client.class` vocabulary. Classification uses
 the trimmed `x-st3-client` header, limited to 120 characters, with case-insensitive matching.
@@ -637,6 +641,52 @@ file state. Tracking is a no-op without daemon OpenTelemetry initialization.
 Excluded from FIFO telemetry are coalesced Notify/watch states, caches,
 durable inbox and seat queues, driver-side mailbox `Subscription` queues, and
 ping sidecar queues.
+
+## Per-agent delivery health
+
+The daemon's existing `st3` meter exports observable f64 gauge
+`st.delivery.state_age`, unit `s`, with exactly three point attributes:
+`st.agent`, `st.delivery.state`, and `st.delivery.reason`. Host identity stays in
+the daemon resource, not an additional point attribute.
+
+Membership comes exclusively from
+`mailbox_metrics::managed_agents_owned_by_local_host(&Store)`: declared subjects
+whose kind is `agent` and whose member host equals `store.origin()`. The full
+subject is used unchanged as `st.agent`, so this series joins the mailbox
+backlog gauges without display-name aliases or duplicate remote-host reporting.
+Every member contributes one series, including stopped agents, agents that have
+never bound, and members not yet in the cached agents publication. Only removing
+an agent from locally owned declarations removes its series.
+
+The cached delivery projection maps `current`, `outdated`, and `legacy` to
+`live`; an explicit bind refusal maps to `refused`. Every other case maps to
+`stale`, including startup `unknown`, a never-bound seat, an inactive seat, or
+missing publication data. This is deliberately stricter than the UI's startup
+grace: absence of confirmed delivery evidence is explicit rather than an absent
+time series.
+
+`st.delivery.reason` is always the empty string for `live` and `stale`. For
+`refused` its fixed vocabulary is `mailbox-runtime-indeterminate`,
+`stale-mailbox-session`, `mailbox-binding-conflict`, `mailbox-peer-mismatch`,
+`mailbox-not-authorized`, `recipient-retired`, and `other`. Unrecognized codes
+map to `other`; their original text remains in the warning log and API reason.
+Free-form diagnostic text is never exported as a label.
+
+The value is seconds since the current normalized state began in this daemon
+lifetime. `delivery.since_unix_ms` supplies the initial clock when available;
+otherwise the clock starts at the first successful metrics refresh. Repeated
+refusals, unknown-to-stale transitions, and binary-version changes within `live`
+do not reset it. State or runtime-incarnation changes do reset it. A single
+off-scrape worker refreshes membership and cached projection data, with at least
+30 seconds of rest after each refresh (or its elapsed duration if longer).
+Failures retain the last complete summary. Collection only reads this summary
+and advances ages; it does no store, graph, process, or filesystem reads.
+
+Alert on `st.delivery.state` equal to `stale` or `refused` and
+`st.delivery.state_age > 600`. This detects channel health independently of
+whether the mailbox happens to contain unread messages. Daemon disappearance
+requires the separate exporter/host-availability alert; an unbound or stopped
+managed seat continues to emit `stale`.
 
 ## Projection freshness telemetry
 

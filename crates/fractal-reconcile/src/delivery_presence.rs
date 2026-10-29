@@ -185,6 +185,8 @@ mod refusal_tests {
     }
 }
 
+type IncarnationStateClocks = HashMap<String, (&'static str, u64)>;
+
 struct Presence {
     started: Instant,
     image: Option<String>,
@@ -194,7 +196,7 @@ struct Presence {
     observations: Mutex<std::collections::HashSet<std::path::PathBuf>>,
     uncertain: Mutex<HashMap<String, Uncertain>>,
     refusals: Mutex<HashMap<String, Refusal>>,
-    state_since: Mutex<HashMap<String, HashMap<String, (&'static str, u64)>>>,
+    state_since: Mutex<HashMap<String, IncarnationStateClocks>>,
     /// Attachment-push title streams waiting on a subject, one sender per watched subject.
     watchers: Mutex<HashMap<String, watch::Sender<u64>>>,
     /// The title binding of each live stream that has been sent an attachment frame.
