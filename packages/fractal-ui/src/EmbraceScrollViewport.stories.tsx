@@ -21,6 +21,8 @@ export default meta
 export const scenarioExemptions: readonly string[] = [
   'AllStates:primitive',
   'AllStatesLight:primitive',
+  'EasedReturnYieldsToReader:primitive',
+  'EasedReturnYieldsToReaderLight:primitive',
   'FollowingAndAnchored:primitive',
   'FollowingAndAnchoredLight:primitive',
 ]
@@ -49,11 +51,40 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   // ResizeObserver schedules compensation on the next frame; two frames alone race that work.
   await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
   await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
-  await frame()
-  await expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1)
+  // The return eases over the standard motion duration (200ms), or lands at once under reduced motion.
+  await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1), { timeout: 400 })
   await expect(canvas.queryByRole('button', { name: 'New messages ↓' })).toBeNull()
 } }
 export const FollowingAndAnchoredLight: Story = { ...FollowingAndAnchored, args: { scheme: 'light' } }
+/** The return to the end eases and yields to the reader's wheel; under reduced motion it lands at once. */
+export const EasedReturnYieldsToReader: Story = { play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  const viewport = canvas.getByTestId('scroll-viewport')
+  const distance = () => viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop
+  await frame()
+  viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -400 }))
+  viewport.scrollTop = 0
+  viewport.dispatchEvent(new Event('scroll'))
+  await frame()
+  await userEvent.click(canvas.getByRole('button', { name: 'Append message' }))
+  const jump = await canvas.findByRole('button', { name: 'New messages ↓' })
+  await userEvent.click(jump)
+  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    await frame()
+    await expect(distance(), 'reduced motion returns at once').toBeLessThanOrEqual(1)
+    return
+  }
+  // One frame into the ease the lane has started moving but has not landed.
+  await new Promise(resolve => requestAnimationFrame(resolve))
+  await expect(distance(), 'return jumped instead of easing').toBeGreaterThan(1)
+  viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -40 }))
+  const interrupted = viewport.scrollTop
+  await frame()
+  await frame()
+  await expect(Math.abs(viewport.scrollTop - interrupted), 'eased return kept moving after reader input').toBeLessThanOrEqual(1)
+  await expect(distance()).toBeGreaterThan(1)
+} }
+export const EasedReturnYieldsToReaderLight: Story = { ...EasedReturnYieldsToReader, args: { scheme: 'light' } }
 export const AllStates: Story = { render: args => <ScrollStory {...args} /> }
 export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
 const styles = stylex.create({

@@ -25,8 +25,8 @@ export function isSnapshotChurn(error: unknown): boolean {
     && 'code' in error.response && error.response.code === 'page-cursor-expired';
 }
 
-export function recentTimeline<T extends { sequence: number }>(entries: T[], limit = 100): T[] {
-  return [...entries].sort((a, b) => a.sequence - b.sequence).slice(-limit);
+export function recentTimeline<T extends Pick<Entry, 'id' | 'sequence' | 'timestamp'>>(entries: T[], limit = 100): T[] {
+  return [...entries].sort(before).slice(-limit);
 }
 
 export function timelineText(body: unknown): string | null {
@@ -77,36 +77,56 @@ export async function listSessionPages(
 
 type Entry = { id: string; sequence: number; type: string; body: unknown; timestamp?: string };
 
-/** Reading back past the live window, one page of st's session timeline at a time. */
+/** Reading back past the live window, one page of Fractal's session timeline at a time. */
 export type Older = {
   /** At least one earlier page was read: these entries are not in the live window. */
   paged: boolean;
-  /** st said there is nothing before the oldest entry held: the session's start. */
+  /** Fractal said there is nothing before the oldest entry held: the session's start. */
   start: boolean;
-  /** st's cursor for the page before the oldest one read, and when (ms) it was read. */
+  /** Fractal's cursor for the page before the oldest one read, and when (ms) it was read. */
   cursor?: { value: string; at: number };
   loading: boolean;
   /** Why the last page could not be read; scrolling up tries again. */
   failed?: string;
 };
-export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; historyVersion: number; /** The conversation header st last sent (`conversation-blocks.v1`), register fields first. */ header?: ConversationHeader; older: Older };
+export type Conversation<T extends Entry> = { entries: T[]; hasOlder: boolean; newestSequence: number; sessionId?: string; historyVersion: number; /** The conversation header Fractal last sent (`conversation-blocks.v1`), register fields first. */ header?: ConversationHeader; older: Older };
 /** The session and history snapshot an older-page request started from. */
 export type OlderRequest = { sessionId: string; historyVersion: number };
 const noOlder: Older = { paged: false, start: false, loading: false };
 
-// Everything a person reads in a conversation: the harness's turns, tool calls and results, Small
-// Talk st joins in, and st's diagnostics. Status heartbeats and usage are not conversation.
+// Everything a person reads in a conversation: the harness's turns, tool calls and results, Fractal
+// messages joined into the stream, and Fractal's diagnostics. Status heartbeats and usage are not conversation.
 export function isConversational(entry: Entry): boolean {
   return entry.type !== 'status' && entry.type !== 'usage';
 }
 
-/** st's order: by time, then by sequence. */
-function before(a: Entry, b: Entry): number {
-  const at = (a.timestamp ?? '').localeCompare(b.timestamp ?? '');
-  return at !== 0 ? at : a.sequence - b.sequence;
+type Position = Pick<Entry, 'id' | 'sequence' | 'timestamp'>;
+// Retained entries recur across deltas and page merges. Parse each timestamp once, keeping
+// sub-millisecond precision that Date.parse alone would discard.
+const instants = new WeakMap<Position, { timestamp: string | undefined; millis: number; nanos: number }>();
+const instant = (entry: Position) => {
+  const cached = instants.get(entry);
+  if (cached && cached.timestamp === entry.timestamp) return cached;
+  const parsed = Date.parse(entry.timestamp ?? '');
+  const fraction = entry.timestamp?.match(/\.(\d+)(?:Z|[+-]\d{2}:\d{2})$/i)?.[1] ?? '';
+  const value = {
+    timestamp: entry.timestamp,
+    millis: Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY,
+    nanos: Number.isFinite(parsed) ? Number(fraction.padEnd(9, '0').slice(3, 9)) : 0,
+  };
+  instants.set(entry, value);
+  return value;
+};
+
+/** Fractal's presentation order: numeric RFC3339 instant, original source sequence, stable ID. */
+function before(a: Position, b: Position): number {
+  const left = instant(a);
+  const right = instant(b);
+  if (left.millis !== right.millis) return left.millis < right.millis ? -1 : 1;
+  return left.nanos - right.nanos || a.sequence - b.sequence || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
 }
 
-/** Whether st holds entries before the oldest one held. */
+/** Whether Fractal holds entries before the oldest one held. */
 function moreBefore(older: Older, live: boolean): boolean {
   return older.paged ? !older.start : live;
 }
@@ -176,14 +196,14 @@ export function olderFailed<T extends Entry>(conversation: Conversation<T>, requ
   return { ...conversation, older: { ...conversation.older, loading: false, failed: reason } };
 }
 
-/** st keeps a page cursor for five minutes; one older than this starts again from the newest. */
+/** Fractal keeps a page cursor for five minutes; one older than this starts again from the newest. */
 const CURSOR_LIFE_MS = 240_000;
-/** Entries per page read back: st's largest, so a long session takes few requests. */
+/** Entries per page read back: Fractal's largest, so a long session takes few requests. */
 export const OLDER_PAGE = 200;
 
 /**
  * The page before `oldest`. A live cursor continues where the last page ended. Without one (or
- * once st has let it go), pages are read again from the newest until one reaches past `oldest`,
+ * once Fractal has let it go), pages are read again from the newest until one reaches past `oldest`,
  * so nothing between is skipped.
  */
 export async function readOlder<T extends Entry>(
@@ -199,7 +219,7 @@ export async function readOlder<T extends Entry>(
   // Bounded: a session longer than this many pages stops loading with a reason.
   for (let hop = 0; hop < 50; hop++) {
     const page = await read(cursor);
-    const first = [...page.items].sort(before)[0];
+    const first = page.items.reduce<T | undefined>((oldest, item) => !oldest || before(item, oldest) < 0 ? item : oldest, undefined);
     if (!oldest || (first && before(first, oldest) < 0) || !page.hasMore || !page.cursor) return page;
     cursor = page.cursor;
   }

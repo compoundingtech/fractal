@@ -867,7 +867,7 @@ mod tests {
 
     #[test]
     fn daily_estimate_is_visible_in_the_list_and_whole_period_pane() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.agent_messages = Some(
             serde_json::from_value(serde_json::json!({
                 "source":"dated audit", "method":"count times allowance",
@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn groups_rank_by_cost_and_name_what_st_does_not_know() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let rows = world.usage.items();
         let by_agent = groups(rows.iter(), By::Agent);
         assert_eq!(by_agent[0].0, "agent/example/atlas/builder");
@@ -940,7 +940,7 @@ mod tests {
 
     #[test]
     fn every_declared_account_is_listed_by_name_with_its_limits_or_credits() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         let declared = |name: &str, label: &str, kind: &str, credits: Option<serde_json::Value>| {
             serde_json::from_value::<fractal_client::UsageAccount>(serde_json::json!({
                 "name": name, "account": label, "provider": "anthropic", "kind": kind, "credits": credits,
@@ -987,7 +987,7 @@ mod tests {
 
     #[test]
     fn an_account_a_person_declared_reads_by_its_name() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.usage_limits[0].account = "claude/0123456789abcdef".into();
         world.usage_limits[0].account_ref = Some("ada/claude-1".into());
         world.usage_limits[1].account = "claude/fedcba9876543210".into();
@@ -1042,7 +1042,7 @@ mod tests {
             "98% cached · 0.9% written to cache · 0.6% fresh input · 0.2% output"
         );
         // The summary shows it under the total.
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let summary = list(&world, By::Agent, 24)
             .items
             .iter()
@@ -1058,7 +1058,7 @@ mod tests {
 
     #[test]
     fn a_groups_detail_shows_only_its_rows() {
-        let world = super::super::demo::world();
+        let world = super::super::demo::test_world();
         let plain = |doc: &Doc| {
             doc.lines
                 .iter()

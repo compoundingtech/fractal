@@ -137,4 +137,6 @@ pub mod checkpoint_agreement_tests;
 pub mod checkpoint_capture_epoch_tests;
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+pub mod legacy_uri_resource_cleanup_tests;
 

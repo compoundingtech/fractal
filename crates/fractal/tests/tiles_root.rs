@@ -1167,22 +1167,19 @@ fn a_tile_acts_through_its_endpoint_only_as_its_own_agent() {
     {
         let _context = runtime.enter();
         fractal_daemon::api::spawn_tile_endpoints_from(
-            fractal_daemon::api::AppState {
-                store: store.clone(),
-                notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-                event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: "example".into(),
-                state_dir: state_dir.path().to_path_buf(),
-                pty_root: state_dir.path().join("pty"),
-                pty_binary: "pty".into(),
-                fleet_id: None,
-                configured_peers: vec![],
-                client_relay: None,
-                native_session_home: None,
-                owning_person: None,
-                planner_default: fractal_daemon::model::PlannerSpec::default(),
-                assistant_receipts: Default::default(),
-            },
+            fractal_daemon::api::AppState { store: store.clone(),
+            notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "example".into(),
+            state_dir: state_dir.path().to_path_buf(),
+            pty_root: state_dir.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            owning_person: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  },
             host.registry.clone(),
         );
     }

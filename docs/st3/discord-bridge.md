@@ -16,11 +16,11 @@ The retained `--legacy-text` option uses provisional person recipients. The curr
 daemon refuses replies to those recipients with `person-has-no-inbox`; use the
 native enrolled route described here.
 
-The bridge is a normal-user Python process run by an enrolled st program seat. It polls one private
+The bridge is a normal-user Python process run by an enrolled Fractal program seat. It polls one private
 Discord text channel every five seconds and routes allowlisted Discord accounts
-to one explicitly configured st agent. Up to sixteen human accounts can be
+to one explicitly configured Fractal agent. Up to sixteen human accounts can be
 explicitly enrolled. It needs Python's standard library and the
-existing local st Unix socket. There is no package installation or root service setup.
+existing local Fractal Unix socket. There is no package installation or root service setup.
 
 Create the route file privately at `~/.local/state/st3/discord-probe/trial.json`
 (mode 0600, owned by you). It contains application, server, channel and user IDs,
@@ -31,7 +31,7 @@ never a token. These example values are invented:
 ```
 
 To check the token and channel before running the bridge,
-`python3 -I scripts/st3-discord-probe test --route PATH` posts one labelled message
+`python3 -I scripts/fractal-discord-probe test --route PATH` posts one labelled message
 and verifies your `st probe hello` reply; it never retries a post. It uses a hidden
 local token prompt and does not route to an agent. The token's application,
 channel's server/type and bot account are checked before importing messages.
@@ -43,7 +43,7 @@ terminal without that identity cannot import native messages. The managed progra
 seat recipe below supplies the identity automatically.
 
 ```sh
-python3 -I scripts/st3-discord-bridge run --agent agent/example/discord-test \
+python3 -I scripts/fractal-discord-bridge run --agent agent/example/discord-test \
   --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock"
 ```
 
@@ -51,7 +51,7 @@ Replace the invented agent subject with the intended existing agent. Paste the
 bot token at the hidden local prompt. On a first launch, wait for
 `Text bridge running as external/discord/user/…` and the allowlisted-account count. Then send
 an ordinary text message in Discord. Keep the terminal open while chatting.
-An agent must reply using st's normal reply operation to preserve the message link.
+An agent must reply using Fractal's normal reply operation to preserve the message link.
 Its answer appears as a Discord reply to the corresponding message, with mentions
 disabled. You do not need to type a special exact test phrase.
 
@@ -71,15 +71,15 @@ chmod 600 ~/.config/st3-discord/bot.env
 
 In the editor, put one line, replacing the placeholder with the bot token:
 `DISCORD_BOT_TOKEN=<paste-token-here>`. Do not put the token into a shell command,
-st message or repository. The loader accepts that one entry, optionally quoted,
+Fractal message or repository. The loader accepts that one entry, optionally quoted,
 plus blank lines and full-line comments; it never sources shell code or exports
 the value into the environment. It refuses shared files, symlinks, hardlinks,
 non-regular files and files owned by another user. The token remains on disk until
 you remove the file yourself.
 
-Stop the current bridge before launching its replacement. To run it under st,
+Stop the current bridge before launching its replacement. To run it under Fractal,
 adapt the invented paths, placement and subjects in
-[`examples/st3/discord-bridge.kdl`](../../examples/st3/discord-bridge.kdl), then
+[`examples/fractal/discord-bridge.kdl`](../../examples/fractal/discord-bridge.kdl), then
 preview and apply that declaration:
 
 ```sh
@@ -91,20 +91,20 @@ st terminals peek agent/example/discord-bridge
 
 The top-level program seat uses `argv` to run Python directly in st's managed PTY,
 without a model harness. It remains independent of finite verification missions.
-`restart "always"` restarts an exit, subject to st's crash-loop guard. To stop it
+`restart "always"` restarts an exit, subject to Fractal's crash-loop guard. To stop it
 durably, use `st agents stop agent/example/discord-bridge --as agent/example/operator`;
 Ctrl-C alone allows the supervisor to restart it. To resume, use the corresponding
 `st agents start` command. `st terminals attach agent/example/discord-bridge`
 opens its terminal; Ctrl-\\ detaches. The runtime keeps running across SSH
-disconnects. Reboot startup depends on the existing st daemon starting on that host.
+disconnects. Reboot startup depends on the existing Fractal daemon starting on that host.
 
 The token path is recorded in the declaration; the token itself is read only by
 the bridge from the private file. `--token-file` works for `run` and `resolve`;
 `status` never reads a token. Secret-gateway setup is not a prerequisite for this
 program seat or the provider identity migration.
 
-The recorded st sender is the Discord account `external/discord/user/<id>`, for
-example `external/discord/user/404`; it is never an existing native st person. Server
+The recorded Fractal sender is the Discord account `external/discord/user/<id>`, for
+example `external/discord/user/404`; it is never an existing native Fractal person. Server
 ownership, Discord display names and mentions do not change that identity or the
 configured destination. The body carries server, channel and message provenance;
 the private state records the route and Discord/st message mappings. Imports use the route-scoped native adapter endpoint and the selected program-seat
@@ -112,7 +112,7 @@ declaration. The Unix socket is not exposed to Discord.
 
 Discord replies to imported messages or exported agent replies preserve their
 st reply links. A reply to an unmapped historical message starts a new st
-conversation. Unrelated st messages, another agent's messages, other Discord
+conversation. Unrelated Fractal messages, another agent's messages, other Discord
 authors, bot/webhook messages and other channels are not forwarded. One bot
 installation and one state file should own the route.
 
@@ -127,7 +127,7 @@ holds its cursor and asks you to check Message Content Intent.
 
 With the default hidden prompt, the token stays in process memory and is never
 saved. With `--token-file`, the operator explicitly supplies their own local
-credential file. Neither mode prints the token, passes it to st or places it in
+credential file. Neither mode prints the token, passes it to Fractal or places it in
 command arguments or the environment. Hidden input must be available when no
 file is supplied. Redirects and proxy
 environment settings are ignored for the authenticated Discord connection.
@@ -142,8 +142,8 @@ two launches sharing that file. Do not delete it to fix a delivery error: doing 
 loses correlation and delivery evidence. `--route`, `--state` and `--socket` allow
 explicit local paths; the socket must be owned by your user and not world-accessible.
 
-Accepted messages remain queued if st is temporarily unavailable. Once accepted
-by st, its normal durable mailbox holds them for an offline agent. At most 100
+Accepted messages remain queued if Fractal is temporarily unavailable. Once accepted
+by Fractal, its normal durable mailbox holds them for an offline agent. At most 100
 messages wait for agent replies; at capacity, the bridge holds its Discord cursor
 and leaves new messages in channel history. Catch-up is bounded to 1000 messages
 and retained conversation/reply records to 10000 each. Exceeding a limit stops or
@@ -165,10 +165,10 @@ copy its ID. `status` prints retained IDs and delivery states without a token.
 author, channel, text, reference and nonce when present:
 
 ```sh
-python3 -I scripts/st3-discord-bridge status --agent agent/example/discord-test
-python3 -I scripts/st3-discord-bridge resolve --agent agent/example/discord-test \
+python3 -I scripts/fractal-discord-bridge status --agent agent/example/discord-test
+python3 -I scripts/fractal-discord-bridge resolve --agent agent/example/discord-test \
   --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock" \
-  --st-message message/0123456789abcdef --discord-message 505 --part 0
+  --fractal-message message/0123456789abcdef --discord-message 505 --part 0
 ```
 
 Then restart `run`. If no matching message exists, retain the held state for
@@ -178,9 +178,9 @@ for an uncertain Discord send.
 Run focused checks:
 
 ```sh
-python3 -I scripts/st3-discord-bridge-test
-ST3_BRIDGE_NATIVE_TEST_BIN=/path/to/st3 python3 -I scripts/st3-discord-bridge-test
-python3 -I scripts/st3-discord-probe-test
+python3 -I scripts/fractal-discord-bridge-test
+ST3_BRIDGE_NATIVE_TEST_BIN=/path/to/st3 python3 -I scripts/fractal-discord-bridge-test
+python3 -I scripts/fractal-discord-probe-test
 ```
 
 The native check creates and cleans up an isolated daemon with invented identities
@@ -197,7 +197,7 @@ token entry, an actual agent reply, and a fresh exchange after restarting.
 The adapter seat uploads images with `POST /v1/client/blobs`, then imports each
 Discord message with `POST /v1/client/adapter/import` as itself, with an external
 `from` (`external/discord/user/ID`), the target agent as `to`, and a stable
-`idempotency_key`; st tags the message `adapter:<seat>`. Replies come from
+`idempotency_key`; Fractal tags the message `adapter:<seat>`. Replies come from
 `GET /v1/client/adapter/deliveries?after=INDEX&wait_ms=MS` (contract
 `st3.adapter.delivery.v0`): it waits at most ten seconds and returns at most 100
 replies from the target agent to enrolled accounts, a frontier cursor, the host

@@ -2,8 +2,8 @@ import { ClientError, FractalClient, isTransient } from '@fractal/client'
 import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
-  St3,
-  St3Live,
+  Fractal,
+  FractalLive,
   AttachFailure,
   type FollowEvent,
   type FollowSpec,
@@ -11,9 +11,10 @@ import {
   type Undecodable,
   type ConnectionState,
   followKey,
-  type St3Options,
+  type FractalOptions,
   type SyncStatus,
   syncStatusFromFailure,
+  openPtySession,
 } from '@fractal/sdk/effect'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -40,7 +41,7 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
-import { BrowserSt3Platform } from './sdk-browser/platform.ts'
+import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
   initialFeedSync,
@@ -133,13 +134,13 @@ export const liveSource = ({
   ux,
   sessionTraceLayer,
 }: {
-  readonly options: St3Options
+  readonly options: FractalOptions
   /** The live page opts in; replay and other retained sources never take a page-global socket. */
   readonly adoptEarlyCollections?: boolean
   /** Browser root owns sampling and observers; the SDK shares its scoped tracer/exporter. */
   readonly telemetryLayer?: Layer.Layer<never> | undefined
   readonly ux?: () => UxTelemetry
-  /** Optional independent trace provider; the public default only knows native st meters. */
+  /** Optional independent trace provider; the public default only knows native Fractal meters. */
   readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider> | undefined
 }): LiveSource => {
   const { baseUrl } = options
@@ -157,6 +158,7 @@ export const liveSource = ({
     messageSend: 'ungranted',
     attachmentUpload: 'ungranted',
     terminalInput: 'ungranted',
+    terminalControl: 'ungranted',
   }
   setDebug('Wf.socketErrors', 0)
   setDebug('Wf.socketLive', 0)
@@ -192,7 +194,7 @@ export const liveSource = ({
   })
   const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
-    St3Live({
+    FractalLive({
       ...options,
       fetch,
       onDiagnostics: (event) => {
@@ -254,7 +256,7 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
-      Layer.provide(BrowserSt3Platform({ adoptEarlyCollections })),
+      Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(
@@ -263,7 +265,7 @@ export const liveSource = ({
       Layer.provideMerge(telemetryLayer ?? Layer.empty),
     ),
   )
-  let sdk: St3['Service'] | undefined
+  let sdk: Fractal['Service'] | undefined
   let disposed = false
   const browser = typeof window === 'undefined' ? undefined : window
   const documentEvents = typeof document === 'undefined' ? undefined : document
@@ -311,11 +313,11 @@ export const liveSource = ({
   }: {
     readonly resolve: (get: Atom.AtomContext) => Effect.Effect<TSpec, AttachFailure>
     readonly follow: (args: {
-      readonly st3: St3['Service']
+      readonly fractal: Fractal['Service']
       readonly spec: TSpec
     }) => Stream.Stream<FollowEvent<A>>
     /** A published fallback after transport failure or a stalled first snapshot, never a parallel bootstrap read. */
-    readonly initialRead?: (st3: St3['Service']) => Effect.Effect<{ readonly value: A; readonly hasMore: boolean }, AttachFailure>
+    readonly initialRead?: (fractal: Fractal['Service']) => Effect.Effect<{ readonly value: A; readonly hasMore: boolean }, AttachFailure>
     /** Freshness of a decoded frame; a frame retaining last-good rows is stale, not live. */
     readonly observedFreshness?: (value: A) => 'live' | 'stale'
     /** Applied only after the observation's authority/ordering guard accepts it. */
@@ -421,7 +423,7 @@ export const liveSource = ({
             })
             return
           }
-          const st3 = yield* St3
+          const fractal = yield* Fractal
           const boundSpec = yield* resolving
           spec = boundSpec
           const key = followKey(boundSpec)
@@ -430,7 +432,7 @@ export const liveSource = ({
               || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
             initialReadDeadlineFiber?.interruptUnsafe()
             initialReadDeadlineFiber = undefined
-            initialReadFiber = runtime.runFork(initialRead(st3).pipe(
+            initialReadFiber = runtime.runFork(initialRead(fractal).pipe(
               Effect.tap(({ value, hasMore }) => Effect.sync(() => {
                 if (!active || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
                 value = prepareObservation?.(value, latest) ?? value
@@ -455,7 +457,7 @@ export const liveSource = ({
             ))
           }
           if (initialRead !== undefined) {
-            initialReadConnectionFiber = runtime.runFork(st3.connection.pipe(
+            initialReadConnectionFiber = runtime.runFork(fractal.connection.pipe(
               Stream.runForEach(state => Effect.sync(() => {
                 if (state._tag === 'Reconnecting' || state._tag === 'Closed' || state._tag === 'Rejected') startInitialRead()
               })),
@@ -465,7 +467,7 @@ export const liveSource = ({
             Effect.gen(function* () {
               freshnessConsumers += 1
               setDebug('Wf.freshnessConsumers', freshnessConsumers)
-              yield* st3.followSyncStatus(key).pipe(
+              yield* fractal.followSyncStatus(key).pipe(
                 Stream.runForEach((status) =>
                   Effect.sync(() => {
                     if (!active || readRejection !== undefined) return
@@ -491,8 +493,8 @@ export const liveSource = ({
               ),
             ),
           )
-          yield* st3.setVisible(boundSpec, visible)
-          yield* follow({ st3, spec: boundSpec }).pipe(
+          yield* fractal.setVisible(boundSpec, visible)
+          yield* follow({ fractal, spec: boundSpec }).pipe(
             Stream.runForEach((event) =>
               Effect.sync(() => {
                 if (!active || readRejection !== undefined) return
@@ -607,13 +609,13 @@ export const liveSource = ({
       }
       const current = spec
       if (current !== undefined)
-        runtime.runFork(Effect.flatMap(St3, (st3) => st3.setVisible(current, true)))
+        runtime.runFork(Effect.flatMap(Fractal, (fractal) => fractal.setVisible(current, true)))
       get.addFinalizer(() => {
         visible = false
         onVisibilityChange?.(false)
         const hidden = spec
         if (hidden !== undefined)
-          runtime.runFork(Effect.flatMap(St3, (st3) => st3.setVisible(hidden, false)))
+          runtime.runFork(Effect.flatMap(Fractal, (fractal) => fractal.setVisible(hidden, false)))
       })
       get.mount(retained.controller)
     })
@@ -685,7 +687,7 @@ export const liveSource = ({
   }
   const agentsRetained = retain<readonly DecodedAgent[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
-    initialRead: (st3) => st3.readAgents.pipe(
+    initialRead: (fractal) => fractal.readAgents.pipe(
       Effect.map(({ value, hasMore, undecodable, decodeStale }) => {
         const rows = [...value]
         rosterEvidence.set(rows, { undecodable, decodeStale })
@@ -701,8 +703,8 @@ export const liveSource = ({
     },
     onCommit: (value) => recordRosterDecode(rosterEvidence.get(value) ?? decodedRoster),
     observedFreshness: (value) => rosterEvidence.get(value)?.decodeStale ? 'stale' : 'live',
-    follow: ({ st3, spec }) =>
-      st3.followWindow(spec).pipe(
+    follow: ({ fractal, spec }) =>
+      fractal.followWindow(spec).pipe(
         Stream.map((event) => {
           if (event._tag !== 'Observed') return event
           const { items, undecodable, decodeStale } = event.value
@@ -715,8 +717,8 @@ export const liveSource = ({
   const agents = agentsRetained.atom
   const missionsRetained = retain<readonly Mission[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'missions', limit: 100 }),
-    follow: ({ st3, spec }) =>
-      st3.followWindow(spec).pipe(
+    follow: ({ fractal, spec }) =>
+      fractal.followWindow(spec).pipe(
         Stream.map((event) =>
           event._tag === 'Observed'
             ? {
@@ -730,8 +732,8 @@ export const liveSource = ({
   const missions = missionsRetained.atom
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
-    follow: ({ st3, spec }) =>
-      st3.followWindow(spec).pipe(
+    follow: ({ fractal, spec }) =>
+      fractal.followWindow(spec).pipe(
         Stream.map((event) =>
           event._tag === 'Observed'
             ? {
@@ -748,8 +750,8 @@ export const liveSource = ({
   const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
-        const st3 = yield* St3
-        const statuses = yield* SubscriptionRef.get(st3.syncStatuses)
+        const fractal = yield* Fractal
+        const statuses = yield* SubscriptionRef.get(fractal.syncStatuses)
         let freshest: typeof Snapshot.Type | undefined
         // Window snapshots fence the gateway's complete store, not just their rows.
         // Conversation frames have no Snapshot; their opaque cursors are not action fences.
@@ -761,7 +763,7 @@ export const liveSource = ({
             freshest = decoded.value
         }
         if (freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
-        return yield* st3.snapshot.pipe(
+        return yield* fractal.snapshot.pipe(
           Effect.map((value): ConversationPortResult<string> => ({ _tag: 'Success', value })),
           Effect.catch((failure) => Effect.succeed<ConversationPortResult<string>>({
             _tag: 'Refused', reason: 'snapshot-unavailable',
@@ -781,7 +783,7 @@ export const liveSource = ({
     // Until Fractal #1977 provides owner-side read-after-send visibility, an absent row on
     // even a later replace page proves nothing; outbox and key aliases share this feed's lifetime.
     const pending = new Map<string, PendingSend>()
-    // st deduplicates a key by its whole request except the fence. Each key's first action
+    // Fractal deduplicates a key by its whole request except the fence. Each key's first action
     // id and parameters are what every Resend of it repeats, even after its row retires.
     const sentActions = new Map<string, Pick<AttachmentSendRequest, 'id' | 'parameters'>>()
     let lastSendId: string | undefined
@@ -803,6 +805,8 @@ export const liveSource = ({
       } else changedFrom = Math.min(changedFrom, projection.changedFrom)
       return {
         items,
+        subagents: timeline.subagents,
+        ...(timeline.header === undefined ? {} : { header: timeline.header }),
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
         change: { from: publishedItems, index: changedFrom },
@@ -824,8 +828,8 @@ export const liveSource = ({
         if (visible) visibleConversations.set(ref, painted)
         else visibleConversations.delete(ref)
       },
-      follow: ({ st3, spec }) =>
-        st3.followConversation(spec).pipe(
+      follow: ({ fractal, spec }) =>
+        fractal.followConversation(spec).pipe(
           Stream.map((event) => {
             if (event._tag !== 'Observed') return event
             ux?.().switchDataReady(ref)
@@ -1008,8 +1012,8 @@ export const liveSource = ({
           return yield* new AttachFailure({ code: 'no-terminal', message: 'This agent has no terminal.', retryable: false })
         })
       },
-      follow: ({ st3, spec }) =>
-        st3.followTerminal(spec).pipe(
+      follow: ({ fractal, spec }) =>
+        fractal.followTerminal(spec).pipe(
           Stream.tap((event) =>
             Effect.sync(() => {
               if (event._tag === 'Observed') incrDebug('Wf.terminalUpdates')
@@ -1040,8 +1044,8 @@ export const liveSource = ({
   const transportConnection = Atom.keepAlive(
     Atom.make((get): ConnectionState => {
       const fiber = runtime.runFork(
-        Effect.flatMap(St3, (st3) =>
-          st3.connection.pipe(Stream.runForEach((value) => Effect.sync(() => get.setSelf(value)))),
+        Effect.flatMap(Fractal, (fractal) =>
+          fractal.connection.pipe(Stream.runForEach((value) => Effect.sync(() => get.setSelf(value)))),
         ),
       )
       get.addFinalizer(() => fiber.interruptUnsafe())
@@ -1059,8 +1063,8 @@ export const liveSource = ({
     Atom.make((get) => {
       let current = initialFeedSync<never>(Date.now())
       const fiber = runtime.runFork(
-        Effect.flatMap(St3, (st3) =>
-          st3.gatewaySyncStatus.pipe(
+        Effect.flatMap(Fractal, (fractal) =>
+          fractal.gatewaySyncStatus.pipe(
             Stream.runForEach((status) => Effect.sync(() => {
               current = transitionFeedSync(current, status, Date.now())
               if (status._tag === 'Live' && online) registry.set(networkLoss, undefined)
@@ -1085,8 +1089,8 @@ export const liveSource = ({
       deniedReaders.add(deny)
       const fiber = runtime.runFork(
         Effect.gen(function* () {
-          const st3 = yield* St3
-          const discovered = yield* st3.capabilities
+          const fractal = yield* Fractal
+          const discovered = yield* fractal.capabilities
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1099,6 +1103,7 @@ export const liveSource = ({
             messageSend: allowed.has('message.send') ? 'granted' : 'ungranted',
             attachmentUpload: allowed.has('control.messages') ? 'granted' : 'ungranted',
             terminalInput: allowed.has('terminal.input') ? 'granted' : 'ungranted',
+            terminalControl: allowed.has('terminal.control') ? 'granted' : 'ungranted',
           })
         }),
       )
@@ -1113,7 +1118,7 @@ export const liveSource = ({
     selectConversation,
     registry,
     ready: runtime.runPromise(Effect.gen(function* () {
-      sdk = yield* St3
+      sdk = yield* Fractal
       if (!online) yield* sdk.setNetworkOnline(false)
     })),
     suspendSockets: () => sdk?.suspendSockets(),
@@ -1166,6 +1171,11 @@ export const liveSource = ({
       prompts: gatewayPromptAnswers(client),
       alertActions: gatewayAlertActions(client),
       documents: gatewayDocuments(client),
+      // Same origin and transport as `client`; the gateway injects the credential and keeps the
+      // capability subprotocol on the WebSocket upgrade.
+      terminalRaw: {
+        open: (options) => openPtySession({ ...options, baseUrl, fetch }),
+      },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.

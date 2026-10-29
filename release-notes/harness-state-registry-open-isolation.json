@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep slow ownership-lock initialization outside the process-wide registry mutex",
+  "replay": { "status": "none", "detail": "No replay changes." },
+  "schema": { "status": "none", "detail": "No persisted state changes." },
+  "rules": { "status": "none", "detail": "Ownership checks and filesystem flock exclusion are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Slow lock-file opens no longer block cached async admission for unrelated driver paths. Racing synchronous initializers recheck the registry and retain a single shared descriptor and admission entry." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout; no live-state changes." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback; filesystem lock protocol is unchanged." }
+}

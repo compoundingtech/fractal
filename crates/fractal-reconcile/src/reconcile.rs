@@ -47,12 +47,13 @@ use crate::model::{
     WorkSelector, ObserverSpec,
 };
 use crate::resource::{
-    ObservationRequest, ObserverCondition, ProviderRateLimit, RegisteredResourceProvider,
-    ResourceProvider,
+    LocalObserverBudget, ObservationRequest, ObserverCondition, ProviderRateLimit,
+    RegisteredResourceProvider, ResourceProvider,
 };
 use crate::store::Store;
 
 pub mod channel_recovery;
+pub mod github_plugin_store;
 pub mod idle_nudge;
 pub mod placement;
 pub mod run_report;
@@ -124,6 +125,8 @@ const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
 // A failed checkout fetch or worktree command waits this long before Git runs again.
 const CHECKOUT_RETRY_MS: u128 = 30_000;
+/// How long a member's launch evidence, read once, is trusted before it is read again.
+const LAUNCH_EVIDENCE_RECHECK_MS: u128 = 60_000;
 // Workspace errors hold one schedule, without retrying filesystem I/O on every pass.
 const SCHEDULE_WORKSPACE_RETRY_MS: u128 = 30_000;
 // A deadline source that could not be read is read again this soon, so the deadlines it holds
@@ -1057,6 +1060,14 @@ pub type WorkWakeObserveHook = Box<dyn FnOnce(&crate::incremental::Incremental, 
 pub type BackgroundEntryHook =
     Arc<dyn Fn(bool, Option<tokio::time::Instant>, smallclaims::sqlite::work::SqliteWork) + Send + Sync>;
 
+/// A cursor a poll recorded facts for that the plugin database did not keep, with the degraded
+/// receipt saying so while that could not be written either.
+#[derive(Clone)]
+struct UnkeptCursor {
+    cursor: Option<String>,
+    receipt: Option<ClaimInput>,
+}
+
 /// Local observation retries never turn unreadable process state into a completed stop.
 struct StopObservationRetry {
     started_at: u128,
@@ -1175,6 +1186,12 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Quiet standing-watch cadence by observer/revision; not part of the provider cache.
     observer_intervals: Arc<Mutex<HashMap<String, u64>>>,
     observer_cursors: Arc<Mutex<HashMap<String, Option<String>>>>,
+    /// Each observer's poll cursor across restarts, in the GitHub plugin's own database rather
+    /// than the graph (see [`github_plugin_store`]).
+    github_plugin: Arc<github_plugin_store::GithubPluginStore>,
+    /// By observer: the cursor its plugin database did not keep. Every arm of the observer keeps
+    /// it before it asks the provider again.
+    unkept_cursors: Arc<Mutex<HashMap<String, UnkeptCursor>>>,
     delayed_restarts: Arc<Mutex<HashMap<String, RestartWake>>>,
     stop_observation_retries: Mutex<HashMap<String, StopObservationRetry>>,
     /// The kill deadline already logged for each active stop operation.
@@ -1192,6 +1209,11 @@ pub struct Reconciler<R = NativeRuntime> {
     /// index of the subject's newest declaration it was read from.
     declared_checkouts: Mutex<HashMap<String, (u64, Option<(Checkout, String)>)>>,
     materialized_mission_generations: Mutex<BTreeSet<String>>,
+    /// Held while mission runs are evaluated, by a pass or by `evaluate_changed_mission_runs`, so
+    /// no run is evaluated twice at once.
+    mission_evaluation: Mutex<()>,
+    /// How far `evaluate_changed_mission_runs` has read the change feed, apart from the passes.
+    mission_reads_cursor: Mutex<Option<(u64, i64)>>,
     /// Found launch evidence is immutable for one origin and incarnation. Missing evidence
     /// is checked again on a subject change or the existing full-pass safety interval.
     launched_members: Mutex<HashMap<(String, String, String), LaunchEvidence>>,
@@ -1202,7 +1224,7 @@ pub struct Reconciler<R = NativeRuntime> {
     person: Option<String>,
     #[cfg(any(test, feature = "test-support"))]
     mission_declaration_parses: std::sync::atomic::AtomicUsize,
-    file_watchers: Arc<Mutex<HashMap<String, notify::RecommendedWatcher>>>,
+    file_watchers: Arc<Mutex<HashMap<String, FileWatch>>>,
     file_watchers_used: Arc<Mutex<HashSet<String>>>,
     file_observations: Arc<Mutex<HashMap<String, FileStamp>>>,
     resource_provider: Arc<dyn ResourceProvider>,
@@ -1255,6 +1277,38 @@ pub struct Reconciler<R = NativeRuntime> {
     /// Publish during a unit test after the work feed was observed, before wake selection.
     #[cfg(any(test, feature = "test-support"))]
     after_work_wake_observe: Mutex<Option<WorkWakeObserveHook>>,
+}
+
+struct FileWatch {
+    // Keep the subscription alive, including across replacements of the target file.
+    _watcher: notify::RecommendedWatcher,
+    target: PathBuf,
+    directory: PathBuf,
+    referent: Option<PathBuf>,
+}
+
+impl FileWatch {
+    fn relevant(event: &notify::Event, target: &Path, directory: &Path, referent: Option<&Path>) -> bool {
+        // Overflow/rescan means paths may have been lost; every subscription must reread.
+        event.need_rescan()
+            || (matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_)
+            ) && (event.paths.is_empty()
+                || event.paths.iter().any(|path| {
+                    path == target
+                        || referent == Some(path.as_path())
+                        || ((path == directory
+                            || referent.and_then(Path::parent) == Some(path.as_path()))
+                            && matches!(
+                                event.kind,
+                                notify::EventKind::Remove(_)
+                                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                            ))
+                })))
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -1349,6 +1403,8 @@ impl Reconciler<NativeRuntime> {
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
+            unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
+            github_plugin: Arc::new(github_plugin_store::GithubPluginStore::open(state_dir)?),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1358,6 +1414,8 @@ impl Reconciler<NativeRuntime> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            mission_evaluation: Mutex::new(()),
+            mission_reads_cursor: Mutex::new(None),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -1469,6 +1527,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         self
     }
 
+    /// A reconciler for tests: no client endpoint, a temporary driver directory, and a GitHub
+    /// plugin database that lasts only as long as it does (`with_github_plugin` replaces it).
+    /// The daemon builds its reconciler with [`Reconciler::native`], which opens the database in
+    /// the state directory.
     pub fn new(store: Arc<Store>, runtime: Arc<R>, host: String, notify: Arc<Notify>) -> Self {
         Self {
             store,
@@ -1512,6 +1574,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             observer_deadlines: Arc::new(Mutex::new(HashMap::new())),
             observer_intervals: Arc::new(Mutex::new(HashMap::new())),
             observer_cursors: Arc::new(Mutex::new(HashMap::new())),
+            unkept_cursors: Arc::new(Mutex::new(HashMap::new())),
+            github_plugin: Arc::new(github_plugin_store::GithubPluginStore::memory()),
             delayed_restarts: Arc::new(Mutex::new(HashMap::new())),
             stop_observation_retries: Mutex::new(HashMap::new()),
             reported_kill_survivors: Mutex::new(HashMap::new()),
@@ -1521,6 +1585,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             checkout_conflicts: Mutex::new(HashMap::new()),
             declared_checkouts: Mutex::new(HashMap::new()),
             materialized_mission_generations: Mutex::new(BTreeSet::new()),
+            mission_evaluation: Mutex::new(()),
+            mission_reads_cursor: Mutex::new(None),
             launched_members: Mutex::new(HashMap::new()),
             #[cfg(any(test, feature = "test-support"))]
             launch_evidence_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -1678,6 +1744,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         self
     }
 
+    /// The GitHub plugin database this reconciler keeps cursors in, as a restarted daemon
+    /// reopens its own.
+    #[doc(hidden)]
+    pub fn with_github_plugin(mut self, store: Arc<github_plugin_store::GithubPluginStore>) -> Self {
+        self.github_plugin = store;
+        self
+    }
+
     #[doc(hidden)]
     pub fn with_cleanup_deadline(mut self, deadline: Duration) -> Self {
         self.cleanup_deadline = deadline;
@@ -1793,7 +1867,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         // unrelated replication traffic must not keep this wake alive.
                         let before = smallclaims::touched::writes();
                         let failed = match crate::profile::task("task reconcile-pass", || {
-                            let _trigger_span = crate::profile::span(pass_trigger);
+                            let _trigger_span = crate::profile::span_with_io(pass_trigger);
                             this.reconcile_once_with_cause(cause)
                         }) {
                             Err(error) => {
@@ -1819,7 +1893,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
-                        this.incremental.finish_pass(now_ms().saturating_sub(started));
                         Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
@@ -2552,7 +2625,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         {
             for claim in self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
+                .iter()
             {
                 let fields = claim.body.get("fields").unwrap_or(&claim.body);
                 if fields.get("code").and_then(Value::as_str) != Some("provider-capacity")
@@ -3273,6 +3347,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                         // A pending publication must not orphan a suspend or block its resume.
                         if let Some(suspension) = &suspension {
+                            self.retire_obsolete_failed_restart(subject, now_ms())?;
                             return self.reconcile_suspension(
                                 subject,
                                 member,
@@ -3938,7 +4013,8 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn reconcile_provider_capacity_retry(&self, subject: &DesiredSubject, now: u128) -> Result<()> {
         for claim in self
             .store
-            .claims_for(&subject.subject, Some("harness.diagnostic"))?
+            .harness_diagnostics(&subject.subject)?
+            .iter()
         {
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("code").and_then(Value::as_str) != Some("provider-capacity")
@@ -3987,7 +4063,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ),
                         ("status".into(), Value::String("accepted".into())),
                     ]),
-                    evidence: vec![claim.id],
+                    evidence: vec![claim.id.clone()],
                     expected_subject: None,
                     idempotency_key: Some(retry_key),
                 })?;
@@ -4037,7 +4113,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                         ]),
                     ),
                 ]),
-                evidence: vec![claim.id],
+                evidence: vec![claim.id.clone()],
                 expected_subject: None,
                 idempotency_key: Some(retry_key),
             })?;
@@ -4379,7 +4455,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         subject: &str,
         current_incarnation: &str,
     ) -> Result<()> {
-        for claim in self.store.claims_for(subject, Some("harness.diagnostic"))? {
+        for claim in self.store.harness_diagnostics(subject)?.iter() {
             if claim.body.pointer("/fields/code").and_then(Value::as_str)
                 != Some("provider-auth-expired")
             {
@@ -4599,7 +4675,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             // replayed pass records it once and a later prompt of the same kind is its own.
             let earlier = self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
                 .iter()
                 .filter(|claim| {
                     claim.body.pointer("/fields/code").and_then(Value::as_str)
@@ -4830,13 +4906,14 @@ impl<R: RuntimeControl> Reconciler<R> {
             let mut key = format!("{prefix}:{}:{incarnation}", subject.subject);
             for claim in self
                 .store
-                .claims_for(&subject.subject, Some("harness.diagnostic"))?
+                .harness_diagnostics(&subject.subject)?
+                .iter()
             {
-                if claim_incarnation(&claim) != Some(incarnation) {
+                if claim_incarnation(claim) != Some(incarnation) {
                     continue;
                 }
                 match claim.body.pointer("/fields/code").and_then(Value::as_str) {
-                    Some(found) if found == code => fence = Some(claim),
+                    Some(found) if found == code => fence = Some(claim.clone()),
                     Some(found) if found == restored => {
                         fence = None;
                         key = format!("{prefix}:{}:{incarnation}:{}", subject.subject, claim.id);
@@ -5367,12 +5444,13 @@ impl<R: RuntimeControl> Reconciler<R> {
     fn claude_trust_prompts(&self, subject: &str) -> Result<Vec<crate::model::ClaimRecord>> {
         Ok(self
             .store
-            .claims_for(subject, Some("harness.diagnostic"))?
-            .into_iter()
+            .harness_diagnostics(subject)?
+            .iter()
             .filter(|claim| {
                 claim.body.pointer("/fields/code").and_then(Value::as_str)
                     == Some("provider-trust-prompt")
             })
+            .cloned()
             .collect())
     }
 
@@ -5946,8 +6024,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let epoch = self.store.publication_evidence_epoch(&subject.subject)?;
                 if let Some(known) = known
                     && known.epoch == epoch
-                    && now.saturating_sub(known.checked_at_ms)
-                        < crate::incremental::FULL_PASS_INTERVAL_MS
+                    && now.saturating_sub(known.checked_at_ms) < LAUNCH_EVIDENCE_RECHECK_MS
                 {
                     None
                 } else {
@@ -6146,6 +6223,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return Ok(None);
                 }
                 Ok(Some(caught(|| -> Result<()> {
+                    self.retire_obsolete_failed_restart(subject, now_ms())?;
                     self.reconcile_stop_with_origin(subject, ptys, actual_origin)?;
                     self.remove_checkout_after_run(subject, live_workspaces)
                 })))
@@ -7141,7 +7219,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             use crate::store::identities::{IdentityKind, IdentityStore as _};
             self.store.resolve_identity(IdentityKind::Agent, &subject.subject)?;
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() {
+        if request.is_none() && self.store.runtime_start_for(&subject.subject)?.is_some() {
             return Ok(false);
         }
         let selected_token = self.store.selected_desired_token(&subject.subject)?;
@@ -7662,13 +7740,17 @@ impl<R: RuntimeControl> Reconciler<R> {
         launch: &MemberSpec,
     ) -> Option<String> {
         let driver = crate::accounts::harness_driver(&subject.desired)?;
-        let configured = crate::accounts::login_environment_name(driver).and_then(|variable| {
-            launch
-                .environment
-                .get(variable)
-                .cloned()
-                .or_else(|| std::env::var(variable).ok())
-        });
+        // A harness with a login directory names it in that variable; omp names the key file it
+        // reads in its own.
+        let configured = crate::accounts::login_environment_name(driver)
+            .or_else(|| (driver == "omp").then_some(crate::accounts::OMP_KEY_FILE_ENV))
+            .and_then(|variable| {
+                launch
+                    .environment
+                    .get(variable)
+                    .cloned()
+                    .or_else(|| std::env::var(variable).ok())
+            });
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let accounts = self.store.declared_accounts().ok()?;
         crate::accounts::unbound_login_account(
@@ -8019,13 +8101,33 @@ impl<R: RuntimeControl> Reconciler<R> {
                     );
                 };
                 let mut resumed = member.clone();
-                resumed
-                    .environment
-                    .insert(suspended::RESUME_ENV.into(), session);
                 if agent.starts_with("agent/import/omp/") {
-                    // A cold resume names the suspension's session, not the import.
+                    // The authored import path may name an older session; recover the captured
+                    // incarnation's binding below instead of carrying that path into a cold resume.
                     crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
                 }
+                // Recover the suspended incarnation's durable path, not the current launch's
+                // latest binding. The snapshot's existing native ID remains the resume fence.
+                if let (Some(incarnation), Some(harness)) =
+                    (suspension.incarnation_id.as_deref(), suspension.harness.as_deref())
+                {
+                    match suspended::bound_session_path(
+                        &self.store, agent, incarnation, harness, &session,
+                    ) {
+                        Ok(Some(path)) => {
+                            crate::environment::set(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV, path);
+                        }
+                        Ok(None) => {
+                            crate::environment::remove_aliases(&mut resumed.environment, crate::rollout::RESUME_PATH_ENV);
+                        }
+                        Err(error) => {
+                            return self.fail_suspension(
+                                agent, suspension, "snapshot-binding-changed", format!("{error:#}"), Vec::new(),
+                            );
+                        }
+                    }
+                }
+                crate::environment::set(&mut resumed.environment, suspended::RESUME_ENV, session);
                 if let Err(error) =
                     self.perform_start(subject, &resumed, "a suspended seat was resumed")
                 {
@@ -8192,16 +8294,79 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// A requester-authored action replicates to the runtime owner. The declaration and old
-    /// incarnation fence it, so a delayed request cannot stop a replacement or revive a stop.
-    /// A start that FAILED and whose producer closure was never proven stays pending, and while it
-    /// does an explicit restart is swallowed (the seat looks parked for good). Once the failed start
-    /// is older than any launcher could still publish a session, no runtime of the seat is observed
-    /// running, and no launch worker holds the start lock, the failure is final: close the operation
-    /// so the request makes a new attempt. Returns whether it did.
-    fn supersede_stale_failed_start(
+    /// A failed launch is not a durable grant to restart after later lifecycle intent.
+    /// Keep its unresolved producer fenced, but consume the obsolete restart request.
+    fn retire_obsolete_failed_restart(&self, subject: &DesiredSubject, now: u128) -> Result<bool> {
+        let Some(pending) = self.store.runtime_start_for(&subject.subject)? else {
+            return Ok(false);
+        };
+        if !pending.finished || pending.cleanup_verified
+            || !pending.result.as_ref().is_some_and(|result| result["error"].is_string())
+        {
+            return Ok(false);
+        }
+        let Some(request) = crate::restart::latest_request(&self.store, &subject.subject)? else {
+            return Ok(false);
+        };
+        let completion = format!("agent-restart-completed:{}", request.id);
+        if self.store.operation_claim(&completion)?.is_some() {
+            return Ok(false);
+        }
+        let later_control = self.store.observations_for(&subject.subject, "runtime.action.requested")?
+            .into_iter().rev().take_while(|claim| claim.id != request.id)
+            .any(|claim| matches!(
+                claim.body["fields"]["action"].as_str(),
+                Some("suspend" | "resume" | "stop" | "terminate")
+            ));
+        let retired = self.store.claims_for(&subject.subject, Some("agent.retired"))?
+            .into_iter().any(|claim| claim.store_index > request.store_index);
+        let reason = if self.store.selected_desired_token(&subject.subject)?.as_deref()
+            != request.body.pointer("/evidence/0").and_then(Value::as_str)
+        {
+            "the desired declaration changed after the restart request"
+        } else if retired || later_control || crate::suspension::current(&self.store, &subject.subject)?
+            .is_some_and(|suspension| suspension.holds_seat())
+        {
+            "later lifecycle control or suspension superseded the restart request"
+        } else if now.saturating_sub(request.accepted_at_unix_ms) > crate::restart::FAILED_START_RETRY_MAX_AGE_MS {
+            "the failed-start restart request exceeded its one-hour retry authority"
+        } else {
+            return Ok(false);
+        };
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.reconcile-decision".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("decision".into(), Value::from("restart-retired-obsolete-request")),
+                ("reason".into(), Value::from(reason)),
+                ("key".into(), Value::from(format!("restart-retired-obsolete-request:{}", request.id))),
+            ]),
+            evidence: vec![request.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(format!("restart-retired-obsolete-request:{}", request.id)),
+        })?;
+        self.store.append_claim(&ClaimInput {
+            subject: subject.subject.clone(),
+            kind: "runtime.action.succeeded".into(),
+            actor: Some(RECONCILER_ACTOR.into()),
+            fields: BTreeMap::from([
+                ("action".into(), Value::from("restart")),
+                ("operation_status".into(), Value::from("retired")),
+                ("reason".into(), Value::from(reason)),
+            ]),
+            evidence: vec![request.id],
+            expected_subject: None,
+            idempotency_key: Some(completion),
+        })?;
+        self.signal_changed();
+        Ok(true)
+    }
+
+    /// Preflight the stale producer and runtime evidence. This never releases admission;
+    /// the replacement's writer transaction fences intent and closes the old hold together.
+    fn stale_failed_start_ready(
         &self,
-        subject: &DesiredSubject,
         pending: &RuntimeStartOperation,
         observation: Option<&RuntimeObservation>,
     ) -> Result<bool> {
@@ -8235,30 +8400,8 @@ impl<R: RuntimeControl> Reconciler<R> {
         if observation.is_some_and(|item| !matches!(item.status.as_str(), "exited" | "vanished" | "stopped")) {
             return Ok(false);
         }
-        // The kernel lock, not a PID guess, says no launch worker holds admission.
-        let Some(_lock) = self.store.try_runtime_start_lock(&subject.subject)? else {
-            return Ok(false);
-        };
-        if pending.revoked_by.is_none() {
-            self.revoke_start(&subject.subject)?;
-        }
-        self.store.retain_runtime_start_producer_closed(&pending.id)?;
-        self.record_once(
-            &subject.subject,
-            "runtime.reconcile-decision",
-            BTreeMap::from([
-                ("key".into(), Value::String(format!("restart-superseded-failed-start:{}", pending.id))),
-                ("decision".into(), Value::String("restart-superseded-failed-start".into())),
-                (
-                    "reason".into(),
-                    Value::String(format!(
-                        "the failed runtime start {} never proved its producer closed; it is older than any launcher could still publish and no runtime is running, so a new restart request makes a new attempt",
-                        pending.id
-                    )),
-                ),
-            ]),
-        )?;
-        self.start_changed(&subject.subject);
+        // This is only physical preflight. The admission writer must fence lifecycle intent,
+        // release this exact failed operation and admit its replacement atomically.
         Ok(true)
     }
 
@@ -8276,6 +8419,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(false);
         };
+        if self.retire_obsolete_failed_restart(subject, now_ms())? {
+            return Ok(true);
+        }
         if self
             .store
             .selected_desired_token(&subject.subject)?
@@ -8302,8 +8448,8 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .operation_claim(&format!("agent-restart-attempt:{}", request.id))?;
         if let Some(pending) = self.store.runtime_start_for(&subject.subject)? {
-            if self.supersede_stale_failed_start(subject, &pending, observation)? {
-                // The failed start no longer holds the seat: this request makes the new attempt.
+            if self.stale_failed_start_ready(&pending, observation)? {
+                // Admission will release this exact failed operation with the replacement.
             } else {
                 // The request is not lost: it waits for this start. Say so (once per request and
                 // start), so a restart that is never consumed is visible and not a silent success.
@@ -8560,7 +8706,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                 &format!("restart blocked: {error:#}"),
             );
         }
-        if self.store.runtime_start_for(&subject.subject)?.is_some() { return Ok(true); }
         if attempted.is_some() {
             return self.fail_requested_restart(
                 subject,
@@ -8748,8 +8893,8 @@ impl<R: RuntimeControl> Reconciler<R> {
                     let token = self.launch_token(&subject.subject)?;
                     let diagnostic = self
                         .store
-                        .claims_for(&subject.subject, Some("harness.diagnostic"))?
-                        .into_iter()
+                        .harness_diagnostics(&subject.subject)?
+                        .iter()
                         .rev()
                         .find(|claim| {
                             claim.body.pointer("/fields/code").and_then(Value::as_str)
@@ -9469,6 +9614,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some("exited" | "vanished" | "stopped")
             )
         {
+            // The process exit that follows is not a claim. Watch the exec until it ends, so
+            // that exit wakes a pass whatever waits on it: an exit-code gate behind a pending
+            // gate is never evaluated, and cannot arm the watch itself.
+            if member.host == self.host {
+                self.arm_gate_poll(&member.runtime_id);
+            }
             return Ok(());
         }
         if subject.kind == "agent"
@@ -9695,6 +9846,12 @@ impl<R: RuntimeControl> Reconciler<R> {
     }
 
     fn evaluate_mission_runs_pass(&self) -> Result<()> {
+        // Before reading what changed: a mark set while `evaluate_changed_mission_runs` evaluated
+        // the run would be cleared when that evaluation finished.
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         self.incremental.observe(&self.store)?;
         // A gate runner's exit is not a claim: look again at the runners evaluations wait on.
         self.incremental.observe_execs(|runtime_id| {
@@ -9705,10 +9862,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                 .map(|observation| observation.status)
         });
         let ids = self.store.active_mission_run_ids_for_origin(&self.host)?;
-        self.evaluate_mission_run_ids(ids)
+        self.evaluate_mission_run_ids_held(ids)
     }
 
     pub fn evaluate_mission_run_ids(&self, ids: Vec<String>) -> Result<()> {
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        self.evaluate_mission_run_ids_held(ids)
+    }
+
+    /// [`Self::evaluate_mission_run_ids`], with `mission_evaluation` already held.
+    fn evaluate_mission_run_ids_held(&self, ids: Vec<String>) -> Result<()> {
         let mut active_generations = BTreeSet::new();
         let mut active_steps = BTreeSet::new();
         let mut changed = false;
@@ -9734,85 +9900,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 }
                 continue;
             }
-            let cpu_started = crate::incremental::thread_cpu();
-            let wrote_mark = smallclaims::touched::wrote_len();
-            let mut due = None;
-            let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
-                smallclaims::touched::record_due(|| {
-                    self.isolate("mission-run", &subject, || {
-                        let (run, mission) = self.store.mission_run_for_evaluation(id)?;
-                        active_generations.insert(run.generation.clone());
-                        active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
-                        // From the view the evaluation started with: a write it makes changes subjects
-                        // it read, so the next pass evaluates it again and takes the new times.
-                        due = crate::incremental::run_due(&run, now_ms());
-                        // Telling a run's reporter never holds the run back or fails it.
-                        match self.run_report(&run.subject).and_then(|report| {
-                            report
-                                .map(|report| self.report_run(&run, &report, now_ms()))
-                                .transpose()
-                        }) {
-                            Ok(None) => {
-                                // A run whose reporter was cleared has nobody left to fail.
-                                if let Err(error) = self.close_fault(
-                                    &run.subject,
-                                    run_report::REPORT_FAULT_SCOPE,
-                                    "the run reports to nobody",
-                                ) {
-                                    eprintln!("st3: run report for {}: {error:#}", run.subject);
-                                }
-                            }
-                            Ok(Some(stalls_at)) => {
-                                due = [due, stalls_at].into_iter().flatten().min();
-                            }
-                            Err(error) => {
-                                if let Err(error) = self.record_fault(
-                                    &run.subject,
-                                    run_report::REPORT_FAULT_SCOPE,
-                                    Err(error),
-                                ) {
-                                    eprintln!("st3: run report for {}: {error:#}", run.subject);
-                                }
-                            }
-                        }
-                        let evaluated = self.evaluate_active_mission_run(&run, mission);
-                        // Recovery is diagnostic too: admission and execution writes come first.
-                        if (!first_readiness_pending(&run)
-                            || now_ms().saturating_sub(first_readiness_since(&run))
-                                < FIRST_READINESS_FAULT_AFTER_MS)
-                            && let Err(error) = self.close_fault(
-                                &run.subject,
-                                FIRST_READINESS_FAULT_SCOPE,
-                                "the run no longer has an overdue first-readiness wait",
-                            )
-                        {
-                            eprintln!(
-                                "st3: first-readiness recovery for {}: {error:#}", run.subject
-                            );
-                        }
-                        evaluated
-                    })
-                })
-            });
-            due = match (due, armed) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-            changed |= evaluated.unwrap_or(false);
-            crate::performance::record_evaluation(
-                "mission-run",
+            changed |= self.evaluate_one_mission_run(
+                id,
                 needed,
-                crate::incremental::thread_cpu().saturating_sub(cpu_started),
+                false,
+                &mut active_generations,
+                &mut active_steps,
             );
-            if !needed {
-                let wrote = smallclaims::touched::wrote_since(wrote_mark);
-                // Rows that are not claims or observations (caches, capabilities) change no
-                // graph state a later pass would have to catch up with.
-                if !wrote.is_empty() {
-                    self.incremental_correction("mission-run", &subject, &reads, &wrote);
-                }
-            }
-            self.incremental.evaluated(&subject, reads, due);
         }
         self.incremental.retain(
             "mission-run/",
@@ -9860,6 +9954,174 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// Evaluate one run and remember what it read. `active_only` skips a run that has ended since
+    /// the last pass listed the active runs.
+    fn evaluate_one_mission_run(
+        &self,
+        id: &str,
+        needed: bool,
+        active_only: bool,
+        active_generations: &mut BTreeSet<String>,
+        active_steps: &mut BTreeSet<String>,
+    ) -> bool {
+        let subject = format!("mission-run/{id}");
+        let cpu_started = crate::incremental::thread_cpu();
+        let wrote_mark = smallclaims::touched::wrote_len();
+        let mut due = None;
+        let ((evaluated, armed), reads) = smallclaims::touched::record(|| {
+            smallclaims::touched::record_due(|| {
+                self.isolate("mission-run", &subject, || {
+                    let (run, mission) = self.store.mission_run_for_evaluation(id)?;
+                    if active_only
+                        && !matches!(run.status.as_str(), "running" | "standing" | "blocked")
+                    {
+                        return Ok(false);
+                    }
+                    active_generations.insert(run.generation.clone());
+                    active_steps.extend(run.steps.iter().map(|step| step.subject.clone()));
+                    // From the view the evaluation started with: a write it makes changes subjects
+                    // it read, so the next pass evaluates it again and takes the new times.
+                    due = crate::incremental::run_due(&run, now_ms());
+                    // Telling a run's reporter never holds the run back or fails it.
+                    match self.run_report(&run.subject).and_then(|report| {
+                        report
+                            .map(|report| self.report_run(&run, &report, now_ms()))
+                            .transpose()
+                    }) {
+                        Ok(None) => {
+                            // A run whose reporter was cleared has nobody left to fail.
+                            if let Err(error) = self.close_fault(
+                                &run.subject,
+                                run_report::REPORT_FAULT_SCOPE,
+                                "the run reports to nobody",
+                            ) {
+                                eprintln!("st3: run report for {}: {error:#}", run.subject);
+                            }
+                        }
+                        Ok(Some(stalls_at)) => {
+                            due = [due, stalls_at].into_iter().flatten().min();
+                        }
+                        Err(error) => {
+                            if let Err(error) = self.record_fault(
+                                &run.subject,
+                                run_report::REPORT_FAULT_SCOPE,
+                                Err(error),
+                            ) {
+                                eprintln!("st3: run report for {}: {error:#}", run.subject);
+                            }
+                        }
+                    }
+                    let evaluated = self.evaluate_active_mission_run(&run, mission);
+                    // Recovery is diagnostic too: admission and execution writes come first.
+                    if (!first_readiness_pending(&run)
+                        || now_ms().saturating_sub(first_readiness_since(&run))
+                            < FIRST_READINESS_FAULT_AFTER_MS)
+                        && let Err(error) = self.close_fault(
+                            &run.subject,
+                            FIRST_READINESS_FAULT_SCOPE,
+                            "the run no longer has an overdue first-readiness wait",
+                        )
+                    {
+                        eprintln!(
+                            "st3: first-readiness recovery for {}: {error:#}", run.subject
+                        );
+                    }
+                    evaluated
+                })
+            })
+        });
+        due = match (due, armed) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        crate::performance::record_evaluation(
+            "mission-run",
+            needed,
+            crate::incremental::thread_cpu().saturating_sub(cpu_started),
+        );
+        if !needed {
+            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            // Rows that are not claims or observations (caches, capabilities) change no
+            // graph state a later pass would have to catch up with.
+            if !wrote.is_empty() {
+                self.incremental_correction("mission-run", &subject, &reads, &wrote);
+            }
+        }
+        self.incremental.evaluated(&subject, reads, due);
+        evaluated.unwrap_or(false)
+    }
+
+    /// Evaluate the runs whose last evaluation read a subject that changed since, such as a
+    /// baseline's resource or a step they depend on, without waiting for a pass. A pass reaches
+    /// mission runs once, after its other stages, so on a slow host a run that a change makes
+    /// ready would wait for the rest of the pass running then and most of the next. It reads the
+    /// change feed with its own cursor and marks nothing, so a pass's evaluation running at the
+    /// same time cannot clear a mark it set. Leaves full passes, due times and runs no pass has
+    /// evaluated yet to the pass. Returns how many runs it evaluated and whether any wrote.
+    pub fn evaluate_changed_mission_runs(&self) -> Result<(usize, bool)> {
+        let _evaluating = self
+            .mission_evaluation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut cursor = self
+            .mission_reads_cursor
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (next, changed_runs) =
+            self.incremental.readers_since(&self.store, *cursor, "mission-run/")?;
+        *cursor = Some(next);
+        let mut active_generations = BTreeSet::new();
+        let mut active_steps = BTreeSet::new();
+        let mut changed = false;
+        for subject in &changed_runs {
+            let Some(id) = subject.strip_prefix("mission-run/") else {
+                continue;
+            };
+            let _clock = smallclaims::store::clock_snapshot();
+            changed |= self.evaluate_one_mission_run(
+                id,
+                true,
+                true,
+                &mut active_generations,
+                &mut active_steps,
+            );
+        }
+        Ok((changed_runs.len(), changed))
+    }
+
+    /// Follow the post-commit feed and evaluate the runs each change touched; see
+    /// [`Self::evaluate_changed_mission_runs`]. A run that wrote wakes the pass, which carries
+    /// its effects on (seats, wake messages) and tells clients when it ends.
+    pub async fn follow_mission_reads(self: Arc<Self>) {
+        let mut changes = self.event_notify.subscribe();
+        // Look once at the start too, for what committed before this subscribed.
+        changes.mark_changed();
+        loop {
+            if changes.changed().await.is_err() {
+                return;
+            }
+            changes.borrow_and_update();
+            let changed = self
+                .blocking(|this| {
+                    crate::profile::task("task mission-reads", || {
+                        this.recording_writes(|| this.evaluate_changed_mission_runs())
+                    })
+                })
+                .await;
+            match changed {
+                Ok((_, true)) => {
+                    crate::reconcile_telemetry::record_wake(
+                        crate::reconcile_telemetry::WakeCause::Reconciler,
+                        None,
+                    );
+                    self.notify.notify_one();
+                }
+                Ok((_, false)) => {}
+                Err(error) => eprintln!("st3: evaluating the runs a change touched: {error:#}"),
+            }
+        }
+    }
+
     /// An evaluation of `subject` wrote although nothing it read had changed and nothing was due:
     /// an incremental pass would have missed this write. Counted, and in tests a failure.
     fn incremental_correction(
@@ -9870,6 +10132,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         wrote: &[String],
     ) {
         crate::performance::record_correction(item);
+        smallclaims::profile::note("reconcile incremental correction");
         eprintln!(
             "st3: incremental correction: {subject} wrote {wrote:?} with no change among {} reads",
             reads.len()
@@ -11182,12 +11445,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]),
             )?;
         }
-        let timed_out = if let Some(timeout) = loop_spec.timeout_ms {
-            self.loop_first_execution_at(run, view)?
-                .is_some_and(|started| now_ms().saturating_sub(started) >= timeout as u128)
-        } else {
-            false
+        let deadline = match loop_spec.timeout_ms {
+            Some(timeout) => self
+                .loop_first_execution_at(run, view)?
+                .map(|started| started.saturating_add(u128::from(timeout))),
+            None => None,
         };
+        let timed_out = deadline.is_some_and(|deadline| now_ms() >= deadline);
+        // A loop waiting on a blocked child or a person changes nothing a pass would notice
+        // when its timeout passes, so the run is due again then. A deadline already passed is
+        // not noted: the loop ends below, and a due time in the past would make every pass
+        // evaluate the run again while it stays exhausted.
+        if let Some(deadline) = deadline.filter(|_| !timed_out) {
+            smallclaims::touched::note_due(deadline);
+        }
         if timed_out {
             return self.finish_exhausted_loop(
                 run,
@@ -13332,10 +13603,31 @@ impl<R: RuntimeControl> Reconciler<R> {
         let source = crate::mission::interpolate_kdl(source, &variables)?;
         let mut intent = crate::graph::parse_execution_intent(&source, &self.host, &run.id)?;
         if assigned_agents_only {
-            intent.subjects.retain(|subject, desired| {
+            let selected_agent = |subject: &str, desired: &DesiredSubject| {
                 desired.kind == "agent"
-                    && (view.assigned_to.as_deref() == Some(subject.as_str())
+                    && (view.assigned_to.as_deref() == Some(subject)
                         || view.available_to.iter().any(|agent| agent == subject))
+            };
+            // Publish a selected agent's synthesized targets before it can start, without
+            // bringing forward other agents, resources, or execution declarations.
+            let uri_targets = intent.subjects.iter()
+                .filter(|(subject, desired)| selected_agent(subject, desired))
+                .flat_map(|(_, desired)| {
+                    desired.desired.get("resources").and_then(Value::as_array)
+                        .into_iter().flatten()
+                })
+                .filter(|edge| edge["kind"] == "uri")
+                .filter_map(|edge| edge["subject"].as_str().map(str::to_owned))
+                .collect::<BTreeSet<_>>();
+            intent.subjects.retain(|subject, desired| {
+                selected_agent(subject, desired)
+                    || (uri_targets.contains(subject)
+                        && desired.kind == "resource"
+                        && subject.starts_with("resource/uri/")
+                        && desired.owner_run.is_none()
+                        && desired.owner_generation.is_none()
+                        && desired.owner_step.is_none()
+                        && crate::graph::declared_uri(&desired.desired).is_some())
             });
         }
         self.keep_stops_by_hand(&mut intent, run)?;
@@ -13343,6 +13635,9 @@ impl<R: RuntimeControl> Reconciler<R> {
             return Ok(false);
         }
         for subject in intent.subjects.values_mut() {
+            if subject.kind == "resource" && crate::graph::declared_uri(&subject.desired).is_some() {
+                continue;
+            }
             subject.owner_run = Some(run.subject.clone());
             subject.owner_generation = Some(run.generation.clone());
             subject.owner_step = Some(view.subject.clone());
@@ -13597,11 +13892,26 @@ impl<R: RuntimeControl> Reconciler<R> {
             })
             .map(str::to_owned)
             .collect::<BTreeSet<_>>();
+        let admitted_uri_targets = admitting_gate
+            .into_iter()
+            .filter_map(|gate| {
+                let agent = deferred_gate?;
+                (gate.assigned_to.as_deref() == Some(agent))
+                    .then(|| intent.subjects.get(agent))
+                    .flatten()
+            })
+            .flat_map(|desired| crate::graph::declared_resources(&desired.desired))
+            .filter(|reference| reference.kind == crate::model::ResourceReferenceKind::Uri)
+            .map(|reference| reference.subject)
+            .collect::<BTreeSet<_>>();
         intent.subjects.retain(|subject, desired| {
             if let Some(gate) = admitting_gate {
-                return desired.kind == "agent"
+                return (desired.kind == "agent"
                     && deferred_gate == Some(subject.as_str())
-                    && gate.assigned_to.as_deref() == Some(subject.as_str());
+                    && gate.assigned_to.as_deref() == Some(subject.as_str()))
+                    || (admitted_uri_targets.contains(subject)
+                        && desired.kind == "resource"
+                        && crate::graph::declared_uri(&desired.desired).is_some());
             }
             if desired.kind != "agent" || deferred_gate != Some(subject.as_str()) {
                 return true;
@@ -13639,6 +13949,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         });
         self.keep_stops_by_hand(&mut intent, run)?;
         for subject in intent.subjects.values_mut() {
+            if subject.kind == "resource" && crate::graph::declared_uri(&subject.desired).is_some() {
+                continue;
+            }
             subject.owner_run = Some(run.subject.clone());
             subject.owner_generation = Some(run.generation.clone());
             subject.owner_step = None;
@@ -14279,6 +14592,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                     .and_then(Value::as_str)
                     .filter(|reason| !reason.trim().is_empty())
                     .context("a request for changes has no feedback text")?;
+                let reviewer = decision
+                    .actor
+                    .as_deref()
+                    .context("human feedback has no reviewer actor")?;
                 self.apply_human_feedback(subject, attempt, reviewer, reason, &decision.id)?;
                 Ok(GateOutcome::Pending)
             }
@@ -16051,6 +16368,43 @@ impl<R: RuntimeControl> Reconciler<R> {
         Ok(())
     }
 
+    /// The cursor `observer` polls from on this member: the one its last poll here kept in the
+    /// plugin database, or, when it never polled here, the cursor in its newest
+    /// `observer.observed` claim: a whole cursor an older build wrote, or how far another member
+    /// had read. A poll here that had a cursor, before or after, keeps a row even when a later one
+    /// ends without one, so a claim's cursor is adopted once per database. A row older than the
+    /// claim, left from before polling moved away and back, only reads more again.
+    fn observer_cursor(&self, observer: &str) -> Result<(Option<String>, Option<Option<String>>)> {
+        let kept = self.github_plugin.cursor(observer)?;
+        let cursor = match &kept {
+            Some(cursor) => cursor.clone(),
+            None => self.store.claimed_observer_cursor(observer)?,
+        };
+        Ok((cursor, kept))
+    }
+
+    /// The cursor of the observer that last recorded into `resource`, for `observer` when it has
+    /// none of its own: it starts where that observer left the resource, so what changed between
+    /// their polls is read as a change rather than taken as already known. That observer's cursor
+    /// is in this member's plugin database when it polled here, and otherwise in its claim.
+    pub fn inherited_observer_cursor(&self, resource: &str, observer: &str) -> Result<Option<String>> {
+        let Some(recorder) = self.store.resource_recorder(resource, observer)? else {
+            return Ok(None);
+        };
+        Ok(self.observer_cursor(&recorder)?.0)
+    }
+
+    /// Drop the plugin database's row for an observer this member no longer polls. A failure only
+    /// leaves the row, which reads more again if polling comes back here.
+    fn forget_observer_cursor(&self, observer: &str) {
+        let prefix = format!("{observer}:");
+        self.observer_cursors.lock().unwrap_or_else(PoisonError::into_inner)
+            .retain(|key, _| !key.starts_with(&prefix));
+        if let Err(error) = self.github_plugin.forget(observer) {
+            tracing::warn!(observer, "the GitHub plugin database kept a cursor it no longer needs: {error:#}");
+        }
+    }
+
     /// Settle a stopped observer, or arm this observer's next observation.
     fn reconcile_resource_observer(
         &self,
@@ -16071,6 +16425,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let prefix = format!("{}:", observer.subject);
             self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner)
                 .retain(|operation| !operation.starts_with(&prefix));
+            self.forget_observer_cursor(&observer.subject);
             let is_stopped = self
                 .store
                 .latest_actual_value(&observer.subject)?
@@ -16104,6 +16459,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             let prefix = format!("{}:", observer.subject);
             self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner)
                 .retain(|operation| !operation.starts_with(&prefix));
+            self.forget_observer_cursor(&observer.subject);
             return Ok(());
         }
         spec.fields.extend(
@@ -16167,14 +16523,14 @@ impl<R: RuntimeControl> Reconciler<R> {
         // A changed cadence retires the old sleeping poll; its result cannot overwrite
         // a newer watcher observation if it was already in flight.
         if watched_ref && refresh_attempt.is_none() && observer_actual.as_ref().is_none_or(|actual|
-            actual["error_code"] != "rate-limited") {
+            !matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget"))) {
             next_check = next_check.min(now_ms().saturating_add(u128::from(spec.every_ms.unwrap())));
         }
-        // Provider retry deadlines remain a lower bound even after a restart or a
-        // desired revision change. Older rate-limit receipts have no revision.
+        // Provider and local admission deadlines remain lower bounds after restart or
+        // desired revision changes. Older rate-limit receipts have no revision.
         if refresh_attempt.is_none()
             && let Some(retry_at) = observer_actual.as_ref()
-                .filter(|actual| actual["error_code"] == "rate-limited")
+                .filter(|actual| matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget")))
                 .and_then(|actual| actual.get("next_check_unix_ms"))
                 .and_then(Value::as_str)
                 .and_then(|value| value.parse::<u128>().ok())
@@ -16224,28 +16580,40 @@ impl<R: RuntimeControl> Reconciler<R> {
             .store
             .latest_actual_value(&spec.resource)?
             .and_then(|actual| actual.get("facts").cloned());
-        let cursor = self
-            .observer_cursors
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&deadline_key)
-            .cloned()
-            .unwrap_or_else(|| {
-                observer_actual
-                    .as_ref()
-                    .and_then(|actual| actual.get("cursor"))
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-            });
+        // What the plugin database holds for this observer, which a poll replaces when its
+        // cursor moves. This process's own cursor is what it last kept there.
         // A repository observer that never recorded anything continues from the observer that
         // last recorded into its resource, such as the intake observer a standing observer
         // replaces, so nothing changed between their polls is missed.
-        let mut cursor = match cursor {
-            None if spec.provider == "github.repository" => self
-                .store
-                .inherited_observer_cursor(&spec.resource, &observer.subject)?,
-            cursor => cursor,
+        let resolved = (|| -> Result<_> {
+            let (cursor, kept_cursor) = match self
+                .observer_cursors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&deadline_key)
+                .cloned()
+            {
+                Some(cursor) => (cursor.clone(), Some(cursor)),
+                None => self.observer_cursor(&observer.subject)?,
+            };
+            let cursor = match cursor {
+                None if spec.provider == "github.repository" => {
+                    self.inherited_observer_cursor(&spec.resource, &observer.subject)?
+                }
+                cursor => cursor,
+            };
+            Ok((cursor, kept_cursor))
+        })();
+        // A database that cannot be read leaves no arm behind, so a later pass polls again.
+        let (mut cursor, mut kept_cursor) = match resolved {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                self.armed_observers.lock().unwrap_or_else(PoisonError::into_inner).remove(&operation);
+                return Err(error);
+            }
         };
+        let unkept_cursors = self.unkept_cursors.clone();
+        let github_plugin = self.github_plugin.clone();
         let agent_workspaces = agent_workspaces.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(crate::task_cpu::account("reconcile.timer", async move {
@@ -16261,6 +16629,15 @@ impl<R: RuntimeControl> Reconciler<R> {
                         return false;
                     }
                     store.append_observer_state(&input, &revision, current).is_ok_and(|(_, wrote)| wrote)
+                };
+                // Whether a receipt is in the graph now, newly or already: `None` when it failed.
+                let publish_state = |input: &ClaimInput, current: &(dyn Fn() -> bool + Sync)| -> Option<bool> {
+                    #[cfg(any(test, feature = "test-support"))]
+                    if let Some(injection) = &completion_fault
+                        && injection.fault("observer-receipt-write", &observer_subject).is_some() {
+                        return None;
+                    }
+                    store.append_observer_state(input, &revision, current).ok().map(|(_, wrote)| wrote)
                 };
                 loop {
                 let delay = next_check.saturating_sub(now_ms()).min(u64::MAX as u128) as u64;
@@ -16279,6 +16656,32 @@ impl<R: RuntimeControl> Reconciler<R> {
                     return;
                 }
                 if !armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation) { return; }
+                // Until the plugin database keeps the cursor the last poll recorded facts for,
+                // the provider is not asked again and the observer stays degraded.
+                let pending = unkept_cursors.lock().unwrap_or_else(PoisonError::into_inner)
+                    .get(&observer_subject).cloned();
+                if let Some(UnkeptCursor { cursor: pending, receipt }) = pending {
+                    if github_plugin.set_cursor(&observer_subject, &spec.resource, pending.as_deref()).is_err() {
+                        let current = || armed.lock().unwrap_or_else(PoisonError::into_inner).contains(&operation);
+                        if let Some(receipt) = receipt
+                            && let Some(wrote) = publish_state(&receipt, &current)
+                        {
+                            if let Some(entry) = unkept_cursors.lock()
+                                .unwrap_or_else(PoisonError::into_inner).get_mut(&observer_subject)
+                            {
+                                entry.receipt = None;
+                            }
+                            if wrote { signal_changed(&notify, &event_notify); }
+                        }
+                        next_check = now_ms().saturating_add(60_000);
+                        continue;
+                    }
+                    unkept_cursors.lock().unwrap_or_else(PoisonError::into_inner).remove(&observer_subject);
+                    cursors.lock().unwrap_or_else(PoisonError::into_inner)
+                        .insert(deadline_key.clone(), pending.clone());
+                    kept_cursor = Some(pending.clone());
+                    cursor = pending;
+                }
                 let request = ObservationRequest {
                     provider: spec.provider.clone(),
                     locator: spec.locator.clone(),
@@ -16344,12 +16747,19 @@ impl<R: RuntimeControl> Reconciler<R> {
                             observation.next_check_unix_ms =
                                 observed_at.saturating_add(u128::from(interval));
                         }
+                        // A repository observer's claim carries only how far it has read, which
+                        // any member resumes from; the rest stays in this member's plugin database.
+                        let claimed_cursor = match spec.provider.as_str() {
+                            "github.repository" => observation.cursor.as_deref()
+                                .and_then(crate::resource::replicated_cursor),
+                            _ => observation.cursor.clone(),
+                        };
                         match store.record_resource_observation_outcome(
                             &observer_subject,
                             &revision,
                             refresh_attempt.as_deref(),
                             &spec.resource,
-                            observation.cursor.as_deref(),
+                            claimed_cursor.as_deref(),
                             &observation.facts,
                             observation.next_check_unix_ms,
                             &selected,
@@ -16372,8 +16782,67 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 }
                                 durable_changed = wrote;
                                 previous_facts = Some(observation.facts);
-                                completed_deadline = Some(observation.next_check_unix_ms);
-                                completed_cursor = Some(observation.cursor);
+                                // The cursor survives a restart only in the plugin database. A poll
+                                // that cannot keep it there is the observer's failure, which its
+                                // state shows until the database takes it. A provider that never
+                                // gives this observer a cursor needs no row: nothing is adopted.
+                                let failed = if kept_cursor.as_ref() == Some(&observation.cursor)
+                                    || (kept_cursor.is_none() && cursor.is_none() && observation.cursor.is_none())
+                                {
+                                    None
+                                } else {
+                                    github_plugin
+                                        .set_cursor(&observer_subject, &spec.resource, observation.cursor.as_deref())
+                                        .err()
+                                };
+                                match failed {
+                                    None => {
+                                        if kept_cursor.is_some() || observation.cursor.is_some() || cursor.is_some() {
+                                            kept_cursor = Some(observation.cursor.clone());
+                                        }
+                                        completed_deadline = Some(observation.next_check_unix_ms);
+                                        completed_cursor = Some(observation.cursor);
+                                    }
+                                    Some(error) => {
+                                        completed_deadline = Some(now_ms().saturating_add(60_000));
+                                        error_backoff = true;
+                                        let unkept_cursor = observation.cursor;
+                                        let reason = format!("the GitHub plugin database did not keep the cursor: {error:#}");
+                                        // The healthy receipt this poll recorded names the episode,
+                                        // so a failure after a recovery records its own receipt.
+                                        let episode = store.latest_claim_id(&observer_subject).ok().flatten().unwrap_or_default();
+                                        let failure_hash = hex::encode(sha2::Sha256::digest(
+                                            format!("{revision}:{reason}:{episode}").as_bytes(),
+                                        ));
+                                        let receipt = ClaimInput {
+                                            subject: observer_subject.clone(),
+                                            kind: "observer.state".into(),
+                                            actor: None,
+                                            fields: BTreeMap::from([
+                                                ("state".into(), Value::String("degraded".into())),
+                                                ("reason".into(), Value::String(reason)),
+                                                ("error_code".into(), Value::String("github-plugin-database".into())),
+                                                ("revision".into(), Value::String(revision.clone())),
+                                            ]),
+                                            evidence: Vec::new(),
+                                            expected_subject: None,
+                                            idempotency_key: Some(format!(
+                                                "observer-cursor-unkept:{}",
+                                                &failure_hash[..20]
+                                            )),
+                                        };
+                                        // A receipt that cannot be written is retried with the cursor.
+                                        let unreceipted = match publish_state(&receipt, &current) {
+                                            Some(wrote) => {
+                                                durable_changed |= wrote;
+                                                None
+                                            }
+                                            None => Some(receipt),
+                                        };
+                                        unkept_cursors.lock().unwrap_or_else(PoisonError::into_inner)
+                                            .insert(observer_subject.clone(), UnkeptCursor { cursor: unkept_cursor, receipt: unreceipted });
+                                    }
+                                }
                             }
                             Err(error) if error.code == "observer-operation-retired" => {}
                             Err(error) => {
@@ -16415,25 +16884,40 @@ impl<R: RuntimeControl> Reconciler<R> {
                         }
                     }
                     Err(error) => {
-                        let rate_limit = error.downcast_ref::<ProviderRateLimit>();
-                        let retry_at = rate_limit.map_or_else(
-                            || now_ms().saturating_add(60_000),
-                            |limit| limit.retry_at_unix_ms.max(now_ms().saturating_add(1_000)),
+                        let refusal_deadline = error.downcast_ref::<ProviderRateLimit>()
+                            .map(|limit| limit.retry_at_unix_ms)
+                            .or_else(|| error.downcast_ref::<LocalObserverBudget>()
+                                .map(|limit| limit.retry_at_unix_ms));
+                        let now = now_ms();
+                        let retry_at = refusal_deadline.map_or_else(
+                            || now.saturating_add(60_000),
+                            |deadline| if deadline > now { deadline }
+                                else { now.saturating_add(15 * 60_000) },
                         );
                         let reason = error.to_string();
                         completed_deadline = Some(retry_at);
                         error_backoff = true;
                         let previous = store.latest_actual_value(&observer_subject).ok().flatten();
                         let condition = ObserverCondition::of(&error, previous.as_ref());
+                        let state = if matches!(condition, ObserverCondition::LocalBudget(_)) {
+                            // Existing readers alert on degraded and reject new state values.
+                            // Local admission made no provider attempt; retain facts and expose the defer code/deadline.
+                            "healthy"
+                        } else {
+                            "unreachable"
+                        };
                         let unchanged_failure = previous.as_ref().is_some_and(|actual| {
-                            actual.get("state").and_then(Value::as_str) == Some("unreachable")
+                            actual.get("state").and_then(Value::as_str) == Some(state)
                                 && actual.get("reason").and_then(Value::as_str)
                                     == Some(reason.as_str())
+                                && (refusal_deadline.is_none()
+                                    || actual.get("next_check_unix_ms").and_then(Value::as_str)
+                                        .and_then(|value| value.parse::<u128>().ok()) == Some(retry_at))
                         });
                         if !unchanged_failure || refresh_attempt.is_some() {
                             let failure_hash = hex::encode(sha2::Sha256::digest(
                                 format!(
-                                    "{operation}:{reason}:{}",
+                                    "{operation}:{reason}:{retry_at}:{}",
                                     store
                                         .claims_for(&observer_subject, Some("observer.state"))
                                         .unwrap_or_default()
@@ -16445,7 +16929,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .as_bytes(),
                             ));
                             let mut fields = BTreeMap::from([
-                                ("state".into(), Value::String("unreachable".into())),
+                                ("state".into(), Value::String(state.into())),
                                 ("reason".into(), Value::String(reason)),
                                 ("error_code".into(), Value::String(condition.code().into())),
                                 ("revision".into(), Value::String(revision.clone())),
@@ -17764,16 +18248,50 @@ impl<R: RuntimeControl> Reconciler<R> {
             .file_watchers
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        if watchers.contains_key(subject) {
+        let target = std::path::absolute(path)?;
+        // Watching the file itself attaches to its inode and misses later replacements.
+        // Descend from a missing target's nearest existing parent on each observation.
+        let directory = target
+            .parent()
+            .into_iter()
+            .flat_map(Path::ancestors)
+            .find(|candidate| candidate.is_dir())
+            .context("file watch has no existing parent directory")?;
+        let next_component = target
+            .strip_prefix(directory)?
+            .components()
+            .next()
+            .context("file watch has no target component")?;
+        // Backends report canonical directories (notably /private/tmp on macOS).
+        // Keep the lexical target as identity, but compare events in their namespace.
+        let directory = directory.canonicalize()?;
+        let relevant = directory.join(next_component);
+        // A file symlink can point outside the lexical parent. Observe its referent's
+        // parent too, so both writes and inode replacements preserve file-gate behavior.
+        let referent = target.canonicalize().ok().filter(|path| *path != relevant);
+        if watchers.get(subject).is_some_and(|watch| {
+            watch.target == target
+                && watch.directory == directory
+                && watch.referent == referent
+        }) {
             return Ok(());
         }
+        let watched_directory = directory.clone();
+        let watched_referent = referent.clone();
         let notify = self.notify.clone();
         let observations = self.file_observations.clone();
         let incremental = self.incremental.clone();
         let watched_subject = subject.to_owned();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok() {
+                let Ok(event) = event else { return };
+                // Reads (including this observer's own reads) must never self-wake.
+                if FileWatch::relevant(
+                    &event,
+                    &relevant,
+                    &watched_directory,
+                    watched_referent.as_deref(),
+                ) {
                     observations
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -17784,12 +18302,23 @@ impl<R: RuntimeControl> Reconciler<R> {
                     notify.notify_one();
                 }
             })?;
-        let watched = path
-            .ancestors()
-            .find(|candidate| candidate.exists())
-            .unwrap_or(path);
-        watcher.watch(watched, notify::RecursiveMode::NonRecursive)?;
-        watchers.insert(subject.into(), watcher);
+        watcher.watch(&directory, notify::RecursiveMode::NonRecursive)?;
+        if let Some(parent) = referent.as_ref().and_then(|path| path.parent())
+            && parent != directory
+        {
+            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        }
+        watchers.insert(subject.into(), FileWatch {
+            _watcher: watcher,
+            target,
+            directory,
+            referent,
+        });
+        // A refreshed subscription may now refer to a different file at the same stamp.
+        self.file_observations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(subject);
         Ok(())
     }
 
@@ -20709,6 +21238,109 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         ));
     }
 
+    /// The same late process exit, reached through a working step whose first gate is still
+    /// pending: the step never evaluates its exit-code gate, so the wake cannot come from it.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_process_exit_wakes_a_step_whose_exit_code_gate_waits_behind_a_pending_gate() {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+mission "orchid/replay" state="ready" {
+  goal "Explain an impossible predicate behind a pending gate."
+  step "prepare" {
+    agentless
+    exec "prepare" { host "node"; workspace "/tmp"; command "exit 2"; restart "never" }
+    gate "an external result exists" { exists "resource/orchid/result" }
+    gate "prepared" { field "exit_code" "exec/${ST_MISSION_RUN}/prepare" is 0 }
+  }
+}
+"#,
+            "late-exit-behind-pending-gate",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "orchid/replay".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "late-exit-behind-pending-gate-run".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let notify = Arc::new(Notify::new());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), notify.clone());
+        let subject = format!("exec/{}/prepare", run.id);
+        let started = || {
+            store
+                .observations_for(&subject, "runtime.action.succeeded")
+                .unwrap()
+                .into_iter()
+                .find(|claim| claim.body["fields"]["action"] == "start")
+        };
+        // The first passes claim the step and declare its exec; a later one starts it.
+        for _ in 0..4 {
+            if started().is_some() {
+                break;
+            }
+            reconciler.reconcile_once().unwrap();
+        }
+        let incarnation = started()
+            .unwrap_or_else(|| panic!("{subject} was not started: {:?}", store.desired_subjects().unwrap().iter().map(|desired| &desired.subject).collect::<Vec<_>>()))
+            .body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
+        let desired = store.desired_subject_with_writer(&subject).unwrap().unwrap().0;
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let running = RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: false,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(incarnation),
+        };
+        runtime.execs.lock().unwrap().insert(runtime_id.clone(), running.clone());
+        reconciler.reconcile_once().unwrap();
+        // The driver reports its child's exit while its own process still runs.
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.clone()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("exited")),
+                    ("exit_code".into(), json!(2)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        let stuck = || {
+            let view = store.mission_run(&run.subject).unwrap().unwrap();
+            let missions = store.mission_specs_for_runs(std::slice::from_ref(&run.subject)).unwrap();
+            stuck_field_gates(&store, &view, &missions[&run.subject]).unwrap()
+        };
+        assert_eq!(store.step_run(&run.steps[0].subject).unwrap().unwrap().status, "working");
+        assert!(stuck().is_empty(), "the wrapper's receipt alone proves no exit of this launch");
+        // Consume prior writes' wake, then exit with no new graph claim.
+        notify.notified().await;
+        runtime.execs.lock().unwrap().insert(
+            runtime_id,
+            RuntimeObservation { status: "exited".into(), exit_code: Some(2), ..running },
+        );
+        tokio::time::timeout(Duration::from_secs(11), notify.notified())
+            .await
+            .expect("the late process exit must wake a pass although the exit-code gate is not evaluated");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(stuck().len(), 1, "the exit of this launch makes the exit-code gate impossible");
+    }
+
     /// An exec started by a pass, observed running as `incarnation`, whose `st3 driver exec`
     /// wrapper has just reported its child's exit (with no incarnation, as the wrapper does).
     fn exec_whose_wrapper_reported_its_exit() -> (Arc<Store>, Arc<FakeRuntime>, Reconciler<FakeRuntime>, String, String, u64) {
@@ -21283,6 +21915,137 @@ version 2
         );
     }
 
+    /// A run blocked on a step baseline of `resource/allocation` being "resumed", evaluated by
+    /// skipping passes until it is blocked and nothing it read changes.
+    fn run_paused_on_its_allocation(
+        store: Arc<Store>,
+    ) -> (Arc<Store>, Arc<Reconciler<FakeRuntime>>, String) {
+        let source = r#"
+            version 2
+              resource "allocation" { kind "custom.st3.document-source" }
+              resource "elsewhere" { kind "custom.st3.document-source" }
+
+              mission "paused" state="ready" {
+                goal "Work only once the allocation resumes."
+
+                  agent "worker" { workspace "/tmp"; command "true"; restart "never" }
+
+                step "fix" {
+                  baseline "allocation resumed" {
+                    field "state" "resource/allocation" is "resumed"
+                  }
+                }
+              }
+
+        "#;
+        apply_source(&store, source, "paused-mission");
+        observe_state(&store, "resource/allocation", "paused", "allocation-paused");
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "paused".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "paused-run".into(),
+            })
+            .unwrap();
+        let reconciler = Arc::new(
+            Reconciler::new(
+                store.clone(),
+                Arc::new(FakeRuntime::default()),
+                "node".into(),
+                Arc::new(Notify::new()),
+            )
+            .skipping_unneeded(true),
+        );
+        for _ in 0..3 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let blocked = store.mission_run(&run.id).unwrap().unwrap().steps[0].clone();
+        assert_eq!(blocked.status, "blocked");
+        assert_eq!(
+            blocked.blocked_reason.as_deref(),
+            Some("step baseline `allocation resumed` does not hold")
+        );
+        (store, reconciler, run.id)
+    }
+
+    fn observe_state(store: &Store, subject: &str, state: &str, key: &str) {
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: "resource.observed".into(),
+                actor: None,
+                fields: BTreeMap::from([("state".into(), Value::String(state.into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(key.into()),
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_change_to_a_baselines_resource_readies_its_step_without_waiting_for_a_pass() {
+        let (store, reconciler, run) =
+            run_paused_on_its_allocation(Arc::new(Store::open_memory("node").unwrap()));
+        let fix = || store.mission_run(&run).unwrap().unwrap().steps[0].clone();
+        let before = fix();
+        // A claim no run read evaluates no run.
+        observe_state(&store, "resource/elsewhere", "resumed", "elsewhere-resumed");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (0, false));
+
+        // No pass runs: the resource's own claim names the run that read it.
+        observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        assert_eq!(reconciler.evaluate_changed_mission_runs().unwrap(), (1, true));
+        let ready = fix();
+        assert_eq!((ready.status.as_str(), ready.blocked_reason.as_deref()), ("ready", None));
+        assert_eq!(ready.readiness_epoch, before.readiness_epoch + 1);
+        assert_eq!(ready.attempt, before.attempt, "the step is not reset");
+    }
+
+    #[tokio::test]
+    async fn the_post_commit_feed_wakes_the_runs_a_change_touched() {
+        // On disk, so this test's reads wait for the follower's writes rather than fail.
+        let root = tempfile::tempdir().unwrap();
+        let (store, reconciler, run) = run_paused_on_its_allocation(Arc::new(
+            Store::open(&root.path().join("store.sqlite"), "node").unwrap(),
+        ));
+        let before = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
+        let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
+        observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
+        // What a write through the API does after it commits.
+        reconciler.event_notify.send_modify(|generation| *generation += 1);
+        // The step is agentless, so the follower's next evaluation admits it and completes it:
+        // `ready` can be gone before any read of the run. Its state history keeps it, and the
+        // follower wakes the pass after every evaluation that wrote, after that write.
+        let readied = || {
+            store
+                .claims_page(Some(&before.subject), None, 0, None, false, 500)
+                .unwrap()
+                .claims
+                .into_iter()
+                .find(|claim| {
+                    claim.kind == "step-run.state"
+                        && claim.body.pointer("/fields/status").and_then(Value::as_str)
+                            == Some("ready")
+                })
+        };
+        let ready = loop {
+            if let Some(ready) = readied() {
+                break ready;
+            }
+            reconciler.notify.notified().await;
+        };
+        assert_eq!(ready.body.pointer("/fields/reason"), Some(&Value::Null));
+        assert_eq!(
+            ready.body.pointer("/fields/readiness_epoch"),
+            Some(&Value::from(before.readiness_epoch + 1))
+        );
+        follower.abort();
+    }
+
     #[test]
     fn mission_products_and_gates_hold_completion_and_record_evidence() {
         let store = Arc::new(Store::open_memory("node").unwrap());
@@ -21550,6 +22313,129 @@ version 2
                 rows: 48,
                 columns: 160
             })
+        );
+    }
+
+    #[test]
+    fn shared_uri_resources_survive_run_discard_and_eval_cleanup_without_rewrites() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+agent "shared/reader" {
+  workspace "/tmp"
+  command "true"
+  restart "never"
+  resource "issue" uri="https://github.com/example/project/issues/42"
+  resource "mission-worker" uri="urn:example:one" reason="mission-worker"
+  resource "agent/mission-worker" uri="urn:example:two" reason="agent/mission-worker"
+  resource "step-worker" uri="urn:example:three" reason="step-worker"
+  resource "agent/step-worker" subject="resource/worker" reason="agent/step-worker"
+}
+mission "shared-resource" state="ready" timeout="1m" {
+  concurrent-runs max=4
+  goal "Work on the same issue without owning its shared reference."
+  agent "mission-worker" {
+    workspace "/tmp"
+    command "true"
+    restart "never"
+    resource "issue" uri="https://github.com/example/project/issues/42"
+    resource "mission-worker" uri="urn:example:one" reason="mission-worker"
+    resource "agent/mission-worker" uri="urn:example:two" reason="agent/mission-worker"
+    resource "step-worker" uri="urn:example:three" reason="step-worker"
+    resource "agent/step-worker" subject="resource/worker" reason="agent/step-worker"
+  }
+  step "work" {
+    assigned-to "agent/${ST_MISSION_RUN}/step-worker"
+    agent "step-worker" {
+      workspace "/tmp"
+      command "true"
+      restart "never"
+      resource "issue" uri="https://github.com/example/project/issues/42"
+      resource "mission-worker" uri="urn:example:one" reason="mission-worker"
+      resource "agent/mission-worker" uri="urn:example:two" reason="agent/mission-worker"
+      resource "step-worker" uri="urn:example:three" reason="step-worker"
+      resource "agent/step-worker" subject="resource/worker" reason="agent/step-worker"
+    }
+  }
+}
+"#,
+            "publish-shared-uri",
+        );
+        let (_, reader) = store.agent_declaration("agent/shared/reader", None).unwrap().unwrap();
+        let references = crate::graph::declared_resources(&reader);
+        let resource = &references[0].subject;
+        let original = store.claims_for(resource, Some("intent.desired")).unwrap();
+        let original_ids = original.iter().map(|claim| claim.id.clone()).collect::<Vec<_>>();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        let mut runs = Vec::new();
+        for (mode, key) in [
+            ("run", "shared-run-first"),
+            ("run", "shared-run-second"),
+            ("eval", "shared-eval-first"),
+            ("eval", "shared-eval-second"),
+        ] {
+            let run = store.create_mission_run(&crate::model::MissionRunRequest {
+                mission: "shared-resource".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some(mode.into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: key.into(),
+            }).unwrap();
+            for _ in 0..3 {
+                reconciler.reconcile_once().unwrap();
+            }
+            let declared = store.desired_subjects_for_owner_run(&run.subject).unwrap();
+            for local in ["mission-worker", "step-worker"] {
+                let worker = declared.iter()
+                    .find(|desired| desired.subject == format!("agent/{}/{local}", run.id))
+                    .unwrap();
+                assert_eq!(crate::graph::declared_resources(&worker.desired), references);
+            }
+            let shared = store.desired_subjects_named(std::slice::from_ref(resource)).unwrap();
+            assert_eq!(shared[0].owner_run, None);
+            assert_eq!(shared[0].owner_generation, None);
+            assert_eq!(shared[0].owner_step, None);
+            assert_eq!(
+                store.claims_for(resource, Some("intent.desired")).unwrap()
+                    .iter().map(|claim| claim.id.clone()).collect::<Vec<_>>(),
+                original_ids,
+                "materializing another run must not rewrite the shared URI subject",
+            );
+            runs.push((mode, run));
+        }
+        for (mode, run) in runs {
+            if mode == "eval" {
+                assert!(store.retire_eval_owned_desired(&run.subject).unwrap().is_empty());
+            } else {
+                assert!(store.discard_desired_owned_by(&run.subject).unwrap() >= 2);
+            }
+            assert!(store.desired_subjects_for_owner_run(&run.subject).unwrap().is_empty());
+            let uris = store.declared_resource_uris(&references).unwrap();
+            assert_eq!(
+                uris.get(resource).map(String::as_str),
+                Some("https://github.com/example/project/issues/42"),
+                "another seat's URI must still resolve after each run's cleanup",
+            );
+            let kdl = crate::graph::render_agent_desired_kdl(&reader, &uris).unwrap();
+            let restored = parse_intent(&kdl, "node").unwrap();
+            assert_eq!(
+                crate::graph::declared_resources(&restored.subjects["agent/shared/reader"].desired),
+                references,
+            );
+        }
+        assert_eq!(
+            store.claims_for(resource, Some("intent.desired")).unwrap()
+                .iter().map(|claim| claim.id.clone()).collect::<Vec<_>>(),
+            original_ids,
         );
     }
 
@@ -22770,7 +23656,18 @@ mission "self-assigned" state="ready" {
   goal "Bring up the judge before offering its work."
   step "judge" {
     assigned-to "agent/${ST_MISSION_RUN}/judge"
-    agent "judge" { workspace "/tmp"; command "true"; restart "never" }
+    agent "judge" {
+      workspace "/tmp"
+      command "true"
+      restart "never"
+      resource "judge" uri="urn:example:assigned" reason="judge"
+      resource "agent/judge" uri="urn:example:assigned-two" reason="agent/judge"
+    }
+    agent "bystander" {
+      workspace "/tmp"
+      command "true"
+      resource "unrelated" uri="urn:example:unrelated"
+    }
   }
 }
 "#,
@@ -22803,6 +23700,18 @@ mission "self-assigned" state="ready" {
         assert!(store.desired_subjects().unwrap().iter().any(|desired| {
             desired.subject == format!("agent/{}/judge", run.id)
                 && desired.owner_step.as_deref() == Some(judge.subject.as_str())
+        }));
+        let (_, desired) = store.agent_declaration(&format!("agent/{}/judge", run.id), None)
+            .unwrap().unwrap();
+        let edges = crate::graph::declared_resources(&desired);
+        let uris = store.declared_resource_uris(&edges).unwrap();
+        assert_eq!(uris[&edges[0].subject], "urn:example:assigned");
+        assert_eq!(uris[&edges[1].subject], "urn:example:assigned-two");
+        let published = store.desired_subjects().unwrap();
+        assert!(published.iter().all(|subject| {
+            subject.subject != format!("agent/{}/bystander", run.id)
+                && crate::graph::declared_uri(&subject.desired)
+                    != Some("urn:example:unrelated")
         }));
     }
 
@@ -23265,6 +24174,58 @@ mission "feedback-review" state="ready" {
             "found evidence must use no SQLite statements on repeated passes: {cost:?}"
         );
         assert!(runtime.stops.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_start_restart_authority_expires_without_closing_the_producer() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\"; }",
+            "original",
+        );
+        let subject = "agent/example/worker";
+        let desired = store.desired_subject_with_writer(subject).unwrap().unwrap().0;
+        let token = store.selected_desired_token(subject).unwrap().unwrap();
+        let mut operation = RuntimeStartOperation {
+            id: uuid::Uuid::now_v7().to_string(),
+            subject: subject.into(),
+            owner: "fixture".into(),
+            body: serde_json::json!({
+                "subject": desired, "selected_token": token, "request": null,
+                "member": desired.member, "reason": "fixture failed start",
+            }),
+            revoked_by: None,
+            finished: false,
+            result: None,
+            applied: false,
+            cleanup_verified: false,
+            dispatched: false,
+            receipted: false,
+        };
+        store.admit_runtime_start(&mut operation, 2).unwrap();
+        store.finish_runtime_start(&operation.id, &serde_json::json!({
+            "error": "producer closure unverified", "producer_closed": false,
+        })).unwrap();
+        let request = store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "runtime.action.requested".into(),
+            actor: Some("person/avery".into()),
+            fields: BTreeMap::from([("action".into(), Value::from("restart"))]),
+            evidence: vec![token], expected_subject: None,
+            idempotency_key: Some("age-bounded-restart".into()),
+        }).unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()));
+        let deadline = request.accepted_at_unix_ms + 60 * 60 * 1000;
+        assert!(!reconciler.retire_obsolete_failed_restart(&desired, deadline).unwrap());
+        assert!(reconciler.retire_obsolete_failed_restart(&desired, deadline + 1).unwrap());
+        let result = store.operation_claim(&format!("agent-restart-completed:{}", request.id))
+            .unwrap().unwrap();
+        assert_eq!(result.body["fields"]["operation_status"], "retired");
+        assert_eq!(result.body["evidence"][0], request.id);
+        let pending = store.runtime_start_for(subject).unwrap().unwrap();
+        assert_eq!(pending.id, operation.id);
+        assert!(!pending.cleanup_verified);
     }
 
     #[test]
@@ -24572,6 +25533,270 @@ agent "import/omp/fixture" {{
             argv.first().map(Path::new),
             Some(std::env::current_exe().unwrap().as_path())
         );
+    }
+
+    #[test]
+    fn file_gate_watchers_rescan_after_lost_or_unscoped_mutations() {
+        let target = Path::new("/watched/gate");
+        let directory = target.parent().unwrap();
+        let rescan = notify::Event::new(notify::EventKind::Other)
+            .set_flag(notify::event::Flag::Rescan);
+        assert!(FileWatch::relevant(&rescan, target, directory, None));
+        for kind in [
+            notify::EventKind::Create(notify::event::CreateKind::Any),
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Remove(notify::event::RemoveKind::Any),
+        ] {
+            assert!(FileWatch::relevant(&notify::Event::new(kind), target, directory, None));
+        }
+        let read = notify::Event::new(notify::EventKind::Access(notify::event::AccessKind::Any));
+        assert!(!FileWatch::relevant(&read, target, directory, None));
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_ignore_reads_and_unrelated_mutations() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("gate.txt");
+        std::fs::write(&path, "ready").unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            store,
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_observation(&subject).unwrap();
+        // Publishing the initial file.observed claim signals a graph change. Consume
+        // that known wake before asserting that subsequent reads stay quiet.
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the initial observation must publish its graph-change wake");
+        for _ in 0..3 {
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "ready");
+            reconciler.ensure_file_observation(&subject).unwrap();
+        }
+        let unrelated = root.path().join("unrelated.txt");
+        std::fs::write(&unrelated, "not a gate").unwrap();
+        std::fs::write(&unrelated, "still not a gate").unwrap();
+        std::fs::remove_file(&unrelated).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "reading the gate and mutating siblings must not wake reconciliation"
+        );
+
+        std::fs::write(&path, "changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("a target mutation must still wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_missing_parents_and_file_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("outer/inner/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        for parent in [root.path().join("outer"), root.path().join("outer/inner")] {
+            std::fs::write(parent.parent().unwrap().join("unrelated.txt"), "ignore").unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                    .await
+                    .is_err(),
+                "unrelated ancestor mutations must not wake reconciliation"
+            );
+            std::fs::create_dir(&parent).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("the next missing parent must wake reconciliation");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_ok()
+            {}
+        }
+
+        std::fs::write(&path, "created").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("creating the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+
+        let replacement = path.with_extension("replacement");
+        std::fs::write(&replacement, "replacement").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "staging a replacement beside the target must stay quiet"
+        );
+        std::fs::rename(&replacement, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("replacing the target must wake reconciliation");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "replacement"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await
+            .is_ok()
+        {}
+        std::fs::write(&path, "replacement changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the replacement's subsequent mutations must remain watched");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_refresh_when_the_target_path_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.txt");
+        let second = root.path().join("second.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch("file/node:gate", &first).unwrap();
+        reconciler.ensure_file_watch("file/node:gate", &second).unwrap();
+        std::fs::write(&first, "old target changed").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await
+                .is_err(),
+            "the old target must no longer wake reconciliation"
+        );
+        std::fs::write(&second, "new target changed").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the new target must wake reconciliation");
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_resolve_symlinked_parent_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let actual = root.path().join("actual");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let path = alias.join("missing/gate.txt");
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        std::fs::write(actual.join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::create_dir(actual.join("missing")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("canonical ancestor creation must wake an aliased file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(actual.join("missing/gate.txt"), "ready").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the file under an aliased parent must remain watched");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "ready"
+        );
+    }
+
+    #[tokio::test]
+    async fn file_gate_watchers_follow_symlink_referent_writes_and_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let referents = tempfile::tempdir().unwrap();
+        let first = referents.path().join("first.txt");
+        let second = referents.path().join("second.txt");
+        let path = root.path().join("gate.txt");
+        std::fs::write(&first, "first").unwrap();
+        std::fs::write(&second, "second").unwrap();
+        std::os::unix::fs::symlink(&first, &path).unwrap();
+        let subject = format!("file/node:{}", path.display());
+        let notify = Arc::new(Notify::new());
+        let reconciler = Reconciler::new(
+            Arc::new(Store::open_memory("node").unwrap()),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            notify.clone(),
+        );
+        reconciler.ensure_file_watch(&subject, &path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        std::fs::write(referents.path().join("unrelated"), "ignore").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+
+        for content in ["written", "replaced"] {
+            if content == "written" {
+                std::fs::write(&first, content).unwrap();
+            } else {
+                let replacement = referents.path().join("replacement");
+                std::fs::write(&replacement, content).unwrap();
+                std::fs::rename(&replacement, &first).unwrap();
+            }
+            tokio::time::timeout(Duration::from_secs(5), notify.notified())
+                .await
+                .expect("referent writes and replacements must wake the file gate");
+            reconciler.ensure_file_observation(&subject).unwrap();
+            assert_eq!(
+                reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+                content
+            );
+            while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+                .await.is_ok()
+            {}
+        }
+
+        let replacement_link = root.path().join("replacement-link");
+        std::os::unix::fs::symlink(&second, &replacement_link).unwrap();
+        std::fs::rename(&replacement_link, &path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("retargeting the symlink must wake the file gate");
+        reconciler.ensure_file_observation(&subject).unwrap();
+        assert_eq!(
+            reconciler.store.latest_actual_value(&subject).unwrap().unwrap()["content"],
+            "second"
+        );
+        while tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_ok()
+        {}
+        std::fs::write(&first, "old referent").unwrap();
+        assert!(tokio::time::timeout(Duration::from_millis(200), notify.notified())
+            .await.is_err());
+        std::fs::write(&second, "new referent").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), notify.notified())
+            .await
+            .expect("the newly resolved referent must remain watched");
     }
 
     #[test]
@@ -27076,6 +28301,44 @@ agent "test/worker" {
     }
 
     #[test]
+    fn declared_resource_edits_do_not_relaunch_an_exited_restart_never_seat() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = |resource: &str| format!(
+            "version 2\nagent \"test/worker\" {{ workspace \"/tmp\"; command \"true\"; restart \"never\"\n{resource}\n}}\n"
+        );
+        apply_source(&store, &source(""), "resource-seat");
+        let runtime = Arc::new(FakeRuntime::default());
+        let reconciler = Reconciler::new(
+            store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+        );
+        reconciler.reconcile_once().unwrap();
+        let launch = reconciler.launch_token("agent/test/worker").unwrap();
+        let runtime_id = runtime.starts.lock().unwrap()[0].clone();
+        runtime.ptys.lock().unwrap().push(RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: true,
+            status: "exited".into(),
+            exit_code: Some(0),
+            incarnation_id: Some("finished-resource-seat".into()),
+        });
+        reconciler.reconcile_once().unwrap();
+        for (key, resource) in [
+            ("add-resource", "resource \"notes\" uri=\"https://example.com/notes\""),
+            ("remove-resource", ""),
+        ] {
+            apply_source(&store, &source(resource), key);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(reconciler.launch_token("agent/test/worker").unwrap(), launch);
+            assert_eq!(
+                runtime.starts.lock().unwrap().as_slice(),
+                std::slice::from_ref(&runtime_id),
+                "{key} must not relaunch an exited restart-never seat",
+            );
+            assert!(runtime.stops.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
     fn a_relabel_of_an_older_launch_runs_again_after_another_revision_launched() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, r#"version 2
@@ -27754,6 +29017,19 @@ agent "worker" {
         store.rename_agent("agent/node.worker", Some("Renamed"), "rename-exhausted").unwrap();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.starts.lock().unwrap().len(), 1);
+        for (key, resource) in [
+            ("add-exhausted-resource", "resource \"notes\" uri=\"https://example.com/notes\""),
+            ("remove-exhausted-resource", ""),
+        ] {
+            let edited = source.replace(
+                "command \"true\"",
+                &format!("command \"true\"\n{resource}"),
+            );
+            apply_source(&store, &edited, key);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(reconciler.launch_token("agent/node.worker").unwrap(), desired_token);
+            assert_eq!(runtime.starts.lock().unwrap().len(), 1, "{key} must preserve the exhausted budget");
+        }
         store
             .append_claim(&ClaimInput {
                 subject: "agent/node.worker".into(),
@@ -27868,6 +29144,20 @@ agent "worker" {
         store.rename_agent("agent/node.worker", Some("Renamed"), "rename-parked").unwrap();
         reconciler.reconcile_once().unwrap();
         assert_eq!(runtime.starts.lock().unwrap().len(), 3, "a rename must not unpark the seat");
+        let launch = reconciler.launch_token("agent/node.worker").unwrap();
+        for (key, resource) in [
+            ("add-parked-resource", "resource \"notes\" uri=\"https://example.com/notes\""),
+            ("remove-parked-resource", ""),
+        ] {
+            let source = format!(
+                "version 2\nagent \"worker\" {{ workspace \"/tmp\"; command \"true\"; restart \"always\"\n{resource}\n}}\n"
+            );
+            apply_source(&store, &source, key);
+            reconciler.reconcile_once().unwrap();
+            assert_eq!(reconciler.launch_token("agent/node.worker").unwrap(), launch);
+            assert_eq!(runtime.starts.lock().unwrap().len(), 3, "{key} must not unpark the seat");
+            assert!(reconciler.runtime_crash_loop_raised("agent/node.worker", &launch).unwrap());
+        }
     }
 
     #[test]
@@ -31754,6 +33044,86 @@ mission "untimed-clock" state="ready" {
     }
 
     #[test]
+    fn a_timed_loop_is_due_again_when_its_timeout_passes() {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        const START: u128 = 1_800_000_000_000;
+        smallclaims::store::set_thread_clock(Some(START));
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.set_write_clock_at(START).unwrap();
+        // The round waits on a document nobody writes, so nothing marks the run again before
+        // the loop's hour is up.
+        let source = r#"version 2
+mission "timed-clock" state="ready" {
+  goal "Stop the loop when its hour is up, though nothing else changes."
+  loop "improve" timeout="1h" {
+    max-rounds 2
+    round {
+      completion { when "all-steps-exhausted" }
+      step "work" { agentless; gate "wait" { document "doc/invented-never" } }
+    }
+  }
+}
+"#;
+        apply_source(&store, source, "timed-clock-source");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "timed-clock".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "timed-clock-run".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..6 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let run = store.mission_run(&run.id).unwrap().unwrap();
+        let mission = store
+            .mission_spec("timed-clock", Some(&run.revision))
+            .unwrap()
+            .unwrap();
+        let steps = flatten_mission_steps(&mission);
+        let (step, view) = (&steps[0], &run.steps[0]);
+        let loop_spec = step.spec.loop_spec.as_ref().unwrap();
+        let started = store
+            .loop_first_execution_at(&run.root_mission_run, &view.subject)
+            .unwrap()
+            .expect("the first round has started");
+        let (_, due) = smallclaims::touched::record_due(|| {
+            reconciler
+                .evaluate_loop_step(&run, step, view, loop_spec)
+                .unwrap()
+        });
+        assert_eq!(due, Some(started + 3_600_000), "the loop is due when its timeout passes");
+        // Once the timeout has passed the loop ends, and notes no due time in the past.
+        smallclaims::store::set_thread_clock(Some(started + 3_600_000));
+        store.set_write_clock_at(started + 3_600_000).unwrap();
+        let (_, due) = smallclaims::touched::record_due(|| {
+            reconciler
+                .evaluate_loop_step(&run, step, view, loop_spec)
+                .unwrap()
+        });
+        assert!(
+            due.is_none_or(|due| due > started + 3_600_000),
+            "a passed loop timeout is not a due time: {due:?}"
+        );
+    }
+
+    #[test]
     fn an_unclaimed_timed_out_round_is_redispatched_without_spending_a_round() {
         struct TestClock;
         impl Drop for TestClock {
@@ -35580,7 +36950,8 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
         Observe,
         /// An observation that asks to continue at once, as a listing longer than one read does.
         Continue,
-        RateLimit,
+        RateLimitAt(u128),
+        LocalBudget(u128),
         Forbidden,
         Fail,
     }
@@ -35634,10 +37005,15 @@ observer "repo" {{ resource "resource/repo"; provider "github.repository"; locat
                         next_check_unix_ms: now_ms()
                             .saturating_add(crate::resource::PROVIDER_CONTINUE_MS),
                     }),
-                    ScriptedObservation::RateLimit => {
+                    ScriptedObservation::RateLimitAt(deadline) => {
                         Err(anyhow::Error::new(crate::resource::ProviderRateLimit {
-                            retry_at_unix_ms: now_ms() + 180_000,
+                            retry_at_unix_ms: deadline,
                             status: 403,
+                        }))
+                    }
+                    ScriptedObservation::LocalBudget(deadline) => {
+                        Err(anyhow::Error::new(crate::resource::LocalObserverBudget {
+                            retry_at_unix_ms: deadline,
                         }))
                     }
                     ScriptedObservation::Forbidden => {
@@ -35817,6 +37193,24 @@ observer "{subject}" {{
             .unwrap();
         let key = format!("observer/repo:{revision}");
         let expected = calls.load(Ordering::SeqCst) + 1;
+        // Persisted refusal deadlines deliberately override an in-memory deadline. Use the
+        // public refresh contract to force the next scripted refusal without sleeping.
+        if reconciler.store.latest_actual_value("observer/repo").unwrap().is_some_and(|actual|
+            matches!(actual["error_code"].as_str(), Some("rate-limited" | "local-observer-budget")))
+        {
+            reconciler.store.append_claim(&ClaimInput {
+                subject: "observer/repo".into(),
+                kind: "observer.refresh-requested".into(),
+                actor: Some("person/test".into()),
+                fields: BTreeMap::from([
+                    ("revision".into(), Value::String(revision)),
+                    ("attempt".into(), Value::String(format!("scripted-{expected}"))),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
         reconciler
             .armed_observers
             .lock()
@@ -35937,10 +37331,11 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
     }
 
     #[tokio::test]
-    async fn a_rate_limit_asks_a_person_only_after_it_outlasts_its_reset() {
+    async fn a_rate_limit_persists_each_new_deadline_and_clears_stale_attention() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(&store, SCRIPTED_OBSERVER, "outlasted-rate-limit");
         let calls = Arc::new(AtomicUsize::new(0));
+        let reset = now_ms() + 180_000;
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
@@ -35950,8 +37345,9 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         .with_resource_provider(Arc::new(ScriptedResourceProvider::new(
             calls.clone(),
             [
-                ScriptedObservation::RateLimit,
-                ScriptedObservation::RateLimit,
+                ScriptedObservation::RateLimitAt(reset),
+                ScriptedObservation::RateLimitAt(reset + 180_000),
+                ScriptedObservation::RateLimitAt(reset + 360_000),
                 ScriptedObservation::Observe,
             ],
         )));
@@ -35962,7 +37358,7 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
         assert_eq!(state["error_code"], "rate-limited");
         assert!(observer_items(&store).is_empty());
 
-        // The reset it named passed, and the observer is still limited.
+        // Until another refusal is observed, a missed reset can ask for attention.
         let revision = store
             .selected_desired_revision("observer/repo")
             .unwrap()
@@ -35990,7 +37386,6 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 idempotency_key: None,
             })
             .unwrap();
-        observe_now(&reconciler, &calls).await;
         let items = observer_items(&store);
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "A GitHub rate limit outlasted its reset");
@@ -36001,6 +37396,14 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
             "{}",
             items[0].detail
         );
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 180_000).to_string());
+        assert!(observer_items(&store).is_empty(), "the new refusal supersedes the old reset");
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["next_check_unix_ms"], (reset + 360_000).to_string());
+        assert!(observer_items(&store).is_empty());
 
         // Observing again closes it.
         observe_now(&reconciler, &calls).await;
@@ -36013,6 +37416,28 @@ subscription "performance" {{ observer "observer/repo"; to "agent/node.target"; 
                 .body["fields"]["state"],
             "healthy"
         );
+    }
+
+    #[tokio::test]
+    async fn a_local_observer_refusal_persists_its_slot_without_provider_attention() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(&store, SCRIPTED_OBSERVER, "local-budget");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let slot = now_ms() + 180_000;
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        ).with_resource_provider(Arc::new(ScriptedResourceProvider::new(
+            calls.clone(), [ScriptedObservation::LocalBudget(slot)],
+        )));
+        observe_now(&reconciler, &calls).await;
+        let state = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(state["error_code"], "local-observer-budget");
+        assert_eq!(state["state"], "healthy", "compatible non-fault deferred receipt");
+        assert_eq!(state["next_check_unix_ms"], slot.to_string());
+        assert_eq!(state["reason"], format!("local observer budget reached, next slot at {slot} (Unix ms)"));
+        assert!(observer_items(&store).is_empty());
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -38527,6 +39952,428 @@ observer "intake" {
         );
     }
 
+    /// A repository observer's cursor lives in the polling member's GitHub plugin database; its
+    /// claim carries only how far it has read. Across mixed builds: a claim an older build wrote
+    /// hands its whole cursor over once, even when the first poll is quiet and writes no claim; a
+    /// restart continues from the plugin database; an older build reads the read position from
+    /// the folded actual state; and a member without the database resumes from the claim, which
+    /// delivers only the item opened meanwhile.
+    #[tokio::test]
+    async fn a_repository_cursor_moves_to_the_plugin_database_without_flooding() {
+        /// Answers one poll with `facts` and `cursor`, and keeps the cursor it was asked from.
+        struct OnePoll {
+            asked: Arc<Mutex<Vec<Option<String>>>>,
+            facts: Value,
+            cursor: String,
+        }
+        impl ResourceProvider for OnePoll {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                self.asked.lock().unwrap().push(request.cursor);
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: self.facts.clone(),
+                    cursor: Some(self.cursor.clone()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        // A repository cursor as the provider writes one: how far it has read, and a version map.
+        let cursor = |day: u32| serde_json::json!({
+            "items_since": format!("2026-09-{day}T00:00:00Z"),
+            "seen": {"items": format!("listing-{day}")},
+        }).to_string();
+        let position = |day: u32| serde_json::json!({"items_since": format!("2026-09-{day}T00:00:00Z")});
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example.reader"; delivery "message" }"#,
+            "cursor-watch",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let issue = |number: u64| serde_json::json!({
+            "node_id": format!("I_fixture{number}"), "number": number, "state": "open",
+            "url": format!("https://github.com/acme/garden/issues/{number}"),
+            "title": format!("issue {number}"),
+        });
+        let listing = |numbers: &[u64]| serde_json::json!({
+            "repository_id": 7,
+            "issues": numbers.iter().map(|number| issue(*number)).collect::<Vec<_>>(),
+        });
+        let subscriptions = store.desired_subjects().unwrap().iter()
+            .filter(|item| item.kind == "subscription")
+            .map(|item| (item.subject.clone(), crate::graph::subscription_spec(&item.desired).unwrap()))
+            .collect::<Vec<_>>();
+        // An older build polled first: its baseline knows issue 1, and its claim holds its cursor.
+        store.record_resource_observation("observer/repo", &revision, None, "resource/repo",
+            Some("old-build"), &listing(&[1]), now_ms() + 60_000, &subscriptions, None).unwrap();
+        store.append_claim(&ClaimInput {
+            subject: "observer/repo".into(),
+            kind: "observer.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), Value::String("healthy".into())),
+                ("revision".into(), Value::String(revision.clone())),
+                ("cursor".into(), Value::String("old-build".into())),
+                ("changed".into(), Value::Bool(true)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let delivered = || store.messages(Some("agent/example.reader"), true).unwrap().len();
+        assert_eq!(delivered(), 0, "a baseline delivers nothing");
+
+        let state = tempfile::tempdir().unwrap();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        // One poll by a reconciler that keeps cursors in `plugin`, as one daemon process does.
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>, facts: Value, cursor: String| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin.clone())
+            .with_resource_provider(Arc::new(OnePoll { asked: asked.clone(), facts, cursor: cursor.clone() }));
+            // Due now, rather than at the deadline the last poll recorded.
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                // A bound for a loaded machine, not an expected duration.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while plugin.cursor("observer/repo").unwrap() != Some(Some(cursor.clone())) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll keeps its cursor in the plugin database");
+            }
+        };
+        let newest_observed = || store.latest_claim("observer/repo", Some("observer.observed"))
+            .unwrap().unwrap().body["fields"].clone();
+
+        // The first poll of this build continues from the older build's claim. Nothing changed,
+        // so it writes no claim, and the older build's claim stays the newest.
+        let disk = || Arc::new(github_plugin_store::GithubPluginStore::open(state.path()).unwrap());
+        poll(disk(), listing(&[1]), cursor(11)).await;
+        assert_eq!(delivered(), 0);
+        assert_eq!(store.claimed_observer_cursor("observer/repo").unwrap().as_deref(), Some("old-build"));
+
+        // A restart reopens the plugin database: the older build's claim is not adopted again.
+        poll(disk(), listing(&[1, 3]), cursor(12)).await;
+        assert_eq!(delivered(), 1, "issue 3 opened after the last poll");
+        let observed = newest_observed();
+        assert_eq!(observed["changed"], true);
+        // The claim carries how far the poll read, not the version maps.
+        let claimed = |observed: &Value| -> Value {
+            serde_json::from_str(observed["cursor"].as_str().expect("the claim has a read position")).unwrap()
+        };
+        assert_eq!(claimed(&observed), position(12), "{observed}");
+        // An older build reads the observer's folded actual state: taking over, it reads on from
+        // the same position.
+        let actual = store.latest_actual_value("observer/repo").unwrap().unwrap();
+        assert_eq!(claimed(&actual), position(12));
+
+        // A member without the plugin database, such as one that takes over polling, reads on
+        // from the claim's position: only issue 4, opened meanwhile, delivers.
+        poll(Arc::new(github_plugin_store::GithubPluginStore::memory()), listing(&[1, 3, 4]), cursor(13)).await;
+        assert_eq!(delivered(), 2, "a lost database delivers only what is new");
+        assert_eq!(*asked.lock().unwrap(), [
+            Some("old-build".into()), Some(cursor(11)), Some(position(12).to_string()),
+        ]);
+        assert_eq!(claimed(&newest_observed()), position(13));
+
+    }
+
+    /// Polling moves to a member without the plugin database, between two polls by the real
+    /// repository provider. The issue closed and the comment written in the gap are each
+    /// delivered once, and the comment from before the gap is not delivered again: the new
+    /// poller reads on from how far the observer's claim says it had read.
+    #[tokio::test]
+    async fn a_closure_and_a_comment_between_two_pollers_are_each_delivered_once() {
+        use crate::resource::test_github::{FakeGithub, age_pull_request_check, observe};
+        /// The real repository provider, against the test GitHub at its base. Each poll
+        /// revalidates instead of reusing this process's cached response, as polls minutes apart do.
+        struct Real(String);
+        impl ResourceProvider for Real {
+            fn observe(&self, mut request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                request.every_ms = Some(0);
+                Box::pin(observe(request, &self.0))
+            }
+        }
+        let (github, base) = FakeGithub::start().await;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"; field "comments"
+}
+agent "example.reader" { workspace "/tmp"; command "true" }
+subscription "issues" { observer "observer/repo"; on "issues"; to "agent/example.reader"; delivery "message" }
+subscription "comments" { observer "observer/repo"; on "comments"; to "agent/example.reader"; delivery "message" }"#,
+            "two-pollers",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        // An older build read the repository up to the tenth: its claim carries that position.
+        store.append_claim(&ClaimInput {
+            subject: "observer/repo".into(),
+            kind: "observer.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), Value::String("healthy".into())),
+                ("revision".into(), Value::String(revision.clone())),
+                ("cursor".into(), Value::String(serde_json::json!({
+                    "items_since": "2026-09-10T00:00:00Z", "comments_since": "2026-09-10T00:00:00Z",
+                }).to_string())),
+                ("changed".into(), Value::Bool(true)),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+
+        let issue = |state: &str, updated_at: &str, comments: u64| serde_json::json!({
+            "number": 1, "node_id": "I_orchid", "title": "Orchid", "state": state,
+            "html_url": "https://github.com/acme/garden/issues/1", "user": {"login": "fern"},
+            "created_at": "2026-09-01T00:00:00Z", "updated_at": updated_at,
+            "comments": comments, "body": "", "reactions": {"total_count": 0, "+1": 0},
+        });
+        let comment = |id: u64, at: &str, body: &str| serde_json::json!({
+            "id": id, "issue_url": "https://api.github.com/repos/acme/garden/issues/1",
+            "html_url": format!("https://github.com/acme/garden/issues/1#issuecomment-{id}"),
+            "user": {"login": "fern"}, "body": body, "created_at": at, "updated_at": at,
+        });
+        let since = |at: &str| (
+            format!("/repos/acme/garden/issues?state=all&sort=updated&direction=asc&since={at}&per_page=100"),
+            format!("/repos/acme/garden/issues/comments?sort=updated&direction=asc&since={at}&per_page=100"),
+        );
+        let node = |state: &str| serde_json::json!([{"id": "I_orchid", "state": state, "number": 1,
+            "url": "https://github.com/acme/garden/issues/1"}]);
+        github.route("/repos/acme/garden", serde_json::json!({"id": 7}));
+        github.open_pull_requests(serde_json::json!([]));
+        github.resolved_nodes(node("OPEN"));
+
+        // One poll by a member whose reconciler keeps cursors in `plugin`, once it has recorded.
+        let poll = |plugin: Arc<github_plugin_store::GithubPluginStore>| {
+            let reconciler = Reconciler::new(
+                store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+            )
+            .with_github_plugin(plugin)
+            .with_resource_provider(Arc::new(Real(base.clone())));
+            let key = format!("observer/repo:{revision}");
+            reconciler.observer_deadlines.lock().unwrap().insert(key.clone(), 0);
+            // Each poll asks GraphQL again, rather than reusing this host's last answer.
+            if !github.graphql_requests.lock().is_empty() {
+                age_pull_request_check(&base, Duration::from_secs(3600));
+            }
+            async move {
+                reconciler.reconcile_resource_observers(&reconciler.store.desired_subjects().unwrap(), &[]).unwrap();
+                // A bound for a loaded machine, not an expected duration.
+                tokio::time::timeout(Duration::from_secs(60), async {
+                    while reconciler.observer_deadlines.lock().unwrap().get(&key).is_none_or(|deadline| *deadline == 0) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                }).await.expect("the poll records");
+            }
+        };
+        // Each delivery: the subscription, the item's state, and the item's last comment.
+        let delivered = || {
+            let mut delivered = store.messages(Some("agent/example.reader"), true).unwrap().into_iter()
+                .flat_map(|message| {
+                    let subscription = message.tags.iter()
+                        .find_map(|tag| tag.strip_prefix("subscription/")).unwrap_or_default().to_owned();
+                    let content: Value = serde_json::from_str(&message.content).unwrap();
+                    content["items"].as_array().cloned().unwrap_or_default().into_iter()
+                        .map(move |item| (
+                            subscription.clone(),
+                            item["facts"]["state"].as_str().unwrap_or_default().to_owned(),
+                            item["facts"]["last_comment"]["id"].as_u64(),
+                        ))
+                })
+                .collect::<Vec<_>>();
+            delivered.sort();
+            delivered
+        };
+        let delivery = |subscription: &str, state: &str, comment: u64| (subscription.to_owned(), state.to_owned(), Some(comment));
+
+        // Member A: the first poll records the baseline, which wakes nobody.
+        let (issues, comments) = since("2026-09-09T23:59:59Z");
+        github.route(&issues, serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
+        github.route(&comments, serde_json::json!([]));
+        let member_a = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        poll(member_a.clone()).await;
+        assert_eq!(delivered(), [], "a baseline delivers nothing");
+
+        // Then a comment before the gap, delivered once.
+        github.route(&issues, serde_json::json!([issue("open", "2026-09-11T00:00:00Z", 1)]));
+        github.route(&comments, serde_json::json!([comment(91, "2026-09-11T00:00:00Z", "before the gap")]));
+        poll(member_a.clone()).await;
+        let before = vec![delivery("comments", "open", 91), delivery("issues", "open", 91)];
+        assert_eq!(delivered(), before);
+
+        // In the gap the issue closes and a second comment lands. Nothing reads the open listing
+        // any more, so it would not show the closure.
+        let (issues, comments) = since("2026-09-10T23:59:59Z");
+        github.route("/repos/acme/garden/issues?state=open&per_page=100", serde_json::json!([]));
+        github.route(&issues, serde_json::json!([issue("closed", "2026-09-12T00:00:00Z", 2)]));
+        github.route(&comments, serde_json::json!([
+            comment(91, "2026-09-11T00:00:00Z", "before the gap"),
+            comment(92, "2026-09-12T00:00:00Z", "in the gap"),
+        ]));
+        github.resolved_nodes(node("CLOSED"));
+
+        // Member B never polled this observer: it reads on from the claim.
+        let member_b = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        poll(member_b.clone()).await;
+        let mut after = before.clone();
+        after.extend([delivery("comments", "closed", 92), delivery("issues", "closed", 92)]);
+        after.sort();
+        assert_eq!(delivered(), after, "the closure and the gap's comment, once each, and nothing older");
+        assert_eq!(
+            store.latest_actual_value("resource/repo/issue/1").unwrap().unwrap()["facts"]["state"],
+            "closed",
+        );
+        // Polling again delivers nothing more.
+        poll(member_b).await;
+        assert_eq!(delivered(), after);
+    }
+
+    /// A plugin database that fails is the observer's failure, never hidden. A read that fails
+    /// leaves no arm behind, so the observer polls once the database reads again. A cursor the
+    /// database does not keep holds the observer degraded, and GitHub is not asked again, until
+    /// the database takes it, whichever arm polls next. A later failure records its own receipt,
+    /// even when a refresh met it and its first write failed.
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_plugin_database_degrades_the_observer_until_it_recovers() {
+        /// Fails the next observer.state receipt once `armed` is set.
+        struct FailReceiptOnce(Arc<std::sync::atomic::AtomicBool>);
+        impl FaultInjection for FailReceiptOnce {
+            fn fault(&self, scope: &str, _subject: &str) -> Option<String> {
+                (scope == "observer-receipt-write" && self.0.swap(false, Ordering::SeqCst))
+                    .then(|| "injected observer.state write failure".into())
+            }
+        }
+        struct Polls {
+            asked: Arc<Mutex<Vec<Option<String>>>>,
+            cursor: Arc<Mutex<&'static str>>,
+        }
+        impl ResourceProvider for Polls {
+            fn observe(&self, request: ObservationRequest) -> std::pin::Pin<Box<
+                dyn Future<Output = Result<crate::resource::ProviderObservation>> + Send + '_
+            >> {
+                self.asked.lock().unwrap().push(request.cursor);
+                let cursor = *self.cursor.lock().unwrap();
+                Box::pin(async move { Ok(crate::resource::ProviderObservation {
+                    facts: serde_json::json!({"repository_id": 7, "issues": []}),
+                    cursor: Some(cursor.into()),
+                    next_check_unix_ms: now_ms() + 300_000,
+                }) })
+            }
+        }
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"version 2
+resource "repo" { kind "vcs.repository" }
+observer "repo" {
+  resource "resource/repo"; provider "github.repository"; locator "acme/garden"
+  field "issues"
+}"#,
+            "cursor-failure",
+        );
+        let revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let cursor = Arc::new(Mutex::new("c1"));
+        let reconciler = Reconciler::new(
+            store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
+        )
+        .with_github_plugin(plugin.clone())
+        .with_resource_provider(Arc::new(Polls { asked: asked.clone(), cursor: cursor.clone() }));
+        let fail_receipt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reconciler = reconciler.with_fault_injection(Arc::new(FailReceiptOnce(fail_receipt.clone())));
+        let pass = || {
+            reconciler.observer_deadlines.lock().unwrap().insert(format!("observer/repo:{revision}"), 0);
+            reconciler.reconcile_resource_observers(&store.desired_subjects().unwrap(), &[]).unwrap();
+        };
+        let state = || store.latest_claim("observer/repo", Some("observer.state")).unwrap()
+            .map(|claim| (claim.id, claim.body["fields"]["state"].as_str().unwrap_or_default().to_owned()));
+        async fn until(what: &str, mut done: impl FnMut() -> bool) {
+            tokio::time::timeout(Duration::from_secs(3_600), async {
+                while !done() { tokio::time::sleep(Duration::from_millis(50)).await; }
+            }).await.unwrap_or_else(|_| panic!("{what}"));
+        }
+
+        plugin.fail_reads(true);
+        pass();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert!(asked.lock().unwrap().is_empty(), "no poll without the cursor it would start from");
+        plugin.fail_reads(false);
+        pass();
+        until("the observer polls once the database reads again", || asked.lock().unwrap().len() == 1).await;
+        until("the cursor is kept", || plugin.cursor("observer/repo").unwrap() == Some(Some("c1".into()))).await;
+
+        plugin.refuse_writes(true);
+        *cursor.lock().unwrap() = "c2";
+        pass();
+        until("an unkept cursor degrades the observer", || state().is_some_and(|(_, state)| state == "degraded")).await;
+        let (first, _) = state().unwrap();
+        let fields = store.latest_claim("observer/repo", Some("observer.state")).unwrap().unwrap().body["fields"].clone();
+        assert_eq!(fields["error_code"], "github-plugin-database", "{fields}");
+        let polls = asked.lock().unwrap().len();
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(asked.lock().unwrap().len(), polls, "GitHub is not asked again until the cursor is kept");
+        assert_eq!(state().unwrap(), (first.clone(), "degraded".into()));
+
+        plugin.refuse_writes(false);
+        until("the database takes the cursor", || plugin.cursor("observer/repo").unwrap() == Some(Some("c2".into()))).await;
+        pass();
+        until("the next poll continues from it", || asked.lock().unwrap().last() == Some(&Some("c2".into()))).await;
+        until("the observer is healthy again", || state().is_some_and(|(_, state)| state == "healthy")).await;
+
+        // A refresh meets the next failure, and its degraded receipt fails to write once.
+        let healthy = state().unwrap().0;
+        plugin.refuse_writes(true);
+        fail_receipt.store(true, Ordering::SeqCst);
+        *cursor.lock().unwrap() = "c3";
+        store.append_claim(&ClaimInput {
+            subject: "observer/repo".into(),
+            kind: "observer.refresh-requested".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("attempt".into(), Value::String("manual".into())),
+                ("revision".into(), Value::String(revision.clone())),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let polls = asked.lock().unwrap().len();
+        pass();
+        until("the refresh polls", || asked.lock().unwrap().len() == polls + 1).await;
+        until("the receipt write was refused", || !fail_receipt.load(Ordering::SeqCst)).await;
+        assert_eq!(state().unwrap().0, healthy, "the failed receipt wrote nothing");
+        pass();
+        until("a later failure degrades the observer again", || state().is_some_and(|(_, state)| state == "degraded")).await;
+        assert_ne!(state().unwrap().0, first, "a later failure records its own receipt");
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        pass();
+        tokio::time::sleep(Duration::from_secs(600)).await;
+        assert_eq!(asked.lock().unwrap().len(), polls + 1, "no arm asks GitHub until the cursor is kept");
+        plugin.refuse_writes(false);
+        until("the database takes the refresh's cursor", || plugin.cursor("observer/repo").unwrap() == Some(Some("c3".into()))).await;
+        pass();
+        until("the next poll continues from it", || asked.lock().unwrap().last() == Some(&Some("c3".into()))).await;
+    }
+
     /// An intake run revised onto its repository's standing observer keeps its subscriptions,
     /// and the standing observer takes over the intake observer's resource and cursor: what the
     /// intake already delivered is not delivered again, and what changed afterwards is delivered
@@ -38582,12 +40429,15 @@ mission "intake" state="ready" {{
                 idempotency_key: "intake-run".into(),
             })
             .unwrap();
+        // The poll loop keeps each cursor in the plugin database; `observe` stands in for it.
+        let plugin = Arc::new(github_plugin_store::GithubPluginStore::memory());
         let reconciler = Reconciler::new(
             store.clone(),
             Arc::new(FakeRuntime::default()),
             "node".into(),
             Arc::new(Notify::new()),
-        );
+        )
+        .with_github_plugin(plugin.clone());
         for _ in 0..3 {
             reconciler.reconcile_once().unwrap();
         }
@@ -38629,6 +40479,7 @@ mission "intake" state="ready" {{
                 .collect::<Vec<_>>();
             store.record_resource_observation(observer_subject, &store.selected_desired_revision(observer_subject).unwrap().unwrap(), None, resource, Some(cursor), &serde_json::json!({"repository_id": 41, "pull_requests": pulls, "issues": issues}), now_ms() + 60_000, &subscriptions, None)
                 .unwrap();
+            plugin.set_cursor(observer_subject, resource, Some(cursor)).unwrap();
         };
         let requested = |subscription: &str| {
             store
@@ -38694,7 +40545,7 @@ mission "intake" state="ready" {{
             assert_eq!(spec.observer, standing);
         }
         assert_eq!(
-            store
+            reconciler
                 .inherited_observer_cursor(resource, standing)
                 .unwrap()
                 .as_deref(),

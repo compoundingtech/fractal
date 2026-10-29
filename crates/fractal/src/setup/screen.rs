@@ -117,7 +117,7 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
     let home = home(environment);
     let login_note = if cfg!(target_os = "macos") {
         format!(
-            "Installs a launch agent for st in {}/Library/LaunchAgents. No admin rights. Remove it with {} service uninstall.",
+            "Installs a launch agent for Fractal in {}/Library/LaunchAgents. No admin rights. Remove it with {} service uninstall.",
             home.display(), start.args.program()
         )
     } else {
@@ -141,7 +141,7 @@ fn form(start: &Start, environment: &BTreeMap<String, String>) -> Form {
             .node
             .clone()
             .unwrap_or_else(|| start.default_node.clone()),
-        login_label: "Start st when I log in".into(),
+        login_label: "Start Fractal when I log in".into(),
         login: start.args.service.unwrap_or(true),
         login_note,
         linger: lingering_offered(),
@@ -229,7 +229,7 @@ fn describe(
         "claude" => (
             "Claude",
             format!(
-                "Adds the st channel plugin to Claude through its own plugin command (user scope, no admin rights). Writes the plugin files under {} and registers them in {}.",
+                "Adds the Fractal channel plugin to Claude through its own plugin command (user scope, no admin rights). Writes the plugin files under {} and registers them in {}.",
                 data.join("st2/claude-channel/marketplace").display(),
                 dir("CLAUDE_CONFIG_DIR", ".claude").display()
             ),
@@ -238,7 +238,7 @@ fn describe(
         "codex" => (
             "Codex",
             format!(
-                "Checks that Codex starts and is signed in. Writes nothing under {}: seats start Codex with st's own launch arguments.",
+                "Checks that Codex starts and is signed in. Writes nothing under {}: seats start Codex with Fractal's own launch arguments.",
                 dir("CODEX_HOME", ".codex").display()
             ),
             "Install Codex with its own installer (npm install -g @openai/codex), open a new terminal, then press r to look again.".into(),
@@ -246,19 +246,19 @@ fn describe(
         "opencode" => (
             "OpenCode",
             format!(
-                "Checks that OpenCode starts and is signed in. Writes nothing under {}: st starts its server for each seat.",
+                "Checks that OpenCode starts and is signed in. Writes nothing under {}: Fractal starts its server for each seat.",
                 home.join(".config/opencode").display()
             ),
             "Install OpenCode with its own installer (npm install -g opencode-ai), open a new terminal, then press r to look again.".into(),
         ),
         "pi" => (
             "Pi",
-            "Checks that Pi starts. Writes nothing globally: st loads its bundled extension for each seat.".into(),
+            "Checks that Pi starts. Writes nothing globally: Fractal loads its bundled extension for each seat.".into(),
             "Install Pi with its own installer so it is on your login PATH, open a new terminal, then press r to look again.".into(),
         ),
         _ => (
             "Omp",
-            "Checks that Omp starts. Writes nothing globally: st loads its bundled extension for each seat.".into(),
+            "Checks that Omp starts. Writes nothing globally: Fractal loads its bundled extension for each seat.".into(),
             "Install Omp with its own installer so it is on your login PATH, open a new terminal, then press r to look again.".into(),
         ),
     }
@@ -511,7 +511,7 @@ async fn stages(
     }
 
     let executable = if start.args.install.unwrap_or(true) {
-        reporter.step("Installing st");
+        reporter.step("Installing Fractal");
         install_binaries(executable)?
     } else {
         executable.to_owned()
@@ -519,7 +519,7 @@ async fn stages(
     check_login_path(&executable);
 
     if should_start {
-        reporter.step("Starting st");
+        reporter.step("Starting Fractal");
         start_daemon(
             &next,
             &executable,
@@ -574,7 +574,7 @@ async fn stages(
                 !start.args.onboarding,
                 "rerunning onboarding needs a running daemon; pass --start true"
             );
-            said(format!("Start the st daemon and run {} setup to begin onboarding.", start.args.program()));
+            said(format!("Start the Fractal daemon and run {} setup to begin onboarding.", start.args.program()));
         }
     }
     Ok(())
@@ -599,13 +599,13 @@ fn set_up_row(id: &str, executable: &Path, reporter: &Reporter) -> Outcome {
     let mut note = String::new();
     if id == "claude" {
         if let Err(error) = ensure_claude_channel(executable) {
-            return Outcome::Failed(format!("The st channel plugin could not be installed: {error}"));
+            return Outcome::Failed(format!("The Fractal channel plugin could not be installed: {error}"));
         }
         facts.integration = Tri::Yes;
-        note.push_str(if fractal_drivers::claude_channel::st3_policy_available() {
-            "The st channel is installed and the managed channel policy is present."
+        note.push_str(if fractal_drivers::claude_channel::fractal_policy_available() {
+            "The Fractal channel is installed and the managed channel policy is present."
         } else {
-            "The st channel is installed. Seats start with Claude's development-channel flag, and st accepts its one-time dialog."
+            "The Fractal channel is installed. Seats start with Claude's development-channel flag, and Fractal accepts its one-time dialog."
         });
     } else {
         match starts(&program, &environment) {

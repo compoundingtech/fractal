@@ -34,9 +34,9 @@ new production writes or grant changes. Refs #3336, #2172, #3257.
 
 ## Trust boundaries and residual risk
 
-The intended composition is external reasoning service → MCP tunnel/shim → SCG approval/execution → st assistant grant → receiving agent. SCG verifies the caller's signing identity; st separately verifies its assistant grant and authorization proofs. A request-body actor, bare approval identifier, ordinary tunnel signature, or person-device signature is not an assistant authorization proof.
+The intended composition is external reasoning service → MCP tunnel/shim → SCG approval/execution → Fractal assistant grant → receiving agent. SCG verifies the caller's signing identity; Fractal separately verifies its assistant grant and authorization proofs. A request-body actor, bare approval identifier, ordinary tunnel signature, or person-device signature is not an assistant authorization proof.
 
-The SCG host owns the st bearer and assistant key. A separate pinned approval-attestor key authorizes read/send proofs. Neither st bearers nor person keys, attestor secrets, raw socket access, or private profiles may enter external model context, tool responses, plugin configuration, or process arguments. The shim owns only its request-signing and tunnel credentials. Pairing is an explicit operator operation, not adapter startup behavior.
+The SCG host owns the Fractal bearer and assistant key. A separate pinned approval-attestor key authorizes read/send proofs. Neither Fractal bearers nor person keys, attestor secrets, raw socket access, or private profiles may enter external model context, tool responses, plugin configuration, or process arguments. The shim owns only its request-signing and tunnel credentials. Pairing is an explicit operator operation, not adapter startup behavior.
 
 Approved reads disclose data to the external model provider. A compromised executor host can steal local secrets; an approved message can influence its recipient. Revocation cannot recall bytes already disclosed, committed messages, or started effects. Transport/client/plan support is a separate feasibility gate: unsupported writes remain unsupported, without a read-hinted workaround or a pending send created through a read tool. Voice approval must use an actually supported explicit approval interaction, not inferred spoken consent.
 
@@ -118,7 +118,7 @@ The attention, missions, and agents pages retain the optional native `sync` noti
 
 The baseline grant contains only the first four minimal scopes: `read.assistant.summary`, `read.assistant.attention`, `read.assistant.missions`, and `read.assistant.agents`. The configured owning person may explicitly add content scopes. `approval-once` grants require a proof for each read; explicitly sealed `caller-bound-allow` grants admit reads within the exact grant scopes, expiry, consent, caller binding, and response budget. The adapter's rich projections remain bounded and do not grant unrelated person authority.
 
-`ScgReadAuthorization` must bind verified issuer/key and identity `chatgpt`, assistant principal, grant and policy revision, approval/execution IDs, exact projection/filter/cursor or content resource/revision/range, response-byte maximum, request digest, expiry, and a one-use nonce. st verifies a separately pinned attestor key and consumes the authorization atomically. A new page or range needs a new approval. Exact retries may recover the same bounded receipt inside the protected executor, but cached/status/private-result re-delivery to the external model requires fresh authorization.
+`ScgReadAuthorization` must bind verified issuer/key and identity `chatgpt`, assistant principal, grant and policy revision, approval/execution IDs, exact projection/filter/cursor or content resource/revision/range, response-byte maximum, request digest, expiry, and a one-use nonce. Fractal verifies a separately pinned attestor key and consumes the authorization atomically. A new page or range needs a new approval. Exact retries may recover the same bounded receipt inside the protected executor, but cached/status/private-result re-delivery to the external model requires fresh authorization.
 
 Pagination binds the exact projection class, grant, policy revision, snapshot and page size: metadata pages use `assistant.<route>`, while rich pages use `assistant.<route>-rich`. A rich cursor cannot continue a metadata request, including one authorized by another grant or after a read-mode change. Missions use the native keyset and page-sized card projection; agents use a published roster slice or cached shallow refs with page-sized card builds; attention uses an owner-indexed published slice. Cursors do not cache fully built assistant collections. A missing initial publication is not-ready; a replaced publication or expired cursor requires restarting pagination. Summary counts grouped mission phases and published attention/agent state inputs instead of building collection cards.
 
@@ -409,10 +409,10 @@ terminal decision. An assistant, external MCP caller, public authorization
 page, or possession of the pairing code cannot approve. A decision cannot
 broaden the displayed request; a changed request needs new consent.
 
-The fractal CLI and stui are the first callers, using the existing pairing
+The fractal CLI and the Fractal terminal UI are the first callers, using the existing pairing
 ceremony. Web and iOS clients can call the same typed operation once they meet
 the same owner/trusted-surface requirements; approval logic does not live in
-CLI commands, stui widgets or an OAuth callback.
+CLI commands, the Fractal terminal UI widgets or an OAuth callback.
 
 ### Tokens, grants and checks at use
 

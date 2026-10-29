@@ -111,6 +111,153 @@ fn attempts(store: &Store) -> Vec<crate::model::ClaimRecord> {
         .collect()
 }
 
+const POLICY_BANNER: &str = "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)\nInbound messages will be silently dropped\nHave an administrator set channelsEnabled: true in managed settings to enable";
+
+fn policy_launch(store: &Store, incarnation: &str) {
+    let token = store.selected_desired_token(SEAT).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.succeeded".into(), actor: None,
+        fields: BTreeMap::from([
+            ("action".into(), json!("start")),
+            ("desired_token".into(), json!(token)),
+            ("incarnation_id".into(), json!(incarnation)),
+        ]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+}
+
+#[test]
+fn channel_policy_refusal_stops_without_spending_retries_and_survives_daemon_restart() {
+    let (store, runtime, reconciler, mut desired) = setup();
+    desired.member.as_mut().unwrap().restart = RestartType::Always;
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = format!("Claude Code v2.1.306\n{POLICY_BANNER}\n❯ ");
+    let error = recover(&reconciler, &desired, "orchid-one", since).unwrap_err();
+    assert!(error.to_string().contains("channelsEnabled: true"), "{error}");
+    reconciler.record_member_reconcile_result(SEAT, Err(error)).unwrap();
+    assert!(store.member_reconcile_fault(SEAT, None).unwrap().unwrap().contains("channelsEnabled"));
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    assert!(attempts(&store).is_empty());
+    let fault = store.latest_observation(SEAT, "runtime.action.failed").unwrap().unwrap();
+    assert_eq!(fault.body["fields"]["action"], "claude-channel-policy-blocked");
+    let restarted = Reconciler::new(
+        store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()),
+    );
+    // No screen or running process is needed to retain the permanent failure.
+    runtime.screen.lock().unwrap().clear();
+    assert!(restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_000,
+    ).unwrap_err().to_string().contains("channelsEnabled"));
+    assert!(attempts(&store).is_empty());
+    store.append_claim(&ClaimInput {
+        subject: SEAT.into(), kind: "runtime.action.requested".into(),
+        actor: Some(SEAT.into()),
+        fields: BTreeMap::from([("action".into(), json!("restart"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    assert!(!restarted.reconcile_claude_channel_recovery(
+        &desired, desired.member.as_ref().unwrap(), None, None, since + 86_400_001,
+    ).unwrap());
+}
+
+#[test]
+fn channel_policy_banner_does_not_stop_an_attached_or_stale_incarnation() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    assert!(!recover(&reconciler, &desired, "predecessor", since).unwrap());
+    attachment(&store, "orchid-one", true);
+    assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
+#[test]
+fn quoted_channel_policy_banner_is_not_a_provider_refusal() {
+    for screen in [
+        format!("❯ Please explain this error:\n> {}", POLICY_BANNER.replace('\n', "\n> ")),
+        format!("❯ Please explain this error:\n```\n{POLICY_BANNER}\n```"),
+        format!("❯ {POLICY_BANNER}"),
+        format!("❯ Please explain this error:\n{POLICY_BANNER}"),
+        format!("● This is the error you quoted:\n{POLICY_BANNER}"),
+        format!("```\n{POLICY_BANNER}\n```"),
+    ] {
+        let (store, runtime, reconciler, desired) = setup();
+        let since = attachment(&store, "orchid-one", false);
+        policy_launch(&store, "orchid-one");
+        *runtime.screen.lock().unwrap() = screen;
+        assert!(!recover(&reconciler, &desired, "orchid-one", since).unwrap());
+        assert!(runtime.stops.lock().unwrap().is_empty());
+        assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    }
+}
+
+// The quotation in #3999 is one line and includes a period after "dropped".
+const REPORTED_POLICY_BANNER: &str = /* sqlite-large-value: allow-for-now lv-h72967be8c2d9 owner=fractal_reconcile::reconcile::tests::channel_recovery TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-drivers/tests/fixtures/blocking-screens/claude-channel-policy-reported.txt");
+
+#[test]
+fn verbatim_and_wrapped_policy_banners_stop_only_in_provider_startup_chrome() {
+    for source in [POLICY_BANNER, REPORTED_POLICY_BANNER] {
+        for width in [usize::MAX, 80, 60, 40, 20] {
+            // Both fixture sources are ASCII. A PTY soft-wrap may split a word at
+            // the right edge, whereas Claude can also wrap at a space.
+            let wrapped = source.lines()
+                .flat_map(|line| line.as_bytes().chunks(width))
+                .map(|line| std::str::from_utf8(line).unwrap())
+                .collect::<Vec<_>>().join("\n");
+            for (screen, refusal) in [
+                (format!("Claude Code v2.1.306\n{wrapped}\n❯ "), true),
+                (format!("❯ Explain this error:\n{wrapped}"), false),
+                (format!("● You quoted:\n{wrapped}"), false),
+                (format!("> {}", wrapped.replace('\n', "\n> ")), false),
+                (format!("```\n{wrapped}\n```"), false),
+            ] {
+                let (store, runtime, reconciler, desired) = setup();
+                let since = attachment(&store, "orchid-one", false);
+                policy_launch(&store, "orchid-one");
+                *runtime.screen.lock().unwrap() = screen;
+                assert_eq!(
+                    recover(&reconciler, &desired, "orchid-one", since).is_err(),
+                    refusal, "width={width}, source={source:?}",
+                );
+                assert_eq!(runtime.stops.lock().unwrap().len(), usize::from(refusal));
+                assert!(attempts(&store).is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn predecessor_policy_banner_does_not_fence_the_replacement_declaration() {
+    let (store, runtime, reconciler, desired) = setup();
+    reconciler.reconcile_once().unwrap();
+    let initial_starts = runtime.starts.lock().unwrap().len();
+    let since = attachment(&store, "orchid-one", false);
+    policy_launch(&store, "orchid-one");
+    *runtime.screen.lock().unwrap() = POLICY_BANNER.into();
+    apply_source(
+        &store,
+        "version 2\nagent \"orchid\" { workspace \"/var/tmp\"; restart \"always\"; harness \"claude\" {} }",
+        "policy-replacement",
+    );
+    let replacement = store.desired_subjects().unwrap().remove(0);
+    assert_ne!(desired.member.as_ref().unwrap().workspace, replacement.member.as_ref().unwrap().workspace);
+    assert!(!recover(&reconciler, &replacement, "orchid-one", since).unwrap());
+    assert!(store.claims_for(SEAT, Some("runtime.action.failed")).unwrap().is_empty());
+    // The normal launch-change path remains authoritative; no policy stop or fence is minted.
+    assert!(reconciler.declared_launch_changes(
+        &replacement, &claude_seat_pty("orchid", "running", "orchid-one"),
+    ).unwrap().is_some());
+    assert!(runtime.stops.lock().unwrap().is_empty());
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "running", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(*runtime.stops.lock().unwrap(), ["node.orchid"]);
+    *runtime.ptys.lock().unwrap() = vec![claude_seat_pty("orchid", "exited", "orchid-one")];
+    reconciler.reconcile_once().unwrap();
+    assert_eq!(runtime.starts.lock().unwrap().len(), initial_starts + 1);
+}
+
 #[test]
 fn channel_recovery_rechecks_then_restarts_once_and_ignores_a_stale_incarnation() {
     let (store, runtime, reconciler, desired) = setup();

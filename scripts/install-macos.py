@@ -15,17 +15,18 @@ import subprocess
 import sys
 import tempfile
 
-CERTIFICATE = os.environ.get('ST_MACOS_SIGNING_IDENTITY') or None
-TEAM = os.environ.get('ST_MACOS_SIGNING_TEAM') or None
-APP = os.environ.get('ST_MACOS_APP_PATH') or None
-BIN_DIR = os.environ.get('ST_MACOS_BIN_DIR') or None
-# A named instance (ST_INSTANCE, or --instance on the install wrappers) is a second, separate install:
+# Prefer Fractal environment names; retain ST_* reads for existing install wrappers.
+CERTIFICATE = os.environ.get('FRACTAL_MACOS_SIGNING_IDENTITY', os.environ.get('ST_MACOS_SIGNING_IDENTITY')) or None
+TEAM = os.environ.get('FRACTAL_MACOS_SIGNING_TEAM', os.environ.get('ST_MACOS_SIGNING_TEAM')) or None
+APP = os.environ.get('FRACTAL_MACOS_APP_PATH', os.environ.get('ST_MACOS_APP_PATH')) or None
+BIN_DIR = os.environ.get('FRACTAL_MACOS_BIN_DIR', os.environ.get('ST_MACOS_BIN_DIR')) or None
+# A named instance (FRACTAL_INSTANCE, or --instance on the install wrappers) is a second, separate install:
 # its own app, command directory, bundle identifier, launchd services and install state, all under
 # ~/.st-instance/NAME. Without a name every default below is the shared install, as before.
-INSTANCE = os.environ.get('ST_INSTANCE') or None
+INSTANCE = os.environ.get('FRACTAL_INSTANCE', os.environ.get('ST_INSTANCE')) or None
 if INSTANCE and not (len(INSTANCE) <= 24 and re.fullmatch(r'[a-z0-9]+(-[a-z0-9]+)*', INSTANCE)):
     raise SystemExit('invalid instance name: lowercase letters, digits and single hyphens, at most 24 characters')
-IDENTIFIER = os.environ.get('ST_MACOS_BUNDLE_ID') or (
+IDENTIFIER = os.environ.get('FRACTAL_MACOS_BUNDLE_ID', os.environ.get('ST_MACOS_BUNDLE_ID')) or (
     'com.compoundingtech.smalltalk.instance.' + INSTANCE if INSTANCE else 'com.compoundingtech.smalltalk')
 # arn:lmig:smalltalk:2026-10-16-service-labels-fractal — service writers retain old labels.
 SERVICES = (['com.compoundingtech.st3.instance.' + INSTANCE, 'com.compoundingtech.st3.instance.' + INSTANCE + '.replication']
@@ -450,7 +451,8 @@ def main():
     global CERTIFICATE, TEAM, APP, BIN_DIR, IDENTIFIER
     parser = argparse.ArgumentParser(description='Install macOS tools as a fixed signed app without restarting services.')
     parser.add_argument('--from', dest='source', type=Path)
-    parser.add_argument('--home', type=Path, default=os.environ.get('ST_MACOS_INSTALL_HOME'),
+    parser.add_argument('--home', type=Path,
+                        default=os.environ.get('FRACTAL_MACOS_INSTALL_HOME', os.environ.get('ST_MACOS_INSTALL_HOME')),
                         help='installation home for isolated staging/tests (default: user home)')
     parser.add_argument('--bin-dir', default=BIN_DIR)
     parser.add_argument('--app', default=APP)

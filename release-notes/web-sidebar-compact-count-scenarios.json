@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry compact sidebar count and tooltip scenario coverage into the parent change",
+  "replay": {"status": "none", "detail": "Scenario coverage only; no replay change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Ports existing child-branch count scenarios without changing production behavior."},
+  "downtime": {"status": "none", "detail": "No service restart required."},
+  "manual": {"status": "none", "detail": "No manual action required."},
+  "recovery": {"status": "none", "detail": "Revert this scenario-only change to restore previous coverage."}
+}

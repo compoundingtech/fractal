@@ -83,12 +83,22 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
         response.writeHead(200, { 'Content-Type': 'text/plain', 'Cache-Control': 'public, max-age=3600' }).end('immutable asset')
       } else if (pathname === '/service-worker.js') {
         response.writeHead(200, { 'Content-Type': 'text/javascript', 'Cache-Control': 'no-store' }).end(`
-          self.addEventListener('install', event => event.waitUntil(self.skipWaiting()))
           self.addEventListener('activate', event => event.waitUntil(self.clients.claim()))
           self.addEventListener('fetch', event => {
             if (new URL(event.request.url).pathname === '/sw-proof') {
               event.respondWith(Promise.resolve(new Response('controlled by previous case')))
             }
+            if (new URL(event.request.url).pathname === '/audit-attack') {
+              event.respondWith(Promise.resolve(new Response('<!doctype html><script>window.__auditAttack = true; setInterval(() => localStorage.setItem("audit-attack", "survived"), 0)</script>', { headers: { 'Content-Type': 'text/html' } })))
+            }
+          })
+          self.addEventListener('message', event => {
+            if (event.data?.type !== 'navigate-audit') return
+            event.waitUntil((async () => {
+              const audit = (await self.clients.matchAll({ type: 'window' })).find(client => client.id !== event.source.id && client.url === event.data.from)
+              await audit.navigate(event.data.url)
+              event.ports[0].postMessage('navigated')
+            })())
           })
         `)
       } else {
@@ -126,6 +136,10 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   worker = await createIsolatedKitWorker(instrumentedBrowser, base, { workerId: 7 })
   await worker.reset()
   const control = worker.context.pages()[0]
+  const baseAudit = worker.context.pages().find(page => page.url() === `${base}/`)
+  assert.ok(baseAudit, 'reset creates an inert origin audit document')
+  await worker.reset()
+  assert.ok(worker.context.pages().includes(baseAudit), 'an unchanged inert target is reused')
   const previous = await worker.newPage(pageOptions)
   await previous.goto(base)
   await seedState(previous)
@@ -145,6 +159,22 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
     await controlled
   })
   assert.equal(await previous.evaluate(() => fetch('/sw-proof').then(response => response.text())), 'controlled by previous case')
+  assert.equal(await baseAudit.evaluate(() => navigator.serviceWorker.controller !== null), true, 'case service worker claims the retained audit client')
+  assert.match(await previous.evaluate(() => fetch('/audit-attack').then(response => response.text())), /window.__auditAttack/, 'negative control: service worker supplies executable attack HTML')
+  const navigateAudit = async url => previous.evaluate(({ url, from }) => new Promise(resolve => {
+    const channel = new MessageChannel()
+    channel.port1.onmessage = () => { channel.port1.close(); resolve() }
+    navigator.serviceWorker.controller.postMessage({ type: 'navigate-audit', url, from }, [channel.port2])
+  }), { url, from: baseAudit.url() })
+  await navigateAudit(`${base}/audit-attack`)
+  assert.equal(new URL(baseAudit.url()).pathname, '/audit-attack', 'service worker navigated the retained audit client')
+  assert.equal(await baseAudit.evaluate(() => window.__auditAttack ?? false), false, 'SW-served document scripts cannot run on audit targets')
+  const attackBlobURL = await previous.evaluate(() => URL.createObjectURL(new Blob([
+    '<!doctype html><script>window.__auditBlobAttack = true; setInterval(() => localStorage.setItem("audit-blob-attack", "survived"), 0)</script>',
+  ], { type: 'text/html' })))
+  await navigateAudit(attackBlobURL)
+  assert.equal(baseAudit.url(), attackBlobURL, 'case-made same-origin blob document reached the audit target')
+  assert.equal(await baseAudit.evaluate(() => window.__auditBlobAttack ?? false), false, 'blob document scripts cannot run on audit targets')
   await worker.context.grantPermissions(['geolocation'], { origin: base })
   assert.equal(await previous.evaluate(async () => (await navigator.permissions.query({ name: 'geolocation' })).state), 'granted')
   const popupEvent = previous.waitForEvent('popup')
@@ -188,10 +218,36 @@ test('reused Chromium worker isolates cases and rejects contamination and broken
   const { resetMilliseconds } = await worker.reset()
   assert.ok(Number.isFinite(resetMilliseconds) && resetMilliseconds >= 0)
   assert.ok(previous.isClosed() && popup.isClosed() && opaque.isClosed() && blob.isClosed())
-  assert.deepEqual(worker.context.pages(), [control])
+  const auditPages = worker.context.pages()
+  assert.equal(auditPages.length, 3, 'only blank control and two inert origin audits survive')
+  assert.ok(auditPages.includes(control) && baseAudit.isClosed(), 'reset replaces a navigated audit target before clearing storage')
+  const cleanAudit = auditPages.find(page => page.url() === `${base}/`)
+  assert.ok(cleanAudit, 'replacement is at the exact inert URL')
+  assert.equal(await cleanAudit.evaluate(() => window.__auditAttack ?? window.__auditBlobAttack ?? false), false)
+  assert.deepEqual(auditPages.filter(page => page !== control).map(page => new URL(page.url()).origin).sort(), [base, otherOrigin].sort())
+  await worker.reset()
+  assert.deepEqual(worker.context.pages(), auditPages, 'repeated resets do not create more audit documents')
   assert.equal(control.url(), 'about:blank')
   assert.deepEqual(await worker.context.cookies(), [])
   await worker.audit()
+  // An exact-URL audit may still acquire a cross-site child target, where the
+  // parent's script-disable flag is not a sufficient boundary.
+  const childAttached = cleanAudit.waitForEvent('frameattached')
+  await cleanAudit.evaluate(() => {
+    const frame = document.createElement('iframe')
+    frame.src = 'https://audit-child.invalid/'
+    document.body.append(frame)
+  })
+  await childAttached
+  assert.equal(cleanAudit.url(), `${base}/`)
+  assert.equal(cleanAudit.frames().length, 2)
+  await assert.rejects(() => worker.audit(), /Kit isolation audit page changed/)
+  await worker.reset()
+  assert.ok(cleanAudit.isClosed(), 'reset replaces an exact-URL audit containing a child frame')
+  const singleFrameAudit = worker.context.pages().find(page => page.url() === `${base}/`)
+  assert.ok(singleFrameAudit)
+  assert.equal(singleFrameAudit.frames().length, 1)
+  assert.equal(singleFrameAudit.workers().length, 0)
 
   const next = await worker.newPage({ viewport: { width: 1440, height: 900 }, colorScheme: 'light' })
   assert.notEqual(next, previous)

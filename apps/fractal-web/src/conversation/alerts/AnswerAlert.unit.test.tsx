@@ -72,7 +72,7 @@ const keys = (alert: Native.Attention) => alertChoices(alert)?.map((choice) => c
 const choice = (alert: Native.Attention, key: string) => alertChoices(alert)!.find((each) => each.key === key)!
 
 describe('alertChoices', () => {
-  it('answers a free-text yes-or-no question with Yes, No, words or Nothing to do, as stui does', () => {
+  it('answers a free-text yes-or-no question with Yes, No, words or Nothing to do, as the Fractal terminal UI does', () => {
     const ask = item({})
     expect(keys(ask)).toEqual(['yes', 'no', 'words', 'nothing'])
     expect(choice(ask, 'yes').action('')).toEqual({ type: 'work.done', summary: 'Yes' })
@@ -103,7 +103,7 @@ describe('alertChoices', () => {
     expect(keys(custom)).toEqual(['merge', 'hold', 'change', 'words', 'dismiss'])
   })
 
-  it('offers only the review answers st lists on a gate, words required to send one back', () => {
+  it('offers only the review answers Fractal lists on a gate, words required to send one back', () => {
     const gate = item({ attention_kind: 'human-gate', source_id: 'gate/example/review', actions: ['review.approve', 'review.request-changes'] })
     expect(keys(gate)).toEqual(['approve', 'changes'])
     expect(choice(gate, 'approve')).toMatchObject({ words: 'optional' })
@@ -123,7 +123,7 @@ describe('alertChoices', () => {
     expect(keys(item({ attention_kind: 'launch-approval', actions: ['launch.approve', 'launch.cancel'], preview: Option.none() }))).toEqual(['revise', 'cancel'])
   })
 
-  it('answers nothing st does not offer here', () => {
+  it('answers nothing Fractal does not offer here', () => {
     expect(alertChoices(item({ actions: [] }))).toBeNull()
     expect(alertChoices(item({ attention_kind: 'launch-approval', actions: [], preview: Option.some(preview) }))).toBeNull()
     expect(alertChoices(item({ attention_kind: 'revision-approval', actions: ['mission.approve-revision'] }))).toBeNull()
@@ -131,7 +131,7 @@ describe('alertChoices', () => {
 })
 
 describe('conversationAlerts', () => {
-  it('chooses this conversation\'s open alerts of every kind, as stui and the phone do', () => {
+  it('chooses this conversation\'s open alerts of every kind, as the Fractal terminal UI and the phone do', () => {
     const rows = [
       item({ id: 'attention/ask' }),
       item({ id: 'attention/gate', attention_kind: 'human-gate', actions: ['review.approve'] }),
@@ -268,7 +268,7 @@ describe('gatewayAlertActions', () => {
     const launchCancel = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const token = (digit: string) => `lpv0:${digit.repeat(64)}`
     const client = {
-      // As st raises it: the alert names its variant, and its episode is the preview's hash.
+      // As Fractal raises it: the alert names its variant, and its episode is the preview's hash.
       attentionGet: vi.fn(async () => envelope({ ...open, actions: ['launch.approve', 'launch.cancel'], source_id: 'planning-session/launch/nightly', variant_id: 'variant/two', episode: token('b') })),
       launchesGet: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { kind: 'launch', id: 'launch/nightly', revision: 'l3' } })),
       launchVariantsList: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { items: [
@@ -318,7 +318,7 @@ describe('gatewayAlertActions', () => {
     })
   })
 
-  it('says why st refused, and never sends an unconfirmed answer again', async () => {
+  it('says why Fractal refused, and never sends an unconfirmed answer again', async () => {
     const refusal = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'invalid', message: 'the step already has an answer', retryable: false, details: {} }, 422)
     const workDone = vi.fn(async () => { throw refusal })
     const port = gatewayAlertActions({ attentionGet: vi.fn(async () => envelope(open)), workDone } as unknown as FractalClient)

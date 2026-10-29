@@ -225,10 +225,10 @@ for path in ("main-upkeep.yml",):
     assert ";job.priority=${{ github.event_name == 'merge_group' && 1 || 3 }}" in generated, (path, "non-merge Linux work keeps the second class")
     assert "github.run-id=" in generated, (path, "avoid nondeterministic runner pickup")
     assert ";job.priority=10" not in generated, path
-for path in ("public-repo.yml", "release-daily.yml", "release-smalltalk.yml", "macos.yml"):
+for path in ("public-repo.yml", "release-daily.yml", "release-fractal.yml", "macos.yml"):
     generated = (ROOT / ".github/workflows" / path).read_text()
     assert all("namespace-features:" not in line for line in generated.splitlines() if line.lstrip().startswith(("runs-on:", "runner:"))), (path, "profile routing must use inline controls")
-release = (ROOT / ".github/workflows/release-smalltalk.yml").read_text()
+release = (ROOT / ".github/workflows/release-fractal.yml").read_text()
 assert "github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1" in release
 assert 'runner: macos-15' in release and 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}' in release
 assert 'namespace-profile-macos' not in release, 'native Mac releases must not depend on saturated Namespace'
@@ -360,9 +360,9 @@ for raw in cache_conditions:
             for cancelled in (False, True):
                 for succeeded in (False, True):
                     for local in ('', '1'):
-                      # A check whose evidence gate decided to skip turns its cache steps off too; an ordinary
-                      # run (no skip decision) must behave exactly as before.
-                      for skip in ('', 'true'):
+                      # A check whose evidence gate decided to skip, or refused an unsigned pull request of ours,
+                      # turns its cache steps off too; an ordinary run (neither decision) must behave exactly as before.
+                      for skip, refuse in (('', ''), ('true', ''), ('', 'true')):
                         expression = condition
                         for token, value in {
                             '!cancelled()': not cancelled,
@@ -370,8 +370,9 @@ for raw in cache_conditions:
                             'github.event_name': event,
                             'vars.CI_OUTAGE_FAST_QUEUE': switch,
                             'env.CI_LOCAL_CACHES': local,
-                            **{f'needs.evidence-gate-{gate}.outputs.skip': skip for gate in (
-                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate')},
+                            **{f'needs.evidence-gate-{gate}.outputs.{output}': value for gate in (
+                                'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate')
+                               for output, value in (('skip', skip), ('refuse', refuse))},
                         }.items():
                             expression = expression.replace(token, repr(value))
                         expression = expression.replace('!(', 'not (')
@@ -379,9 +380,9 @@ for raw in cache_conditions:
                         expected = not cancelled and (event != 'merge_group' or switch != 'on')
                         if 'success()' in condition:
                             expected = expected and succeeded and local != '1'
-                        if skip == 'true' and 'evidence-gate' in condition:
+                        if 'true' in (skip, refuse) and 'evidence-gate' in condition:
                             expected = False
-                        assert actual == expected, (condition, event, switch, cancelled, succeeded, local, skip)
+                        assert actual == expected, (condition, event, switch, cancelled, succeeded, local, skip, refuse)
 for job, block in blocks.items():
     assert 'CI_OUTAGE_FAST_QUEUE' not in block.split('    steps:', 1)[0], (job, 'outage switch must not skip jobs')
 for step in ('Download this run attempt’s successful test build', 'Verify source, hashes and extract test archives',

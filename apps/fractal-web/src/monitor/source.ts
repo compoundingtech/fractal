@@ -1,7 +1,7 @@
 /**
  * Where the monitor's bytes come from (CAG.CLI.WEB.MON-R03): a declared source or none.
  *
- * The active monitor reads the authenticated same-origin usage hub v3 relay. Native st
+ * The active monitor reads the authenticated same-origin usage hub v3 relay. Native Fractal
  * usage.period remains available as a separate, explicitly projected source for consumers that
  * need those observations; it is not a substitute for producer quota coverage or ledger identity.
  */
@@ -97,7 +97,7 @@ export const relayUsageSource = ({
     }),
 })
 
-/** Canonical st usage.period; account limits are observations, not the relay contract. */
+/** Canonical Fractal usage.period; account limits are observations, not the relay contract. */
 export const nativeUsageSource = ({
   label,
   prefix = RELAY_PREFIX,

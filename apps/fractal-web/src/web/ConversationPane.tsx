@@ -9,6 +9,8 @@ import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
+import { nativeTurnFooter } from './NativeTurnFooter.tsx'
+import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
@@ -18,13 +20,37 @@ import type { UxTelemetry } from '../telemetry/ux.ts'
 import { inputPaintRegionMounted, registerInputPaintRegions, type InputPaintRegion } from '../telemetry/inputPaint.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
+import type { ToolCallItem } from '../conversation/model.ts'
+import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
+import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
+import { subagentThreadFocus } from './subagentThreadFocus.ts'
+
+export const ConversationPane = (props: React.ComponentProps<typeof ConversationThreadPane>) => {
+  const feed = useConversation(props.agentRef)
+  const [selected, setSelected] = React.useState(props.agentRef)
+  const children = feed._tag === 'Observed' ? feed.value.subagents ?? [] : []
+  const threads = [
+    { id: props.agentRef, label: 'Main' },
+    ...children.flatMap((child, index) => child.conversation === undefined ? [] : [{ id: child.conversation.session_id, label: child.name ?? `Subagent ${index + 1}`, readOnly: true }]),
+  ]
+  const active = threads.find(thread => thread.id === selected) ?? threads[0]!
+  const tabs = React.useRef<AgentThreadTabsHandle>(null)
+  const focusRequest = useAtomValue(subagentThreadFocus(props.agentRef))
+  React.useLayoutEffect(() => { if (focusRequest > 0) tabs.current?.focusSelected() }, [focusRequest])
+  return <AgentThreadTabs ref={tabs} threads={threads} selectedId={active.id} onSelectionChange={setSelected}>
+    <div hidden={active.id !== props.agentRef} style={{ display: active.id === props.agentRef ? 'flex' : 'none', flexDirection: 'column', flex: '1 1 0', minHeight: 0 }}>
+      <ConversationThreadPane {...props} visible={(props.visible ?? true) && active.id === props.agentRef} />
+    </div>
+    {active.id === props.agentRef ? null : <ConversationThreadPane key={active.id} {...props} interest={undefined} agentRef={active.id} agentName={active.label} readOnly />}
+  </AgentThreadTabs>
+}
 
 /** The follow owns content and the kit owns its presentation. The display-contents host
  * boundary observes asynchronous runtime adoption without inventing a kit commit hook.
  * Visibility lives only in this wrapper: toggling it never re-renders the memoized content,
  * so a retained pane is revealed without re-importing its runtime messages. */
-export const ConversationPane = ({
+const ConversationThreadPane = ({
   agentRef,
   agentName,
   onOpenTool,
@@ -32,6 +58,7 @@ export const ConversationPane = ({
   ux,
   visible = true,
   interest: shellInterest,
+  readOnly = false,
 }: {
   readonly agentRef: string
   /** Roster display name: the composition header and assistant sender captions. */
@@ -45,6 +72,7 @@ export const ConversationPane = ({
   readonly visible?: boolean
   /** Already acquired by the shell before this module loaded; standalone panes acquire their own. */
   readonly interest?: Atom.Atom<void>
+  readonly readOnly?: boolean
 }) => {
   const source = useDataSource()
   const showSystemEvents = useAtomValue(systemEventsPreference)
@@ -111,14 +139,15 @@ export const ConversationPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} stale={stale} ux={ux} visible={visible} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, stale, ux, visible }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, stale, ux, visible, readOnly }: {
   readonly stale: boolean
   readonly ux?: UxTelemetry
   readonly visible: boolean
+  readonly readOnly: boolean
   readonly agentRef: string
   readonly agentName: string
   readonly onOpenTool: (call: WorkLogCall) => void
@@ -128,6 +157,9 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
 }) {
   const source = useDataSource()
   const grants = useGrants()
+  const images = transcriptImagesFor(source)
+  React.useSyncExternalStore(images.subscribe, images.snapshot, images.snapshot)
+  React.useLayoutEffect(images.acquire, [images])
   const composer = React.useRef<HTMLDivElement>(null)
   const tail = React.useRef<HTMLElement | null>(null)
   const tailRef = React.useCallback((node: HTMLElement | null) => {
@@ -158,7 +190,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   // The composer's Stop (and Esc) interrupts the agent's turn, as Interrupt in its actions does.
   // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
   // lasts, clears when the run ends or another starts, and a late answer for an older run is dropped.
-  const agentControls = source.agentControls
+  const agentControls = readOnly ? undefined : source.agentControls
   const running = state._tag === 'Observed' && state.isRunning
   const runId = state._tag === 'Observed' && state.isRunning ? state.turns.findLast(turn => turn.work.running)?.id ?? '' : undefined
   const [stopRefusal, setStopRefusal] = React.useState<{ readonly runId: string; readonly detail: string }>()
@@ -186,6 +218,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
+  // Recorded semantic evidence stands in for the kit summary line; the kit keeps raw input/output and Open beside it.
+  const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call)), [onOpenTool])
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
@@ -200,10 +234,13 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}
+      renderToolDetail={renderSemanticDetail}
+      renderTurnFooter={nativeTurnFooter}
       onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
+      attachmentImages={{ state: images.state, load: (attachment, messageId) => { void images.load(attachment, messageId) } }}
       {...(renderInlineReference === undefined ? {} : { renderInlineReference })}
       onLoadImage={(src) => { const url = openableImageUrl(src); if (url !== undefined) window.open(url, '_blank', 'noopener,noreferrer') }}
-      onRetrySend={grants.messageSend === 'granted' ? (id) => {
+      onRetrySend={!readOnly && grants.messageSend === 'granted' ? (id) => {
         if (feed._tag !== 'Observed') return
         const item = feed.value.items.find(item => item.id === id)
         if (item !== undefined) void binding.retry(item)
@@ -213,15 +250,15 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     />}
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
-    <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />
+    {!readOnly && <LiveAgentAlerts agentRef={agentRef} items={state._tag === 'Observed' ? state.items : []} ux={ux} />}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
-    <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
+    {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
-    </div>
+    </div>}
   </EmbraceRuntimeProvider>
 })
 

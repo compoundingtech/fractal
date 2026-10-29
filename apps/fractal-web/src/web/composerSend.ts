@@ -38,7 +38,7 @@ export const imageUploadAdapter = (upload: AttachmentPort['upload']): Omit<Attac
     const uploaded = await upload({ bytes: attachment.file, mediaType, signal })
     signal?.throwIfAborted()
     if (uploaded._tag === 'Refused') throw new Error(uploaded.detail)
-    // The upload's blob reference is the attachment; message.send names it, the bytes stay with st.
+    // The upload's blob reference is the attachment; message.send names it, the bytes stay with Fractal.
     return { ...attachment, status: { type: 'complete' }, content: [{ type: 'file', data: uploaded.value.blob, mimeType: uploaded.value.media_type, filename: attachment.name, sourceType: 'id' }] }
   },
 })

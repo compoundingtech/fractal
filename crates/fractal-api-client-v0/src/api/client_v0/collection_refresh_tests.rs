@@ -472,8 +472,8 @@ async fn assert_parity(fixture: &Fixture, session: &ClientSession, held: &BTreeM
 }
 
 fn custom_review_kind(store: &Store) {
-    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h5ab62dec9ce4 owner=fractal_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
-        "../../../../../examples/st3/custom-review.json"
+    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hbcd207df08b2 owner=fractal_api_client_v0::api::client_v0::collection_refresh_tests TODO=trace-statement-and-value-representation */ include_str!(
+        "../../../../../examples/fractal/custom-review.json"
     )).unwrap();
     store.register_custom_kind(&crate::store::custom::RegistrationRequest {
         manifest,

@@ -12,22 +12,19 @@ use tokio::sync::{Notify, watch};
 use tower::ServiceExt as _;
 
 fn state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("glasses-test").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "glasses-test".into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("glasses-test").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "glasses-test".into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 async fn request(
     app: axum::Router,
@@ -502,7 +499,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
     device_name: "Fixture phone".into(),
     person_id: "person/ada".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -512,6 +509,7 @@ async fn glasses_rust_client_and_collection_stream_deliver_upserts_and_removes()
         code: challenge.code,
         device_public_key: "a".repeat(64),
         key_storage: None,
+        fabric_node_id: None,
     },)
         .await
         .unwrap()

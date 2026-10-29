@@ -11,9 +11,9 @@ async fn delivery(
     axum::extract::Path(subject): axum::extract::Path<String>,
 ) -> axum::Json<serde_json::Value> {
     let message = state.store.message(&subject).unwrap().unwrap();
-    let rendered = fractal_drivers::ding::st3_notification_with_metadata(
+    let rendered = fractal_drivers::ding::fractal_notification_with_metadata(
         &message.subject, &message.from, &message.to, message.title.as_deref(),
-        &message.content, &fractal_drivers::ding::st3_body_sha256(&message.content),
+        &message.content, &fractal_drivers::ding::fractal_body_sha256(&message.content),
         fractal_drivers::ding::NotificationMetadata {
             attachments: &[],
             assistant: message.assistant_metadata().as_ref(),
@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     for (kind,fields) in [("runtime.observed",json!({"status":"running","runtime_id":"prototype-pty","incarnation_id":"native-pty:prototype","terminal":true})),("harness.observed",json!({"state":"working","driver":"codex","incarnation_id":"native-pty:prototype","evidence_incarnation":"prototype-provider"}))] {
         store.append_claim(&ClaimInput {subject:"agent/prototype.worker".into(),kind:kind.into(),actor:Some("agent/prototype.worker".into()),fields:serde_json::from_value(fields)?,evidence:vec![],expected_subject:None,idempotency_key:None})?;
     }
-    let state=AppState {owning_person:Some("person/ada".into()),store,notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,node:"prototype".into(),state_dir:root.clone(),pty_root:root.join("pty"),pty_binary:PathBuf::from("pty"),fleet_id:None,configured_peers:vec![],client_relay:None,native_session_home:Some(home),planner_default:Default::default(),assistant_receipts:Default::default()};
+    let state=AppState {owning_person:Some("person/ada".into()),store,notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,node:"prototype".into(),state_dir:root.clone(),pty_root:root.join("pty"),pty_binary:PathBuf::from("pty"),fleet_id:None,configured_peers:vec![],client_relay:None,native_session_home:Some(home),planner_default:Default::default(),assistant_receipts:Default::default(),private_notes:Default::default()};
     fractal_daemon::api::start_agent_roster(&state);
     fractal_daemon::api::start_native_session_discovery(&state);
     let local=root.join("st3.sock");let gateway=root.join("st3-client.sock");

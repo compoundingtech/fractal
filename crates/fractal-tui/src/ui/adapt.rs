@@ -49,12 +49,8 @@ pub struct Extras {
     pub slo_history: BTreeMap<String, Load<fractal_client::SloHistory>>,
 }
 
-fn now() -> String {
-    chrono::Utc::now().to_rfc3339()
-}
-
-fn age(then: &str) -> String {
-    let label = crate::age_label(then, &now());
+fn age(then: &str, now: &str) -> String {
+    let label = crate::age_label(then, now);
     label.trim_end_matches(" ago").to_owned()
 }
 
@@ -98,13 +94,13 @@ fn short(id: &str) -> String {
         .to_owned()
 }
 
-fn missions(model: &Model, person: &str) -> Vec<Mission> {
+fn missions(model: &Model, person: &str, now: &str) -> Vec<Mission> {
     fractal_ui_model::missions::adapt(
         model.missions(),
         model.agents(),
         model.attention(),
         person,
-        &now(),
+        now,
         &fractal_ui_model::missions::Display {
             mission_label: &crate::mission_display_label,
             age_label: &crate::age_label,
@@ -129,7 +125,43 @@ pub fn offline_grace() -> std::time::Duration {
     })
 }
 
+/// Render shared presentation prose without changing its serialized spelling.
+pub(super) fn human_presentation(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match text {
+        "a step is ready; st has not said which agent takes it" => {
+            Cow::Borrowed("a step is ready; Fractal has not said which agent takes it")
+        }
+        "st keeps this open and starts other missions when something happens" => {
+            Cow::Borrowed("Fractal keeps this open and starts other missions when something happens")
+        }
+        "st does not say: an older st, or one that has not read its agents yet" => {
+            Cow::Borrowed("Fractal does not say: an older version, or one that has not read its agents yet")
+        }
+        "st names a card this client does not know: answer it with st alerts." => {
+            Cow::Borrowed("Fractal names a card this client does not know: answer it with fractal alerts.")
+        }
+        "st does not say what this is: this host's st is older, or has not presented it yet. Answer it with st alerts." => {
+            Cow::Borrowed("Fractal does not say what this is: this host's Fractal is older, or has not presented it yet. Answer it with fractal alerts.")
+        }
+        _ => {
+            if let Some(reason) = text.strip_prefix("Its st channel is not attached, so its mail is held") {
+                Cow::Owned(format!("Its Fractal channel is not attached, so its mail is held{reason}"))
+            } else if let Some(state) = text.strip_suffix(" · st does not say") {
+                Cow::Owned(format!("{state} · Fractal does not say"))
+            } else {
+                Cow::Borrowed(text)
+            }
+        }
+    }
+}
+
 pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
+    world_at(model, person, extras, &chrono::Utc::now().to_rfc3339())
+}
+
+/// Adapt a snapshot using one explicit clock for all timestamp presentation.
+pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) -> World {
     let restarting = extras
         .offline_since
         .is_some_and(|since| since.elapsed() < offline_grace());
@@ -146,8 +178,8 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     let host = gateway(model)
         .map(|host| host.trim_start_matches("host/").to_owned())
         .unwrap_or_else(|| "this machine".into());
-    let attention = attention(model, extras);
-    let missions = missions(model, person);
+    let attention = attention_at(model, extras, now);
+    let missions = missions(model, person, now);
     let quiet = missions
         .iter()
         .filter(|mission| {
@@ -206,10 +238,10 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
         settled: extras.attention_live && extras.agents_live,
         active_missions: extras.summary.as_ref().map(|summary| summary.active_missions as usize),
         attention: loaded_or_why(model.now.snapshot.is_some(), attention, extras.window_errors.get("Attention")),
-        agents: loaded_or_why(model.agents.snapshot.is_some(), agents(model, &missions), extras.window_errors.get("Agents")),
+        agents: loaded_or_why(model.agents.snapshot.is_some(), agents_at(model, &missions, now), extras.window_errors.get("Agents")),
         missions: loaded_or_why(model.missions.snapshot.is_some(), missions, extras.window_errors.get("Missions")),
-        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model), extras.window_errors.get("machines")),
-        worktrees: Load::Ready(super::demo::world().worktrees.items().to_vec()),
+        machines: loaded_or_why(model.machines.snapshot.is_some(), machines(model, now), extras.window_errors.get("machines")),
+        worktrees: Load::Failed("Worktrees are not modeled by the graph".into()),
         devices: loaded_or_why(
             model.devices.snapshot.is_some(),
             model
@@ -252,7 +284,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
             Some(Ok(list)) => Load::Ready(
                 list.items
                     .iter()
-                    .map(|item| connected(item, model.member_build.as_deref()))
+                    .map(|item| connected(item, model.member_build.as_deref(), now))
                     .collect(),
             ),
             Some(Err(why)) => Load::Failed(why.clone()),
@@ -263,7 +295,7 @@ pub fn world(model: &Model, person: &str, extras: &Extras) -> World {
     }
 }
 
-fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>) -> Connected {
+fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>, now: &str) -> Connected {
     let client = item.client.clone().unwrap_or_default();
     Connected {
         older: member_build.is_some_and(|member| older_than_member(&client, member)),
@@ -274,9 +306,9 @@ fn connected(item: &fractal_client::ClientConnection, member_build: Option<&str>
         via: item.via.clone(),
         connected: item.connected,
         when: if item.connected {
-            format!("since {}", age(&item.since))
+            format!("since {}", age(&item.since, now))
         } else {
-            format!("seen {} ago", age(&item.last_seen))
+            format!("seen {} ago", age(&item.last_seen, now))
         },
         follows: item.follows.clone(),
     }
@@ -320,7 +352,7 @@ fn tier(id: &str) -> Option<Tier> {
 fn who(actor: &fractal_client::AttentionActor) -> String {
     if actor.label == "st" {
         "Fractal".into()
-    } else if actor.id.starts_with("agent/") {
+    } else if actor.id.starts_with("agent/") && actor.label != actor.id {
         format!("{} · {}", actor.label, actor.id)
     } else {
         actor.label.clone()
@@ -331,7 +363,12 @@ fn who(actor: &fractal_client::AttentionActor) -> String {
 /// group, its card, who Chat about this reaches, who raised it and the step it holds. The
 /// client keeps no derivation of its own. A row st puts on no Now is not shown; one st places
 /// in a way this client does not know shows what st says, as an unplaced card.
+#[cfg(test)]
 fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
+    attention_at(model, extras, &chrono::Utc::now().to_rfc3339())
+}
+
+fn attention_at(model: &Model, extras: &Extras, now: &str) -> Vec<Attention> {
     let question_agents: std::collections::BTreeSet<_> = model.agents()
         .filter(|agent| extras.agents_live && agent.ask.as_deref() == Some("question"))
         .map(|agent| agent.header.id.as_str())
@@ -564,7 +601,7 @@ fn attention(model: &Model, extras: &Extras) -> Vec<Attention> {
                     .map(|title| clean_message_text(&title))
                     .unwrap_or_else(|| clean_message_text(&item.title)),
                 waiting: path.map(|path| format!("step {path}")),
-                age: age(&item.requested_at),
+                age: age(&item.requested_at, now),
                 mission,
                 kind,
                 actions: item.actions.clone(),
@@ -703,7 +740,12 @@ fn agent_state(agent: &fractal_client::Agent) -> AgentState {
     }
 }
 
+#[cfg(test)]
 fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
+    agents_at(model, missions, &chrono::Utc::now().to_rfc3339())
+}
+
+fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
     let mut agents = model
         .agents()
         .map(|agent| {
@@ -725,7 +767,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                 worktree: agent.checkout.as_ref().map(fractal_client::checkout_label),
                 mission: work.map(|work| work.mission_id.clone()),
                 step: work.map(|work| work.path.clone()),
-                activity: age(&agent.header.updated_at),
+                activity: age(&agent.header.updated_at, now),
                 unmanaged: false,
                 // A running agent with a runtime is worth trying; opening it finds the terminal.
                 terminal: !agent.runtime_ids.is_empty()
@@ -748,7 +790,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                             }
                         }),
                     goal: work.and_then(|work| work.goal.as_deref().map(clean_message_text)),
-                    claimed: work.map(|work| format!("{} ago", age(&work.since))),
+                    claimed: work.map(|work| format!("{} ago", age(&work.since, now))),
                     next: agent
                         .next_work
                         .as_ref()
@@ -799,7 +841,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
                         id: subagent.id.clone(),
                         kind: subagent.subagent_type.clone(),
                         description: subagent.description.clone(),
-                        age: subagent.started_at.as_deref().map(age).unwrap_or_default(),
+                        age: subagent.started_at.as_deref().map(|at| age(at, now)).unwrap_or_default(),
                     })
                     .collect(),
                 // An st too old to serve a presentation: show the state it reports.
@@ -837,7 +879,7 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
             worktree: workspace,
             mission: None,
             step: None,
-            activity: age(&session.header.updated_at),
+            activity: age(&session.header.updated_at, now),
             unmanaged: true,
             parent: None,
             details: AgentDetails::default(),
@@ -854,8 +896,9 @@ fn agents(model: &Model, missions: &[Mission]) -> Vec<Agent> {
 /// A member heard from within this long is online, even without a direct link.
 const HEARD_RECENTLY: chrono::Duration = chrono::Duration::minutes(5);
 
-fn machines(model: &Model) -> Vec<Machine> {
+fn machines(model: &Model, now: &str) -> Vec<Machine> {
     let gateway = gateway(model).unwrap_or_default();
+    let clock = chrono::DateTime::parse_from_rfc3339(now).ok();
     model
         .machines()
         .map(|machine| {
@@ -873,7 +916,7 @@ fn machines(model: &Model) -> Vec<Machine> {
                 )
                 .filter_map(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
                 .max();
-            let recent = heard.is_some_and(|at| chrono::Utc::now() - at.to_utc() < HEARD_RECENTLY);
+            let recent = heard.zip(clock).is_some_and(|(at, now)| now - at < HEARD_RECENTLY);
             let reach = match machine.state.as_str() {
                 _ if machine.host_id == gateway => Reach::Here,
                 "local" => Reach::Here,
@@ -887,7 +930,7 @@ fn machines(model: &Model) -> Vec<Machine> {
                 reach,
                 platform: String::new(),
                 seen: heard
-                    .map(|at| crate::age_label(&at.to_rfc3339(), &now()))
+                    .map(|at| crate::age_label(&at.to_rfc3339(), now))
                     .unwrap_or_else(|| "never".into()),
                 load: Some(match machine.occupancy.running_runtimes {
                     1 => "1 running runtime".to_owned(),
@@ -905,7 +948,7 @@ fn machines(model: &Model) -> Vec<Machine> {
                         );
                         let detail = match (up, transport.last_success_at.as_deref()) {
                             (true, _) => "up".to_owned(),
-                            (false, Some(at)) => format!("down · last worked {}", age(at)),
+                            (false, Some(at)) => format!("down · last worked {}", age(at, now)),
                             (false, None) => "no direct link".to_owned(),
                         };
                         (transport.protocol.clone(), up, detail)
@@ -1016,6 +1059,46 @@ pub fn conversation(timeline: &[fractal_client::TimelineEntry], names: &BTreeMap
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_labels_show_fallback_ids_only_once() {
+        for id in ["agent/example/unnamed", "person/ada"] {
+            let actor = fractal_client::AttentionActor {
+                id: id.into(),
+                label: id.into(),
+            };
+            assert_eq!(who(&actor), id);
+        }
+        let named = fractal_client::AttentionActor {
+            id: "agent/example/maintainer".into(),
+            label: "Maintainer".into(),
+        };
+        assert_eq!(who(&named), "Maintainer · agent/example/maintainer");
+    }
+
+    #[test]
+    fn human_presentation_accepts_current_and_older_shared_model_wording() {
+        let word = fractal_ui_model::missions::Word::Watching;
+        let current = "Fractal keeps this open and starts other missions when something happens";
+        // Shared explanations are human copy, not serialized state identifiers.
+        assert_eq!(word.explain(), current);
+        assert_eq!(serde_json::to_value(word).unwrap(), "watching");
+        assert_eq!(human_presentation(word.explain()), current);
+        // An older daemon or shared model can still supply the previous wording.
+        assert_eq!(
+            human_presentation("st keeps this open and starts other missions when something happens"),
+            current
+        );
+        assert_eq!(human_presentation("st"), "st");
+        assert_eq!(human_presentation("blocked · st does not say"), "blocked · Fractal does not say");
+        assert_eq!(
+            human_presentation("Its st channel is not attached, so its mail is held (reason)"),
+            "Its Fractal channel is not attached, so its mail is held (reason)"
+        );
+        // User-authored text and stable IDs are not product presentation.
+        assert_eq!(human_presentation("please run st"), "please run st");
+        assert_eq!(human_presentation("agent/st/assistant"), "agent/st/assistant");
+    }
 
     #[test]
     fn retired_agent_card_shows_pending_mail_custodian_in_plain_words() {
@@ -1614,7 +1697,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_skill_model_folds_the_expansion_and_stui_draws_real_lines() {
+    fn claude_skill_model_folds_the_expansion_and_tui_draws_real_lines() {
         let fixture = include_str!("../../../../fixtures/clients/transcripts/claude-skill.json");
         let timeline: Vec<TimelineEntry> = serde_json::from_str(fixture).unwrap();
         let entries = conversation(&timeline, &BTreeMap::new());
@@ -1781,9 +1864,23 @@ mod tests {
         let preview = preview("harbor/audit", &normalized);
         assert_eq!(preview.goals, vec!["Audit dependencies"]);
         assert_eq!(preview.steps[0].assignee, "example/auditor");
+        assert_eq!(preview.steps[1].assignee, "Fractal");
         assert_eq!(preview.steps[1].after, vec!["scan"]);
         assert!(preview.steps[1].asks_you);
         assert_eq!(preview.agents.len(), 1);
+    }
+
+    #[test]
+    fn an_agent_named_st_keeps_its_launch_assignment_label() {
+        let normalized = json!({
+            "goals": [],
+            "display_order": ["scan"],
+            "steps": {
+                "scan": {"path": "scan", "work_selector": {"kind": "assigned", "agent": "agent/st"}, "dependencies": [], "gates": []}
+            }
+        });
+        let preview = preview("audit", &normalized);
+        assert_eq!(preview.steps[0].assignee, "st");
     }
 
     #[test]
@@ -2043,7 +2140,7 @@ mod tests {
 
     #[test]
     fn a_seats_status_is_what_its_step_last_reported_on_one_line() {
-        let mut mission = crate::ui::demo::world().missions.items()[0].clone();
+        let mut mission = crate::ui::demo::test_world().missions.items()[0].clone();
         mission.step_metadata.insert(
             "step-run/example/build".into(),
             fractal_ui_model::missions::StepMetadata {
@@ -2599,7 +2696,7 @@ mod tests {
         let guidance = super::super::screens::login_guidance(agent);
         assert!(guidance.contains("Claude login required on harbor"), "{guidance}");
         assert!(guidance.contains("/login") && guidance.contains("without a restart"), "{guidance}");
-        let header = super::super::screens::agent_header(&super::super::demo::world(), agent, 100, "⠋")
+        let header = super::super::screens::agent_header(&super::super::demo::test_world(), agent, 100, "⠋")
             .lines
             .iter()
             .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
@@ -2665,7 +2762,7 @@ mod tests {
         assert!(!subagents[0].age.is_empty());
         assert!(
             subagents[1].age.is_empty(),
-            "st did not say when it started"
+            "Fractal did not say when it started"
         );
     }
 
@@ -2749,7 +2846,7 @@ mod tests {
 
     #[test]
     fn the_agent_header_names_the_model_beside_the_harness() {
-        let world = crate::ui::demo::world();
+        let world = crate::ui::demo::test_world();
         let mut agent = world.agents.items()[0].clone();
         assert_eq!(agent.details.model.as_deref(), Some("claude-sonnet-5-5"));
         let line = |agent: &Agent| -> String {
@@ -2791,7 +2888,7 @@ mod tests {
 
     #[test]
     fn the_clients_card_says_who_is_connected_and_notes_an_older_build_quietly() {
-        let world = crate::ui::demo::world();
+        let world = crate::ui::demo::test_world();
         let doc = crate::ui::screens::clients_card(&world, 100);
         let text: Vec<String> = doc
             .lines
@@ -2819,7 +2916,7 @@ mod tests {
 
     #[test]
     fn the_clients_card_wraps_a_long_client_instead_of_clipping_it() {
-        let world = crate::ui::demo::world();
+        let world = crate::ui::demo::test_world();
         let doc = crate::ui::screens::clients_card(&world, 44);
         let lines: Vec<String> = doc
             .lines

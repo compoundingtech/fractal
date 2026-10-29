@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -251,6 +252,105 @@ def main(argv):
         assert git(sink, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/notes/evidence/', 'refs/tags/') == \
             f'refs/notes/evidence/{head_tree}/{record} {record}\nrefs/tags/evidence/{head_tree}/{record} {record}'
         print('passed: --push sends the record as a tag and a note, the token through the environment, not an argument, and never prints it')
+
+        # GitHub now and then answers a ref with a bare `(failed)` and takes it on the next push: those refs go again, within a bound.
+        # A refusal with a reason fails at once. The shim answers the first FAILS pushes as GitHub did, then runs git.
+        blips = tmp / 'blip-shim'
+        blips.mkdir()
+        calls = tmp / 'blip-calls'
+        (blips / 'git').write_text(f'''#!{sys.executable}
+import os, sys
+args = sys.argv[1:]
+if 'push' in args:
+    with open({str(calls)!r}, 'a') as log:
+        log.write(' '.join(args) + '\\n')
+    pushes = len(open({str(calls)!r}).read().splitlines())
+    if pushes <= int(os.environ.get('FAILS', '0')):
+        refs = [a for a in args[args.index('push') + 3:]]
+        print('To ' + args[args.index('push') + 2])
+        for spec in refs:
+            print('!\\t' + spec + '\\t[remote rejected] (failed)')
+        print('Done')
+        sys.exit(1)
+os.execv({real_git!r}, ['git', *args])
+''')
+        (blips / 'git').chmod(0o755)
+        def blipped(remote, fails):
+            if calls.exists():
+                calls.unlink()
+            done = subprocess.run([sys.executable, str(WRAP), '--check', 'linux-gate', '--toolchain-sha256', toolchain, '--signer', signer,
+                                   '--push', remote, '--', 'sh', '-c', 'exit 3'], cwd=repo, capture_output=True,
+                                  env=dict(ENV, HOME=str(home), EVIDENCE_SIGN_NOW=DATE, FAILS=str(fails), PATH=f'{blips}:{ENV["PATH"]}'))
+            return done, (calls.read_text().splitlines() if calls.exists() else [])
+        flaky = tmp / 'flaky.git'
+        git(tmp, 'init', '-q', '--bare', str(flaky))
+        git(repo, 'remote', 'add', 'flaky', str(flaky))
+        pushed, pushes = blipped('flaky', 2)
+        assert pushed.returncode == 3 and len(pushes) == 3, (pushes, pushed.stderr.decode())
+        assert 'flaky answered 2 ref(s) with a bare (failed); pushing them again (2 of 3)' in pushed.stderr.decode(), pushed.stderr.decode()
+        retried = json.loads(pushed.stderr.decode()[pushed.stderr.decode().index('{'):])
+        assert retried['pushed'] and git(flaky, 'for-each-ref', '--format=%(refname)') == f"{retried['ref']}\n{retried['tag']}", retried
+        pushed, pushes = blipped('flaky', 3)
+        assert pushed.returncode == 1 and len(pushes) == 3, (pushes, pushed.stderr.decode())
+        tree = git(repo, 'rev-parse', 'HEAD^{tree}')
+        refused = r'refs/tags/evidence/{0}/(\w+) \[remote rejected\] \({1}\); refs/notes/evidence/{0}/\1 \[remote rejected\] \({1}\)'
+        assert re.search(r'push failed \(try 3 of 3\): ' + refused.format(tree, 'failed'), pushed.stderr.decode()), pushed.stderr.decode()
+        declines = tmp / 'declines.git'
+        git(tmp, 'init', '-q', '--bare', str(declines))
+        (declines / 'hooks/pre-receive').write_text('#!/bin/sh\nexit 1\n')
+        (declines / 'hooks/pre-receive').chmod(0o755)
+        git(repo, 'remote', 'add', 'declines', str(declines))
+        pushed, pushes = blipped('declines', 0)
+        assert pushed.returncode == 1 and len(pushes) == 1 and 'pushing them again' not in pushed.stderr.decode(), (pushes, pushed.stderr.decode())
+        assert re.search(r'push failed \(try 1 of 3\): ' + refused.format(tree, 'pre-receive hook declined'), pushed.stderr.decode()), pushed.stderr.decode()
+        assert git(declines, 'for-each-ref', '--format=%(refname)') == ''
+        print('passed: refs a push answers with a bare (failed) are pushed again, at most 3 times, and the failure names each ref; a refusal with a reason fails at once')
+
+        # A caller can suppress its HOME's SSH rewrite and supply an HTTPS transport
+        # mapping through git's environment. Publication must use the same configuration.
+        https_sink = tmp / 'https-sink.git'
+        git(tmp, 'init', '-q', '--bare', str(https_sink))
+        https_url = 'https://evidence.invalid/owner/repo.git'
+        git(repo, 'remote', 'add', 'https-sink', https_url)
+        (home / '.gitconfig').write_text('[url "git@invalid.example:"]\n\tinsteadOf = https://evidence.invalid/\n')
+        transport = {
+            'GIT_CONFIG_COUNT': '2',
+            'GIT_CONFIG_KEY_0': f'url.{https_sink.as_uri()}.insteadOf', 'GIT_CONFIG_VALUE_0': https_url,
+            'GIT_CONFIG_KEY_1': 'protocol.file.allow', 'GIT_CONFIG_VALUE_1': 'always',
+        }
+        # Thousands of unrelated cached refs must never enter this publication.
+        git(repo, 'update-ref', '--stdin', stdin=''.join(
+            f'update refs/tags/evidence/{"a" * 40}/cached-{i} {record}\n' for i in range(2000)))
+        for token in ('', 'secret-token-xyz'):
+            pushed = run([sys.executable, str(WRAP), '--check', 'transport-check', '--toolchain-sha256', toolchain,
+                          '--signer', signer, '--keys', str(signers), '--push', 'https-sink',
+                          '--input', f'source_inputs={head_tree}', '--attempt', '2' if token else '1', '--', 'true'],
+                         repo, home, EVIDENCE_PUSH_TOKEN=token, **transport)
+            assert pushed.returncode == 0, pushed.stderr.decode()
+            published = json.loads(pushed.stderr.decode()[pushed.stderr.decode().index('{'):])
+            assert published['verified'] and published['pushed'], published
+            expected = {
+                published['tag'], published['ref'],
+                f'refs/tags/evidence/input/transport-check/{head_tree}/{published["record"]}',
+                f'refs/notes/evidence-input/transport-check/{head_tree}/{published["record"]}',
+            }
+            actual = set(git(https_sink, 'for-each-ref', '--format=%(refname)').splitlines())
+            if not token:
+                assert actual == expected, actual
+                previous = actual
+            else:
+                assert actual == previous | expected, actual
+        print('passed: HTTPS environment overrides and insteadOf survive publication, including with a token; only the current record and its input indexes are pushed, not 2000 cached refs')
+
+        push_sink = tmp / 'pushurl-sink.git'
+        git(tmp, 'init', '-q', '--bare', str(push_sink))
+        git(repo, 'remote', 'add', 'pushurl-sink', 'https://unreachable.invalid/fetch.git')
+        git(repo, 'remote', 'set-url', '--push', 'pushurl-sink', push_sink.as_uri())
+        pushed = wrap(['sh', '-c', 'exit 3'], '--push', 'pushurl-sink')
+        assert pushed.returncode == 3, pushed.stderr.decode()
+        published = json.loads(pushed.stderr.decode()[pushed.stderr.decode().index('{'):])
+        assert set(git(push_sink, 'for-each-ref', '--format=%(refname)').splitlines()) == {published['tag'], published['ref']}
+        print('passed: a configured pushurl is used instead of the fetch URL')
 
         (repo / 'a').write_text('dirty\n')
         assert wrap(['true']).returncode == 1

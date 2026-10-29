@@ -7,17 +7,17 @@
         "tsgo": "tsgo"
       },
       "locked": {
-        "lastModified": 1793038040,
-        "narHash": "sha256-hdNsyVpb3yY42DN3CM9vW13T5CK9X4r4EwYQ+OJrOCE=",
+        "lastModified": 1793249746,
+        "narHash": "sha256-0jklcur3TLRMeIwSl64QWBz+bfyuJOkqlB/4nS11kAQ=",
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "4e87aab8bc8dbab8b05040c3c23558c3e34d4773",
+        "rev": "d883d18e3ad7609602db0ec8687c14a77625b905",
         "type": "github"
       },
       "original": {
         "owner": "overengineeringstudio",
         "repo": "effect-utils",
-        "rev": "4e87aab8bc8dbab8b05040c3c23558c3e34d4773",
+        "rev": "d883d18e3ad7609602db0ec8687c14a77625b905",
         "type": "github"
       }
     },

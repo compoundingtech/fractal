@@ -21,10 +21,7 @@ pub(super) fn run_driver_hook() -> ExitCode {
             &mut std::io::stdin(),
             &mut |diagnostic| {
                 if let Err(error) = fractal_daemon::driver_hook::post_diagnostic(&env, &diagnostic) {
-                    eprintln!(
-                        "st: could not record the {} diagnostic: {error:#}",
-                        diagnostic.code
-                    );
+                    crate::stderr_message("st", format_args!("could not record the {} diagnostic: {error:#}", diagnostic.code));
                 }
             },
         )
@@ -96,7 +93,7 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
             )
             .await;
         }
-        return fractal_drivers::claude_mcp::run_st3(&paths.driver_root, &paths.identity);
+        return fractal_drivers::claude_mcp::run_fractal(&paths.driver_root, &paths.identity);
     }
     if matches!(args.driver.as_str(), "pi-channel" | "omp-channel") {
         let identity = args
@@ -541,7 +538,7 @@ fn spawn_st3_provider(
         },
         };
         #[cfg(feature = "test-support")]
-        if env!("CARGO_BIN_NAME") == "st3-fixture" {
+        if env!("CARGO_BIN_NAME") == "fractal-fixture" {
             fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
@@ -691,7 +688,7 @@ async fn drive_st2_native(
             completion_announced |= fixture_terminal_completion_barrier(
                 &mut observations, client, subject, driver, &mut loop_state.ready, &task,
             ).await?;
-            if completion_announced && env!("CARGO_BIN_NAME") == "st3-fixture"
+            if completion_announced && env!("CARGO_BIN_NAME") == "fractal-fixture"
                 && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
             {
                 fs::write(PathBuf::from(root).join("awaiting-completion"), b"awaiting")?;
@@ -700,7 +697,7 @@ async fn drive_st2_native(
         tokio::select! {
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "st3-fixture"
+                if env!("CARGO_BIN_NAME") == "fractal-fixture"
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
@@ -1129,7 +1126,7 @@ async fn drive_st2_native(
 // The installed executable always enables the provider completion branch.
 fn fixture_completion_task_enabled() -> bool {
     #[cfg(feature = "test-support")]
-    if env!("CARGO_BIN_NAME") == "st3-fixture"
+    if env!("CARGO_BIN_NAME") == "fractal-fixture"
         && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from)
         && root.join("join-phase").exists()
         && !root.join("fence-received").exists()
@@ -1150,7 +1147,7 @@ async fn fixture_terminal_completion_barrier(
     ready: &mut bool,
     task: &tokio::task::JoinHandle<Result<()>>,
 ) -> Result<bool> {
-    if env!("CARGO_BIN_NAME") != "st3-fixture" || driver != "claude" {
+    if env!("CARGO_BIN_NAME") != "fractal-fixture" || driver != "claude" {
         return Ok(false);
     }
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
@@ -2183,11 +2180,46 @@ fn spawn_codex_provider(
             }
         };
         #[cfg(feature = "test-support")]
-        if env!("CARGO_BIN_NAME") == "st3-fixture" {
+        if env!("CARGO_BIN_NAME") == "fractal-fixture" {
             fractal_daemon::test_support::hold_provider_completion(&outcome)?;
         }
         outcome
     })
+}
+
+fn codex_launch_outcome(outcome: Result<()>, ready: bool) -> Result<()> {
+    match outcome {
+        Ok(()) if !ready => anyhow::bail!(
+            "Codex launch failed: the provider exited with exit status 0 before becoming ready"
+        ),
+        other => other,
+    }
+}
+
+fn codex_completion_ready(ready: bool, state_dir: &Path, prior: Option<&Vec<u8>>) -> bool {
+    ready || codex_bound_thread(state_dir, prior).is_some()
+}
+
+#[test]
+fn codex_bind_then_immediate_clean_exit_before_tick_is_not_launch_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("binding.json");
+    let prior = br#"{"threadId":"previous"}"#.to_vec();
+    fs::write(&path, &prior).unwrap();
+    assert!(!codex_completion_ready(false, root.path(), Some(&prior)));
+    // The binding lands and the provider returns before the timer can set ready.
+    fs::write(&path, br#"{"threadId":"current","runtimeIncarnation":"new"}"#).unwrap();
+    assert!(codex_launch_outcome(Ok(()),
+        codex_completion_ready(false, root.path(), Some(&prior))).is_ok());
+}
+
+#[test]
+fn codex_launch_clean_exit_before_ready_is_a_failure() {
+    let error = codex_launch_outcome(Ok(()), false).unwrap_err();
+    assert!(error.to_string().contains("exit status 0 before becoming ready"));
+    assert!(codex_launch_outcome(Ok(()), true).is_ok());
+    assert_eq!(codex_launch_outcome(Err(anyhow::anyhow!("schema incompatible")), false)
+        .unwrap_err().to_string(), "schema incompatible");
 }
 
 async fn drive_codex_native(
@@ -2292,7 +2324,7 @@ async fn drive_codex_native(
         tokio::select! {
             frame = mailbox.recv() => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "st3-fixture"
+                if env!("CARGO_BIN_NAME") == "fractal-fixture"
                     && matches!(&frame, Some(fractal_daemon::mailbox::Frame::Fenced { .. }))
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
@@ -2316,7 +2348,9 @@ async fn drive_codex_native(
                 #[cfg(feature = "test-support")]
                 if completion_announced { fixture_codex_completion_phase(&task).await?; }
             }
-            result = &mut task, if completion_announced || fixture_completion_task_enabled() => {
+            // Preflight can fail before creating any harness observation. Waiting for an
+            // ended event here would hide that error indefinitely.
+            result = &mut task => {
                 let outcome = result.context("joining the Codex driver")?;
                 if let Some(session) = detached_session(&outcome) {
                     loop_state.delivery_episode = delivery.episode;
@@ -2333,10 +2367,15 @@ async fn drive_codex_native(
                     completion_announced = false;
                     continue;
                 }
+                // A fast session can bind and exit between timer ticks. Its durable
+                // current-attempt binding proves readiness even if no tick published it.
+                loop_state.ready = codex_completion_ready(
+                    loop_state.ready, &state_dir, prior_binding.as_ref(),
+                );
                 // A resume that ended before its thread bound was refused by Codex itself, such
                 // as a thread with no rollout. The wrapper can end cleanly and leave the reason in
                 // its harness record. The refusal goes first, so nothing after it can delay it.
-                if reported_session.is_none() && fractal_daemon::native_resume::requested().is_some() {
+                if !loop_state.ready && reported_session.is_none() && fractal_daemon::native_resume::requested().is_some() {
                     let reason = match &outcome {
                         Err(error) => format!("{error:#}"),
                         Ok(()) => fractal_drivers::harness_state::read(&harness_state_path, None)
@@ -2348,7 +2387,7 @@ async fn drive_codex_native(
                         reason: reason.chars().take(2_000).collect(),
                     };
                     let _ = refuse_native_resume(client, subject, &incarnation, "codex", refusal).await;
-                } else if reported_session.is_none()
+                } else if !loop_state.ready && reported_session.is_none()
                     && let Some(thread) = &continued
                 {
                     // The next relaunch starts a new thread instead of trying this one again.
@@ -2367,6 +2406,8 @@ async fn drive_codex_native(
                 if let Err(error) = observations.drain(client, subject, "codex", &mut loop_state.ready).await {
                     note_driver_tick_failure(subject, error, &mut last_control_warning);
                 }
+                let exit_code = if outcome.is_ok() { 0 } else { 1 };
+                let outcome = codex_launch_outcome(outcome, loop_state.ready);
                 // The harness is gone, and its subagents with it.
                 let _ = tokio::time::timeout(
                     Duration::from_secs(5),
@@ -2374,6 +2415,23 @@ async fn drive_codex_native(
                 )
                 .await;
                 if let Err(error) = &outcome {
+                    if !loop_state.ready {
+                        let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+                            subject: subject.into(),
+                            kind: "harness.observed".into(),
+                            actor: Some(subject.into()),
+                            fields: BTreeMap::from([
+                                ("state".into(), Value::String("ended".into())),
+                                ("driver".into(), Value::String("codex".into())),
+                                ("incarnation_id".into(), Value::String(incarnation.clone())),
+                                ("exit".into(), Value::String(format!("exit {exit_code}"))),
+                                ("reason".into(), Value::String(format!("{error:#}"))),
+                            ]),
+                            evidence: Vec::new(),
+                            expected_subject: None,
+                            idempotency_key: Some(format!("codex-launch-failed:{subject}:{incarnation}")),
+                        }).await;
+                    }
                     let reason = format!("{error:#}").chars().take(2_000).collect::<String>();
                     let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
                         subject: subject.into(),
@@ -2382,13 +2440,27 @@ async fn drive_codex_native(
                         fields: BTreeMap::from([
                             ("severity".into(), Value::String("error".into())),
                             ("status".into(), Value::String("failed".into())),
-                            ("code".into(), Value::String("codex-driver-failed".into())),
+                            ("code".into(), Value::String(if loop_state.ready { "codex-driver-failed" } else { "codex-launch-failed" }.into())),
                             ("reason".into(), Value::String(reason)),
                             ("incarnation_id".into(), Value::String(incarnation.clone())),
                         ]),
                         evidence: Vec::new(),
                         expected_subject: None,
                         idempotency_key: Some(format!("codex-driver-failed:{subject}:{incarnation}")),
+                    }).await;
+                    let _: Result<ClaimRecord> = client.post("/v1/claims", &ClaimInput {
+                        subject: subject.into(),
+                        kind: "runtime.observed".into(),
+                        actor: Some(subject.into()),
+                        fields: BTreeMap::from([
+                            ("status".into(), Value::String("exited".into())),
+                            ("runtime_id".into(), Value::String(runtime_id.clone())),
+                            ("incarnation_id".into(), Value::String(incarnation.clone())),
+                            ("exit_code".into(), Value::from(exit_code)),
+                        ]),
+                        evidence: Vec::new(),
+                        expected_subject: None,
+                        idempotency_key: Some(native_exit_key(subject, &runtime_id, &incarnation)),
                     }).await;
                 }
                 return outcome;
@@ -2616,7 +2688,7 @@ async fn drive_codex_native(
 /// This fixture controls JoinHandle ordering; it performs no drain, claim or fence itself.
 #[cfg(feature = "test-support")]
 async fn fixture_codex_completion_phase(task: &tokio::task::JoinHandle<Result<()>>) -> Result<()> {
-    if env!("CARGO_BIN_NAME") != "st3-fixture" { return Ok(()); }
+    if env!("CARGO_BIN_NAME") != "fractal-fixture" { return Ok(()); }
     let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION").map(PathBuf::from) else {
         return Ok(());
     };

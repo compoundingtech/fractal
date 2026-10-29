@@ -1,6 +1,6 @@
 import { useAtomValue } from '@effect/atom-react'
 import { SystemNotice } from '@fractal/ui/assistant-ui/shell'
-import type * as St3 from '@fractal/client/schema'
+import type * as Fractal from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
 import { DateTime } from 'effect'
 import * as React from 'react'
@@ -12,13 +12,13 @@ import { useDataSource, useNow } from '../data/react.tsx'
 import { hiddenByDefault, missionWord, presentMission, sortMissions, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
 
 // The Missions screen: every mission with its word and who must act, in the contract's order,
-// as stui's Missions tab lists them. A row opens to its steps. St's own missions, ones never
+// as the Fractal terminal UI's Missions tab lists them. A row opens to its steps. Fractal's own missions, ones never
 // started and ones settled before today are folded away until "Show all".
 
 const STEP_GLYPH: Record<StepWord, string> = { needs_you: '◆', done: '✓', working: '⠋', ready: '◇', waiting: '◐', cancelled: '⊘', failed: '✕', pending: '○' }
 const STEP_NAME: Record<StepWord, string> = { needs_you: 'needs you', done: 'done', working: 'working', ready: 'ready', waiting: 'waiting', cancelled: 'cancelled', failed: 'failed', pending: 'pending' }
 
-type Row = { readonly mission: St3.Mission; readonly presentation: MissionPresentation }
+type Row = { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation }
 
 const startOfDay = (now: number) => { const day = new Date(now); day.setHours(0, 0, 0, 0); return day.getTime() }
 
@@ -88,7 +88,7 @@ export const MissionsPane = ({ onOpenAgent }: { readonly onOpenAgent?: (ref: str
   )
 }
 
-const MissionDetail = ({ mission, presentation, onOpenAgent }: { readonly mission: St3.Mission; readonly presentation: MissionPresentation; readonly onOpenAgent?: (ref: string) => void }): React.ReactNode => {
+const MissionDetail = ({ mission, presentation, onOpenAgent }: { readonly mission: Fractal.Mission; readonly presentation: MissionPresentation; readonly onOpenAgent?: (ref: string) => void }): React.ReactNode => {
   const word = missionWord(presentation.word)
   return (
     <div {...stylex.props(styles.detail)} aria-label={`${mission.title} steps`}>

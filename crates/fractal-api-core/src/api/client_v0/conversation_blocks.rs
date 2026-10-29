@@ -40,6 +40,29 @@ pub fn invalidated() -> ApiError {
 pub fn source(
     state: &AppState, session_id: &str, managed: Option<&super::super::ManagedSessionOwner>,
 ) -> Result<ExternalSession, ApiError> {
+    if let Some(parts) = crate::subagent_sessions::child_parts(session_id) {
+        let index = state.store.index().map_err(ApiError::internal)?;
+        let routing_owner = super::super::managed_session_owner_at(
+            &state.store, index, &parts.routing_parent_session_id,
+        ).map_err(ApiError::internal)?;
+        let parent = if crate::subagent_sessions::child_parts(&parts.external_parent_id).is_some()
+            || parts.routing_parent_session_id.starts_with("session/external-")
+        {
+            source(state, &parts.external_parent_id, None)?
+        } else {
+            let owner = routing_owner.as_ref().ok_or_else(|| {
+                ApiError::not_found("the child routing parent does not exist")
+            })?;
+            let parent = source(state, &parts.routing_parent_session_id, Some(owner))?;
+            if parent.id != parts.external_parent_id {
+                return Err(ApiError::not_found("the child native parent does not match its owner binding"));
+            }
+            parent
+        };
+        return crate::subagent_sessions::resolve_child_of(&parent, session_id, &parts.task_id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("the session does not exist"));
+    }
     if let Some((owner, incarnation, origin)) = managed {
         if origin
             .as_deref()
@@ -490,6 +513,8 @@ pub struct PreparedSlice {
     pub generation: u64,
 }
 
+/// Read a bounded source slice with optional display preparation. Replay extents only
+/// inspect identity, sequence and echo correlation; they must not expand display bodies.
 pub fn read_slice(
     source: &ExternalSession,
     session: &ClientSession,
@@ -497,6 +522,7 @@ pub fn read_slice(
     order: crate::external_sessions::TimelineOrder,
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
+    prepare_display: bool,
 ) -> Result<PreparedSlice, ApiError> {
     let queue = crate::profile::span("conversation/native-fold-queue");
     let timeline = crate::external_sessions::LineTimeline::acquire(source);
@@ -511,9 +537,11 @@ pub fn read_slice(
         .slice(source, order, before, limit)
         .map_err(ApiError::internal)?;
     drop(fold);
-    let _preparation = crate::profile::span("conversation/native-display-preparation");
-    for item in &mut slice.items {
-        prepare_one(source, session, session_id, &basis, item)?;
+    if prepare_display {
+        let _preparation = crate::profile::span("conversation/native-display-preparation");
+        for item in &mut slice.items {
+            prepare_one(source, session, session_id, &basis, item)?;
+        }
     }
     if basis != self::basis(source)? {
         return Err(invalidated());
@@ -700,6 +728,7 @@ pub fn prepare_one(
                             json!({"session_id": crate::subagent_sessions::child_session_id(
                                 source,
                                 &task_id,
+                                session_id,
                             )}),
                         );
                     }

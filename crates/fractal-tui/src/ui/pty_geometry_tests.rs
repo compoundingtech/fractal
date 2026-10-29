@@ -43,7 +43,7 @@ fn visible_rows(screen: &Screen) -> Vec<String> {
 
 #[test]
 fn coalesced_initial_snapshot_uses_its_geometry_before_a_later_shrink() {
-    let (stui, mut daemon) = UnixStream::pair().unwrap();
+    let (tui, mut daemon) = UnixStream::pair().unwrap();
     daemon.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     let snapshot = b"\x1b[?7l\x1b[6;1H\r$1.00\x1b[7;1H\reditor\x1b[8;1H\rBOTTOM";
     let barrier = b"\x1b]2;coalesced-initial-geometry\x07";
@@ -54,7 +54,7 @@ fn coalesced_initial_snapshot_uses_its_geometry_before_a_later_shrink() {
     // Queue the entire stream before the attach thread can read it: the first
     // socket read sees both geometries, not just the one belonging to SCREEN.
     assert_eq!(daemon.write(&coalesced).unwrap(), coalesced.len());
-    let terminal = NativeTerminal::spawn(stui, "test", "one".into(), 10, 30);
+    let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30);
     let mut reader = PacketReader::new();
     let mut pending = VecDeque::new();
     assert_eq!(
@@ -102,9 +102,9 @@ fn coalesced_initial_snapshot_uses_its_geometry_before_a_later_shrink() {
 
 #[test]
 fn cell_metrics_preserve_requested_dimensions_under_shared_geometry_constraints() {
-    let (stui, mut daemon) = UnixStream::pair().unwrap();
+    let (tui, mut daemon) = UnixStream::pair().unwrap();
     daemon.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let terminal = NativeTerminal::spawn(stui, "test", "one".into(), 10, 30);
+    let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30);
     let mut reader = PacketReader::new();
     let mut pending = VecDeque::new();
     let attach = next_packet(&mut daemon, &mut reader, &mut pending);

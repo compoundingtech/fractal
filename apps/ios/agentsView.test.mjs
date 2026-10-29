@@ -5,21 +5,25 @@ const now = Date.parse('2026-09-30T12:00:00Z');
 const served = (state) => ({ presentation: { state, group: state, because: null, now: null, next: [], queued: 0 } });
 const agent = (id, extra = {}, state = 'idle') => ({ id: `agent/${id}`, name: id, kind: 'agent', updated_at: '2026-09-30T11:00:00Z', state: 'running', harness_state: 'idle', driver: 'claude', runtime_ids: [], reachability: 'local', ...served(state), ...extra });
 
-// Names read the way stui reads them, including an omp seat under its parent.
+// Names read the way the Fractal terminal UI reads them, including an omp seat under its parent.
 assert.equal(agentName({ id: 'agent/example/cos/standing/cos', name: 'example/cos/standing/cos' }), 'COS');
 assert.equal(agentName({ id: 'agent/example/pty-rust/omp', name: 'example/pty-rust/omp' }), 'PTY Rust · OMP');
-// A seat named after its host (st agents new NAME) is labelled without the host.
+// A seat named after its host (fractal agents new NAME) is labelled without the host.
 assert.equal(agentName({ id: 'agent/harbor.image-sorter', name: 'harbor.image-sorter', host_id: 'host/harbor' }), 'Image Sorter');
 assert.equal(agentName({ id: 'agent/v2.parser', name: 'v2.parser', host_id: 'host/harbor' }), 'V2.parser');
 assert.equal(agentName({ id: 'agent/example/fractal-ci', name: 'example/fractal-ci' }), 'Fractal Ci');
+// Product slugs have a canonical label; stored legacy slugs retain their own label.
+assert.equal(agentName({ id: 'agent/example/st3', name: 'example/st3' }), 'ST');
+assert.equal(agentName({ id: 'agent/example/FRACTAL', name: 'example/FRACTAL' }), 'Fractal');
+assert.equal(agentName({ id: 'agent/example/FRACTAL/omp', name: 'example/FRACTAL/omp' }), 'Fractal · OMP');
 
-// st serves each agent's state; the phone reads it and derives nothing.
+// Fractal serves each agent's state; the phone reads it and derives nothing.
 assert.equal(agentState(served('working')), 'working');
 assert.equal(agentState(served('needs_you')), 'needs-you');
 assert.equal(agentState(served('needs_login')), 'needs-login');
 assert.equal(agentState(served('down')), 'down');
 assert.equal(agentState({ state: 'running', harness_state: 'working' }), 'unknown', 'an older daemon serves no presentation');
-// An older st's row shows the state it reports, marked so, and derives nothing.
+// An older Fractal's row shows the state it reports, marked so, and derives nothing.
 import { agentReported, OLDER_ST_NOTE } from './agentsView.ts';
 assert.equal(agentReported({ state: 'running' }), 'running · older Fractal');
 assert.equal(agentReported(served('working')), undefined);
@@ -29,12 +33,12 @@ assert.equal(UNMANAGED_GROUP, 'found running · not started by Fractal');
 assert.equal(agentState(served('something-new')), 'unknown');
 assert.equal(agentWord('compacting'), 'compacting');
 assert.equal(agentWord('needs-you'), 'alert');
-// A retired seat is retired as st serves it, in its own section.
+// A retired seat is retired as Fractal serves it, in its own section.
 assert.equal(agentState(served('retired')), 'retired');
 assert.equal(agentWord('retired'), 'retired');
 assert.deepEqual(agentSections(agentRows([agent('example/retired', {}, 'retired')], [], 'example-linux', now)).map(section => section.title), ['retired']);
 
-// Grouped and sorted like stui: waiting on you, broken, working, idle, stopped, and sessions st
+// Grouped and sorted like the Fractal terminal UI: waiting on you, broken, working, idle, stopped, and sessions Fractal
 // found but did not start last, never first.
 const agents = [
   agent('example/zeta'),
@@ -81,7 +85,7 @@ assert.deepEqual(compactFolders([
   ['solo'],
 ]), [['fleet', 'fractal', 'operations/2026-10-01'], ['fleet', 'fractal', 'ci'], ['fleet', 'cos/standing'], []]);
 
-// The model beside the harness is what the harness last reported, and nothing when st says none.
+// The model beside the harness is what the harness last reported, and nothing when Fractal says none.
 assert.equal(agentModel({ usage: { context: { model: 'claude-sonnet-5-5' } } }), 'claude-sonnet-5-5');
 assert.equal(agentModel({ usage: { context: { model: ' ' } } }), null);
 assert.equal(agentModel({ usage: { context: null } }), null);

@@ -10,7 +10,7 @@ import { DetailsPane, type DetailsLayoutIntent, type DetailsVariants } from './a
 import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
 import { detailsStoryInputs } from './assistant-ui/details/story-fixtures'
-import type { SyncStatus } from './assistant-ui/st3-views/sync-status'
+import type { SyncStatus } from './assistant-ui/sync-presentation/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
@@ -23,7 +23,7 @@ const states = ['busy', 'partial', 'new', 'error', 'loading', 'idle'] as const
 const variants: DetailsVariants[] = (['O1', 'O2', 'O3'] as const).flatMap(overview => (['C1', 'C2', 'C3'] as const).flatMap(context => (['S1', 'S2', 'S3'] as const).map(spend => ({ overview, context, spend, resources: 'R2', empty: 'E3' } satisfies DetailsVariants))))
 const representative = variants.filter(variant => ['O1C1S1', 'O2C2S1', 'O2C2S2', 'O3C3S3'].includes(variant.overview + variant.context + variant.spend))
 const defaultVariant = variants.findIndex(variant => variant.overview === 'O2' && variant.context === 'C2' && variant.spend === 'S1')
-const cause = 'st request timed out after 15 s'
+const cause = 'Fractal request timed out after 15 s'
 const live: SyncStatus = { _tag: 'Live', since: 1799999999000 }
 const connecting: SyncStatus = { _tag: 'Connecting', attempt: 1, since: 1799999999000 }
 const failed: SyncStatus = { _tag: 'Failed', cause: { _tag: 'Server', code: 'timeout', message: cause } }

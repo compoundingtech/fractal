@@ -55,6 +55,8 @@ mod prepared_envelope_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
+mod sealed_view_cache_tests;
+#[cfg(test)]
 mod repair_operation_tests;
 #[cfg(test)]
 mod schema_install_tests;
@@ -125,6 +127,14 @@ pub struct ProjectionProgress {
     pub total: Option<u64>,
 }
 
+fn projection_diagnostic_prefix() -> &'static str {
+    // Exec gates capture stderr as JSON; keep their established diagnostic spelling.
+    static PREFIX: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(|| {
+        if std::env::var_os("ST_GATE_REPORT").is_some() { "st" } else { "fractal" }
+    });
+    *PREFIX
+}
+
 /// Keep diagnostics on one bounded line even when an error code or caller phase is untrusted.
 fn full_replay_log_line(phase: &str, reason: &str, frontier: u64, target: u64) -> String {
     fn bounded(value: &str) -> String {
@@ -135,7 +145,8 @@ fn full_replay_log_line(phase: &str, reason: &str, frontier: u64, target: u64) -
             .collect()
     }
     format!(
-        "st: projection full replay phase={} reason={} frontier={frontier} target={target}",
+        "{}: projection full replay phase={} reason={} frontier={frontier} target={target}",
+        projection_diagnostic_prefix(),
         bounded(phase),
         bounded(reason)
     )
@@ -253,12 +264,33 @@ fn projection_failure_log_line(
             || ["projection_stage", "projection_claim_id", "projection_subject", "projection_operation_id", "projection_claim_kind"].iter()
                 .any(|name| details.get(*name).and_then(Value::as_str).is_some_and(|value| value.chars().take(257).count()>256)),
     });
-    format!("st: projection failure detail {diagnostic}")
+    format!("{}: projection failure detail {diagnostic}", projection_diagnostic_prefix())
 }
 
 #[cfg(test)]
 mod projection_failure_diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn projection_diagnostic_prefix_preserves_gate_stderr() {
+        const CHILD: &str = "FRACTAL_TEST_PROJECTION_PREFIX_CHILD";
+        if let Some(expected) = std::env::var_os(CHILD) {
+            let line = full_replay_log_line("replay", "test", 0, 1);
+            assert!(line.starts_with(&format!("{}: projection ", expected.to_string_lossy())), "{line}");
+            return;
+        }
+        for (gate, expected) in [(false, "fractal"), (true, "st")] {
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command.args(["--exact", "store::projection_failure_diagnostic_tests::projection_diagnostic_prefix_preserves_gate_stderr", "--nocapture"])
+                .env(CHILD, expected)
+                .env_remove("ST_GATE_REPORT");
+            if gate {
+                command.env("ST_GATE_REPORT", "/unused/gate-report");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+    }
 
     #[test]
     fn diagnostic_rate_keeps_first_error_and_reports_reset_counts_by_stage_and_code() {
@@ -392,7 +424,7 @@ mod projection_failure_diagnostic_tests {
         assert_eq!(lines.len(), 2);
         for (line, suppressed) in lines.iter().zip([0, 1]) {
             let value: Value =
-                serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+                serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                     .unwrap();
             assert_eq!(value["error"], error.message);
             assert_eq!(value["suppressed_errors"], suppressed);
@@ -419,7 +451,7 @@ mod projection_failure_diagnostic_tests {
         );
         assert_eq!(line.lines().count(), 1);
         let value: Value =
-            serde_json::from_str(line.strip_prefix("st: projection failure detail ").unwrap())
+            serde_json::from_str(line.strip_prefix("fractal: projection failure detail ").unwrap())
                 .unwrap();
         assert_eq!(value["error"].as_str().unwrap().chars().count(), 4096);
         assert_eq!(value["error_truncated"], true);
@@ -441,7 +473,7 @@ mod projection_failure_diagnostic_tests {
         );
         let value: Value = serde_json::from_str(
             short
-                .strip_prefix("st: projection failure detail ")
+                .strip_prefix("fractal: projection failure detail ")
                 .unwrap(),
         )
         .unwrap();
@@ -852,6 +884,9 @@ pub struct Store {
     pub trim_pause_micros: AtomicU64,
     /// Extra time each trimmed row takes. Tests only.
     pub trim_row_cost_micros: AtomicU64,
+    /// The last seal-identity digest, and the capture epoch it holds for; see
+    /// `checkpoint_sealed_identities`. In memory only, so a reopen or restore starts empty.
+    pub(crate) sealed_identity_memo: Mutex<Option<checkpoint::SealedIdentityMemo>>,
     /// The runtime whose projections this store keeps.
     pub runtime: Arc<dyn Runtime>,
 }
@@ -1067,10 +1102,8 @@ impl Store {
         install_schema_batch(connection, fresh, |connection| {
             connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h22782312d531 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &retired_facts::schema()).map_err(Into::into)
         })?;
-        install_schema_batch(connection, fresh, |connection| {
-            connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
-            idempotency::initialize(connection)
-        })?;
+        initialize_fleet_generation(connection)?;
+        install_schema_batch(connection, fresh, idempotency::initialize)?;
         events::initialize(connection)?;
         install_schema_batch(connection, fresh, |connection| {
             inventory_generation::initialize(connection)
@@ -1194,6 +1227,7 @@ impl Store {
             trim_chunk_envelopes: AtomicUsize::new(checkpoint_trim::TRIM_CHUNK_ENVELOPES),
             trim_pause_micros: AtomicU64::new(checkpoint_trim::TRIM_MIN_PAUSE.as_micros() as u64),
             trim_row_cost_micros: AtomicU64::new(0),
+            sealed_identity_memo: Mutex::new(None),
             runtime,
         })
     }
@@ -2729,15 +2763,84 @@ pub fn max_envelope_rowid(connection: &Connection) -> Result<i64> {
         .map_err(Into::into)
 }
 
+const FLEET_GENERATION_TRIGGER_VERSION: i64 = 1;
+
+fn initialize_fleet_generation(connection: &Connection) -> Result<()> {
+    // Acquire the write reservation before reading the version. Concurrent opens then
+    // observe the completed installation rather than both trying to replace its triggers.
+    let transaction = Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+    let exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='fleet_generation')",
+        [], |row| row.get(0),
+    )?;
+    if !exists {
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h9dd0c105a101 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE fleet_generation (
+                 id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL,
+                 trigger_version INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO fleet_generation(id,value,trigger_version) VALUES(1,0,0);",
+        )?;
+    } else {
+        let version_column: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('fleet_generation') WHERE name='trigger_version')",
+            [], |row| row.get(0),
+        )?;
+        if !version_column {
+            transaction.execute_batch(
+                /* sqlite-large-value: allow-for-now lv-hee8dc149755b owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE fleet_generation ADD COLUMN trigger_version INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+    }
+    let version: i64 = transaction.query_row(
+        "SELECT trigger_version FROM fleet_generation WHERE id=1", [], |row| row.get(0),
+    )?;
+    anyhow::ensure!(version <= FLEET_GENERATION_TRIGGER_VERSION,
+        "unsupported fleet generation trigger version {version}");
+    if version != FLEET_GENERATION_TRIGGER_VERSION {
+        // Replacement and the generation fence commit together. A live Store's cache
+        // cannot survive a mutation missed by the old definitions or a gap in installation.
+        // Install the covering probe index with the trigger upgrade, not on every open.
+        transaction.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-hbe53791f5691 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_batch_kind ON claims(batch_id, kind);"
+        )?;
+        for table in ["claim", "batch", "envelope", "signature", "anchor"] {
+            for event in ["insert", "update", "delete"] {
+                transaction.execute_batch(&format!(
+                    /* sqlite-large-value: allow-for-now lv-hd5547c558e17 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS fleet_generation_{table}_{event};",
+                ))?;
+            }
+        }
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h12c1178eeb5f owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "DROP TRIGGER IF EXISTS fleet_generation_envelope_detach;")?;
+        for name in [
+            "signature_insert_by_batch",
+            "signature_delete_by_batch",
+            "signature_update_by_batch",
+            "envelope_identity_update",
+            "claim_identity_update",
+        ] {
+            transaction.execute_batch(&format!(
+                /* sqlite-large-value: allow-for-now lv-h71bcfcfc61a4 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS fleet_generation_{name};"
+            ))?;
+        }
+        transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-ha61978aa583a owner=smallclaims::store TODO=trace-statement-and-value-representation */ &fleet_generation_schema())?;
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h6140c9d34075 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_generation SET value=value+1,trigger_version=?1 WHERE id=1",
+            [FLEET_GENERATION_TRIGGER_VERSION],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 /// Fold the admitted `fleet.*` claims from the pinned anchor. A store without an anchor has an
 /// empty membership, in which every writer is legacy.
 /// A counter that moves whenever fleet membership could: a fleet claim, the envelope that carries
 /// it, a signature on that envelope, or the anchor. `fleet_membership` re-folds only when it moved.
 fn fleet_generation_schema() -> String {
     let bump = /* sqlite-large-value: allow-for-now lv-h84b389587ccc owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE fleet_generation SET value=value+1 WHERE id=1;";
-    let carries_fleet_claims = |envelope: &str| {
+    let carries_fleet_claims = |row: &str, column: &str| {
         format!(
-            "EXISTS (SELECT 1 FROM claims WHERE batch_id={envelope}.batch_id \
+            "EXISTS (SELECT 1 FROM claims WHERE batch_id={row}.{column} \
              AND kind IN ({FLEET_CLAIM_KINDS}))"
         )
     };
@@ -2752,62 +2855,51 @@ fn fleet_generation_schema() -> String {
         )
     };
     format!(
-        /* sqlite-large-value: allow-for-now lv-h38fa81434d61 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS fleet_generation (
-             id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL);
-         INSERT OR IGNORE INTO fleet_generation(id, value) VALUES (1, 0);
-         DROP TRIGGER IF EXISTS fleet_generation_signature_insert;
-         DROP TRIGGER IF EXISTS fleet_generation_signature_delete;
-         DROP TRIGGER IF EXISTS fleet_generation_signature_update;
+        /* sqlite-large-value: allow-for-now lv-h509931eac50e owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ "CREATE TABLE IF NOT EXISTS fleet_generation (
+             id INTEGER PRIMARY KEY CHECK(id=1), value INTEGER NOT NULL,
+             trigger_version INTEGER NOT NULL DEFAULT 0);
+         INSERT OR IGNORE INTO fleet_generation(id,value,trigger_version) VALUES(1,0,0);
          CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_delete AFTER DELETE ON claims
          WHEN OLD.kind IN ({FLEET_CLAIM_KINDS}) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_update
-         AFTER UPDATE OF kind, batch_id, body ON claims
+         CREATE TRIGGER fleet_generation_claim_update
+         AFTER UPDATE OF id, kind, subject, body, batch_id ON claims
          WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) OR OLD.kind IN ({FLEET_CLAIM_KINDS})
          BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_insert AFTER INSERT ON replica_envelopes
-         WHEN NEW.batch_id IS NOT NULL AND {insert_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_update
-         AFTER UPDATE OF batch_id ON replica_envelopes
-         WHEN NEW.batch_id IS NOT NULL AND {update_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_insert_by_batch
-         AFTER INSERT ON replica_envelope_signatures
-         WHEN {insert_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_delete_by_batch
-         AFTER DELETE ON replica_envelope_signatures
-         WHEN {delete_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_delete AFTER DELETE ON replica_envelopes
-         WHEN {old_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_identity_update
-         AFTER UPDATE OF writer, sequence, envelope_hash, batch_id ON replica_envelopes
-         WHEN {old_envelope} OR {update_envelope} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_signature_update_by_batch
-         AFTER UPDATE ON replica_envelope_signatures
-         WHEN {insert_signature} OR {delete_signature} BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_claim_identity_update
-         AFTER UPDATE OF id, subject ON claims
-         WHEN NEW.kind IN ({FLEET_CLAIM_KINDS}) OR OLD.kind IN ({FLEET_CLAIM_KINDS})
-         BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_insert AFTER INSERT ON batches
+         WHEN {insert_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_delete AFTER DELETE ON batches
+         WHEN {delete_batch} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_update
          AFTER UPDATE OF id, origin, replica_sequence ON batches
-         WHEN EXISTS (SELECT 1 FROM claims WHERE batch_id IN (OLD.id, NEW.id)
-                      AND kind IN ({FLEET_CLAIM_KINDS})) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_delete AFTER DELETE ON batches
-         WHEN EXISTS (SELECT 1 FROM claims WHERE batch_id=OLD.id
-                      AND kind IN ({FLEET_CLAIM_KINDS})) BEGIN {bump} END;
-         CREATE TRIGGER IF NOT EXISTS fleet_generation_batch_insert AFTER INSERT ON batches
-         WHEN EXISTS (SELECT 1 FROM claims WHERE batch_id=NEW.id
-                      AND kind IN ({FLEET_CLAIM_KINDS})) BEGIN {bump} END;
+         WHEN {insert_batch} OR {delete_batch} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_insert AFTER INSERT ON replica_envelopes
+         WHEN NEW.batch_id IS NOT NULL AND {insert_envelope} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_envelope_update
+         AFTER UPDATE OF writer, sequence, batch_id, envelope_hash ON replica_envelopes
+         WHEN {insert_envelope} OR {delete_envelope} BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS fleet_generation_envelope_delete AFTER DELETE ON replica_envelopes
+         WHEN {delete_envelope} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_signature_insert
+         AFTER INSERT ON replica_envelope_signatures
+         WHEN {insert_signature} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_signature_delete
+         AFTER DELETE ON replica_envelope_signatures
+         WHEN {delete_signature} BEGIN {bump} END;
+         CREATE TRIGGER fleet_generation_signature_update
+         AFTER UPDATE ON replica_envelope_signatures
+         WHEN {insert_signature} OR {delete_signature} BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_insert AFTER INSERT ON meta
          WHEN NEW.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_update AFTER UPDATE ON meta
          WHEN NEW.key='fleet_anchor_key' OR OLD.key='fleet_anchor_key' BEGIN {bump} END;
          CREATE TRIGGER IF NOT EXISTS fleet_generation_anchor_delete AFTER DELETE ON meta
          WHEN OLD.key='fleet_anchor_key' BEGIN {bump} END;",
-        insert_envelope = carries_fleet_claims("NEW"),
-        update_envelope = carries_fleet_claims("NEW"),
-        old_envelope = carries_fleet_claims("OLD"),
+        insert_batch = carries_fleet_claims("NEW", "id"),
+        delete_batch = carries_fleet_claims("OLD", "id"),
+        insert_envelope = carries_fleet_claims("NEW", "batch_id"),
+        delete_envelope = carries_fleet_claims("OLD", "batch_id"),
         insert_signature = signs_fleet_claims("NEW"),
         delete_signature = signs_fleet_claims("OLD"),
     )
@@ -4100,6 +4192,9 @@ const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// Newly admitted claims projected per writer transaction. A catch-up page must not keep
 /// queued lease renewals and messages behind its entire incremental projection.
 pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
+/// A checkpoint that waits this long for the writer names the hold that held it up. The daemon
+/// reports the same wait as an abnormal checkpoint.
+const CHECKPOINT_HELD_UP_MS: u128 = 100;
 
 /// Full-inventory answers since the daemon started: each lists every identity this node holds,
 /// which on a large store can pass `MAX_EXCHANGE_BYTES` and fail the peer's inflate.
@@ -5694,12 +5789,29 @@ impl Store {
 
     #[track_caller]
     pub fn read_snapshot<T>(&self, read: impl FnOnce(u64) -> Result<T>) -> Result<T> {
+        self.read_snapshot_starting(current_index, read)
+    }
+
+    /// `read_snapshot` for a read that needs no claim index. The snapshot starts at the first
+    /// statement `read` runs, so every statement in it still reads one snapshot, without a
+    /// `current_index` read nobody uses.
+    #[track_caller]
+    pub fn read_snapshot_unindexed<T>(&self, read: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.read_snapshot_starting(|_| Ok(()), |()| read())
+    }
+
+    #[track_caller]
+    fn read_snapshot_starting<I, T>(
+        &self,
+        start: impl FnOnce(&Connection) -> Result<I>,
+        read: impl FnOnce(I) -> Result<T>,
+    ) -> Result<T> {
         let key = self.readers.key();
         // Reentry joins this thread's existing snapshot of this store, even when another
         // store's pin is newer: that connection is already inside its read transaction, so
         // BEGINning it again is both wrong and refused by SQLite.
         if let Some(connection) = crate::sqlite::pinned_reader_for(key) {
-            let index = current_index(&connection)?;
+            let index = start(&connection)?;
             return read(index);
         }
         // The snapshot's own entry: the guard below is lent out and dropped at once.
@@ -5724,7 +5836,7 @@ impl Store {
         let timing = crate::sqlite::ReaderTiming::start();
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5f4a6691287 owner=smallclaims::store TODO=trace-statement-and-value-representation */ "BEGIN")?;
         // The first read starts the snapshot; every later read in `read` sees the same one.
-        let index = current_index(&connection)?;
+        let index = start(&connection)?;
         drop(timing);
         live.snapshot_started(&connection);
         crate::sqlite::push_pinned_reader(key, connection);
@@ -7617,9 +7729,15 @@ impl Store {
             return Ok(report);
         }
         let waiting = std::time::Instant::now();
+        let queued_ahead = self.connection.writer_thread().map(crate::windows::holds::WaitWatch::start);
         {
             let _writer = self.connection.write();
             report.writer_wait_ms = waiting.elapsed().as_millis();
+            // Its own hold has begun but not ended, so only the holds ahead of it count.
+            let blocked_by = queued_ahead.and_then(crate::windows::holds::WaitWatch::blocked_by);
+            if report.writer_wait_ms >= CHECKPOINT_HELD_UP_MS {
+                report.blocked_by = blocked_by;
+            }
             let truncating = std::time::Instant::now();
             report.recycled = crate::sqlite::truncate_idle_wal(checkpoint)?;
             report.truncate_ms = Some(truncating.elapsed().as_millis());
