@@ -1173,6 +1173,26 @@ half on a store of three million claims. It is taken once a day and kept, never 
 property test `a_trim_that_keeps_each_newest_claim_answers_the_same` holds the trim invariant for
 random histories and cuts.
 
+Once a day each member compares its answers with every peer it dials. The cut is the start of the
+UTC day, and the check waits an hour into the day so replication has brought every member what
+was written before it. A member asks a peer only after an exchange with it moved nothing, over the
+signed peer route `/v1/peer/answers`, authenticated like an exchange. The daemon computes its
+answers on a thread of its own and keeps them twenty minutes, answering `pending` until it has
+them, so a request never waits for a pass over the store.
+
+When a kind differs the member compares again every half hour, when both members have computed
+again and counted any claim that arrived late. A difference that lasts two hours is narrowed:
+bucket digests for each differing kind, then the keys of the differing buckets. The member records
+one `operational.failure` on its own `daemon/NODE` subject with the condition
+`answers-disagreement`, an episode per member pair, and a `reproduction` that names every
+differing kind with its counts and up to twenty keys, each with both members' answers. The fault
+goes to the agent `[trim] notify` names (`notify = "agent/..."`), or the fleet's fault agent
+without it. While the pair's fault is open, later differences add nothing; the first check of the
+pair that agrees ends it with `operational.recovered`. Each difference is a bug in trimming,
+replication or a reader: it becomes a failing test, then a fix. Nothing repairs it from a peer.
+
+A peer on a build without the route answers 404 and is not compared.
+
 ### First sync
 
 A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first
@@ -1313,6 +1333,9 @@ had already committed still finishes; a checkpoint it was still recording stays 
 and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
 it stops the old checkpoints on the other members until a person excuses it. No claim family is
 trimmed locally yet.
+
+`[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
+finds this member and a peer answering differently; see [Answers across members](#answers-across-members).
 
 ## Recovery
 

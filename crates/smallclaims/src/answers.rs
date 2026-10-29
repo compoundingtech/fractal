@@ -21,8 +21,12 @@
 //!
 //! A summary reads every claim of every kind, one kind per statement, on a reader connection. On
 //! a store of three million claims that is about a minute and a half, so it is taken once a day
-//! and kept, never per request.
+//! and kept, never per request: [`AnswersCache`] computes on a thread of its own and answers
+//! `pending` until it has the answer.
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 use rusqlite::Connection;
@@ -327,5 +331,165 @@ impl Store {
         wanted: &BTreeSet<usize>,
     ) -> Result<KindBuckets> {
         kind_buckets(&self.readers.get(), kind, cut_unix_ms, wanted)
+    }
+}
+
+/// What one member found when it compared its answers at a cut with a peer's: every kind that
+/// differs, or none when they agree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswersCheck {
+    pub peer: String,
+    pub cut_unix_ms: u128,
+    pub differences: Vec<KindReport>,
+}
+
+/// One kind that differs, with the keys that differ. `complete` is false when the check named
+/// fewer keys than differ, or none because it narrowed only the first few kinds.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KindReport {
+    pub kind: String,
+    pub ours: Option<KindAnswers>,
+    pub theirs: Option<KindAnswers>,
+    pub keys: Vec<KeyDifference>,
+    pub complete: bool,
+}
+
+/// What a member asks another: the summary at a cut, or one kind's bucket digests with the keys
+/// of `buckets`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswersRequest {
+    pub cut_unix_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub buckets: BTreeSet<usize>,
+}
+
+/// The answer to an [`AnswersRequest`]. `pending` says the member is still computing it: ask
+/// again later.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnswersReply {
+    #[serde(default)]
+    pub pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<AnswersSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buckets: Option<KindBuckets>,
+}
+
+impl AnswersReply {
+    fn pending() -> Self {
+        Self { pending: true, ..Self::default() }
+    }
+}
+
+/// How long a computed answer serves requests. A check that found a difference asks again after
+/// longer than this, so both members compute again and count claims that arrived late.
+pub const ANSWERS_FRESH: Duration = Duration::from_secs(20 * 60);
+/// The kinds whose every key is kept at once, for the bucket requests that narrow a difference.
+const KEPT_KINDS: usize = 8;
+
+/// Answers computed off the request path and kept for [`ANSWERS_FRESH`]: the summary at one cut,
+/// and every key of the few kinds a check is narrowing.
+#[derive(Default)]
+pub struct AnswersCache {
+    state: Mutex<CacheState>,
+}
+
+#[derive(Default)]
+struct CacheState {
+    summary: Option<(Instant, AnswersSummary)>,
+    kinds: Vec<(Instant, KindBuckets)>,
+    computing: BTreeSet<(u128, Option<String>)>,
+}
+
+enum Computed {
+    Summary(AnswersSummary),
+    Kind(KindBuckets),
+}
+
+impl AnswersCache {
+    /// Answer `request` from what is kept, or answer `pending` and start computing it on a thread
+    /// of its own, unless one already does.
+    pub fn answer<S>(self: &Arc<Self>, store: &Arc<S>, request: &AnswersRequest) -> AnswersReply
+    where
+        S: Borrow<Store> + Send + Sync + 'static,
+    {
+        let fresh = |at: &Instant| at.elapsed() < ANSWERS_FRESH;
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        match &request.kind {
+            None => {
+                if let Some((at, summary)) = &state.summary
+                    && fresh(at)
+                    && summary.cut_unix_ms == request.cut_unix_ms
+                {
+                    return AnswersReply { summary: Some(summary.clone()), ..AnswersReply::default() };
+                }
+            }
+            Some(kind) => {
+                if let Some((_, every)) = state.kinds.iter().find(|(at, every)| {
+                    fresh(at) && every.kind == *kind && every.cut_unix_ms == request.cut_unix_ms
+                }) {
+                    let keys = every
+                        .keys
+                        .iter()
+                        .filter(|key| request.buckets.contains(&bucket(&key.subject, &key.origin)))
+                        .cloned()
+                        .collect();
+                    return AnswersReply {
+                        buckets: Some(KindBuckets { keys, ..every.clone_without_keys() }),
+                        ..AnswersReply::default()
+                    };
+                }
+            }
+        }
+        let job = (request.cut_unix_ms, request.kind.clone());
+        if !state.computing.insert(job.clone()) {
+            return AnswersReply::pending();
+        }
+        let (cache, store) = (self.clone(), store.clone());
+        let thread_job = job.clone();
+        let spawned = std::thread::Builder::new().name("st3-answers".into()).spawn(move || {
+            let (cut, kind) = thread_job;
+            let store: &Store = (*store).borrow();
+            let computed = crate::task_cpu::blocking("replication.answers", || match &kind {
+                None => store.answers_summary(cut).map(Computed::Summary),
+                Some(kind) => store
+                    .answer_buckets(kind, cut, &(0..BUCKETS).collect())
+                    .map(Computed::Kind),
+            });
+            let mut state = cache.state.lock().unwrap_or_else(PoisonError::into_inner);
+            state.computing.remove(&(cut, kind.clone()));
+            match computed {
+                Ok(Computed::Summary(summary)) => state.summary = Some((Instant::now(), summary)),
+                Ok(Computed::Kind(every)) => {
+                    state.kinds.retain(|(_, kept)| kept.kind != every.kind);
+                    state.kinds.push((Instant::now(), every));
+                    if state.kinds.len() > KEPT_KINDS {
+                        state.kinds.remove(0);
+                    }
+                }
+                Err(error) => eprintln!(
+                    "st3: answers for {} at {cut} failed: {error:#}",
+                    kind.as_deref().unwrap_or("every kind")
+                ),
+            }
+        });
+        if let Err(error) = spawned {
+            state.computing.remove(&job);
+            eprintln!("st3: answers could not start: {error}");
+        }
+        AnswersReply::pending()
+    }
+}
+
+impl KindBuckets {
+    fn clone_without_keys(&self) -> Self {
+        Self {
+            kind: self.kind.clone(),
+            cut_unix_ms: self.cut_unix_ms,
+            buckets: self.buckets.clone(),
+            keys: Vec::new(),
+        }
     }
 }
