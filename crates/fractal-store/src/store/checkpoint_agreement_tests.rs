@@ -1259,8 +1259,30 @@ fn a_node_holding_unvalidated_envelopes_before_the_cut_neither_seals_nor_proves(
     // Alder received birch's envelopes but did not validate them: its sealed identities would
     // name envelopes whose claims it does not hold, so its proof could not agree with birch's.
     set_receipt(&alder, "birch", "pending");
-    assert!(alder.holds_unvalidated_envelopes_before(cut).unwrap());
-    assert!(step(&alder, &context).is_empty(), "sealed while holding unvalidated envelopes");
+    // Every pass that holds back says so, naming how many and the oldest, so a node whose
+    // envelopes never validate does not stall the checkpoint silently.
+    let held_back = || {
+        let (pending, oldest_sequence): (u64, u64) = alder
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*), MIN(sequence) FROM replica_envelopes
+                 WHERE writer='birch' AND CAST(accepted_at_unix_ms AS INTEGER) < ?1",
+                [i64::try_from(cut).unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(pending > 0);
+        CheckpointAction::HeldBack {
+            checkpoint: checkpoint_name(cut),
+            pending,
+            oldest_writer: "birch".into(),
+            oldest_sequence,
+        }
+    };
+    for _ in 0..2 {
+        assert_eq!(step(&alder, &context), [held_back()], "sealed while holding unvalidated envelopes");
+    }
     set_receipt(&alder, "birch", "validated");
     assert_eq!(kinds(&step(&alder, &context)), ["sealed"]);
     assert_eq!(kinds(&step(&birch, &context)), ["sealed"]);
@@ -1268,8 +1290,11 @@ fn a_node_holding_unvalidated_envelopes_before_the_cut_neither_seals_nor_proves(
 
     // Nor does it prove, once every seal matches, while an envelope before the cut is pending.
     set_receipt(&alder, "birch", "pending");
-    assert!(step(&alder, &context).is_empty(), "proved while holding unvalidated envelopes");
+    assert_eq!(step(&alder, &context), [held_back()], "proved while holding unvalidated envelopes");
+    // An envelope whose validation failed is no more admitted than a pending one.
+    set_receipt(&alder, "birch", "degraded");
+    assert_eq!(step(&alder, &context), [held_back()], "proved while holding degraded envelopes");
     set_receipt(&alder, "birch", "validated");
-    assert!(!alder.holds_unvalidated_envelopes_before(cut).unwrap());
+    assert_eq!(alder.unvalidated_envelopes_before(cut).unwrap(), None);
     assert_eq!(kinds(&step(&alder, &context)), ["verified"]);
 }
