@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Summaries carry reader/* pseudo-kinds beside claim kinds. A peer on the previous build of the check has none, so the two report each reader kind as differing until both run this build; deploy it to every member before reading the check's faults."
+    "detail": "Summaries carry reader/* pseudo-kinds beside claim kinds. Two members compare reader kinds only when both run fold readers, so a peer on the previous build of the check is compared by claim kinds alone, as before."
   },
   "downtime": {
     "status": "none",

@@ -308,9 +308,14 @@ pub fn differing_kinds(
     theirs: &AnswersSummary,
     compare_claims: bool,
 ) -> Vec<KindDifference> {
+    // Fold readers compare only between members that both run them: a member on a build without
+    // them has none, which is no disagreement about any answer.
+    let runs_readers = |summary: &AnswersSummary| summary.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX));
+    let readers = runs_readers(ours) && runs_readers(theirs);
     let kinds = ours.kinds.keys().chain(theirs.kinds.keys()).collect::<BTreeSet<_>>();
     kinds
         .into_iter()
+        .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
         .filter_map(|kind| {
             let (a, b) = (ours.kinds.get(kind), theirs.kinds.get(kind));
             // A member that holds no claim of a kind answers as one that counts none of its keys.

@@ -296,3 +296,18 @@ fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
     assert!(unknown.keys.is_empty());
     assert!(unknown.buckets.iter().all(String::is_empty));
 }
+
+#[test]
+fn readers_compare_only_between_members_that_both_run_them() {
+    let answers = |digest: &str| KindAnswers { keys: 1, claims: 0, digest: digest.into() };
+    let summary = |kinds: &[(&str, &str)]| AnswersSummary {
+        kinds: kinds.iter().map(|(kind, digest)| (kind.to_string(), answers(digest))).collect(),
+        ..AnswersSummary::default()
+    };
+    let older = summary(&[("example.state", "a")]);
+    let newer = summary(&[("example.state", "a"), ("reader/status_history", "b")]);
+    assert!(differing_kinds(&older, &newer, true).is_empty(), "an older build runs no readers");
+    let other = summary(&[("example.state", "a"), ("reader/status_history", "c")]);
+    assert_eq!(differing_kinds(&newer, &other, true)[0].kind, "reader/status_history");
+}
+
