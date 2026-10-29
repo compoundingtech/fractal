@@ -15811,6 +15811,18 @@ pub fn try_project_simple_replication_tx(
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
         };
+        // A claim a repair replaced decides no operation (`expected_operations`); its repair
+        // already brought the operation's row to the claims that remain.
+        let repaired: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
+                [&claim.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
+        if repaired {
+            continue;
+        }
         if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
             continue;
         }
