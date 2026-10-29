@@ -106,6 +106,9 @@ ready native-session binding must agree. Persons, tiles, ordinary agent requests
 and Fabric loopback cannot use that route. A close must refer to a question opened
 by that same binding; unknown/foreign closes write nothing. Replayed opens and closes
 are idempotent. A reused call identity with different descriptors is refused.
+Legacy PTY records without a boot id may establish daemon identity through their
+matching live start token; this does not relax the independent exact-wrapper
+custody or launch/binding checks above.
 
 Native successful completion records `answered_elsewhere`, a structured native timeout
 records `expired`, and error completion records `cancelled`. O1a records closure status
