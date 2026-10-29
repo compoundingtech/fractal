@@ -165,7 +165,10 @@ async fn deployed_pty_0_13_0_record_without_boot_id_binds_mailbox() {
         .route("/v1/mailbox/bind", axum::routing::post(bind))
         .layer(Extension(fixture.peer.clone()))
         .with_state(fixture.state.clone());
-    let request = Fence::new(&fixture.fence.subject, &fixture.fence.incarnation, "delivery");
+    // NativeReplay already owns this provider lease. Retry its allocation token,
+    // as after a lost bind response, rather than impersonating a second channel.
+    let mut request = fixture.fence.clone();
+    request.epoch = 0;
     let response = app.oneshot(Request::post("/v1/mailbox/bind")
         .header("content-type", "application/json")
         .body(Body::from(serde_json::to_vec(&request).unwrap())).unwrap()).await.unwrap();
