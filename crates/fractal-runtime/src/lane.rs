@@ -396,8 +396,13 @@ pub(crate) fn environment(
         ("FRACTAL_LANE_SLICE", lane.slice.clone()),
     ];
     let named = |key: &str| seat(key).filter(|value| host(key).as_ref() != Some(value));
-    if named("SCCACHE_SERVER_UDS").is_none()
-        && named("SCCACHE_SERVER_PORT").is_none()
+    // The client takes a socket before a port, so a port the seat names is its server only while
+    // no socket is set at all; an inherited socket would win over it.
+    let own_server = match seat("SCCACHE_SERVER_UDS") {
+        Some(_) => named("SCCACHE_SERVER_UDS").is_some(),
+        None => named("SCCACHE_SERVER_PORT").is_some(),
+    };
+    if !own_server
         && let Some(runtime) = seat("XDG_RUNTIME_DIR")
             .or_else(|| host("XDG_RUNTIME_DIR"))
             .filter(|dir| !dir.is_empty())
@@ -526,5 +531,10 @@ mod tests {
         assert_eq!(environment(&lane, server("/elsewhere.sock"), server("/host.sock")).len(), 2);
         let port = |key: &str| (key == "SCCACHE_SERVER_PORT").then(|| "4226".to_owned());
         assert_eq!(environment(&lane, |key| runtime(key).or_else(|| port(key)), port)[2], added[2]);
+        assert_eq!(environment(&lane, |key| runtime(key).or_else(|| port(key)), nothing).len(), 2, "the seat's own port");
+        // A port of the seat's own does not win over a socket inherited from the daemon: the client
+        // takes the socket first, so the lane's replaces it.
+        let both = |key: &str| server("/host.sock")(key).or_else(|| port(key));
+        assert_eq!(environment(&lane, both, server("/host.sock"))[2], added[2]);
     }
 }
