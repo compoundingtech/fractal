@@ -1509,12 +1509,16 @@ mod tests {
         }
         assert_commit_budget(&store);
         assert!(store.client_message_selectors_pending().unwrap());
-        let saved: String = store.readers.get().query_row(
+        // The commit's fold checks its 10 ms budget before each subject, so on a slow host it can
+        // stop before scanning anything and save no work: it then scanned no claim rows at all.
+        let saved: Option<String> = store.readers.get().query_row(
             "SELECT value FROM meta WHERE key=?1", [FOLD_MARKER], |row| row.get(0),
-        ).unwrap();
-        let work: FoldWork = serde_json::from_str(&saved).unwrap();
-        assert!(work.after <= u64::try_from(FOLD_CLAIMS).unwrap(),
-            "the first transaction cannot scan more than its claim-row allowance");
+        ).optional().unwrap();
+        if let Some(saved) = saved {
+            let work: FoldWork = serde_json::from_str(&saved).unwrap();
+            assert!(work.after <= u64::try_from(FOLD_CLAIMS).unwrap(),
+                "the first transaction cannot scan more than its claim-row allowance");
+        }
         let mut loans = 1;
         while store.client_message_selectors_pending().unwrap() {
             store.maintain_client_message_selectors().unwrap();
