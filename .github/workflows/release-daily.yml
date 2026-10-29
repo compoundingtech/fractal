@@ -50,7 +50,7 @@ jobs:
           git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head"
           git fsck --connectivity-only --no-dangling --no-progress
       - name: Publish the verified archives of main when it changed
-        run: 'scripts/release-smalltalk-daily ${TAG:+--tag "$TAG"}'
+        run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"}'
       - name: Report job cache coverage
         if: always()
         shell: bash

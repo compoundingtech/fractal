@@ -12,11 +12,11 @@ mod reconcile;
 mod pairing;
 
 #[derive(Debug, Parser)]
-#[command(about = "Reconcile verified local st fleet membership into Fabric runtime peers")]
+#[command(about = "Reconcile verified local Fractal fleet membership into Fabric runtime peers")]
 struct Args {
     #[command(subcommand)]
     command: Option<PairingCommand>,
-    /// Trusted local st3 HTTP socket (never the replication socket).
+    /// Trusted local Fractal HTTP socket (never the replication socket).
     #[arg(long)]
     st_socket: Option<PathBuf>,
     /// Fabric runtime-peers control socket; defaults to FABRIC_HOME/run/control.sock.

@@ -1,6 +1,6 @@
 # Stable node identity
 
-An st node name identifies both a claim writer and the host that owns its seats.
+A Fractal node name identifies both a claim writer and the host that owns its seats.
 It is independent of the computer's macOS name, hostname, or Tailscale device name.
 Renaming a computer does not move its provider sessions or change its fleet authority.
 

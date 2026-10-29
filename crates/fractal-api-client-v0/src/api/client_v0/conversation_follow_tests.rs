@@ -427,7 +427,7 @@ fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
             }
             let (_, resolved) = resolve_conversation(&fixture.state, &fixture.session_id).unwrap();
             let source = conversation_blocks::source(&fixture.state, &fixture.session_id, resolved.managed.as_ref()).unwrap();
-            let (authoritative, _, native, _) = conversation_first_page_at_generation(
+            let (authoritative, _, native, _, _) = conversation_first_page_at_generation(
                 &fixture.state,
                 &new_client_snapshot(&fixture.state),
                 &session,
@@ -435,6 +435,7 @@ fn native_follow_resynchronizes_a_real_window_gap_without_any_claim_change() {
                 resolved.managed.as_ref(),
                 Some(&source),
                 CLIENT_MAX_PAGE_ITEMS,
+                None,
             )
             .unwrap();
             assert!(native);
@@ -551,7 +552,7 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
     );
     let (_, resolved) = resolve_conversation(&fixture.state, &fixture.session_id).unwrap();
     let source = conversation_blocks::source(&fixture.state, &fixture.session_id, resolved.managed.as_ref()).unwrap();
-    let (after, _, native, _) = conversation_first_page_at_generation(
+    let (after, _, native, _, _) = conversation_first_page_at_generation(
         &fixture.state,
         &new_client_snapshot(&fixture.state),
         &session,
@@ -559,6 +560,7 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
         resolved.managed.as_ref(),
         Some(&source),
         CLIENT_MAX_PAGE_ITEMS,
+        None,
     )
     .unwrap();
     assert!(native);
@@ -587,4 +589,121 @@ fn native_pages_exclude_stored_availability_notices_and_truncation_entries() {
         gap.message,
         "the transcript was rewritten in place; refresh the newest conversation page"
     );
+}
+
+fn replay_native(sequence: u64) -> Value {
+    json!({"id":format!("timeline-entry/native-test-{sequence}"), "sequence":sequence})
+}
+
+#[test]
+fn replay_extent_detects_a_backdated_middle_change_despite_visible_high_water() {
+    let extent = ReplayExtent {
+        native: Some(vec![30, 20, 10]), native_complete: true, ..Default::default()
+    };
+    assert!(extent.native_window_gap(10, &[replay_native(30)]));
+    assert!(!extent.native_window_gap(10, &[replay_native(20), replay_native(30)]));
+}
+
+#[test]
+fn replay_extent_does_not_invent_missing_sequences_between_source_records() {
+    let extent = ReplayExtent {
+        native: Some(vec![90, 12]), native_complete: true, ..Default::default()
+    };
+    assert!(!extent.native_window_gap(12, &[replay_native(90)]));
+}
+
+#[test]
+fn replay_extent_requires_reaching_cursor_before_advancing_a_truncated_source() {
+    let extent = ReplayExtent {
+        native: Some(vec![90, 80]), native_complete: false, ..Default::default()
+    };
+    assert!(extent.native_window_gap(70, &[replay_native(80), replay_native(90)]));
+    assert!(!extent.native_window_gap(80, &[replay_native(90)]));
+}
+
+#[test]
+fn replay_extent_keeps_suppressed_echo_high_water_without_requiring_echo_delivery() {
+    let extent = ReplayExtent {
+        native: Some(vec![20]), native_complete: true, native_suppressed: 30,
+        ..Default::default()
+    };
+    assert_eq!(extent.native_latest(), 30);
+    assert!(!extent.native_window_gap(20, &[]));
+    assert!(!extent.native_window_gap(10, &[replay_native(20)]));
+}
+
+#[test]
+fn replay_extent_does_not_accept_a_graph_sequence_collision_as_native_delivery() {
+    let extent = ReplayExtent {
+        native: Some(vec![20]), native_complete: true, ..Default::default()
+    };
+    assert!(extent.native_window_gap(10, &[json!({"id":"timeline-entry/graph", "sequence":20})]));
+}
+
+#[test]
+fn conversation_open_retries_append_between_display_and_extent_reads() {
+    let fixture = NativeBoundaryFixture::new("open-append-race");
+    fixture.append(0, 3);
+    let path = fixture.path.clone();
+    NATIVE_EXTENT_READ_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            writeln!(file, "{}", NativeBoundaryFixture::record(3)).unwrap();
+        }));
+    });
+    let session = ClientSession::local(Some("person/example")).unwrap();
+    let (start, page) =
+        conversation_open_local(&fixture.state, &session, &fixture.session_id, 1).unwrap();
+    assert!(page["items"].as_array().unwrap().iter()
+        .any(|item| item["body"]["text"] == "entry 3"), "{page:#}");
+    // The entry appended across the two reads was delivered before its cursor advanced.
+    fixture.append(4, 1);
+    let delta = conversation_read_now(
+        &fixture.state, &session, &fixture.session_id, start["next_cursor"].as_str(),
+    ).unwrap();
+    assert!(delta["items"].as_array().unwrap().iter()
+        .any(|item| item["body"]["text"] == "entry 4"), "{delta:#}");
+}
+
+#[test]
+fn conversation_replay_scan_budget_is_shared_and_accepts_exact_limit() {
+    let mut remaining = CONVERSATION_REPLAY_SCAN_LIMIT;
+    charge_conversation_replay_scan("session/test", &mut remaining, 6_000).unwrap();
+    charge_conversation_replay_scan("session/test", &mut remaining, 4_000).unwrap();
+    assert_eq!(remaining, 0);
+    let error = charge_conversation_replay_scan("session/test", &mut remaining, 1).unwrap_err();
+    assert_eq!(error.code, "cursor-gap");
+}
+
+#[test]
+fn conversation_replay_caps_unrelated_local_observations() {
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state_named(root.path(), "replay-local-scan-cap");
+    let owner = "agent/replay-cap";
+    let incarnation = "replay-cap:i1";
+    state.store.append_claim(&ClaimInput {
+        subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+        fields: serde_json::from_value(json!({"status":"running", "runtime_id":"replay-cap",
+            "incarnation_id":incarnation})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let session_id = managed_session_id(owner, incarnation);
+    let session = ClientSession::local(Some("person/example")).unwrap();
+    let (start, _) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
+    let claims = (0..=CONVERSATION_REPLAY_SCAN_LIMIT).map(|index| ClaimInput {
+        subject: "agent/unrelated-replay-cap".into(), kind: "harness.timeline".into(),
+        actor: Some("agent/unrelated-replay-cap".into()),
+        fields: serde_json::from_value(json!({"operation":"append",
+            "entry_id":format!("timeline-entry/unrelated-{index}"), "sequence":index + 1,
+            "revision":1, "role":"assistant", "entry_type":"content", "final":true,
+            "body":{"media_type":"text/plain", "text":"unrelated"}, "driver":"omp",
+            "incarnation_id":"unrelated:i1"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).collect::<Vec<_>>();
+    state.store.append_local_observations_for_test(&claims);
+    let error = conversation_read_now(
+        &state, &session, &session_id, start["next_cursor"].as_str(),
+    ).unwrap_err();
+    assert_eq!(error.code, "cursor-gap");
+    assert!(error.message.contains("scan limit"), "{}", error.message);
 }

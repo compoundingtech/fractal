@@ -53,7 +53,7 @@ const entry = (sequence: number, text: string, role: 'user' | 'assistant' = 'ass
 /** The kit composition groups turns at user prompts, so scenarios pair prompts with replies. */
 const prompt = (sequence: number, text: string) => entry(sequence, text, 'user')
 
-/** A native scenario page as st delivers it: joined tool result, custom omp event, truncation. */
+/** A native scenario page as Fractal delivers it: joined tool result, custom omp event, truncation. */
 const nativeScenario = (): TimelineEntry[] => [
   prompt(1, 'Keep the row projection readable.'),
   {
@@ -351,8 +351,10 @@ describe('ConversationPane conversation demand', () => {
     expect(container.querySelector('[data-testid="agent-message"]')?.querySelector('strong')?.textContent).toBe('visible rows')
     expect(container.querySelector('[data-testid="work-log"]')).not.toBeNull()
     expect(container.querySelector('[data-testid="history-boundary"]')?.textContent).toContain('Earlier messages not loaded')
-    // The unsupported omp event and the truncation marker never become rows or internal wording.
-    expect(paneText()).not.toContain('credential_pin')
+    // A block-less unsupported omp record remains an explicit inspectable marker.
+    expect(container.querySelector('[data-testid="unsupported-record"][data-record-kind="credential_pin"]')).not.toBeNull()
+    expect(container.querySelector('[data-testid="unsupported-record"]')?.textContent).toContain('Unsupported omp record')
+    expect(paneText()).not.toContain('[unrecognized omp')
     expect(paneText()).not.toContain('sequences')
     expect(paneText()).not.toContain('Older history unavailable')
   })
@@ -705,7 +707,7 @@ describe('ConversationPane composer/send binding', () => {
     expect(send).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps the Sent row across a newer read that omits it (st #1977), with no resend', async () => {
+  it('keeps the Sent row across a newer read that omits it (Fractal #1977), with no resend', async () => {
     await prepareSendPane()
     const send = vi.spyOn(live!.source.attachments!, 'send')
     await submitDraft()

@@ -56,7 +56,7 @@ class PublicRepositoryCheck(unittest.TestCase):
                      'docs/st3/operational-state/audit-2027-01-01.md']:
             self.assertTrue(self.findings(path=path))
         self.assertEqual(self.findings(path='docs/st2/invariants.md'), [])
-        self.assertEqual(self.findings(path='evals/st3/example/reports/2026-09-30.md'), [])
+        self.assertEqual(self.findings(path='evals/fractal/example/reports/2026-09-30.md'), [])
 
 
 if __name__ == '__main__':

@@ -79,7 +79,7 @@ MOVES        1 total
 `move` takes exactly one of `--top`, `--bottom`, `--before RUN`, or `--after RUN`. The run and any
 anchor must be queued for the seat. After a move, the command prints the new queue.
 
-A person moves runs with `--as person/NAME` or `person` in the st config, like other client-v0
+A person moves runs with `--as person/NAME` or `person` in the Fractal config, like other client-v0
 mutations. With `--json`, it prints the action result.
 
 An agent moves runs in any seat's queue, including its own, with `--as agent/PATH`; in
@@ -179,14 +179,14 @@ still read from the current store; no queue cache is introduced.
   and JSON output for person and agent moves, `--as`, the configured person fallback, the seat
   moving its own queue, and a malformed actor, against a temporary daemon socket.
 - `tests::agent_queue_view_lists_the_claim_then_runs_in_order_and_moves`: the exact human view.
-- `evals/st3/seat-queue`: a paid eval with one durable seat and three runs. The seat is Claude
+- `evals/fractal/seat-queue`: a paid eval with one durable seat and three runs. The seat is Claude
   `claude-sonnet-5` by default; the runner can put Codex `gpt-6-luna` or omp
   `openai-codex/gpt-5.6-luna` in it instead. A model-free chief agent makes the move. Held-out judges replay graph history
   at every claim. They require that a live agent took the first ready step in queue order each
   time, followed the chief's move, passed over a head run waiting on a gate and returned to it
   once ready, kept each held claim, and got no terminal input. Run reports are in
-  `evals/st3/seat-queue/reports/`.
-  `scripts/st3-seat-queue-eval/report` drafts a run's report from the evidence the runner keeps.
+  `evals/fractal/seat-queue/reports/`.
+  `scripts/fractal-seat-queue-eval/report` drafts a run's report from the evidence the runner keeps.
 
 ## Limits
 

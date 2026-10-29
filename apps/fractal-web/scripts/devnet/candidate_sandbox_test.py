@@ -435,7 +435,7 @@ print(json.dumps(results))
             worktree.mkdir()
             (worktree / 'package.json').write_text(sandbox.json.dumps({
                 'name': 'sandbox-store-fixture', 'version': '1.0.0', 'private': True,
-                'packageManager': 'pnpm@12.7.0',
+                'packageManager': 'pnpm@12.15.0',
                 'dependencies': {'fixture-dependency': 'file:fixture.tgz'}}))
             (worktree / 'pnpm-workspace.yaml').write_text('packages: []\n')
             (worktree / 'pnpm-source-inputs.json').write_text('{"sourceInputPaths": []}')
@@ -558,7 +558,7 @@ print(json.dumps(results))
             self.assertTrue(cached.samefile(dependency))
             self.assertFalse((store / 'new-entry').exists())
             self.assertEqual((worktree / 'sandbox-write').read_text(), 'allowed')
-            print('real sandbox: HOME/SSH/st3/daemon hidden; agent prefixes absent; nested dependencies and pnpm hardlink aliases readonly')
+            print('real sandbox: HOME/SSH/Fractal/daemon hidden; agent prefixes absent; nested dependencies and pnpm hardlink aliases readonly')
             sandbox.tools.cache_clear()
 
 

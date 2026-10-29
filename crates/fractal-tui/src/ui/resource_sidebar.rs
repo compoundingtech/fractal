@@ -1100,7 +1100,7 @@ mod tests {
     }
     #[test]
     fn opening_and_collapsing_only_navigate_and_do_not_edit_arrangements() {
-        let mut ui = Ui::new(super::super::demo::world());
+        let mut ui = Ui::new(super::super::demo::test_world());
         ui.resource_sidebar.arrangements.push(arrangement());
         let before = ui.resource_sidebar.arrangements.clone();
         ui.open_resource_row(0);
@@ -1121,7 +1121,7 @@ mod tests {
     }
     #[test]
     fn a_fresh_install_shows_the_host_and_how_to_start() {
-        let mut world = super::super::demo::world();
+        let mut world = super::super::demo::test_world();
         world.agents = super::super::view::Load::Ready(Vec::new());
         world.missions = super::super::view::Load::Ready(Vec::new());
         world.attention = super::super::view::Load::Ready(Vec::new());

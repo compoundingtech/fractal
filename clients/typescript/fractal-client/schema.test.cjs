@@ -760,6 +760,34 @@ test('exchange carrier additions preserve legacy absence and future carrier valu
     assert.throws(() => decode({ ...observed, last_failed_exchange: { carrier: 'fabric' } }));
 });
 
+test('stream sync notice frames decode in both modes, and a bad notice never reads as level', async () => {
+    const [, Rich] = await modules;
+    const fixture = require('../../../fixtures/clients/stream-sync/frames.json');
+    // What a reader makes of a decoded frame's sync: only exactly level, or a catching-up or
+    // diverged with peers, is known; anything else is unknown.
+    const read = (sync) => sync === undefined ? 'unknown'
+        : sync.state === 'level' && !sync.peers ? 'level'
+        : (sync.state === 'catching-up' || sync.state === 'diverged') && sync.peers?.length ? sync.state
+        : 'unknown';
+    for (const [name, { frame, expect }] of Object.entries(fixture.valid)) {
+        for (const mode of ['tolerant', 'strict']) {
+            const decoded = Rich.decodeUnknownSync(Rich.CollectionFrame, mode)(frame);
+            assert.equal(read(decoded.sync), expect, `${name} ${mode}`);
+        }
+        // A key a newer daemon adds is ignored when tolerant, the production default.
+        const newer = { ...frame, a_key_from_a_newer_daemon: { any: 'value' } };
+        assert.equal(read(Rich.decodeUnknownSync(Rich.CollectionFrame, 'tolerant')(newer).sync), expect, `${name} newer`);
+    }
+    for (const [name, { frame, expect }] of Object.entries(fixture.invalid)) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.CollectionFrame, 'strict')(frame), undefined, `${name} strict`);
+        assert.equal(expect, 'unknown');
+        // Tolerant decoding never turns a bad notice into level: it fails the frame, or reads it
+        // as something the reader rule calls unknown.
+        let decoded;
+        try { decoded = Rich.decodeUnknownSync(Rich.CollectionFrame, 'tolerant')(frame); } catch { decoded = undefined; }
+        if (decoded) assert.notEqual(read(decoded.sync), 'level', `${name} tolerant`);
+    }
+});
 
 test('message provenance retains its serving model and reads historical absence strictly', async () => {
     const [{ Schema }, Rich] = await modules;
@@ -783,4 +811,55 @@ test('schedule schema tolerates future state strings and retains raw declaration
     const decoded = Rich.decodeUnknownSync(Rich.SchedulesPage, 'tolerant')(wire);
     // PageInfo.omitted_items is optional on the wire and encodes as null when the daemon leaves it out.
     assert.deepEqual(Schema.encodeSync(Rich.SchedulesPage)(decoded), { ...wire, page: { omitted_items: null, ...wire.page } });
+});
+
+test('optional author and recipients retain closed legacy scalar types', async () => {
+    const [{Schema},Rich] = await modules;
+    const items = require('../../../docs/st3/client-v0/fixtures/timeline-message-participants.json').value.items;
+    const decode = Rich.decodeUnknownSync(Rich.TimelineEntry,'strict');
+    for (const entry of items) assert.deepEqual(Schema.encodeSync(Rich.TimelineEntry)(decode(entry)), {
+        ...entry,timestamp:new Date(entry.timestamp).toISOString(),
+    });
+    for (const patch of [ {from:'daemon/runtime'}, {to:['agent/worker']}, {author:'step/fixture'},
+        {recipients:['daemon/runtime']}, {author:null}, {recipients:null} ]) {
+        assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
+    }
+});
+
+test('an ask resolved at its deadline decodes, and what the decoder from before deadlines refuses', async () => {
+    const [{ Schema }, Rich] = await modules;
+    // The answer record before deadlines: no resolved_by, and a respondent that is a sender only.
+    const { resolved_by, ...before } = Rich.PersonAnswerRecord.fields;
+    assert.ok(resolved_by);
+    const previous = Schema.Struct({ ...before, respondent: Rich.SenderRef });
+    const record = {
+        ask: 'step-run/run-generation-1/ask-1', status: 'completed', respondent: 'daemon/runtime',
+        answered_at_unix_ms: 1, resolved_by: 'deadline',
+    };
+    const withDefault = {
+        ...record, summary: 'Timed out without an answer; the default applied: Keep it open (keep-open)',
+        answer: { type: 'decision', outcome: 'decline', id: 'keep-open', label: 'Keep it open' },
+    };
+    const withoutAnswer = { ...record, summary: 'Timed out without an answer' };
+    for (const wire of [withDefault, withoutAnswer]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const current = Rich.decodeUnknownSync(Rich.PersonAnswerRecord, mode)(wire);
+            assert.equal(current.respondent, 'daemon/runtime');
+            assert.equal(current.resolved_by, 'deadline');
+            assert.deepEqual(current.answer, wire.answer);
+        }
+        // An older client reads the answer itself as it always did: its outcome is one it knows
+        // and it ignores resolved_by. It refuses daemon/runtime as a respondent, as it already
+        // does for an ask its requester's end cancelled, so [asks] deadlines comes on only once
+        // the web clients run this build.
+        const old = Rich.decodeUnknownSync(previous, 'tolerant');
+        assert.throws(() => old(wire));
+        const read = old({ ...wire, respondent: 'person/avery' });
+        assert.deepEqual(read.answer, wire.answer);
+        assert.equal('resolved_by' in read, false);
+    }
+    // No outcome was added: the one a deadline would otherwise have needed is still refused.
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAnswerRecord, 'strict')({
+        ...withDefault, answer: { ...withDefault.answer, outcome: 'timed_out' },
+    }));
 });

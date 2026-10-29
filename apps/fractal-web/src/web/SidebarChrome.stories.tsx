@@ -93,8 +93,16 @@ const chromePlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agents' })).toBeNull())
 }
 
-const meta = { title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and chrome footer over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. The chrome footer adds no status or reconnect action; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'wf/Sidebar/Chrome', component: SidebarChromeSurface, parameters: { scenario: { _tag: 'contract-fixture', reason: 'The production sidebar toolbar and chrome footer over fixed rows pin search insets, icon controls and wordmark weight at dock and drawer widths.' }, layout: 'fullscreen', docs: { description: { component: 'Sidebar search uses equal 8px outer insets and a 6px radius at every dock/drawer width. Collapse and theme controls reuse decorative stroke icons without changing accessible names. The wordmark is weight 500. The chrome footer adds no status or reconnect action; connection state belongs to the workspace band under the thread header. Play rejects injected full-bleed, small-radius, bold-wordmark and Unicode-icon regressions.' } } } } satisfies Meta<typeof SidebarChromeSurface>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'At256:contract-fixture',
+  'At320:contract-fixture',
+  'Light:contract-fixture',
+  'NarrowDrawer:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 export const At256: Story = { args: { width: 256 }, play: chromePlay }
 export const At320: Story = { args: { width: 320 }, play: chromePlay }

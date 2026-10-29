@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Bound same-driver mailbox ownership contention before blocking-task submission",
+  "replay": { "status": "none", "detail": "No source, projection or replay changes." },
+  "schema": { "status": "none", "detail": "No persisted tables, indexes or migrations." },
+  "rules": { "status": "none", "detail": "Provider ownership checks, Store writer decisions and cross-process flock exclusion are unchanged." },
+  "compatibility": { "status": "changed", "detail": "Mailbox ownership callbacks queue asynchronously per canonical driver lock path before blocking dispatch, without occupying shared writer admission while waiting for flock. Synchronous driver callers share a process-local descriptor; the on-disk lock protocol is unchanged. These callbacks no longer contribute to WriteWorkers admission queue metrics. Applies directly from all preceding binaries; no intermediate migration." },
+  "downtime": { "status": "none", "detail": "Normal binary rollout; no backfill or state rewrite." },
+  "manual": { "status": "none", "detail": "No operator steps or pool-size changes required." },
+  "recovery": { "status": "none", "detail": "Ordinary binary rollback restores prior callback scheduling without changing durable state." }
+}

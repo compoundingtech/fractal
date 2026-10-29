@@ -81,7 +81,7 @@ async fn has_run_on(client: &Client) -> Result<bool> {
         // An older daemon without the overview route cannot say, and guessing "never" would
         // start a second onboarding on an install that already finished one.
         Err(error) if fractal_daemon::client::is_missing_route(&error) => Err(error.context(
-            "the running daemon is older than this st and cannot say whether onboarding already ran; restart it, or run st setup --onboarding to begin explicitly",
+            "the running daemon is older than this st and cannot say whether onboarding already ran; restart it, or run fractal setup --onboarding to begin explicitly",
         )),
         Err(error) => Err(error),
     }
@@ -125,6 +125,7 @@ pub async fn start(
     harness: &str,
     ready: &[String],
     rerun: bool,
+    program: &str,
 ) -> Result<Option<String>> {
     let client = client(config)?;
     if !rerun && has_run_on(&client).await? {
@@ -145,9 +146,9 @@ pub async fn start(
             subject.desired_token.is_some() && subject.kind.as_deref() != Some("agent")
         })
     {
-        said(
-            "The built-in Fractal Assistant is stopped; setup leaves it stopped. Use st setup --onboarding to begin again explicitly."
-        );
+        said(format!(
+            "The built-in Fractal Assistant is stopped; setup leaves it stopped. Use {program} setup --onboarding to begin again explicitly."
+        ));
         return Ok(None);
     }
     let versions: DocumentListResponse = client
@@ -223,7 +224,7 @@ pub async fn start(
             .into_iter()
             .collect::<Vec<_>>();
         if definition_preview.subject_tokens.get(ASSISTANT_SUBJECT) != Some(&expected) {
-            return declaration_changed(rerun);
+            return declaration_changed(rerun, program);
         }
         definition_preview
             .subject_tokens
@@ -231,7 +232,7 @@ pub async fn start(
     }
     if let Err(error) = apply(&client, definition_preview, config).await {
         if !rerun && fractal_daemon::client::http_status(&error) == Some(409) {
-            return declaration_changed(false);
+            return declaration_changed(false, program);
         }
         return Err(error);
     }
@@ -254,14 +255,27 @@ pub async fn start(
         .context("the built-in Fractal Assistant has no declaration")?;
     let claim: fractal_daemon::model::ClaimRecord = client.get(&format!("/v1/claims/by-id/{token}")).await?;
     let desired: fractal_daemon::model::DesiredSubject = serde_json::from_value(claim.body)?;
-    let mut agent = fractal_daemon::graph::render_desired_node(&desired.desired)?;
-    // Typed harnesses require a body even when the provider has no default flags.
-    if let Some(body) = agent.children_mut()
-        && let Some(harness) = body.get_mut("harness")
-        && harness.children().is_none()
-    {
-        harness.set_children(KdlDocument::new());
+    let mut uris = std::collections::BTreeMap::new();
+    for reference in fractal_daemon::graph::declared_resources(&desired.desired) {
+        let status: StatusResponse = client
+            .get(&format!(
+                "/v1/status?subject={}",
+                urlencoding::encode(&reference.subject)
+            ))
+            .await?;
+        if let Some(uri) = status
+            .subjects
+            .iter()
+            .find(|subject| subject.subject == reference.subject)
+            .and_then(|subject| subject.desired.as_ref())
+            .and_then(fractal_daemon::graph::declared_uri)
+        {
+            uris.insert(reference.subject, uri.to_owned());
+        }
     }
+    // Resolve URI edges without converting explicit subject edges; a missing resource
+    // retains its subject reference rather than silently dropping the customization.
+    let agent = fractal_daemon::graph::render_agent_node(&desired.desired, &uris)?;
     let mut run: KdlDocument = source.parse()?;
     run.nodes_mut()
         .retain(|node| node.name().value() != "agent");
@@ -272,7 +286,7 @@ pub async fn start(
     let mut preview = preview(&client, &run.to_string()).await?;
     let expected = vec![token];
     if preview.subject_tokens.get(ASSISTANT_SUBJECT) != Some(&expected) {
-        return declaration_changed(rerun);
+        return declaration_changed(rerun, program);
     }
     preview
         .subject_tokens
@@ -281,7 +295,7 @@ pub async fn start(
     if let Err(error) = result {
         // A concurrent first setup may have won the same named run's publication fence.
         if !rerun && fractal_daemon::client::http_status(&error) == Some(409) {
-            return declaration_changed(false);
+            return declaration_changed(false, program);
         }
         return Err(error);
     }
@@ -291,14 +305,14 @@ pub async fn start(
     Ok(Some(ASSISTANT_SUBJECT.into()))
 }
 
-fn declaration_changed(rerun: bool) -> Result<Option<String>> {
+fn declaration_changed(rerun: bool, program: &str) -> Result<Option<String>> {
     anyhow::ensure!(
         !rerun,
         "the built-in Fractal Assistant changed during setup; retry setup to inspect its new state"
     );
-    said(
-        "The onboarding declarations changed concurrently; ordinary setup preserves their current state. Run st setup again if onboarding has not started."
-    );
+    said(format!(
+        "The onboarding declarations changed concurrently; ordinary setup preserves their current state. Run {program} setup again if onboarding has not started."
+    ));
     Ok(None)
 }
 

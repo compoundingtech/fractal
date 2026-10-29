@@ -608,6 +608,7 @@ mod tests {
             ask: None,
             input_buffer: None,
             exit: None,
+            background_jobs: None,
             claim: "state-a".into(),
             observed_at_unix_ms: 103,
             since_unix_ms: 100,
