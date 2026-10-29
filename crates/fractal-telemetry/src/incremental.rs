@@ -369,6 +369,16 @@ impl Incremental {
             .map(|last| last.saturating_add(FULL_PASS_INTERVAL_MS))
     }
 
+    /// When `item`'s last evaluation said it is next due, if it said.
+    pub fn due_of(&self, item: &str) -> Option<u128> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .items
+            .get(item)
+            .and_then(|item| item.due)
+    }
+
     /// What `item`'s last evaluation read.
     pub fn reads_of(&self, item: &str) -> BTreeSet<String> {
         let state = self
