@@ -503,7 +503,7 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
-ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
+ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests', 'rust-tests')
 # The checks a host or agent may sign (scripts/fractal-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
 HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
@@ -1491,7 +1491,8 @@ class CommittedPolicy(unittest.TestCase):
                     self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
         self.assertEqual(sorted(with_host), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
         for (check, kind), rule in with_host.items():
-            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent', 'queue'], check)
+            # rust-tests, enforced since 2026-10-28, trusts host and agent notes only: CI's own per-crate notes do not skip it.
+            self.assertEqual(rule['trust_levels'], ['host', 'agent', 'queue'] if check == 'rust-tests' else ['fleet', 'host', 'agent', 'queue'], check)
             override = dict(rule['by_level']['host'])
             # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
             # to the lane as well (Factory, 2026-10-22); since 2026-10-26 to the lane as the signed tree defines it, so a tree that edits
