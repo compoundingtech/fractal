@@ -85,7 +85,7 @@ export const runCoverage = Effect.fn('check-st-coverage')(function* (path: strin
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2)
   if (args.length !== 0 && (args.length !== 2 || args[0] !== '--schema' || !args[1])) {
-    console.error('Usage: bun scripts/check-st-coverage.ts [--schema <file>] (or node with TypeScript support)')
+    console.error('Usage: bun scripts/check-fractal-coverage.ts [--schema <file>] (or node with TypeScript support)')
     process.exitCode = 1
   } else {
     Effect.runPromise(runCoverage(args[1] ?? defaultSchemaPath)).then(result => {
@@ -93,7 +93,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
       for (const error of result.errors) console.error(error)
       process.exitCode = result.errors.length > 0 ? 1 : 0
     }).catch((error: unknown) => {
-      console.error(`FAIL check-st-coverage: ${String(error)}`)
+      console.error(`FAIL check-fractal-coverage: ${String(error)}`)
       process.exitCode = 1
     })
   }
