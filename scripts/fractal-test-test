@@ -2077,7 +2077,8 @@ if os.environ.get('FAKE_NO_REPORT') != '1':
         if package == os.environ.get('FAKE_EMPTY'):
             continue  # the selection matched no test of this crate
         out.append('<testsuite name=%s>' % quoteattr(package))
-        out.append('<testcase name="unit_one" classname=%s></testcase>' % quoteattr(package))
+        retried = '<flakyFailure message="x"/>' if package == os.environ.get('FAKE_FLAKY') else ''  # passed on a retry
+        out.append('<testcase name="unit_one" classname=%s>%s</testcase>' % (quoteattr(package), retried))
         failing = package == os.environ.get('FAKE_FAIL')
         out.append('<testcase name="unit_two" classname=%s>%s</testcase>' % (quoteattr(package), '<failure message="x"/>' if failing else ''))
         out.append('</testsuite>')
@@ -2887,6 +2888,15 @@ class PerCrate(StTest):
         self.assertIn('1 left for CI, a test passed only on a retry: top', out)
         gate = next(s for s in self.statements() if 'linux-gate' in s['predicate']['observed']['checks'])['predicate']['observed']
         self.assertEqual((gate['checks']['linux-gate']['exit_code'], gate['inputs']['flaky_tests']), (0, 'top unit_one'))
+
+    def test_a_crate_with_a_test_that_failed_every_try_fails_even_when_another_passed_only_on_a_retry(self):
+        # nextest: '2 tests run: 1 passed (1 flaky), 1 failed', ci-local's tests exit 100. The retried pass must not hide the failure.
+        code, out, err = self.run_crates(FAKE_FAIL='top', FAKE_FLAKY='top')
+        self.assertEqual(code, 1, out + err)
+        self.assertEqual(self.crate_records(), [('base', 0), ('top', 1)], 'top is recorded as a failure, as any failing crate')
+        self.assertRegex(out, r'rust-tests\s+FAILED')
+        self.assertRegex(out, r'rust-tests:top\s+FAILED .*unit_two')
+        self.assertNotIn('left for CI', out)
 
     def test_without_a_report_from_linux_gate_rust_tests_runs_the_crates_it_lacks_itself(self):
         code, out, err = self.run_with_gate(FAKE_GATE_NO_REPORT='1')
