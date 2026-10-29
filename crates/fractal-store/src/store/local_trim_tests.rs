@@ -197,12 +197,40 @@ fn a_plan_that_would_drop_the_newest_claim_of_a_key_stops_before_deleting_anythi
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
     let claims = claims_of(&store, "observer.observed");
+    *store
+        .extension::<crate::store::answers_check::TrimSettings>()
+        .notify
+        .lock()
+        .unwrap() = Some("agent/fleet/operations".into());
     store.set_trim_fault(Some(smallclaims::store::TrimFault::DropNewest));
-    assert_eq!(kinds(&step(&store, &context)), ["graph-changed"]);
+    let actions = step(&store, &context);
+    assert_eq!(kinds(&actions), ["graph-changed"]);
     assert_eq!(claims_of(&store, "observer.observed"), claims, "nothing is deleted");
-    // Halted until resumed; an agent may resume a member that trims locally.
-        assert!(step(&store, &context).is_empty());
+    // The stop alerts the `[trim] notify` agent, once however often it is recorded.
+    store.record_local_trim_stops(&actions).unwrap();
+    store.record_local_trim_stops(&actions).unwrap();
+    let faults = || -> Vec<(String, String)> {
+        store
+            .readers
+            .get()
+            .prepare(
+                "SELECT kind, json_extract(body,'$.fields.reviewer') FROM claims
+                 WHERE subject='daemon/node' AND kind IN ('operational.failure','operational.recovered')
+                   AND json_extract(body,'$.fields.episode') LIKE 'local-trim-stopped/%'
+                 ORDER BY store_index",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?.unwrap_or_default())))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(faults(), [("operational.failure".to_string(), "agent/fleet/operations".to_string())]);
+    // Halted until resumed; an agent may resume a member that trims locally, which ends the fault.
+    assert!(step(&store, &context).is_empty());
     store.resume_checkpoints("agent/fleet/operations", "looked at the plan").unwrap();
+    store.recover_local_trim_stops("agent/fleet/operations", "looked at the plan").unwrap();
+    assert_eq!(faults().last().unwrap().0, "operational.recovered");
     assert!(step(&store, &context).is_empty(), "the stopped cut is set aside, not retried");
     assert!(store.resume_checkpoints("agent/fleet/operations", " ").is_err());
 }
