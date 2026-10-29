@@ -85,6 +85,7 @@ CHECK_KEYS = {'kinds', 'trust_levels', 'max_age_s', 'enforce', 'inputs', 'sample
 REQUIRE_MODES = ('off', 'shadow', 'reject')
 CHECK_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,99}')
 PATH_PART = re.compile(r'[A-Za-z0-9._@+=,~#-]+')
+SELECTOR = re.compile(r'jobs\.[A-Za-z0-9_-]+|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*')
 MAX_INPUTS = 300
 KIND_KEYS = {'command', 'runner_prefix', 'required_inputs', 'bind_inputs', 'trust_levels', 'by_level', 'input_order', 'shard_inputs'}
 SHARD_KEYS = {'count', 'results', 'pull_request_count', 'index'}
@@ -160,7 +161,7 @@ def policy_rules(text, check, repository):
         raise Failure('error', f'skip policy for {check}: require must be one of {", ".join(REQUIRE_MODES)}')
     inputs = entry.get('inputs')
     if inputs is not None:
-        inputs = declared_paths(inputs, f'skip policy for {check}')
+        inputs = declared_paths(inputs, f'skip policy for {check}', selectors=True)
     sample = entry.get('sample_one_in', 1)
     if isinstance(sample, bool) or not isinstance(sample, int) or not 1 <= sample <= 1000:
         raise Failure('error', f'skip policy for {check}: sample_one_in must be an integer from 1 to 1000')
@@ -268,7 +269,7 @@ def narrowed_events(check_events, level_events):
 
 
 LANES_KEYS = {'version', 'lanes'}
-LANE_KEYS = {'argv', 'definition_paths', 'tree_inputs', 'absent_paths'}
+LANE_KEYS = {'argv', 'definition_paths', 'tree_inputs', 'absent_paths', 'ci_inputs'}
 
 
 def lane_rules(text, lane):
@@ -278,6 +279,8 @@ def lane_rules(text, lane):
     everything below it), `tree_inputs` the sources the lane is meant to test (informational: they may differ between the
     signed tree and the base), and `absent_paths` the paths the lane LOOKS FOR and does not find (a `.pnpmfile.cjs`, a
     `package.yaml`): a tracked file appearing there changes what the lane does, so none may exist in the signed tree.
+    `ci_inputs` (optional) are the protected CI files the check uses (docs/st3/gate-evidence.md, "A check's CI inputs"): with them, main
+    moving a protected file the check does not use keeps the pull request's own tree for this check; without them, any does not.
     Unknown keys are refused, like the skip policy."""
     try:
         doc = json.loads(text)
@@ -304,7 +307,36 @@ def lane_rules(text, lane):
         absent = declared_paths(absent, f'lane {lane} absent_paths')
         if '.' in absent:
             raise Failure('error', f'lane {lane}: absent_paths must name files or directories, not the whole tree')
-    return {'argv': argv, 'definition_paths': paths, 'tree_inputs': tuple(inputs), 'absent_paths': tuple(absent)}
+    ci = entry.get('ci_inputs')
+    if ci is not None:
+        ci = declared_paths(ci, f'lane {lane} ci_inputs', selectors=True)
+    return {'argv': argv, 'definition_paths': paths, 'tree_inputs': tuple(inputs), 'absent_paths': tuple(absent), 'ci_inputs': ci}
+
+
+def lane_entry(text, lane):
+    """The canonical bytes of one lane's entry in a lane file's text, or None when the text or the entry is not there."""
+    try:
+        entry = json.loads(text)['lanes'][lane]
+    except (ValueError, KeyError, TypeError):
+        return None
+    return json.dumps(entry, sort_keys=True, separators=(',', ':'))
+
+
+def ci_inputs_unchanged(repo, ci, revisions):
+    """True when the CI inputs `ci` (a lane's declared ci_inputs) name something at every one of `revisions` and project to the same key
+    at each. An entry that names nothing (a job main renamed, a typo) would project to nothing at every revision and so look unchanged
+    while the job it meant changes: it is not unchanged, and the check falls back to the merge tree."""
+    trees = [git(repo, 'rev-parse', '--verify', '--end-of-options', f'{rev}^{{tree}}').decode().strip() for rev in revisions]
+    if any(unresolved_ci_inputs(repo, tree, ci) for tree in trees):
+        return False
+    return len({project(repo, tree, ci) for tree in trees}) == 1
+
+
+def unresolved_ci_inputs(repo, tree, ci):
+    """The declared CI inputs that name nothing in `tree`: a path it lacks, or a job or JSON entry its file does not have. An excluded
+    path (!PATH) may name nothing."""
+    return [item for item in ci if not item.startswith('!') and item != '.'
+            and not (selected(repo, tree, item) if '::' in item else git(repo, 'ls-tree', '--full-tree', tree, '--', item).strip())]
 
 
 def definition_entries(repo, tree, paths):
@@ -346,20 +378,131 @@ def definition_digest(entries, argv, absent):
     return hashlib.sha256(text.encode('utf-8', 'surrogateescape')).hexdigest()
 
 
-def declared_paths(value, where):
-    """The declared input paths of a check: relative, literal, no `..`, at most MAX_INPUTS. `.` means everything."""
+def literal_path(item):
+    parts = item.split('/')
+    return all(PATH_PART.fullmatch(part) and part not in ('.', '..') for part in parts)
+
+
+def declared_paths(value, where, selectors=False):
+    """The declared input paths of a check: relative, literal, no `..`, at most MAX_INPUTS. `.` means everything.
+
+    With `selectors` (a skip policy's inputs, which make a check's key) two more forms are allowed, so a check's key can hold the part of
+    a shared CI file it uses and not the rest of it (docs/st3/gate-evidence.md, "A check's CI inputs"):
+      PATH::jobs.ID    one job of a workflow (.yml): its block, every job it needs, transitively, and the workflow's top-level blocks
+      PATH::KEY.KEY    one entry of a JSON file
+      !PATH            PATH (a file or directory under a declared path) left out of it
+    """
     if not (isinstance(value, list) and value and len(value) <= MAX_INPUTS):
         raise Failure('error', f'{where}: inputs must be a nonempty list of at most {MAX_INPUTS} paths')
     paths = set()
     for item in value:
         if not isinstance(item, str) or len(item) > 300:
             raise Failure('error', f'{where}: an input path is not a short string')
-        if item != '.':
-            parts = item.split('/')
-            if not all(PATH_PART.fullmatch(part) and part not in ('.', '..') for part in parts):
-                raise Failure('error', f'{where}: input path {item!r} must be relative, literal and without . or .. parts')
+        if selectors and item.startswith('!'):
+            if not literal_path(item[1:]):
+                raise Failure('error', f'{where}: excluded path {item!r} must be relative, literal and without . or .. parts')
+        elif selectors and '::' in item:
+            path, _, selector = item.partition('::')
+            if not literal_path(path) or not SELECTOR.fullmatch(selector):
+                raise Failure('error', f'{where}: input {item!r} must be PATH::jobs.ID (a workflow) or PATH::KEY.KEY (a JSON file)')
+            if path.endswith(('.yml', '.yaml')) != selector.startswith('jobs.') or not path.endswith(('.yml', '.yaml', '.json')):
+                raise Failure('error', f'{where}: input {item!r}: a .yml selects jobs.ID, a .json selects KEY.KEY')
+        elif item != '.' and not literal_path(item):
+            raise Failure('error', f'{where}: input path {item!r} must be relative, literal and without . or .. parts')
         paths.add(item)
+    plain = [p for p in paths if not p.startswith('!') and '::' not in p]
+    for item in paths:
+        if item.startswith('!') and not any(d == '.' or item[1:].startswith(d.rstrip('/') + '/') for d in plain):
+            raise Failure('error', f'{where}: excluded path {item!r} is not under a declared path, so it leaves nothing out')
     return tuple(sorted(paths))
+
+
+def workflow_job(text, job):
+    """The bytes of a generated workflow that job `job` depends on: the top-level blocks other than `jobs:` (on, env, defaults,
+    permissions, concurrency, as written), then the block of the job and of every job it needs, transitively, in name order. None
+    when the workflow has no such job. It reads the layout the generator writes (top-level keys at column 0, jobs at two spaces) and
+    refuses anything else rather than guess."""
+    top, jobs, current, in_jobs = [], {}, None, False
+    for line in text.splitlines(keepends=True):
+        if line.strip() == '' or line.startswith('#'):
+            (jobs[current] if in_jobs and current else top).append(line)
+            continue
+        if not line.startswith(' '):
+            in_jobs, current = line.rstrip() == 'jobs:', None
+            if not in_jobs:
+                top.append(line)
+            continue
+        if in_jobs:
+            match = re.fullmatch(r'  ([A-Za-z0-9_-]+):\s*', line.rstrip('\n'))
+            if match:
+                current = match.group(1)
+                jobs[current] = [line]
+            elif current is None or not line.startswith('    '):
+                raise Failure('error', f'workflow layout not understood at {line.strip()[:60]!r}')
+            else:
+                jobs[current].append(line)
+        else:
+            top.append(line)
+    if job not in jobs:
+        return None
+    wanted, queue = set(), [job]
+    while queue:
+        name = queue.pop()
+        if name in wanted:
+            continue
+        if name not in jobs:
+            raise Failure('error', f'workflow job {job} needs {name}, which the workflow does not have')
+        wanted.add(name)
+        queue += job_needs(jobs[name])
+    return (''.join(top) + ''.join(f'\0job {name}\n' + ''.join(jobs[name]) for name in sorted(wanted))).encode()
+
+
+def job_needs(lines):
+    """The job names a job block's `needs:` lists (inline `[a, b]`, a single name, or `- a` lines)."""
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r'    needs:\s*(.*?)\s*', line.rstrip('\n'))
+        if not match:
+            continue
+        value = match.group(1)
+        if value.startswith('['):
+            return [name.strip().strip('"\'') for name in value.strip('[]').split(',') if name.strip()]
+        if value:
+            return [value.strip('"\'')]
+        names = []
+        for item in lines[index + 1:]:
+            listed = re.fullmatch(r'      - ([A-Za-z0-9_"\'-]+)\s*', item.rstrip('\n'))
+            if not listed:
+                break
+            names.append(listed.group(1).strip('"\''))
+        return names
+    return []
+
+
+def selected(repo, tree, item):
+    """The canonical bytes `item` (PATH::SELECTOR) selects in `tree`, or None when the file or the entry is not there."""
+    path, _, selector = item.partition('::')
+    if not git(repo, 'ls-tree', '--full-tree', tree, '--', path).strip():
+        return None
+    try:
+        text = git(repo, 'show', '--end-of-options', f'{tree}:{path}').decode()
+    except UnicodeDecodeError:
+        raise Failure('error', f'{path} is not text')
+    return select_part(text, path, selector)
+
+
+def select_part(text, path, selector):
+    """The canonical bytes SELECTOR selects in the text of the file at `path`, or None when the job or the entry is not there."""
+    if selector.startswith('jobs.'):
+        return workflow_job(text, selector[len('jobs.'):])
+    try:
+        value = json.loads(text)
+    except ValueError:
+        raise Failure('error', f'{path} is not JSON')
+    for key in selector.split('.'):
+        if not isinstance(value, dict) or key not in value:
+            return None
+        value = value[key]
+    return json.dumps(value, sort_keys=True, separators=(',', ':')).encode()
 
 
 def project(repo, tree, paths):
@@ -370,9 +513,12 @@ def project(repo, tree, paths):
     When none of the declared paths exists the projection is the empty tree, which every such tree shares, so
     there is no key (None) and nothing can match by it. Names travel as bytes and NUL-terminated both ways, so a
     newline or any other byte in a name cannot turn one entry into two; symlinks and gitlinks keep their mode."""
-    if '.' in paths:
+    plain = [p for p in paths if not p.startswith('!') and '::' not in p]
+    excluded = [p[1:].encode() for p in paths if p.startswith('!')]
+    chosen = sorted(p for p in paths if '::' in p)
+    if '.' in plain and not excluded and not chosen:
         return tree
-    listing = git(repo, 'ls-tree', '-r', '-z', '--full-tree', tree, '--', *paths)
+    listing = git(repo, 'ls-tree', '-r', '-z', '--full-tree', tree, *(['--', *plain] if '.' not in plain else [])) if plain else b''
     entries = []
     for entry in listing.split(b'\0'):
         if not entry:
@@ -381,7 +527,16 @@ def project(repo, tree, paths):
         parts = meta.decode().split()
         if not tab or len(parts) != 3 or not OID.match(parts[2]):
             raise Failure('error', 'unexpected git ls-tree output')
+        if any(name == out or name.startswith(out.rstrip(b'/') + b'/') for out in excluded):
+            continue
         entries.append(f'{parts[0]} {parts[2]} 0\t'.encode() + name + b'\0')
+    for item in chosen:
+        # One selected part of a shared CI file is an entry of its own, named PATH::SELECTOR, whose blob is the canonical bytes of that
+        # part: the key stays a git tree id, and a change elsewhere in the file leaves it alone.
+        content = selected(repo, tree, item)
+        if content is not None:
+            blob = git(repo, 'hash-object', '--stdin', stdin=content).decode().strip()
+            entries.append(f'100644 {blob} 0\t'.encode() + item.encode() + b'\0')
     if not entries:
         return None
     with tempfile.TemporaryDirectory() as scratch:
@@ -676,11 +831,12 @@ def members_log_view(repo, log_keys, tree, check, member_records, now=None, max_
 
 
 def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None, run_inputs=None, crate_key=None):
+           trust_levels=None, now=None, rules=None, lane=None, level_lane=None, log_keys=None, run_inputs=None, crate_key=None,
+           prefer_levels=None):
     """verified(...) and, with log_keys, the evidence log's shadow view of the same decision (docs/st3/gate-evidence.md)."""
     if not log_keys:
         return verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
-                        run_inputs, crate_key)
+                        run_inputs, crate_key, prefer_levels)
     input_key = crate_key[1] if crate_key else None
     if crate_key is None and rules is not None and rules.get('inputs') is not None:
         try:
@@ -689,7 +845,7 @@ def verify(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None,
             input_key = None
     try:
         result = verified(repo, tree, check, keys, command, kinds, bind, max_age, runner_prefix, trust_levels, now, rules, lane, level_lane,
-                        run_inputs, crate_key)
+                        run_inputs, crate_key, prefer_levels)
     except Failure as failure:
         failure.extra.update(log_view(repo, log_keys, tree, check, input_key, None, now))
         raise
@@ -726,13 +882,18 @@ def zero_test_crates(repo, policy_base):
 
 
 def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=None, runner_prefix=None,
-             trust_levels=None, now=None, rules=None, lane=None, level_lane=None, run_inputs=None, crate_key=None):
+             trust_levels=None, now=None, rules=None, lane=None, level_lane=None, run_inputs=None, crate_key=None, prefer_levels=None):
     """`level_lane`, when given, is a callable returning the lane check at the policy's base; it is used only for a signer level
     whose by_level rule says `lane: true`, so the cost and any lane-file error fall on those records alone.
 
     `crate_key` is (crate, key[, needs_tests]) for a per-crate check (docs/per-crate-test-signing.md): the key is the crate's own input key rather than a
     projection of the policy's declared paths, and a record counts only if it signed that crate AND that key, whichever tree it is for
-    (the several records of one tree, one per crate, are told apart by the signed `crate`)."""
+    (the several records of one tree, one per crate, are told apart by the signed `crate`).
+
+    `prefer_levels`, when given, names signer levels whose newest passing record decides instead of a newer pass from another level, as
+    long as no failing record is dated after it (within FUTURE_SKEW): a newer failure still decides, and every other rule applies to the
+    record chosen. The gate asks for it when only those levels can cover the run (our pull request editing a protected file), so a pass
+    that CI signed later for the same inputs does not hide the host's own note."""
     with tempfile.NamedTemporaryFile() as revocations:
         everything = legacy_refs(repo, len(tree))  # the first layout, until the GC has removed it
         hits = with_note_for(repo, list(dict.fromkeys(tree_refs(repo, tree) + everything)), tree)  # commits that carry a note named by the tree
@@ -807,6 +968,12 @@ def verified(repo, tree, check, keys, command, kinds=KINDS, bind=(), max_age=Non
         shadowing = [c for c in with_check if failed(c) and dated(c) >= dated(chosen) - FUTURE_SKEW]
         if shadowing:
             chosen = max(shadowing, key=dated)
+    if prefer_levels and not failed(chosen):
+        preferred = [c for c in with_check if not failed(c) and c[2].split('/', 1)[0] in prefer_levels]
+        if preferred:
+            best = max(preferred, key=dated)
+            if not any(failed(c) and dated(c) >= dated(best) - FUTURE_SKEW for c in with_check):
+                chosen = best
     commit, statement, principal = chosen
     predicate = statement['predicate']
     observed = predicate['observed']
@@ -1026,8 +1193,8 @@ def lane_for(repo, tree, lanes, check, lane_base=None):
 
     `lane_base` (the pull request's branch point) holds the tree to the lane's definition at that commit instead of the base's: a
     branch that is only behind main, and changes none of the lane's files itself, is not a lane edit, and its note carries the
-    branch point's digest. The branch point must be an ancestor of the base (a definition main accepted) and the lane file itself
-    must be the same blob at both, so the argv and the paths are the base's either way."""
+    branch point's digest. The branch point must be an ancestor of the base (a definition main accepted) and this lane's own entry
+    must be the same at both, so its argv and paths are the base's either way; another lane's entry changing on main is not this one's."""
     if lanes is None:
         return None
     text, base = lanes
@@ -1038,9 +1205,10 @@ def lane_for(repo, tree, lanes, check, lane_base=None):
         code, _ = no_lazy(repo, 'merge-base', '--is-ancestor', lane_base, base)
         if code != 0:
             raise Failure('error', f'the lane base {lane_base[:12]} is not an ancestor of the accepted base')
-        here, there = (no_lazy(repo, 'rev-parse', '--verify', '-q', f'{commit}:{LANES_PATH}') for commit in (lane_base, base))
-        if here[0] != 0 or here != there:
-            raise Failure('definition_changed', f'{LANES_PATH} differs between the branch point and the accepted base')
+        code, shown = no_lazy(repo, 'show', f'{lane_base}:{LANES_PATH}')
+        here = lane_entry(shown.decode(errors='replace'), check) if code == 0 else None
+        if here is None or here != lane_entry(text, check):
+            raise Failure('definition_changed', f'lane {check} in {LANES_PATH} differs between the branch point and the accepted base')
         definition_base = lane_base
     base_tree = git(repo, 'rev-parse', '--verify', '--end-of-options', definition_base + '^{tree}').decode().strip()
     return lane_definition(repo, base_tree, tree, lane_rules(text, check))
@@ -1181,6 +1349,9 @@ def main(argv):
                         help='reject a record observed longer ago than this, or claiming a future time')
     parser.add_argument('--runner-prefix', help='the record runner must start with this (e.g. github:org/repo/)')
     parser.add_argument('--trust-levels', help='comma-separated signer trust levels this check accepts')
+    parser.add_argument('--prefer-levels', metavar='LEVELS',
+                        help='comma-separated signer levels whose newest passing record decides instead of a newer pass from another '
+                             'level, unless a failing record is dated after it; every other rule still applies')
     parser.add_argument('--bind-input', action='append', default=[], metavar='KEY=PATH',
                         help="require the record's input KEY to equal the sha256 of PATH in the verified tree")
     try:
@@ -1234,6 +1405,12 @@ def main(argv):
     if args.max_age is not None and args.max_age <= 0:
         print('--max-age must be a positive number of seconds', file=sys.stderr)
         return 2
+    prefer_levels = None
+    if args.prefer_levels is not None:
+        prefer_levels = tuple(level for level in args.prefer_levels.split(',') if level)
+        if not prefer_levels or args.members or args.require_all:
+            print('--prefer-levels must name at least one level, and is not used with --members or --require-all', file=sys.stderr)
+            return 2
     trust_levels = None
     if args.trust_levels is not None:
         trust_levels = tuple(level for level in args.trust_levels.split(',') if level)
@@ -1331,7 +1508,7 @@ def main(argv):
             return 0
         result = verify(args.repo, tree, args.check, keys, command, kinds, bind, args.max_age, args.runner_prefix,
                         trust_levels, crate_key=crate_key, rules=rules, lane=lane_for(args.repo, tree, lanes, args.check, args.lane_base),
-                        level_lane=level_lane, log_keys=log_keys, run_inputs=run_inputs)
+                        level_lane=level_lane, log_keys=log_keys, run_inputs=run_inputs, prefer_levels=prefer_levels)
         print(json.dumps(result, indent=2))
         return 0
     except Failure as failure:

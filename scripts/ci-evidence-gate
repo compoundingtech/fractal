@@ -5,6 +5,10 @@ Asks the verifier from the accepted base whether a trusted note exists for this 
 and check, and prints one decision line. It fails toward running: every doubt, error,
 timeout or inconsistency is `decision=run`. It never fails the job.
 
+One exception to running: a pull request whose opener the accepted base lists in .st/evidence-signed-only.json (our own
+pull requests, all pre-signed) is never run in CI. For it every `run` of an enforced check becomes `decision=refuse`, and
+the check job fails with what to do instead (sign it with scripts/st-test --all --push origin). See `refusal`.
+
 Outcomes (each has a fixed step name in the workflow so a collector can count them):
   satisfied    a trusted full-tier note from the central observer exists
   degraded     only an unsigned degraded note exists (the observer's signer was unreachable)
@@ -49,16 +53,19 @@ PROTECTED = (
     # What an agent-level note is held to (by_level "lane": true reads it from the base).
     '.st/required-lanes.json',
     # What defines a per-crate test key and the note that signs it (docs/per-crate-test-signing.md).
-    'scripts/rust-test-keys', '.st/rust-test-inputs.json', 'scripts/ci-rust-test-result',
+    # (.st/rust-test-inputs.json is not here: it is data that changes with ordinary code, and the verifier reads it only at the base.)
+    'scripts/rust-test-keys', 'scripts/ci-rust-test-result',
     # The evidence log's key: which log heads the verifier reads at all.
     '.st/evidence-log-key',
+    # Whose pull requests are refused instead of run when unsigned (refusal).
+    '.st/evidence-signed-only.json',
 )
 # The protected files the gate and verifier only ever read at the accepted BASE when they judge a note: the signing keys (--keys-from),
 # the author list (check_authors, from the base's ci-evidence-signing) and the evidence log's key (--log-keys-from). The copy in a head
 # tree decides nothing, so main changing one after the branch point does not make a pull request fall back to the merge tree (a key
 # rotation on main voided every head signature made before it, 2026-10-26). A note the change distrusts, a dropped key say, is still
 # refused, by the lists as they are at the base. The branch's OWN edits to them still count as protected changes (choose_tree).
-BASE_READ = ('.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key')
+BASE_READ = ('.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key', '.st/evidence-signed-only.json')
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
 # may be at most this many first-parent commits of main behind the tip GitHub merged into. Further behind, the run asks about the
@@ -93,6 +100,8 @@ KEYS = '.st/evidence-keys'
 LOG_KEY = '.st/evidence-log-key'
 LOG_REF = 'refs/evidence-log/main'
 POLICY = '.st/evidence-skip-policy.json'
+SIGNED_ONLY = '.st/evidence-signed-only.json'
+SIGN = 'scripts/st-test --all --push origin'
 MISSING = ('no_record', 'stale_tree', 'wrong_check', 'crate_uncovered')  # crate_uncovered: some crate has no note for its key
 UNAVAILABLE = ('error', 'no_policy')
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
@@ -162,6 +171,58 @@ def own_pull_request(context, result):
     return context['event'] == 'pull_request' and result.get('trust_level') in OWN_LEVELS
 
 
+def signed_only(context):
+    """True for a same-repository, non-draft pull_request run whose opener the accepted BASE lists in .st/evidence-signed-only.json
+    ('openers'). Read at the base, so a pull request cannot take itself off the list. No list, an unreadable one or any doubt about
+    the run: False, and the run is decided as before."""
+    if context['event'] != 'pull_request' or context['fork'] != 'false' or context['draft'] != 'false':
+        return False
+    base, opener = context['base'], context['pr_user']
+    if not OID.match(base or '') or not opener:
+        return False
+    shown = run('git', 'show', f'{base}:{SIGNED_ONLY}')
+    if shown.returncode != 0:
+        return False
+    try:
+        openers = json.loads(shown.stdout).get('openers')
+    except (ValueError, AttributeError):
+        return False
+    return isinstance(openers, list) and opener in [name for name in openers if isinstance(name, str) and name]
+
+
+def enforced(context):
+    """True when the base's skip policy turns skipping on for this check: only then can a signature cover it, so only then is an
+    unsigned run refused (a shadow check, rust-tests today, keeps running as its aggregate's part)."""
+    shown = run('git', 'show', f"{context['base']}:{POLICY}")
+    if shown.returncode != 0:
+        return False
+    try:
+        entry = json.loads(shown.stdout)['checks'][context['check']]
+    except (ValueError, KeyError, TypeError):
+        return False
+    return isinstance(entry, dict) and entry.get('enforce') is True
+
+
+def refusal(context, outcome, detail, why, tree):
+    """What to tell the author of a signed-only pull request whose check would otherwise run, or None to run it. Our pull requests
+    never run the heavy jobs in CI: they are signed before the push, and a check with no valid signature for its tree fails here."""
+    if not (signed_only(context) and enforced(context)):
+        return None
+    where = f"tree {tree[:12]}" if OID.match(tree or '') else 'this head'
+    if outcome == 'no_note':
+        problem = f'no signature for {where}'
+    elif outcome == 'satisfied':
+        # Typically a change to a file that decides skipping, covered only by a note another signer made for the same inputs: the run
+        # needs this tree signed on our own host, which st-test does not redo for a check it finds covered unless told to.
+        return (f"{context['check']}: signed, but not usable here: {why}. Our pull requests do not run CI: sign it on our own host "
+                f"with {SIGN.replace(' --all ', ' --all --rerun ')}")
+    elif outcome == 'unavailable':
+        problem = f'the signature could not be checked ({detail}); re-run all jobs, and if it stays, sign again'
+    else:
+        problem = f'the signature for {where} was not accepted ({outcome}: {detail})'
+    return f"{context['check']}: {problem}. Our pull requests do not run CI: sign it with {SIGN}"
+
+
 def sampled(context, result, tree):
     """True when this run is one the policy keeps running for real although a note matches (one in `sample_one_in`).
     Deterministic in (check, input key, head), so a retry of the same run behaves the same.
@@ -207,8 +268,9 @@ def fetch_state(done):
     return 'none' if done.returncode == 1 and not done.stderr.strip() else 'failed'
 
 
-def observe(context, revision='HEAD'):
-    """(outcome, result dict or None, detail, verifier sha256) without ever raising."""
+def observe(context, revision='HEAD', protected=None):
+    """(outcome, result dict or None, detail, verifier sha256) without ever raising. `protected` is the branch's own protected edits
+    when choose_tree compared them (head-tree mode)."""
     base, check, repository = context['base'], context['check'], context['repository']
     if not base:
         return 'unavailable', None, 'no accepted base commit for this event', None
@@ -272,8 +334,13 @@ def observe(context, revision='HEAD'):
             members = ['--members']
         else:
             fetch_input_notes(path, base, check, repository, revision)
+        # Our pull request that edits a protected file can skip only on our own hosts' note (own_pull_request): ask the base's verifier,
+        # once it takes it, for the newest passing note from those levels, so a pass CI signed later for the same inputs (any other pull
+        # request's typescript-client run) does not hide it. A newer failure still decides.
+        prefer = ['--prefer-levels', ','.join(OWN_LEVELS)] if isinstance(protected, list) and protected and not members \
+            and context.get('event') == 'pull_request' and b'--prefer-levels' in script.stdout else []
         done = run(sys.executable, path, '--repo', '.', '--revision', revision, '--check', check, *members,
-                   '--policy-from', base, '--repository', repository, *keys, *log, *values, *lane_base, timeout=VERIFIER_TIMEOUT)
+                   '--policy-from', base, '--repository', repository, *keys, *log, *values, *lane_base, *prefer, timeout=VERIFIER_TIMEOUT)
     try:
         result = json.loads(done.stdout)
     except ValueError:  # includes output that is not valid UTF-8
@@ -357,7 +424,7 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('attempts', result.get('attempts')), ('enforce', result.get('enforce')), ('match', result.get('match')),
         ('source_inputs', result.get('source_inputs')), ('tree', tree), ('tree_of', context.get('tree_of')),
         ('pr_head', context.get('pr_head')), ('merge_tree', context.get('merge_tree')), ('head_tree', context.get('head_tree')),
-        ('behind', context.get('behind')),
+        ('behind', context.get('behind')), ('ci_inputs', context.get('ci_inputs')),
         ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
         ('log', result.get('log')), ('log_head', result.get('log_head')), ('log_age_s', result.get('log_age_s')),
         ('log_missing', result.get('log_missing')), ('log_fetch', context.get('log_fetch')),
@@ -438,14 +505,52 @@ def base_signing_module(base):
     return module
 
 
-def branch_point_verdict(branch_point, head, base, current, context=None):
+def base_module(base, path, name):
+    """The script at `path` as it is at the accepted base, loaded as module `name`; a Fallback when the base has none."""
+    shown = run('git', 'show', f'{base}:{path}')
+    if shown.returncode != 0:
+        raise Fallback(f'the accepted base has no {path}')
+    with tempfile.TemporaryDirectory() as scratch:
+        file = os.path.join(scratch, name)
+        with open(file, 'wb') as handle:
+            handle.write(shown.stdout)
+        loader = importlib.machinery.SourceFileLoader(name, file)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+    return module
+
+
+def ci_inputs_kept(check, branch_point, base, current):
+    """True when `check` declares its CI inputs at the base (its lane's ci_inputs) and they are the same at the branch point, the base
+    and `current`: main moved protected files, but none this check uses, so its own tree may still be asked about. False when the base
+    declares none for it, or cannot say (an older base, a lane file it cannot read): the rule before per-check CI inputs."""
+    if not check:
+        return False
+    try:
+        verify = base_module(base, 'scripts/evidence-verify', 'base_evidence_verify')
+        lanes = run('git', 'show', f'{base}:.st/required-lanes.json')
+        if lanes.returncode != 0 or not hasattr(verify, 'ci_inputs_unchanged'):
+            return False
+        ci = verify.lane_rules(lanes.stdout.decode(), check).get('ci_inputs')
+        return bool(ci) and verify.ci_inputs_unchanged('.', ci, (branch_point, base, current))
+    except Fallback:
+        return False
+    except Exception:  # the base's verifier refused the lane file or the trees: not kept
+        return False
+
+
+def branch_point_verdict(branch_point, head, base, current, context=None, check=None):
     """How far the branch is behind main, when the pull request head's own tree may be asked about; else a Fallback naming why not.
 
     The history half of the head-tree rule, with no CI context in it so that scripts/fractal-test asks the very same question before a push: the
     branch is not more than HEAD_TREE_MAX_BEHIND commits behind (first-parent count from the branch point to `current`, the base tip the
     merge commit was made on), and no protected file differs between the branch point and the base or `current` (main moved one since
-    the branch), other than those only ever read at the base (BASE_READ). The branch's OWN protected edits do not make it fall back: they are the run's `protected_changed` (choose_tree), which
-    decide weighs against the note's signer. Runs git in the current directory."""
+    the branch), other than those only ever read at the base (BASE_READ). With `check`, protected files main moved count only when they
+    are that check's own CI inputs, as the base declares them (ci_inputs_kept): a change to the gate or the verifier on main, say, does
+    not take the pull request's tree away from a check that does not read them. The branch's OWN protected edits do not make it fall
+    back: they are the run's `protected_changed` (choose_tree), which decide weighs against the note's signer. Runs git in the current
+    directory."""
     behind = git_out('rev-list', '--count', '--first-parent', f'{branch_point}..{current}')
     if not behind.isdigit():
         raise Fallback('could not count how far the branch is behind')
@@ -460,7 +565,12 @@ def branch_point_verdict(branch_point, head, base, current, context=None):
             raise Fallback('could not compare protected files')
         changed += [p for p in diff.stdout.decode(errors='replace').split('\0') if p in PROTECTED and p not in BASE_READ]
     if changed:
-        raise Fallback('protected files differ from the branch point')
+        if not ci_inputs_kept(check, branch_point, base, current):
+            if context is not None:
+                context['ci_inputs'] = 'changed' if check else None
+            raise Fallback('protected files differ from the branch point')
+        if context is not None:
+            context['ci_inputs'] = 'kept'  # main moved protected files outside this check's CI inputs
     return int(behind)
 
 
@@ -511,7 +621,7 @@ def choose_tree(context):
             raise Fallback(f'authors: {str(error)[:120]}')
         branch_point = git_out('merge-base', base, head)
         current = git_out('rev-parse', '--verify', '-q', 'HEAD^1', check=False) if checked_out != head else base
-        branch_point_verdict(branch_point, head, base, current or base, context)
+        branch_point_verdict(branch_point, head, base, current or base, context, context.get('check'))
         own = run('git', 'diff', '--no-renames', '--name-only', '-z', branch_point, head)
         if own.returncode != 0:
             raise Fallback('could not compare protected files')
@@ -551,7 +661,7 @@ def main():
             if tree is None:
                 detail = 'could not read this run\'s tree'
             else:
-                outcome, result, detail, verifier_sha = observe(context, revision)
+                outcome, result, detail, verifier_sha = observe(context, revision, protected)
     except Exception as error:  # the gate must never fail the job
         outcome, result, detail = 'unavailable', None, f'{type(error).__name__}: {error}'
     try:
@@ -565,6 +675,14 @@ def main():
         decision, why = 'run', 'decision error'
     if decision == 'run' and outcome == 'satisfied' and why != 'no trusted note':
         detail = f'satisfied but not skipped: {why}'
+    refused = None
+    if decision == 'run':
+        try:
+            refused = refusal(context, outcome, detail, why, tree)
+        except Exception:
+            refused = None  # a doubt about the list runs the check, as before
+        if refused:
+            decision = 'refuse'
     with open(__file__, 'rb') as handle:
         gate_sha = hashlib.sha256(handle.read()).hexdigest()
     text = line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sha)
@@ -573,8 +691,9 @@ def main():
     # `line` is information only (evidence-presign-notice reads it). It goes first and without control characters, so
     # nothing in it can stand in for the outputs below, the ones a skip is decided by.
     single = re.sub(r'[\x00-\x1f\x7f]', '_', text)
+    message = re.sub(r'[\x00-\x1f\x7f]', '_', refused) if refused else ''
     for variable, body in (('GITHUB_OUTPUT', f'line={single}\noutcome={outcome}\nskip={"true" if decision == "skip" else "false"}\n'
-                                             f'record={field(record)}\n'),
+                                             f'record={field(record)}\nrefuse={"true" if refused else "false"}\nrefusal={message}\n'),
                            ('GITHUB_STEP_SUMMARY', text + '\n')):
         target = os.environ.get(variable)
         if target:
