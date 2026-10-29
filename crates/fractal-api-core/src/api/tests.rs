@@ -6242,7 +6242,7 @@ mission "planned/card" state="ready" {
         app.clone(),
         &format!("/v1/launches/{encoded}/submit"),
         serde_json::to_value(PlanningCandidateSubmitRequest {
-            actor: planner,
+            actor: planner.clone(),
             markdown: b"# Mission\n\nInspect the release input.\n".to_vec(),
             kdl: candidate.to_vec(),
             idempotency_key: "card-candidate".into(),
@@ -6252,7 +6252,7 @@ mission "planned/card" state="ready" {
     .await;
     assert_eq!(status, StatusCode::OK, "{submitted}");
     let (status, previewed) =
-        json_request(app, &format!("/v1/launches/{encoded}/preview"), json!({})).await;
+        json_request(app.clone(), &format!("/v1/launches/{encoded}/preview"), json!({})).await;
     assert_eq!(status, StatusCode::OK, "{previewed}");
     // Once previewed, the card shows the newest variant's mission.
     let launch = card(&store);
@@ -6261,8 +6261,46 @@ mission "planned/card" state="ready" {
     assert_eq!(launch["steps"][0]["path"], "inspect");
     assert_eq!(launch["steps"][0]["assignee"]["kind"], "none");
     assert_eq!(launch["asks_you"], 0);
-    assert!(launch["variant"].as_str().is_some_and(|variant| !variant.is_empty()));
+    assert_eq!(launch["variant"], "default");
     serde_json::from_value::<fractal_client::AttentionLaunch>(launch).unwrap();
+
+    // A newer variant whose name sorts first is the newest, and a new candidate for an older
+    // variant makes it the newest again.
+    let submit = async |variant: &str, step: &str, key: &str| {
+        // A later submission is accepted at a later millisecond.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let kdl = format!(
+            "version 2\nmission \"planned/card\" state=\"ready\" {{\n  goal \"Inspect the release.\"\n  step {step:?} {{ goal \"Inspect the release input.\" }}\n}}\n"
+        );
+        let (status, submitted) = json_request(
+            app.clone(),
+            &format!("/v1/launches/{encoded}/variants/{variant}/submit"),
+            serde_json::to_value(PlanningCandidateSubmitRequest {
+                actor: planner.clone(),
+                markdown: format!("# {variant}\n").into_bytes(),
+                kdl: kdl.into_bytes(),
+                idempotency_key: key.into(),
+            })
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{submitted}");
+        let (status, previewed) = json_request(
+            app.clone(),
+            &format!("/v1/launches/{encoded}/variants/{variant}/preview"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{previewed}");
+    };
+    submit("alpha", "survey", "card-alpha").await;
+    let launch = card(&store);
+    assert_eq!(launch["variant"], "alpha", "{launch}");
+    assert_eq!(launch["steps"][0]["path"], "survey");
+    submit("default", "recheck", "card-default-2").await;
+    let launch = card(&store);
+    assert_eq!(launch["variant"], "default", "{launch}");
+    assert_eq!(launch["steps"][0]["path"], "recheck");
 }
 
 #[test]
