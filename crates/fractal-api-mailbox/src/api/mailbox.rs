@@ -1583,7 +1583,7 @@ mod tests {
     /// No launch witness is synthesized: this exercises exact-lease continuity.
     fn admitted_title_fixture(state: &mut AppState, subject: &str) -> (AdmittedPtyFixture, Fence, Fence, NativeDeliveryPeer) {
         let name = subject.strip_prefix("agent/").unwrap();
-        let intent = crate::graph::parse_intent(
+        let intent = crate::graph::parse_test_intent(
             &format!("version 2\nagent {name:?} {{ host \"node\"; workspace \"/tmp\"; harness \"claude\" {{}} }}"),
             "node",
         ).unwrap();
@@ -1786,6 +1786,13 @@ mod tests {
         let state=crate::api::tests_shared::state(root.path());
         crate::store::mailbox_tests::ready(&state.store,"current");
         let subject="agent/eval.worker";
+        state.store.apply_internal(
+            &crate::graph::parse_test_intent(
+                "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; harness \"claude\" {} }\n",
+                "node",
+            ).unwrap(),
+            "declare-protected-claude-seat",
+        ).unwrap();
         let dir = crate::hooks::claude_agent_dir(&state.state_dir.join("drivers"), subject, &state.node);
         fractal_drivers::harness_events::enable(&dir, "current").unwrap();
         let sequence = fractal_drivers::harness_state::claim(&dir, "eval.worker", "claude", "protected-fixture").unwrap();
@@ -3611,7 +3618,7 @@ mod tests {
             let dir = authority::source_agent_dir(&state, &request);
             harness_events::enable(&dir, "current").unwrap();
             let sequence = harness_state::claim(&dir, "eval.worker", "omp", "report-lock").unwrap();
-            let peer = NativeDeliveryPeer { peer_process: None, agent: request.subject.clone(), transport: "omp-channel",
+            let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent: request.subject.clone(), transport: "omp-channel",
                 pid: std::process::id(), archives_inbox: true };
             let owner = crate::mailbox::Authority { provider: "omp".into(), session: "report-lock".into(),
                 sequence, pid: peer.pid, process_token: fractal_runtime::process_start_token(peer.pid).unwrap() };
@@ -3765,7 +3772,7 @@ mod tests {
         harness_events::enable(&agent_dir, "current").unwrap();
         let sequence = harness_state::claim(&agent_dir, name, "omp", "report-session").unwrap();
         let raw = harness_events::read_runtime_state(&agent_dir, "current").unwrap().unwrap();
-        let peer = NativeDeliveryPeer { peer_process: None, agent: subject.clone(), transport: "omp-channel",
+        let peer = NativeDeliveryPeer { peer_process: fixture_direct_peer_process(std::process::id()), agent: subject.clone(), transport: "omp-channel",
             pid: std::process::id(), archives_inbox: true };
         // An explicitly already-admitted fixture lease isolates report consumption.
         // This is not a physical bind/launch authentication certificate.

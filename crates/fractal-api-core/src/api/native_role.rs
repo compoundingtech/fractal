@@ -10,6 +10,14 @@ fn refused(reason: impl Into<String>) -> St3Error {
     St3Error::new("native-role-refused", reason)
 }
 
+fn claude_role_error(error: anyhow::Error) -> St3Error {
+    if claude_process::failure_kind(&error) == Some(claude_process::FailureKind::Unavailable) {
+        St3Error::new("native-role-unavailable", claude_process::diagnostic(&error))
+    } else {
+        St3Error::new("stale-mailbox-session", claude_process::diagnostic(&error))
+    }
+}
+
 fn provider_source(dir: &std::path::Path) -> Result<Option<(String, Vec<u8>)>, St3Error> {
     fractal_drivers::harness_events::read_bound_provider_state(dir).map_err(|error| {
         let absent = error.chain().any(|cause| {
@@ -109,7 +117,7 @@ impl ProcessRoleProof {
         self.kernel.validate().map_err(|error| refused(format!("admitted connector kernel generation ended: {error:#}")))?;
         match &self.witness {
             Some(ProcessWitness::Native(witness)) => witness.revalidate().map_err(internal),
-            Some(ProcessWitness::Claude(witness)) => witness.revalidate().map_err(internal),
+            Some(ProcessWitness::Claude(witness)) => witness.revalidate().map_err(claude_role_error),
             None => require_absent_witness(&self.dir, if self.claude { "claude" } else { "native" }),
         }
     }
@@ -137,11 +145,11 @@ pub fn capture_admitted_process_role(
         claude_process::recorded(&dir)
     } else { native_connector::recorded(&dir) }.map_err(internal)?;
     let witness = if !recorded { None } else if owner.provider == "claude" {
-        let wrapper = claude_process::wrapper(&dir).map_err(internal)?;
+        let wrapper = claude_process::wrapper(&dir).map_err(claude_role_error)?;
         Some(ProcessWitness::Claude(claude_process::capture(
             &dir, &owner.session, owner.sequence, peer.pid, wrapper,
             if peer.archives_inbox { claude_process::Caller::Wrapper } else { claude_process::Caller::Channel },
-        ).map_err(internal)?))
+        ).map_err(claude_role_error)?))
     } else {
         let wrapper = native_connector::wrapper(&dir).map_err(internal)?;
         // Codex's pre-provider mailbox uses a sequence-zero capability; its launch witness
@@ -201,7 +209,7 @@ impl Proof {
         self.peer.require_kernel()?;
         match &self.custody {
             Custody::Native(witness) => witness.revalidate().map_err(internal),
-            Custody::Claude(witness) => witness.revalidate().map_err(internal),
+            Custody::Claude(witness) => witness.revalidate().map_err(claude_role_error),
             Custody::Retained { owner, .. } => require_absent_witness(
                 &source_agent_dir(&self.state, &self.fence), &owner.provider,
             ),
@@ -313,7 +321,9 @@ fn physical_selection(state: &AppState, fence: &Fence, provider: &str) -> Result
     let dir = source_agent_dir(state, fence);
     let recorded = if provider == "claude" { claude_process::recorded(&dir) } else { native_connector::recorded(&dir) }.map_err(internal)?;
     let recorded_wrapper = if bound && recorded {
-        Some(if provider == "claude" { claude_process::wrapper(&dir) } else { native_connector::wrapper(&dir) }.map_err(internal)?)
+        Some(if provider == "claude" {
+            claude_process::wrapper(&dir).map_err(claude_role_error)?
+        } else { native_connector::wrapper(&dir).map_err(internal)? })
     } else { None };
     let wrapper = select_wrapper(terminal, recorded_wrapper, bound)?;
     Ok((physical, daemon, terminal, wrapper, bound))
@@ -381,7 +391,7 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
             Custody::Claude(claude_process::capture(
                 &dir, &session, sequence, peer.pid, wrapper,
                 if peer.archives_inbox { claude_process::Caller::Wrapper } else { claude_process::Caller::Channel },
-            ).map_err(internal)?)
+            ).map_err(claude_role_error)?)
         } else {
             let (session, sequence) = match identity {
                 Some(identity) => identity,
