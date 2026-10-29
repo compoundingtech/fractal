@@ -172,6 +172,7 @@ pub async fn wait_published_lists_at_least(store: &Store, cut: u64) -> anyhow::R
 
 /// Start the refreshers of the missions and work lists, as the daemon starts.
 pub fn start_published_lists(state: &AppState) {
+    super::mailbox_metrics::start(&state.store);
     client_v0::published_runtimes::register_metrics(&state.store);
     spawn(
         state.store.clone(),
