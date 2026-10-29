@@ -11447,8 +11447,10 @@ impl<R: RuntimeControl> Reconciler<R> {
         };
         let timed_out = deadline.is_some_and(|deadline| now_ms() >= deadline);
         // A loop waiting on a blocked child or a person changes nothing a pass would notice
-        // when its timeout passes, so the run is due again then.
-        if let Some(deadline) = deadline {
+        // when its timeout passes, so the run is due again then. A deadline already passed is
+        // not noted: the loop ends below, and a due time in the past would make every pass
+        // evaluate the run again while it stays exhausted.
+        if let Some(deadline) = deadline.filter(|_| !timed_out) {
             smallclaims::touched::note_due(deadline);
         }
         if timed_out {
@@ -32998,6 +33000,18 @@ mission "timed-clock" state="ready" {
                 .unwrap()
         });
         assert_eq!(due, Some(started + 3_600_000), "the loop is due when its timeout passes");
+        // Once the timeout has passed the loop ends, and notes no due time in the past.
+        smallclaims::store::set_thread_clock(Some(started + 3_600_000));
+        store.set_write_clock_at(started + 3_600_000).unwrap();
+        let (_, due) = smallclaims::touched::record_due(|| {
+            reconciler
+                .evaluate_loop_step(&run, step, view, loop_spec)
+                .unwrap()
+        });
+        assert!(
+            due.is_none_or(|due| due > started + 3_600_000),
+            "a passed loop timeout is not a due time: {due:?}"
+        );
     }
 
     #[test]
