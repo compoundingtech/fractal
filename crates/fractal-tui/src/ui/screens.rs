@@ -1315,6 +1315,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             seat,
             text: prompt,
             answers,
+            call,
             ..
         } => {
             card.line(Line::from(vec![
@@ -1324,10 +1325,17 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             card.blank();
             card.lines(text::markdown(&spaced(prompt), inner, theme::text()));
             card.blank();
-            if answers.is_empty() {
+            // A gated answer (allow, approve, answer) goes only beside the call st names.
+            let unnamed = call.is_none()
+                && answers.iter().any(|answer| matches!(answer.as_str(), "allow" | "approve" | "answer"));
+            if answers.is_empty() || unnamed {
                 card.wrap(
                     &text::inline(
-                        "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered.",
+                        if answers.is_empty() {
+                            "Answer it in the seat's terminal (Ctrl+]). This clears when the prompt is gone, however it was answered."
+                        } else {
+                            "Fractal does not say which call this asks about: answer it in the seat's terminal (Ctrl+]), or deny it from its conversation. This clears when the prompt is gone, however it was answered."
+                        },
                         theme::dim(),
                     ),
                     inner,

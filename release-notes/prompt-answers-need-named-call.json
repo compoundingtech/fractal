@@ -4,7 +4,7 @@
   "replay": {"status": "none", "detail": "No claims, projections or replay behavior changed."},
   "schema": {"status": "none", "detail": "No persistent schema change."},
   "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
-  "compatibility": {"status": "changed", "detail": "No server, wire or schema change. Clients stop offering allow, approve or answer for a native prompt that names no call, even beside one waiting call, and show 'Fractal does not say which call this asks about: answer it in the terminal (Ctrl+]) or open it in Inbox'. A current daemon names the call on every native prompt. Against an older daemon that does not, those buttons disappear; deny and answering in the terminal still work."},
+  "compatibility": {"status": "changed", "detail": "No server, wire or schema change. Clients stop offering allow, approve or answer for a native prompt that names no call, even beside one waiting call, and show 'Fractal does not say which call this asks about: answer it in the terminal (Ctrl+]) or open it in Inbox'. A current daemon names the call on every native prompt. Against an older daemon that does not, those buttons disappear; deny and answering in the terminal still work. The terminal UI also refuses allow, approve and answer at dispatch for such a prompt, so no path sends them, and its Inbox card sends the reader to the terminal."},
   "downtime": {"status": "none", "detail": "Normal restart on deploy."},
   "manual": {"status": "none", "detail": "Nothing to configure."},
   "recovery": {"status": "none", "detail": "Reverting restores the buttons beside a lone waiting call; no state migration is needed."}

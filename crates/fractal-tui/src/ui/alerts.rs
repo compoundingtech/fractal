@@ -696,6 +696,13 @@ impl Ui {
             return;
         };
         let effect = match &item.kind {
+            // St names no call: only deny goes from here, whatever asked for more.
+            AttentionKind::Prompt { call: None, .. }
+                if matches!(answer, "allow" | "approve" | "answer") =>
+            {
+                self.flash("Fractal does not say which call this asks about: answer it in the terminal (Ctrl+])");
+                return;
+            }
             AttentionKind::Prompt { seat_id, call, .. }
                 if item.actions.iter().any(|a| a == "prompt.respond") =>
             {
@@ -1008,6 +1015,55 @@ mod tests {
             [Effect::Attention { id, action, answer: Some(answer), .. }]
                 if id == "attention/one" && action == "prompt.respond" && answer == "deny"
         ));
+    }
+
+    /// A tap that reaches a prompt naming no call sends nothing but deny, even beside a lone
+    /// waiting call: the band does not offer the rest, and dispatch refuses them too.
+    #[test]
+    fn a_prompt_that_names_no_call_sends_only_deny() {
+        for offered in [&["allow", "deny"][..], &["approve", "deny"], &["answer", "deny"]] {
+            let mut ui = with_alerts(vec![prompt("attention/one", offered)]);
+            ui.live = true;
+            waiting(&mut ui, vec![bash("rm -rf build/cache")]);
+            ui.click(Hit::Alert(
+                "attention/one".into(),
+                AlertTap::Answer(offered[0].into()),
+            ));
+            assert!(ui.effects.is_empty(), "{offered:?}: {:?}", ui.effects);
+            ui.click(Hit::Alert(
+                "attention/one".into(),
+                AlertTap::Answer("deny".into()),
+            ));
+            assert!(matches!(
+                ui.effects.as_slice(),
+                [Effect::Attention { action, answer: Some(answer), .. }]
+                    if action == "prompt.respond" && answer == "deny"
+            ), "{offered:?}: {:?}", ui.effects);
+        }
+    }
+
+    /// Inbox points at the conversation's pending call only for a prompt that names one; one that
+    /// names none is sent to the terminal, and a screen prompt keeps its own answers' words.
+    #[test]
+    fn inbox_sends_a_prompt_that_names_no_call_to_the_terminal() {
+        let shown = |item: Attention| {
+            let id = item.id.clone();
+            let mut world = demo::test_world();
+            world.attention = Load::Ready(vec![item]);
+            let drafts = screens::Drafts {
+                text: None, cursor: 0, editing: false, confirm: None,
+                answering: None, needs_words: None, chat: None,
+            };
+            screens::home_detail(&world, Some(&id), 120, &drafts)
+                .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n")
+        };
+        let unnamed = shown(prompt("attention/one", &["allow", "deny"]));
+        assert!(unnamed.contains("Fractal does not say which call this asks about"), "{unnamed}");
+        assert!(!unnamed.contains("pending one in the seat's conversation"), "{unnamed}");
+        let named = shown(naming(prompt("attention/one", &["allow", "deny"]), "call-Bash"));
+        assert!(named.contains("pending one in the seat's conversation"), "{named}");
+        let screen = shown(prompt("attention/one", &["trust", "exit"]));
+        assert!(!screen.contains("Fractal does not say which call"), "{screen}");
     }
 
     /// A harness question is answered here: each question with its options, chosen with a tap
