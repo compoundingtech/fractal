@@ -445,6 +445,10 @@ impl Store {
         let _completion = super::checkpoint_completion::Completion::outer();
         let staged = self.checkpoint_staged_set(cut, None, &context.scratch)?;
         staged.protect_all_but(LOCAL_TRIM_KINDS)?;
+        // The in-memory reference planner tests builds compare with knows no kind restriction.
+        #[cfg(any(test, feature = "test-support"))]
+        let plan = super::checkpoint_staging::without_reference_plan(|| self.plan_staged_checkpoint(&staged))?;
+        #[cfg(not(any(test, feature = "test-support")))]
         let plan = self.plan_staged_checkpoint(&staged)?;
         {
             let mut fault = self.trim_fault.lock().unwrap_or_else(PoisonError::into_inner);
