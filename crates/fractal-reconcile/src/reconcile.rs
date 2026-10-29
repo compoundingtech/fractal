@@ -123,6 +123,21 @@ const CODEX_CRASH_LOOP_INTERVAL_MS: u128 = 5 * 60_000;
 const CLAUDE_TRUST_SCREEN_RECHECK_MS: u128 = 2_000;
 const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
+
+/// While a seat has reached Claude's trust prompt more than [`CLAUDE_TRUST_RECOVERY_ATTEMPTS`]
+/// times within [`CLAUDE_TRUST_RECOVERY_WINDOW_MS`], recovery holds back; this is when enough of
+/// those prompts leave the window for it to resume. `None` while recovery may run.
+fn claude_trust_recovery_resumes_at(prompts: &[crate::model::ClaimRecord], now: u128) -> Option<u128> {
+    let mut recent = prompts
+        .iter()
+        .map(|claim| claim.accepted_at_unix_ms)
+        .filter(|at| now.saturating_sub(*at) < CLAUDE_TRUST_RECOVERY_WINDOW_MS)
+        .collect::<Vec<_>>();
+    recent.sort_unstable_by(|a, b| b.cmp(a));
+    recent
+        .get(CLAUDE_TRUST_RECOVERY_ATTEMPTS)
+        .map(|at| at.saturating_add(CLAUDE_TRUST_RECOVERY_WINDOW_MS))
+}
 // A failed checkout fetch or worktree command waits this long before Git runs again.
 const CHECKOUT_RETRY_MS: u128 = 30_000;
 /// How long a member's launch evidence, read once, is trusted before it is read again.
@@ -3685,7 +3700,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 crate::incremental::thread_cpu().saturating_sub(cpu_started),
             );
             if !needed {
-                let wrote = smallclaims::touched::wrote_since(wrote_mark);
+                let wrote = self.missed_by_skipping(&item, wrote_mark, due);
                 if !wrote.is_empty() {
                     self.incremental_correction("member", &item, &reads, &wrote);
                 }
@@ -4632,15 +4647,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|prompt| prompt.kind != "plan");
         let shown = match shown {
             Some(prompt) if driver == "claude" && prompt.kind == "trust" => {
-                let recent = self
-                    .claude_trust_prompts(&subject.subject)?
-                    .iter()
-                    .filter(|claim| {
-                        now.saturating_sub(claim.accepted_at_unix_ms)
-                            < CLAUDE_TRUST_RECOVERY_WINDOW_MS
-                    })
-                    .count();
-                (recent > CLAUDE_TRUST_RECOVERY_ATTEMPTS).then_some(prompt)
+                let resumes_at =
+                    claude_trust_recovery_resumes_at(&self.claude_trust_prompts(&subject.subject)?, now);
+                if let Some(at) = resumes_at {
+                    smallclaims::touched::note_due(at);
+                }
+                resumes_at.map(|_| prompt)
             }
             shown => shown,
         };
@@ -5371,7 +5383,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 now.saturating_sub(claim.accepted_at_unix_ms) < CLAUDE_TRUST_RECOVERY_WINDOW_MS
             })
             .count();
-        if recent > CLAUDE_TRUST_RECOVERY_ATTEMPTS {
+        if let Some(resumes_at) = claude_trust_recovery_resumes_at(&prompts, now) {
+            // A seat left at the dialog changes nothing a pass would notice, so the member is
+            // due again when recovery may resume.
+            smallclaims::touched::note_due(resumes_at);
             let key = format!(
                 "claude-trust-prompt-repeated:{}:{incarnation}",
                 subject.subject
@@ -5680,7 +5695,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction(section, item, &reads, &wrote);
             }
@@ -6235,7 +6250,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
@@ -10040,7 +10055,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(&subject, wrote_mark, due);
             // Rows that are not claims or observations (caches, capabilities) change no
             // graph state a later pass would have to catch up with.
             if !wrote.is_empty() {
@@ -10122,8 +10137,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// An evaluation of `subject` wrote although nothing it read had changed and nothing was due:
-    /// an incremental pass would have missed this write. Counted, and in tests a failure.
+    /// What an evaluation of `item` that nothing marked and nothing made due did, which an
+    /// incremental pass would have missed: the claims it wrote since `wrote_mark`, and a due time
+    /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
+    /// limit it found, which no skipping pass would have woken for.
+    fn missed_by_skipping(&self, item: &str, wrote_mark: usize, due: Option<u128>) -> Vec<String> {
+        let mut missed = smallclaims::touched::wrote_since(wrote_mark);
+        if let Some(due) = due
+            && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
+        {
+            missed.push(format!("due {item} at {due}"));
+        }
+        missed
+    }
+
+    /// An evaluation of `subject` wrote or found an earlier due time although nothing it read
+    /// had changed and nothing was due: an incremental pass would have missed it. Counted by
+    /// cause (`write` or `due`), and in tests a failure.
     fn incremental_correction(
         &self,
         item: &str,
@@ -10131,15 +10161,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         reads: &BTreeSet<String>,
         wrote: &[String],
     ) {
-        crate::performance::record_correction(item);
+        let causes = wrote
+            .iter()
+            .map(|entry| if entry.starts_with("due ") { "due" } else { "write" })
+            .collect::<BTreeSet<_>>();
+        for cause in causes {
+            crate::performance::record_correction(&format!("{item} · {cause}"));
+        }
         smallclaims::profile::note("reconcile incremental correction");
         eprintln!(
-            "st3: incremental correction: {subject} wrote {wrote:?} with no change among {} reads",
+            "st3: incremental correction: {subject} missed {wrote:?} with no change among {} reads",
             reads.len()
         );
         assert!(
             !self.strict_incremental,
-            "an incremental pass would have missed a write by {subject}: it wrote {wrote:?}; its reads: {reads:?}"
+            "an incremental pass would have missed a write or due time by {subject}: {wrote:?}; its reads: {reads:?}"
         );
     }
 
@@ -40329,6 +40365,9 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
 
         // Member A: the first poll records the baseline, which wakes nobody.
         let (issues, comments) = since("2026-09-09T23:59:59Z");
+        // Resuming from the claim's bare position, a poll also reads the open listing once.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100",
+            serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&issues, serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&comments, serde_json::json!([]));
         let member_a = Arc::new(github_plugin_store::GithubPluginStore::memory());
@@ -40342,8 +40381,8 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         let before = vec![delivery("comments", "open", 91), delivery("issues", "open", 91)];
         assert_eq!(delivered(), before);
 
-        // In the gap the issue closes and a second comment lands. Nothing reads the open listing
-        // any more, so it would not show the closure.
+        // In the gap the issue closes and a second comment lands. The open listing no longer
+        // names it, so only reading on from the claim's position shows the closure.
         let (issues, comments) = since("2026-09-10T23:59:59Z");
         github.route("/repos/acme/garden/issues?state=open&per_page=100", serde_json::json!([]));
         github.route(&issues, serde_json::json!([issue("closed", "2026-09-12T00:00:00Z", 2)]));
@@ -43765,6 +43804,19 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             "Claude keeps stopping at its workspace trust prompt"
         );
         assert_eq!(attention[0].targets, ["agent/node.seat"]);
+        // Nothing changes while the seat sits at the dialog, so the member is due again when
+        // the oldest prompt that holds recovery back leaves the window.
+        let mut prompts = reconciler
+            .claude_trust_prompts("agent/node.seat")
+            .unwrap()
+            .iter()
+            .map(|claim| claim.accepted_at_unix_ms)
+            .collect::<Vec<_>>();
+        prompts.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(
+            reconciler.incremental.next_due("member:agent/node.seat"),
+            Some(prompts[CLAUDE_TRUST_RECOVERY_ATTEMPTS] + CLAUDE_TRUST_RECOVERY_WINDOW_MS)
+        );
     }
 
     fn harness_claim(subject: &str, state: &str, incarnation: &str) -> ClaimInput {
