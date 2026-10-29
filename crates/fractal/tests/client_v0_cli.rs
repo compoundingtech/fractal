@@ -379,6 +379,16 @@ async fn run_cli_with_agent_env(socket: &Path, agent: &str, args: &[&str]) -> Ou
     .unwrap()
 }
 
+/// Human detail output with each `UPDATED` age blanked. Two CLI runs render that age against
+/// their own clocks, so it can read `now` in one and `1s ago` in the next.
+fn without_ages(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| if line.starts_with("UPDATED ") { "UPDATED" } else { line })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn value(output: &Output) -> Value {
     assert!(
         output.status.success(),
@@ -4730,7 +4740,7 @@ mission "orchid-actor" state="ready" {
                         assert_eq!(returned, plain_json);
                     }
                 } else {
-                    assert_eq!(output.stdout, plain_human.stdout);
+                    assert_eq!(without_ages(&output.stdout), without_ages(&plain_human.stdout));
                 }
             }
         }
