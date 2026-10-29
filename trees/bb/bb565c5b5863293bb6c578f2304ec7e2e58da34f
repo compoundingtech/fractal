@@ -1,2 +1,3 @@
 record 9c1c7df8a4bd68a22fda1627e67bf354819ae6aa genie-freshness 0 host/spindle 2026-10-29T00:04:31Z
 record cc0377af7069d5aa73f5e84dc91e34bb2d01f370 ci-script-tests 0 host/spindle 2026-10-29T00:08:01Z
+record 9b0b75b64ffe8950a4f77a5fb42ed2e0d4029837 linux-gate 100 host/spindle 2026-10-29T00:50:15Z
