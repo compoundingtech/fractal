@@ -477,14 +477,11 @@ impl PtyRuntime {
         // A lane's variables are the harness's own, forwarded by name like the seat's, not left to
         // what the PTY server happens to inherit from the launcher.
         if let Some(lane) = &lane {
-            let value = |key: &str| {
-                terminal_env
-                    .get(key)
-                    .or_else(|| self.command_environment.as_ref()?.get(key))
-                    .cloned()
-                    .or_else(|| std::env::var(key).ok())
+            let host = |key: &str| match &self.command_environment {
+                Some(base) => base.get(key).cloned(),
+                None => std::env::var(key).ok(),
             };
-            let added = crate::lane::environment(lane, value);
+            let added = crate::lane::environment(lane, |key| terminal_env.get(key).cloned(), host);
             terminal_env.extend(added.into_iter().map(|(key, value)| (key.to_owned(), value)));
         }
         // Name-only `--env`: the pty launcher resolves each name against its

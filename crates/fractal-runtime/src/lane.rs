@@ -379,20 +379,28 @@ pub(crate) fn forget_for_test(runtime_id: &str) {
 /// test runner on the build hosts run in place under `BUILDS_SLICE_ACTIVE` instead of moving into
 /// `builds.slice` (`scripts/st-test` reads its own cgroup's limits instead). The host's sccache
 /// server compiles in `builds.slice`, so a lane names a server socket of its own and the client
-/// starts that server inside the lane, on the same on-disk cache; a seat that names its own sccache
-/// server keeps it. `FRACTAL_LANE_SLICE` names the slice, for a job the seat starts as its own unit
-/// there (`systemd-run --user --slice=...`) so that it outlives a restart of the harness.
+/// starts that server inside the lane, on the same on-disk cache. A seat that names its own sccache
+/// server keeps it; one it only inherited from the daemon (`seat` holds the daemon's own value) does
+/// not count, since that is the host's server. The lane's socket is the client's first choice
+/// either way: sccache reads `SCCACHE_SERVER_UDS` before `SCCACHE_SERVER_PORT`.
+/// `FRACTAL_LANE_SLICE` names the slice, for a job the seat starts as its own unit there
+/// (`systemd-run --user --slice=...`) so that it outlives a restart of the harness. `seat` reads the
+/// task's environment and `host` the daemon's.
 pub(crate) fn environment(
     lane: &Lane,
-    environment: impl Fn(&str) -> Option<String>,
+    seat: impl Fn(&str) -> Option<String>,
+    host: impl Fn(&str) -> Option<String>,
 ) -> Vec<(&'static str, String)> {
     let mut added = vec![
         ("BUILDS_SLICE_ACTIVE", "1".to_owned()),
         ("FRACTAL_LANE_SLICE", lane.slice.clone()),
     ];
-    if environment("SCCACHE_SERVER_UDS").is_none()
-        && environment("SCCACHE_SERVER_PORT").is_none()
-        && let Some(runtime) = environment("XDG_RUNTIME_DIR").filter(|dir| !dir.is_empty())
+    let named = |key: &str| seat(key).filter(|value| host(key).as_ref() != Some(value));
+    if named("SCCACHE_SERVER_UDS").is_none()
+        && named("SCCACHE_SERVER_PORT").is_none()
+        && let Some(runtime) = seat("XDG_RUNTIME_DIR")
+            .or_else(|| host("XDG_RUNTIME_DIR"))
+            .filter(|dir| !dir.is_empty())
     {
         // A slice name can be longer than a socket path may be, so the socket is named by its digest.
         added.push((
@@ -492,18 +500,31 @@ mod tests {
     #[test]
     fn builds_stay_in_the_lane_and_a_declared_sccache_server_is_kept() {
         let runtime = |key: &str| (key == "XDG_RUNTIME_DIR").then(|| "/run/user/1000".to_owned());
+        let nothing = |_: &str| None;
         let lane = Lane { slice: seat_slice("fleet.example.a-very-long-seat-name") };
-        let added = environment(&lane, runtime);
+        let added = environment(&lane, runtime, nothing);
         assert_eq!(added[0], ("BUILDS_SLICE_ACTIVE", "1".to_owned()));
         assert_eq!(added[1], ("FRACTAL_LANE_SLICE", lane.slice.clone()));
         let (key, socket) = &added[2];
         assert_eq!(*key, "SCCACHE_SERVER_UDS");
         assert!(socket.starts_with("/run/user/1000/sccache-lane-") && socket.len() < 108);
-        assert_eq!(environment(&lane, runtime)[2], added[2], "a restart reuses the seat's server");
+        assert_eq!(environment(&lane, runtime, nothing)[2], added[2], "a restart reuses the seat's server");
+        assert_eq!(environment(&lane, nothing, runtime)[2], added[2], "the daemon's runtime directory serves too");
         let other = Lane { slice: seat_slice("fleet.example.other") };
-        assert_ne!(environment(&other, runtime)[2], added[2]);
+        assert_ne!(environment(&other, runtime, nothing)[2], added[2]);
 
-        let own = |key: &str| (key == "SCCACHE_SERVER_UDS").then(|| "/elsewhere.sock".to_owned());
-        assert_eq!(environment(&lane, own).len(), 2);
+        let server = |value: &'static str| {
+            move |key: &str| match key {
+                "XDG_RUNTIME_DIR" => Some("/run/user/1000".to_owned()),
+                "SCCACHE_SERVER_UDS" => Some(value.to_owned()),
+                _ => None,
+            }
+        };
+        assert_eq!(environment(&lane, server("/elsewhere.sock"), nothing).len(), 2, "the seat's own server");
+        // The host's server, only inherited from the daemon, compiles outside the lane.
+        assert_eq!(environment(&lane, server("/host.sock"), server("/host.sock"))[2], added[2]);
+        assert_eq!(environment(&lane, server("/elsewhere.sock"), server("/host.sock")).len(), 2);
+        let port = |key: &str| (key == "SCCACHE_SERVER_PORT").then(|| "4226".to_owned());
+        assert_eq!(environment(&lane, |key| runtime(key).or_else(|| port(key)), port)[2], added[2]);
     }
 }

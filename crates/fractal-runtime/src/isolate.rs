@@ -218,11 +218,8 @@ fn wrap_for_mode(
             }
             if let Some(lane) = lane {
                 command.args(lane.scope_arguments());
-                let value = |key: &str| match environment {
-                    Some(environment) => environment.get(key).cloned(),
-                    None => std::env::var(key).ok(),
-                };
-                command.envs(crate::lane::environment(lane, value));
+                let seat = |key: &str| environment?.get(key).cloned();
+                command.envs(crate::lane::environment(lane, seat, |key| std::env::var(key).ok()));
             }
             instance_scope_environment(&mut command, environment);
             command.arg("--").arg(program).args(arguments);
