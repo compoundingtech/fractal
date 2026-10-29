@@ -48,7 +48,9 @@ starts as a unit of its own in the slice: the harness's environment names it in
 runs it inside the seat's cap and beside, not inside, the harness's scope. The slice ends, and every
 job in it with it, when the seat stops for good: the reconciler ends it when a stop completes and the
 seat's declaration is an explicit stop or gone. A stop for a restart of a live declaration keeps it.
-Ending a lane also removes the slice's runtime limits (`systemctl --user revert`).
+Ending a lane also removes the slice's runtime limits (`systemctl --user revert`). A seat whose lane
+was prepared before a daemon restart is found by its slice in the cgroup tree, so its lane still
+ends; a seat without a lane costs that one look and nothing else.
 
 There is no `MemoryHigh`. Measured on a build host (systemd 259): with `MemoryHigh` at 90% a child
 asking for twice the lane sat in `mem_cgroup_handle_over_high` indefinitely (lane memory pressure

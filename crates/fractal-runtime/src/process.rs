@@ -1254,9 +1254,11 @@ mod tests {
         assert!(matches!(runtime.observe(&id).unwrap(), Some(ExecObservation::Running(_))));
         assert_eq!(systemctl_show(&job, "ActiveState"), "active", "a stale end left the lane's job");
 
-        // Stopped for good: the lane ends, its job with it, and its limits are gone.
+        // Stopped for good after a daemon restart, which forgets what the old process prepared:
+        // the lane still ends, its job with it, and its limits are gone.
         runtime.stop_if(&id, Some(&relaunched.generation_id)).unwrap();
         wait_for_exit(&runtime, &id);
+        crate::lane::forget_for_test(&id);
         crate::lane::end(&id);
         wait_until("the lane's job outlived the lane", || systemctl_show(&job, "ActiveState") != "active");
         wait_until("the lane outlived its end", || !slice.exists());

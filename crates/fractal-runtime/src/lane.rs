@@ -266,11 +266,11 @@ pub(crate) fn prepare(capacity: Option<Capacity>, runtime_id: &str) -> Result<Op
     }
 }
 
-/// Ends the lane of `runtime_id`, when this process prepared one: everything still running in its
-/// slice, the jobs the seat started included, then the slice's limits. In the background, since the
-/// units in it get their own stop timeouts. For a seat that stopped for good; a restart keeps its
-/// lane, and a launch prepared after this call cancels it, so a seat started again at once keeps
-/// its new lane. A seat without a lane does nothing here.
+/// Ends the lane of `runtime_id`, when it has one: everything still running in its slice, the jobs
+/// the seat started included, then the slice's limits. In the background, since the units in it
+/// get their own stop timeouts. For a seat that stopped for good; a restart keeps its lane, and a
+/// launch prepared after this call cancels it, so a seat started again at once keeps its new lane.
+/// A seat without a lane does nothing here beyond one look for its slice in the cgroup tree.
 pub fn end(runtime_id: &str) {
     let slice = seat_slice(runtime_id);
     if !request_end(&slice) {
@@ -279,18 +279,35 @@ pub fn end(runtime_id: &str) {
     crate::isolate::end_later(format!("lane:{slice}"), move || end_requested(&slice));
 }
 
-/// Marks the end of `slice`'s lane as asked. False when this process prepared no lane there: a
-/// seat without a lane has nothing to end.
+/// Marks the end of `slice`'s lane as asked. False when the seat has no lane: this process
+/// prepared none there, and no slice of that name is left from before it started (a lane prepared
+/// before a daemon restart keeps running, its slot gone with the old process).
 fn request_end(slice: &str) -> bool {
-    let Some(slot) = slots().get(slice).cloned() else {
-        return false;
-    };
-    let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if slot.removed {
+    if !slots().contains_key(slice) && !slice_cgroup(slice).is_some_and(|cgroup| cgroup.is_dir()) {
         return false;
     }
-    slot.end_at = Some(slot.launches);
-    true
+    loop {
+        let slot = slots().entry(slice.to_owned()).or_default().clone();
+        let mut slot = slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if slot.removed {
+            continue;
+        }
+        slot.end_at = Some(slot.launches);
+        return true;
+    }
+}
+
+/// Where `slice` sits in the cgroup tree: under `app-lanes.slice` of the user manager this process
+/// runs in.
+fn slice_cgroup(slice: &str) -> Option<std::path::PathBuf> {
+    let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
+    let parts: Vec<&str> = own.split('/').filter(|part| !part.is_empty()).collect();
+    let manager = parts.iter().position(|part| part.starts_with("user@") && part.ends_with(".service"))?;
+    let mut path = std::path::PathBuf::from("/sys/fs/cgroup");
+    path.extend(&parts[..=manager]);
+    path.extend(["app.slice", LANES_SLICE, slice]);
+    Some(path)
 }
 
 /// Ends `slice` if its last end request still stands: no launch was prepared after it. Its slot
@@ -350,6 +367,12 @@ pub(crate) fn request_end_for_test(runtime_id: &str) -> impl FnOnce() -> Result<
 #[cfg(test)]
 pub(crate) fn prepared_for_test(runtime_id: &str) -> bool {
     slots().contains_key(&seat_slice(runtime_id))
+}
+
+/// Drops this process's slot for `runtime_id`'s lane, as a daemon restart does.
+#[cfg(test)]
+pub(crate) fn forget_for_test(runtime_id: &str) {
+    slots().remove(&seat_slice(runtime_id));
 }
 
 /// What a laned task's environment adds so its builds stay in the lane. The cargo shim and the
