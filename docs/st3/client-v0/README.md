@@ -3030,6 +3030,23 @@ as waiting records until upgrade; see [rolling upgrades](../replication.md#rolli
 
 `agent.retire.parameters.successor` optionally names an existing eligible agent. It is recorded in the signed retirement claim after the all-member registry gate. The successor's read and close claims carry `acting_for` and the retirement claim as evidence; `Agent.mail_custody` reports `{ successor, state: "pending" }` for OLD. Numeric unread counts and completion are not available in this increment.
 
+### Optional terminal owner route
+
+`GET /v1/client/terminals/{id}/route` requires `terminal.read`. Its ordinary envelope
+contains `TerminalRoute`: `terminal_id`, `runtime_incarnation`, `owner_host_id`,
+and optional `fabric: { node, service }`. The service is `st3/client/FLEET_ID`.
+The descriptor and envelope snapshot come from one graph read, selecting the current
+runtime owner and its sealed current membership. This read does not dial the owner.
+Absent or ambiguous owner Fabric advertisements omit `fabric`.
+
+A paired client may use this authenticated descriptor to reach the owner's ordinary
+client service. It must keep the terminal subject and incarnation, authenticate with
+the same delegated credential, and obtain that owner's attachment capability and
+snapshot fences. A gateway capability or snapshot does not authorize an owner request.
+The owner independently enforces `terminal.read` and `terminal.control`.
+Older daemons may return not-found for this optional endpoint; the existing gateway
+terminal API remains available with its original fences.
+
 ### Exchange carrier observations
 
 `SyncPeer` may include `last_successful_exchange` and `last_failed_exchange`, each

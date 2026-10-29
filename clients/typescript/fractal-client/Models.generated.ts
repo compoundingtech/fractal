@@ -1516,7 +1516,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | TerminalRoute | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -2987,6 +2987,11 @@ export type TerminalCreateParameters = {
   name: string;
 };
 
+export type TerminalFabricRoute = {
+  node: string;
+  service: string;
+};
+
 export type TerminalFacts = {
   clients?: {
   attached: number;
@@ -3039,6 +3044,13 @@ export type TerminalRelay = {
   rtt_ms: number;
   transport: "fabric" | "http";
   via: Id;
+};
+
+export type TerminalRoute = {
+  fabric?: TerminalFabricRoute;
+  owner_host_id: string;
+  runtime_incarnation: string;
+  terminal_id: TerminalId;
 };
 
 export type TerminalRun = {

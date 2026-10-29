@@ -139,6 +139,8 @@
   "fractal-daemon": {
    "extra": [
     "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
+    "apps/ios/proofs/owner-terminal.mjs",
+    "apps/ios/testHooks.mjs",
     "docs/st3/client-v0/fixtures/timeline-relay-omission.json",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "examples/fractal/custom-review.json",

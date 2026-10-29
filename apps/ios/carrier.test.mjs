@@ -161,6 +161,13 @@ assert.equal(routeLabel({ kind: 'none', fellBack: false, why: '' }), 'Not connec
   state.waits.at(-1).resolve(); await again;
 }
 
+// The fabric-only setting also governs an absent target, before any network attempt.
+{
+  const selected = selectRoute('fabric', false, 'https://gateway.example', { phase: 'off' }, false);
+  assert.equal(selected.baseUrl, null);
+  assert.match(selected.issue, /No fabric target/);
+}
+
 // ---- A foreground that returns inside the memory of a failure is not left failed: fabric is tried again when
 // ---- the memory ends, with no further foreground change (a pulled-down notification, or a quick look at the app switcher).
 {
