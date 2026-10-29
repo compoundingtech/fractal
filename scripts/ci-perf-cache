@@ -13,6 +13,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 
+class IncompatibleSnapshot(ValueError):
+    """A previous archive layout cannot supply this cache generation."""
+
+
 def api(path):
     return json.loads(subprocess.check_output(['gh', 'api', path], text=True))
 
@@ -157,9 +161,14 @@ def restore_sources(checkpoint=None):
 def unpack(archive, destination, names):
     # These are main's own archives, but refuse unexpected roots before extracting.
     listing = subprocess.check_output(['tar', '--zstd', '-tf', str(archive)], text=True)
-    for name in listing.splitlines():
-        path = Path(name)
-        if path.is_absolute() or '..' in path.parts or path.parts[0] not in names:
+    paths = [Path(name) for name in listing.splitlines()]
+    for path in paths:
+        if path.is_absolute() or '..' in path.parts or not path.parts:
+            raise ValueError('unexpected snapshot path')
+    if 'fractal-ci-cache' in names and 'fractal-ci-cache' not in {path.parts[0] for path in paths}:
+        raise IncompatibleSnapshot('snapshot lacks the current cache directory')
+    for path in paths:
+        if path.parts[0] not in names:
             raise ValueError('unexpected snapshot path')
     subprocess.run(['tar', '--zstd', '-xf', str(archive), '-C', str(destination)], check=True)
 
@@ -197,7 +206,11 @@ def restore():
             pending = [(kind, pool.submit(fetch, kind, name)) for kind, name in wanted.items()
                        if kind not in found and name in names]
             for kind, future in pending:
-                extracted, roots, downloaded, unpacked = future.result()
+                try:
+                    extracted, roots, downloaded, unpacked = future.result()
+                except IncompatibleSnapshot:
+                    print(f"Performance {kind} cache MISS: incompatible archive layout in run {run['id']}", flush=True)
+                    continue
                 for root in roots:
                     target = (work if root == 'target' else temp) / root
                     shutil.rmtree(target, ignore_errors=True)

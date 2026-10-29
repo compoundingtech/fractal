@@ -264,6 +264,10 @@ backend) holding Cargo's registry and the workspace `target/` directory, keyed o
 copies reference-free downloads and sources fetched by the run, plus the closures of the
 previous-release messaging package and provider components. It leaves the installer-managed
 `/nix` directory intact. Cache failures emit a warning and let the job build normally.
+Build and performance snapshots lacking the current cache directory are clean cache misses:
+the reader skips them without extracting or installing outputs and builds from dependency caches.
+New signing keys use the name `fractal-ci-cache-1`; restored keys retain their identity, and trust
+is derived from the restored secret rather than a hardcoded signing-name prefix.
 
 Genie uses a separate `nix6-genie-closure-...` entry keyed on its locked shell and cache policy.
 It retains the complete `nix print-dev-env .#genie` profile closure, including upstream-signed

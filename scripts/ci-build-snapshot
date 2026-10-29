@@ -107,9 +107,14 @@ def stream(archive, command):
 
 def unpack(archive, dest):
     names = stream(archive, ['tar', '-tf', '-']).splitlines()
-    for name in names:
-        parts = Path(name).parts
-        if not parts or name.startswith('/') or '..' in parts or parts[0] not in ('target', 'cargo-home', 'fractal-ci-cache', 'cost-stores', 'zig-tool'):
+    paths = [Path(name) for name in names]
+    for name, path in zip(names, paths):
+        if not path.parts or name.startswith('/') or '..' in path.parts:
+            raise ValueError('unexpected snapshot archive path')
+    if 'fractal-ci-cache' not in {path.parts[0] for path in paths}:
+        raise source.IncompatibleSnapshot('snapshot lacks the current cache directory')
+    for path in paths:
+        if path.parts[0] not in ('target', 'cargo-home', 'fractal-ci-cache', 'cost-stores', 'zig-tool'):
             raise ValueError('unexpected snapshot archive path')
     stream(archive, ['tar', '-xf', '-', '-C', str(dest)])
     for name in ('target', 'cargo-home/registry', 'cargo-home/git', 'fractal-ci-cache'):
@@ -142,7 +147,11 @@ def restore():
                 source.download(repo, run, name, dest / 'download')
                 archives = list((dest / 'download').rglob('build.tar.zst'))
                 if len(archives) != 1: raise ValueError('missing build snapshot archive')
-                unpack(archives[0], dest)
+                try:
+                    unpack(archives[0], dest)
+                except source.IncompatibleSnapshot:
+                    summary('Build snapshot skipped: incompatible archive layout; restoring dependency caches.')
+                    continue
                 checkpoint = dest / 'fractal-ci-cache/perf-source-state.json'
                 state = json.loads(checkpoint.read_text())
                 if state['head'] != source.git(work, 'rev-parse', 'HEAD'):
