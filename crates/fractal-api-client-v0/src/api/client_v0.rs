@@ -1124,6 +1124,19 @@ fn sync_said(sync: &Value) -> (String, Vec<String>) {
     (state, peers)
 }
 
+/// The changes frame a delivered window gets when a read finds no row changed but this host's
+/// sync did: no upserts or removes, the window's last snapshot, order and `has_more`, and the new
+/// `sync`. `None` when the sync is what the window last stated, or the window has stated none.
+fn sync_only_changes(subscription: &CollectionSubscription, sync: &Value) -> Option<Value> {
+    let snapshot = subscription.snapshot.as_ref().filter(|_| subscription.delivered)?;
+    if subscription.sync.as_ref() == Some(&sync_said(sync)) {
+        return None;
+    }
+    let request = &subscription.request;
+    Some(json!({"kind":"changes", "id":request.id, "collection":request.collection, "snapshot":snapshot,
+        "upserts":[], "removes":[], "order":subscription.order, "has_more":subscription.has_more, "sync":sync}))
+}
+
 /// Bring one subscription up to date from a fresh read: its snapshot first, then only what
 /// changed. `sync` is this host's replication for a window that states it, with the flags it
 /// was taken at.
@@ -1220,6 +1233,7 @@ async fn deliver_collection(
     if let Some((_, flags)) = sync {
         subscription.sync = said;
         subscription.sync_flags = flags;
+        subscription.snapshot = Some(snapshot);
     }
     subscription.previous = Arc::new(current);
     subscription.order = order;
@@ -1253,7 +1267,23 @@ async fn deliver_ivm_collection(
             if !matches!(result, Refreshed::Current) { subscription.delivered = delivered; }
             result
         }
-        Output::Silent => Refreshed::Current,
+        // No row changed, but this host's sync may have: a window that states it says so.
+        Output::Silent => match sync {
+            Some((sync, flags)) => {
+                let sent = match sync_only_changes(subscription, &sync) {
+                    Some(frame) => send_collection(socket, frame).await,
+                    None => true,
+                };
+                if sent {
+                    subscription.sync = Some(sync_said(&sync));
+                    subscription.sync_flags = flags;
+                    Refreshed::Current
+                } else {
+                    Refreshed::Closed
+                }
+            }
+            None => Refreshed::Current,
+        },
         // Proposed opt-in resync-snapshot contract:
         // docs/st3/client-v0/collection-resync-snapshot-proposal.md. On an IVM
         // journal gap, the replacement authorized window and its continuation
@@ -2176,7 +2206,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                         }
                         refresh.push(request.id.clone());
                         // Collection results and conversation frames share the same generation fence.
-                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, sync: None, sync_flags: (false, false), request });
+                        subscriptions.insert(request.id.clone(), CollectionSubscription { generation, reading: None, dirty: false, delivered: false, previous: Arc::new(BTreeMap::new()), ivm: sources.as_ref().and_then(|sources| sources.adapter(&request.collection)), cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: Some(std::time::Instant::now()), waiting_for_view: false, owner_revision: None, sync: None, sync_flags: (false, false), snapshot: None, request });
 
                     }
                     next = futures_util::FutureExt::now_or_never(socket.recv());
@@ -2421,8 +2451,11 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // paired grant's expiry. Stable rows remain reusable; authority and local
                 // overlays are rechecked on reads.
                 let paired = session.transport != "unix";
+                // A window that states its sync rereads too, read from its view or not: another peer
+                // named, or a measurement grown too old, changes no row.
                 refresh.extend(subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
-                    && (paired && !inventory::is_inventory(&s.request.collection) || collection_follows_clock(&s.request.collection)))
+                    && (paired && !inventory::is_inventory(&s.request.collection) || collection_follows_clock(&s.request.collection))
+                    || s.ivm.is_some() && s.delivered && collection_carries_sync(&s.request.collection))
                     .map(|(id, _)| id.clone()));
             }
             _ = ping_clock.tick() => {
