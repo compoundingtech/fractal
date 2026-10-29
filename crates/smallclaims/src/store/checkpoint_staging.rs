@@ -235,6 +235,7 @@ impl Store {
         dir: &Path,
     ) -> Result<StagedSet> {
         self.runtime.checkpoint_preflight()?;
+        let _span = crate::profile::span_with_io("checkpoint.capture");
         // Admit before lock_staging creates the scratch directory or lock file.
         let space = if self.shared_memory { None } else {
             Some(super::checkpoint_space::SpaceGuard::admit(&self.path, dir, true)?)
@@ -329,6 +330,7 @@ impl Store {
         if let Some(plan) = staged.plan()? {
             return Ok(plan);
         }
+        let _span = crate::profile::span_with_io("checkpoint.plan");
         // One transaction on the staging file: a plan cut short leaves no marks behind.
         let transaction = staged.staging.unchecked_transaction()?;
         transaction.execute_batch(
