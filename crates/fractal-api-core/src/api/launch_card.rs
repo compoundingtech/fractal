@@ -41,7 +41,14 @@ fn newest_variant(
     session: &PlanningSessionView,
     label: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<Value> {
-    let Some(variant) = session.variants.last() else {
+    // The variant whose latest candidate the planner submitted last; the store lists variants
+    // by name, so the newest is chosen by submission time, then by name for one instant.
+    let Some(variant) = session.variants.iter().max_by(|left, right| {
+        left.candidate
+            .submitted_at_unix_ms
+            .cmp(&right.candidate.submitted_at_unix_ms)
+            .then_with(|| left.name.cmp(&right.name))
+    }) else {
         return Ok(unavailable("The planner has not proposed a mission yet.", vec![]));
     };
     let Some(preview) = &variant.preview else {

@@ -8,6 +8,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import re
 from pathlib import Path
 import shutil
@@ -289,6 +290,55 @@ class FlipReady(unittest.TestCase):
         entry = self.check()
         self.assertEqual((entry['unlogged_pass_unexplained'], entry['log_missing']), (2, 1))
         self.assertEqual(entry['why_not'], ['1 lines with log=missing', '2 unexplained log=unlogged_pass'])
+
+    def publish_log(self, heads):
+        """The published evidence log in origin, as the log host pushes it: one head per (as_of, records), oldest first, each listing
+        every record of the heads before it too."""
+        parent, listed = None, []
+        for when, records in heads:
+            listed += records
+            body = ''.join(f'record {record} {CHECK} 0 fleet/ci {stamp(when)}\n' for record in listed)
+            env = dict(os.environ, GIT_AUTHOR_NAME='l', GIT_AUTHOR_EMAIL='l@x', GIT_COMMITTER_NAME='l', GIT_COMMITTER_EMAIL='l@x',
+                       GIT_AUTHOR_DATE=stamp(when), GIT_COMMITTER_DATE=stamp(when))
+            blob = subprocess.run(['git', '-C', str(self.origin), 'hash-object', '-w', '--stdin'], input=body.encode(), capture_output=True,
+                                  check=True).stdout.decode().strip()
+            tree = subprocess.run(['git', '-C', str(self.origin), 'mktree'], input=f'100644 blob {blob}\tlog\n'.encode(), capture_output=True,
+                                  check=True).stdout.decode().strip()
+            subject = f'evidence-log v1 as_of={when.isoformat()} added={len(records)} gc=0 missing=0'
+            parent = subprocess.run(['git', '-C', str(self.origin), 'commit-tree', tree, '-m', subject, *(['-p', parent] if parent else [])],
+                                    capture_output=True, env=env, check=True).stdout.decode().strip()
+        git(self.origin, 'update-ref', flip.LOG_REF, parent)
+
+    def test_a_record_ci_published_minutes_after_it_observed_it_is_explained_once_the_log_lists_it_within_the_latency(self):
+        # 2026-10-28 08:33Z: CI pushed its records at the end of its run; the log listed one 366 s after it was observed but 54 s
+        # after the gate's run was created. Another record the log only lists 10 minutes after its run: a stalled log, unexplained.
+        self.ready_history(count=40)
+        late, stalled = 'a' * 40, 'b' * 40
+        self.gh.run(3000, at(3), [decision(log='unlogged_pass', record=late, observed_at=stamp(at(3, 366)))])
+        self.gh.run(3001, at(2), [decision(log='unlogged_pass', record=stalled, observed_at=stamp(at(2, 100)))])
+        self.publish_log([(at(4), []), (at(3, -54), [late]), (at(2, -200), []), (at(2, -600), [stalled])])
+        code, result, _ = self.report()
+        self.assertEqual(code, 0, self.err)
+        self.assertEqual(result['log_clock'], 'published log')
+        self.assertEqual(result['checks'][CHECK]['unlogged_pass_unexplained'], 1)
+
+    def test_a_gate_that_read_the_head_one_pull_before_the_record_was_published_is_explained(self):
+        # 2026-10-28 00:13Z: the record was logged and published 80 s before the run was created, but the gate read the head before it.
+        self.ready_history(count=40)
+        record = 'c' * 40
+        self.gh.run(3000, at(3), [decision(log='unlogged_pass', record=record, observed_at=stamp(at(3, 289)), log_age_s='240')])
+        self.publish_log([(at(4), []), (at(3, 200), []), (at(3, 80), [record])])
+        self.assertEqual(self.check()['unlogged_pass_unexplained'], 0)
+
+    def test_none_names_no_time_like_a_dash(self):
+        # 2026-10-28 05:05Z: a single check's line printed log_unlogged_observed_at=None; its own observed_at (170 s) is the time.
+        self.ready_history(count=40)
+        self.gh.run(3000, at(3), [decision(log='unlogged_pass', observed_at=stamp(at(3, 170)), log_unlogged_observed_at='None')])
+        code, result, _ = self.report()                                       # origin publishes no log here: observed_at is the clock
+        self.assertTrue(result['log_clock'].startswith('observed_at'))
+        self.assertEqual(result['checks'][CHECK]['unlogged_pass_unexplained'], 0)
+        self.gh.run(3001, at(2), [decision(log='unlogged_pass', observed_at='None', log_unlogged_observed_at='None')])
+        self.assertEqual(self.check()['unlogged_pass_unexplained'], 1)          # no time at all: unexplained, as with '-'
 
     def test_an_aggregates_unlogged_pass_is_explained_by_its_unlogged_members_observed_at_not_its_oldest_members(self):
         self.ready_history(count=40)
