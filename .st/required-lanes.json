@@ -467,11 +467,14 @@
     },
     "linux-clippy": {
       "argv": [
-        "nix",
-        "develop",
-        "-c",
-        "bash",
-        "scripts/ci-clippy-keyed"
+        "python3",
+        "scripts/ci-clippy-result"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.evidence-gate-linux-clippy",
+        ".github/workflows/fleet.yml::jobs.linux-clippy",
+        ".st/evidence-skip-policy.json",
+        ".st/required-lanes.json::lanes.linux-clippy"
       ],
       "definition_paths": [
         ".cargo/config.toml",
@@ -487,7 +490,7 @@
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
         "scripts/ci-cargo-tools-env-test",
-        "scripts/ci-clippy-keyed",
+        "scripts/ci-clippy-result",
         "scripts/ci-install-built-hooks",
         "scripts/ci-linux",
         "scripts/ci-local",
@@ -575,7 +578,7 @@
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
         "scripts/ci-cargo-tools-env-test",
-        "scripts/ci-clippy-keyed",
+        "scripts/ci-clippy-result",
         "scripts/ci-install-built-hooks",
         "scripts/ci-linux",
         "scripts/ci-local",

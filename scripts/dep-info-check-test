@@ -99,16 +99,26 @@ class DepInfo(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn('no dep-info found', out)
 
-    def test_in_shadow_the_same_files_are_warnings_and_the_stage_passes(self):
-        self.unit('alpha', ['crates/alpha/src/lib.rs', 'crates/alpha/src/../../../docs/st3/schema.md'])
-        code, out = self.run_check('--warn')
-        self.assertEqual(code, 0, out)
-        self.assertIn("::warning::linux-clippy read docs/st3/schema.md, which its input key does not cover", out)
-        self.assertNotIn('::error::', out)
-        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=2 uncovered=1')
-        # ci-linux passes --warn: no default local run checks linux-clippy yet, so a failure would first show in the merge queue.
-        line = next(line for line in (HERE / 'ci-linux').read_text().splitlines() if 'scripts/dep-info-check' in line)
-        self.assertIn('--warn', line)
+    def test_a_workspace_build_script_s_declared_reads_are_judged_too_and_one_outside_the_key_fails(self):
+        # A build script's reads are in no dep-info file: the rerun-if-changed paths it printed are, relative to its package.
+        self.unit('alpha', ['crates/alpha/src/lib.rs'])
+        out_dir = self.root / 'target/debug/build/alpha-1/out'
+        out_dir.mkdir(parents=True)
+        (out_dir.parent / 'output').write_text('cargo:rerun-if-changed=build.rs\ncargo::rerun-if-changed=../../docs/vrs/requirements.md\n'
+                                               'cargo:rustc-cfg=probe\n')
+        (self.logs / 'clippy-metadata.json').write_text(json.dumps({
+            'target_directory': str(self.root / 'target'),
+            'packages': [{'id': 'alpha-id', 'manifest_path': str(self.root / 'crates/alpha/Cargo.toml')}]}))
+        with open(self.logs / 'clippy-workspace.jsonl', 'a') as log:
+            log.write(json.dumps({'reason': 'build-script-executed', 'package_id': 'alpha-id', 'out_dir': str(out_dir)}) + '\n')
+            # A dependency outside the workspace is not in the --no-deps metadata: its build script is not the tree's.
+            log.write(json.dumps({'reason': 'build-script-executed', 'package_id': 'registry-dep', 'out_dir': str(out_dir)}) + '\n')
+        code, out = self.run_check()
+        self.assertEqual(code, 1, out)
+        self.assertIn('::error::linux-clippy read docs/vrs/requirements.md, which its input key does not cover', out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=3 uncovered=1')
+        self.policy(['crates', 'Cargo.toml', 'docs/vrs'])
+        self.assertEqual(self.run_check()[0], 0)
 
     def test_the_committed_policy_declares_the_check_and_its_lane_lists_the_same_tree_inputs(self):
         root = HERE.parent
