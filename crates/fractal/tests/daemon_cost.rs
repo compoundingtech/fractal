@@ -290,6 +290,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "POST /v1/internal/replication/checkpoint-adopt",
         "adopts a peer's checkpoint",
     ),
+    (
+        "POST /v1/internal/replication/answers",
+        "answers from a cache filled off the request path; filling it reads every claim, once a day by design",
+    ),
+    (
+        "POST /v1/internal/replication/answers-check",
+        "records a daily answers check; writes only when a fault opens or ends",
+    ),
     // Planning sessions and evals start harnesses.
     ("POST /v1/launches", "starts a planning harness"),
     ("POST /v1/launches/{id}/submit", "planning session"),

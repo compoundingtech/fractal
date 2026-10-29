@@ -29845,6 +29845,18 @@ mission "scheduled-cycle" state="ready" {
             .unwrap()
             .revision
     }
+
+    /// Waits until every schedule timer the reconciler armed has run; only for a test whose armed
+    /// occurrences are already due. Each timer removes its operation from `armed_schedules` and
+    /// then signals the reconciler's events, so this waits on that signal. A fixed pause does not
+    /// order the two: on a loaded host the test's own timer can expire in the same tick as the
+    /// schedule's and be polled first.
+    async fn finish_armed_schedules<R>(reconciler: &Reconciler<R>) {
+        let mut events = reconciler.event_notify.subscribe();
+        while !reconciler.armed_schedules.lock().unwrap_or_else(PoisonError::into_inner).is_empty() {
+            events.changed().await.unwrap();
+        }
+    }
     #[test]
     fn scheduled_start_contention_waits_without_durable_failure_then_starts() {
         use serde_json::json;
@@ -30281,7 +30293,7 @@ schedule "daily" {{
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
         let reached = store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap();
         assert_eq!(reached.len(), 1);
         let key = reached[0].body["fields"]["occurrence"].as_u64().unwrap();
@@ -30333,7 +30345,7 @@ schedule "daily" {{
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
         let reached = store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap();
         assert_eq!(reached.len(), 1);
         assert_eq!(reached[0].body["fields"]["occurrence"], key);
@@ -31344,7 +31356,7 @@ schedule "{name}" {{
         );
 
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
 
         let reached = store
             .claims_for("schedule/cycle", Some("schedule.occurrence-reached"))
@@ -40353,6 +40365,9 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
 
         // Member A: the first poll records the baseline, which wakes nobody.
         let (issues, comments) = since("2026-09-09T23:59:59Z");
+        // Resuming from the claim's bare position, a poll also reads the open listing once.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100",
+            serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&issues, serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&comments, serde_json::json!([]));
         let member_a = Arc::new(github_plugin_store::GithubPluginStore::memory());
@@ -40366,8 +40381,8 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         let before = vec![delivery("comments", "open", 91), delivery("issues", "open", 91)];
         assert_eq!(delivered(), before);
 
-        // In the gap the issue closes and a second comment lands. Nothing reads the open listing
-        // any more, so it would not show the closure.
+        // In the gap the issue closes and a second comment lands. The open listing no longer
+        // names it, so only reading on from the claim's position shows the closure.
         let (issues, comments) = since("2026-09-10T23:59:59Z");
         github.route("/repos/acme/garden/issues?state=open&per_page=100", serde_json::json!([]));
         github.route(&issues, serde_json::json!([issue("closed", "2026-09-12T00:00:00Z", 2)]));
