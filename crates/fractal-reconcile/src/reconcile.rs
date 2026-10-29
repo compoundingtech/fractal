@@ -9614,6 +9614,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some("exited" | "vanished" | "stopped")
             )
         {
+            // The process exit that follows is not a claim. Watch the exec until it ends, so
+            // that exit wakes a pass whatever waits on it: an exit-code gate behind a pending
+            // gate is never evaluated, and cannot arm the watch itself.
+            if member.host == self.host {
+                self.arm_gate_poll(&member.runtime_id);
+            }
             return Ok(());
         }
         if subject.kind == "agent"
@@ -21222,6 +21228,109 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             reconciler.evaluate_gate(&stage, &gate).unwrap(),
             GateOutcome::Fail(_)
         ));
+    }
+
+    /// The same late process exit, reached through a working step whose first gate is still
+    /// pending: the step never evaluates its exit-code gate, so the wake cannot come from it.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_process_exit_wakes_a_step_whose_exit_code_gate_waits_behind_a_pending_gate() {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+mission "orchid/replay" state="ready" {
+  goal "Explain an impossible predicate behind a pending gate."
+  step "prepare" {
+    agentless
+    exec "prepare" { host "node"; workspace "/tmp"; command "exit 2"; restart "never" }
+    gate "an external result exists" { exists "resource/orchid/result" }
+    gate "prepared" { field "exit_code" "exec/${ST_MISSION_RUN}/prepare" is 0 }
+  }
+}
+"#,
+            "late-exit-behind-pending-gate",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "orchid/replay".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "late-exit-behind-pending-gate-run".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let notify = Arc::new(Notify::new());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), notify.clone());
+        let subject = format!("exec/{}/prepare", run.id);
+        let started = || {
+            store
+                .observations_for(&subject, "runtime.action.succeeded")
+                .unwrap()
+                .into_iter()
+                .find(|claim| claim.body["fields"]["action"] == "start")
+        };
+        // The first passes claim the step and declare its exec; a later one starts it.
+        for _ in 0..4 {
+            if started().is_some() {
+                break;
+            }
+            reconciler.reconcile_once().unwrap();
+        }
+        let incarnation = started()
+            .unwrap_or_else(|| panic!("{subject} was not started: {:?}", store.desired_subjects().unwrap().iter().map(|desired| &desired.subject).collect::<Vec<_>>()))
+            .body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
+        let desired = store.desired_subject_with_writer(&subject).unwrap().unwrap().0;
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let running = RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: false,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(incarnation),
+        };
+        runtime.execs.lock().unwrap().insert(runtime_id.clone(), running.clone());
+        reconciler.reconcile_once().unwrap();
+        // The driver reports its child's exit while its own process still runs.
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.clone()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("exited")),
+                    ("exit_code".into(), json!(2)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        let stuck = || {
+            let view = store.mission_run(&run.subject).unwrap().unwrap();
+            let missions = store.mission_specs_for_runs(std::slice::from_ref(&run.subject)).unwrap();
+            stuck_field_gates(&store, &view, &missions[&run.subject]).unwrap()
+        };
+        assert_eq!(store.step_run(&run.steps[0].subject).unwrap().unwrap().status, "working");
+        assert!(stuck().is_empty(), "the wrapper's receipt alone proves no exit of this launch");
+        // Consume prior writes' wake, then exit with no new graph claim.
+        notify.notified().await;
+        runtime.execs.lock().unwrap().insert(
+            runtime_id,
+            RuntimeObservation { status: "exited".into(), exit_code: Some(2), ..running },
+        );
+        tokio::time::timeout(Duration::from_secs(11), notify.notified())
+            .await
+            .expect("the late process exit must wake a pass although the exit-code gate is not evaluated");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(stuck().len(), 1, "the exit of this launch makes the exit-code gate impossible");
     }
 
     /// An exec started by a pass, observed running as `incarnation`, whose `st3 driver exec`
