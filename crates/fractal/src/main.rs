@@ -6377,7 +6377,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.bind_fleet(fleet_id)?;
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
-    store.trim_locally(config.trim.local);
+    store.trim_locally(config.trim.local)?;
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
