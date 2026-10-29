@@ -296,14 +296,25 @@ pub fn retired_ids_in_leaf(connection: &Connection, leaf: u32) -> Result<Vec<Str
     } else {
         let bound = |leaf: u32| vec![(leaf >> 4) as u8, ((leaf & 0xf) << 4) as u8];
         let from = bound(leaf);
-        let mut statement = connection.prepare_cached(
-            "SELECT lower(hex(id)) FROM retired_claim_ids
-             WHERE typeof(id)='blob' AND id>=?1 AND (?2 IS NULL OR id<?2) ORDER BY id",
-        )?;
-        let to = (leaf + 1 < LEAF_RANGES).then(|| bound(leaf + 1));
-        statement
-            .query_map(params![from, to], |row| row.get(0))?
-            .collect::<rusqlite::Result<_>>()?
+        // Both bounds are bound, so the scan stays inside the leaf: SQLite cannot bound an index
+        // range by an OR term. A blob sorts after every TEXT, so the last leaf runs to the end.
+        if leaf + 1 < LEAF_RANGES {
+            connection
+                .prepare_cached(
+                    "SELECT lower(hex(id)) FROM retired_claim_ids
+                     WHERE typeof(id)='blob' AND id>=?1 AND id<?2 ORDER BY id",
+                )?
+                .query_map(params![from, bound(leaf + 1)], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        } else {
+            connection
+                .prepare_cached(
+                    "SELECT lower(hex(id)) FROM retired_claim_ids
+                     WHERE typeof(id)='blob' AND id>=?1 ORDER BY id",
+                )?
+                .query_map(params![from], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        }
     };
     Ok(ids.into_iter().filter(|id| self::leaf(id) == leaf).collect())
 }

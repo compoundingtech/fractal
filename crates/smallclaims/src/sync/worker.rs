@@ -3604,8 +3604,13 @@ impl ClaimWalk {
         self.missing.extend(query.claims);
     }
 
-    /// Take in what one answer showed.
-    pub(crate) fn absorb(&mut self, comparison: &crate::replication::ClaimRangeComparison) {
+    /// Take in what the answer to `query` showed. A retired step the answer left out, because
+    /// the peer's retired ranges were still folding, is asked again.
+    pub(crate) fn absorb(
+        &mut self,
+        query: crate::replication::ClaimRangeQuery,
+        comparison: &crate::replication::ClaimRangeComparison,
+    ) {
         if comparison.same {
             self.finish();
         } else {
@@ -3618,6 +3623,11 @@ impl ClaimWalk {
             (Some(walk), Some(retired)) => {
                 walk.tops.extend(&retired.tops);
                 walk.leaves.extend(&retired.leaves);
+            }
+            (Some(walk), None) => {
+                if let Some(asked) = query.retired {
+                    walk.retry(*asked);
+                }
             }
             _ => {}
         }
@@ -3690,7 +3700,7 @@ async fn walk_claim_ranges<B: Backend>(
                 walk.retry(query);
                 break;
             }
-            Some(comparison) => walk.absorb(comparison),
+            Some(comparison) => walk.absorb(query, comparison),
         }
     }
     CLAIM_WALKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, walk);
