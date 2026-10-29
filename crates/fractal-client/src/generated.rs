@@ -121,6 +121,7 @@ pub enum ErrorCode {
     PeerTooOld,
     ValidationFailed,
     IdempotencyConflict,
+    LegacyActionReceiptUntrusted,
     IssuerRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
