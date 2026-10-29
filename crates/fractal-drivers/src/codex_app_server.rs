@@ -226,6 +226,34 @@ impl CodexRuntime {
     }
 }
 
+/// Fresh native wrapper custody established before its first mailbox bind. The owner lock
+/// travels with the launch so no other wrapper can claim the runtime during bootstrap.
+pub struct PreparedNativeLaunch {
+    runtime: CodexRuntime,
+    sequence: u64,
+    state_dir: PathBuf,
+    agent_dir: PathBuf,
+    _owner_lock: crate::flock::FileLock,
+}
+
+/// Called only by the fresh physical wrapper's supervisor path, before native mailbox bind.
+/// Adoption keeps the predecessor's record and never calls this constructor.
+pub fn prepare_native_launch(
+    state_dir: &Path, agent_dir: &Path, identity: &str, runtime_id: &str, incarnation: &str,
+) -> Result<PreparedNativeLaunch> {
+    secure_dir(state_dir)?;
+    secure_dir(agent_dir)?;
+    let owner_lock = acquire_owner_lock(state_dir)?;
+    let runtime = CodexRuntime::with_incarnation(identity.into(), runtime_id.into(), incarnation.into())?;
+    let sequence = harness_state::claim(agent_dir, identity, "codex", incarnation)?;
+    crate::native_connector::begin(agent_dir, "codex", incarnation, sequence)?;
+    atomic_json(&state_dir.join("runtime.json"), &runtime)?;
+    Ok(PreparedNativeLaunch {
+        runtime, sequence, state_dir: state_dir.into(), agent_dir: agent_dir.into(),
+        _owner_lock: owner_lock,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodexThreadBinding {
@@ -2855,6 +2883,7 @@ fn run_controlled_with_required_resume(
         delivery,
         resume_thread,
         required_incarnation,
+        None,
         &mut diagnostics,
     );
     match result {
@@ -2893,6 +2922,7 @@ pub fn run_controlled_paths(
     gate: crate::session_control::DeliveryGate,
     prompt_answers: Option<crate::session_control::PromptAnswers>,
     resume_thread: Option<String>,
+    prepared: PreparedNativeLaunch,
 ) -> Result<()> {
     anyhow::ensure!(
         !codex_argv.is_empty(),
@@ -2931,7 +2961,9 @@ pub fn run_controlled_paths(
         model: None,
         prompt_answers,
     };
-    let _owner_lock = acquire_owner_lock(state_dir)?;
+    anyhow::ensure!(prepared.state_dir == state_dir && prepared.agent_dir == agent_dir
+        && prepared.runtime.agent() == identity && prepared.runtime.runtime_id() == runtime_id,
+        "Codex prepared native launch does not match physical wrapper paths");
     let mut diagnostics = WrapperDiagnostics::open(state_dir, &identity, &runtime_id)?;
     diagnostics.record("ownerAcquired", json!({ "mode": "explicit-paths" }))?;
     // The prior binding is always retired: a resumed thread binds again once its control
@@ -2958,6 +2990,7 @@ pub fn run_controlled_paths(
         delivery,
         resume_thread,
         None,
+        Some(prepared),
         &mut diagnostics,
     );
     match result {
@@ -3239,6 +3272,7 @@ fn run_controlled_owned(
     mut delivery: CodexDeliveryConfig,
     resume_thread: Option<String>,
     required_incarnation: Option<String>,
+    native_launch: Option<PreparedNativeLaunch>,
     diagnostics: &mut WrapperDiagnostics,
 ) -> Result<()> {
     delivery.model = declared_codex_model(&codex_argv[1..]);
@@ -3259,13 +3293,25 @@ fn run_controlled_owned(
         prepare_controlled_launch_args(&endpoint, &codex_argv[1..], resume_thread.as_deref())?;
     let safe_fallback_active = Arc::new(AtomicBool::new(false));
 
-    // Publish the host-owned incarnation for a residency attempt only after this process holds
-    // the owner lock. Ordinary launches continue to mint their incarnation at this boundary.
-    let runtime = match required_incarnation {
-        Some(incarnation) => CodexRuntime::with_incarnation(identity, runtime_id, incarnation)?,
-        None => CodexRuntime::fresh(identity, runtime_id)?,
+    // Native wrappers established their incarnation and custody before mailbox bind and retain
+    // their owner lock here. Catalog/residency launches publish after acquiring their own lock.
+    let runtime = if let Some(prepared) = &native_launch {
+        anyhow::ensure!(prepared.runtime.agent() == identity && prepared.runtime.runtime_id() == runtime_id
+            && prepared.state_dir == state_dir && prepared.agent_dir == delivery.agent_dir,
+            "Codex prepared launch generation changed");
+        anyhow::ensure!(crate::native_connector::observer_sequence(
+            &delivery.agent_dir, "codex", prepared.runtime.incarnation(),
+        )? == prepared.sequence, "Codex prepared launch ownership changed");
+        prepared.runtime.clone()
+    } else {
+        match required_incarnation {
+            Some(incarnation) => CodexRuntime::with_incarnation(identity, runtime_id, incarnation)?,
+            None => CodexRuntime::fresh(identity, runtime_id)?,
+        }
     };
-    atomic_json(&state_dir.join("runtime.json"), &runtime)?;
+    if native_launch.is_none() {
+        atomic_json(&state_dir.join("runtime.json"), &runtime)?;
+    }
     diagnostics.record(
         "runtimePublished",
         json!({
@@ -3296,12 +3342,17 @@ fn run_controlled_owned(
         }
     }
     diagnostics.record("appServerStarting", json!({ "safeFallback": false }))?;
-    let sequence = harness_state::claim(
-        &delivery.agent_dir, delivery.identity.clone(), "codex", runtime.incarnation(),
-    )?;
-    crate::native_connector::begin(
-        &delivery.agent_dir, "codex", runtime.incarnation(), sequence,
-    )?;
+    let sequence = if let Some(prepared) = &native_launch {
+        prepared.sequence
+    } else {
+        let sequence = harness_state::claim(
+            &delivery.agent_dir, delivery.identity.clone(), "codex", runtime.incarnation(),
+        )?;
+        crate::native_connector::begin(
+            &delivery.agent_dir, "codex", runtime.incarnation(), sequence,
+        )?;
+        sequence
+    };
     let mut server = spawn_controlled_app_server(&codex_argv[0], &server_args, &socket_path, &log)?;
     crate::native_connector::spawned(
         &delivery.agent_dir, "codex", runtime.incarnation(), sequence, server.id(),

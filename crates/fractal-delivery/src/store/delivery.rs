@@ -142,6 +142,14 @@ pub trait DeliveryStore {
             fence: &crate::mailbox::Fence,
             native: Option<&crate::conversation_delivery::NativeReceipt>,
         ) -> Result<(ClaimRecord, bool), St3Error>;
+    /// Revalidate native connector custody inside the receipt writer transaction.
+    fn append_native_mailbox_receipt_outcome_checked(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
+            validate: &(dyn Fn() -> Result<(), St3Error> + Send + Sync),
+        ) -> Result<(ClaimRecord, bool), St3Error>;
     /// Search refreshes only a person's private message texts, using the same endpoint
     /// indexes as the mailbox. Other fleet writes do not invalidate this source.
     fn conversation_search_mail_stamp(&self, person: &str, through: u64) -> Result<String>;
@@ -374,6 +382,16 @@ impl DeliveryStore for Store {
             fence: &crate::mailbox::Fence,
             native: Option<&crate::conversation_delivery::NativeReceipt>,
         ) -> Result<(ClaimRecord, bool), St3Error> {
+        self.append_native_mailbox_receipt_outcome_checked(input, fence, native, &|| Ok(()))
+    }
+
+    fn append_native_mailbox_receipt_outcome_checked(
+            &self,
+            input: &ClaimInput,
+            fence: &crate::mailbox::Fence,
+            native: Option<&crate::conversation_delivery::NativeReceipt>,
+            validate: &(dyn Fn() -> Result<(), St3Error> + Send + Sync),
+        ) -> Result<(ClaimRecord, bool), St3Error> {
         if native.is_some_and(|native| !native.valid() || input.kind != "message.read") {
             return Err(St3Error::new(
                 "invalid-native-receipt",
@@ -389,6 +407,7 @@ impl DeliveryStore for Store {
             None,
             ClaimCommitContext {
                 native_receipt: native,
+                writer_validate: Some(validate),
                 ..Default::default()
             },
         )
@@ -1199,3 +1218,78 @@ impl DeliveryStore for Store {
     }
 }
 
+
+#[cfg(test)]
+mod checked_native_receipt_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn native_receipt_custody_is_rechecked_before_writer_mutation_and_replay() {
+        const OWNER: &str = "agent/eval.worker";
+        let store = Store::open_memory("node").unwrap();
+        crate::store::mailbox_tests::ready(&store, "session-1");
+        let fence = store.bind_mailbox(
+            &crate::mailbox::Fence::new(OWNER, "session-1", "delivery"),
+        ).unwrap();
+        let claim = |kind: &str, actor: &str, fields: Value| ClaimInput {
+            subject: "message/checked-native-receipt".into(),
+            kind: kind.into(),
+            actor: Some(actor.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: Some(format!("checked-native-receipt:{kind}")),
+        };
+        store.append_claim(&claim("message.sent", "person/fixture", json!({
+            "status":"sent", "from":"person/fixture", "to":OWNER, "content":"Receipt fixture"
+        }))).unwrap();
+        for status in ["staged", "delivered"] {
+            store.append_mailbox_receipt_outcome(
+                &claim(&format!("message.{status}"), OWNER, json!({"status":status})),
+                &fence,
+            ).unwrap();
+        }
+        let input = claim("message.read", OWNER, json!({"status":"read"}));
+        let native = crate::conversation_delivery::NativeReceipt {
+            session_id: "session/external-0123456789abcdef01234567".into(),
+            message_id: "native-checked".into(),
+        };
+        let counts = || store.readers.get().query_row(
+            "SELECT (SELECT COUNT(*) FROM claims),
+                    (SELECT COUNT(*) FROM local_native_delivery_receipts_v2)",
+            [], |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
+        ).unwrap();
+        let before = (store.index().unwrap(), counts());
+        let caller = std::thread::current().id();
+        let calls = AtomicUsize::new(0);
+        let refuse = || {
+            assert_ne!(std::thread::current().id(), caller);
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err(St3Error::new("native-custody-retired", "connector custody changed"))
+        };
+        assert_eq!(store.append_native_mailbox_receipt_outcome_checked(
+            &input, &fence, Some(&native), &refuse,
+        ).unwrap_err().code, "native-custody-retired");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!((store.index().unwrap(), counts()), before);
+        let (_, appended) = store.append_native_mailbox_receipt_outcome_checked(
+            &input, &fence, Some(&native), &|| {
+                assert_ne!(std::thread::current().id(), caller);
+                Ok(())
+            },
+        ).unwrap();
+        assert!(appended);
+        assert_eq!(counts(), (before.1.0 + 1, before.1.1 + 1));
+        let committed = (store.index().unwrap(), counts());
+        assert_eq!(store.append_native_mailbox_receipt_outcome_checked(
+            &input, &fence, Some(&native), &refuse,
+        ).unwrap_err().code, "native-custody-retired");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!((store.index().unwrap(), counts()), committed);
+        assert!(!store.append_native_mailbox_receipt_outcome_checked(
+            &input, &fence, Some(&native), &|| Ok(()),
+        ).unwrap().1);
+        assert_eq!((store.index().unwrap(), counts()), committed);
+    }
+}

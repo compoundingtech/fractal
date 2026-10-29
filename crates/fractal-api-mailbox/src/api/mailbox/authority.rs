@@ -40,22 +40,23 @@ pub(super) fn with_claude_primary<T>(
     captured: Option<fractal_drivers::claude_process::Process>,
     action: impl FnOnce() -> Result<T, St3Error>,
 ) -> Result<(T, Option<fractal_drivers::claude_process::Process>), St3Error> {
-    use fractal_drivers::claude_process::{self, Caller};
-    let argv = peer.transport == "omp-channel" && state.store
-        .desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?.into_iter()
-        .any(|desired| desired.member.is_some_and(|member| member.driver.is_none()
-            && matches!(member.launch, crate::model::LaunchSpec::Argv(_))));
-    let role = (!argv).then(|| fractal_api_core::api::native_role::capture(state, fence, peer))
-        .transpose()?;
+    use fractal_drivers::claude_process;
+    if peer.transport != "claude-channel" {
+        #[cfg(not(target_os = "linux"))]
+        {
+            // Linux's native/argv admission gates authenticate these operations themselves.
+            // Other platforms cannot inherit that protocol's permissive return path.
+            let role = fractal_api_core::api::native_role::capture(state, fence, peer)?;
+            role.validate()?;
+        }
+        return action().map(|value| (value, None));
+    }
+    let role = fractal_api_core::api::native_role::capture(state, fence, peer)?;
     let action = || {
         peer.require_kernel()?;
-        if let Some(role) = &role { role.validate()?; }
+        role.validate()?;
         action()
     };
-    if peer.transport != "claude-channel" {
-        return action().map(|v| (v, None));
-    }
     let known = primary_bindings()
         .lock()
         .map_err(|_| internal("Claude binding lock poisoned"))?
@@ -77,11 +78,11 @@ pub(super) fn with_claude_primary<T>(
         queue_legacy_shape(state, fence, peer);
         return Ok((value, None));
     }
-    let wrapper = if let Some(wrapper) = captured {
-        wrapper
-    } else {
-        physical_wrapper(state, fence, None)?
-    };
+    let wrapper = role.wrapper()
+        .ok_or_else(|| refused("witnessed Claude wrapper unavailable"))?;
+    if captured.is_some_and(|captured| captured != wrapper) {
+        return Err(refused("admitted Claude physical wrapper changed"));
+    }
     if peer.archives_inbox && fence.component == "title" && peer.pid == wrapper.pid {
         // The exact physical wrapper opens its title stream concurrently with provider startup.
         // This grants no delivery readiness or mailbox delivery epoch.
@@ -98,44 +99,18 @@ pub(super) fn with_claude_primary<T>(
             );
         return Ok((value, Some(wrapper)));
     }
-    let raw = fractal_drivers::harness_events::read_bound_provider_state(&dir)
-        .map_err(internal)?
-        .filter(|(runtime, _)| runtime == &fence.incarnation)
-        .map(|(_, raw)| raw)
-        .ok_or_else(|| refused("Claude provider source unavailable"))?;
-    let owner = provider_authority(&raw)?;
-    let session = owner
-        .evidence_incarnation
-        .ok_or_else(|| refused("Claude session unavailable"))?;
-    let seq = owner
-        .ownership_sequence
-        .ok_or_else(|| refused("Claude ownership unavailable"))?;
-    let role = if peer.archives_inbox {
-        Caller::Wrapper
-    } else {
-        Caller::Channel
-    };
-    claude_process::with_caller(&dir, &session, seq, peer.pid, Some(wrapper), role, |_| {
-        let value = action().map_err(anyhow::Error::new)?;
-        delivery_presence::record_ownership(fence, false);
-        primary_bindings()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Claude binding lock poisoned"))?
-            .insert(
-                (state.state_dir.clone(), fence.subject.clone()),
-                (fence.incarnation.clone(), wrapper),
-            );
-        Ok((value, Some(wrapper)))
-    })
-    .map_err(|e| {
-        e.downcast::<St3Error>().unwrap_or_else(|e| {
-            if claude_process::failure_kind(&e) == Some(claude_process::FailureKind::Unavailable) {
-                unavailable(claude_process::diagnostic(&e))
-            } else {
-                refused(claude_process::diagnostic(&e))
-            }
-        })
-    })
+    // The shared capture already authenticated this exact primary. Its immutable validator
+    // runs at the writer boundary without recursively acquiring process or harness locks.
+    let value = action()?;
+    delivery_presence::record_ownership(fence, false);
+    primary_bindings()
+        .lock()
+        .map_err(|_| internal("Claude binding lock poisoned"))?
+        .insert(
+            (state.state_dir.clone(), fence.subject.clone()),
+            (fence.incarnation.clone(), wrapper),
+        );
+    Ok((value, Some(wrapper)))
 }
 
 /// Physical source selection shared by enforcement and legacy shape observation. A legacy
@@ -1009,7 +984,7 @@ pub fn with_argv_channel<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    action: impl FnOnce(&crate::model::MemberSpec, &(dyn Fn() -> Result<(), St3Error> + Send + Sync)) -> Result<T, St3Error>,
 ) -> Result<Option<T>, St3Error> {
     let desired = state.store.desired_subjects_named(std::slice::from_ref(&fence.subject))
         .map_err(internal)?.into_iter().next()
@@ -1069,7 +1044,7 @@ pub fn with_argv_channel<T>(
     _state: &AppState,
     _fence: &Fence,
     _peer: &NativeDeliveryPeer,
-    _action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    _action: impl FnOnce(&crate::model::MemberSpec, &(dyn Fn() -> Result<(), St3Error> + Send + Sync)) -> Result<T, St3Error>,
 ) -> Result<Option<T>, St3Error> {
     Ok(None)
 }
@@ -1078,7 +1053,7 @@ pub fn with_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    action: impl FnOnce(&Authority, &(dyn Fn() -> Result<(), St3Error> + Send + Sync)) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
     let role = fractal_api_core::api::native_role::capture(state, fence, peer)?;
     if fence.epoch != 0 {

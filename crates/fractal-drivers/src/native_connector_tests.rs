@@ -293,3 +293,62 @@ fn present_invalid_witness_never_downgrades_to_legacy_canonical_ownership() {
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(fs::read(dir.path().join(FILE)).unwrap(), b"not a launch record");
 }
+
+#[test]
+fn fresh_codex_claim_placeholder_uses_actual_sequence_for_pre_spawn_wrapper_role() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = "fresh-incarnation";
+    let sequence = crate::harness_state::claim(dir.path(), "seat", "codex", session).unwrap();
+    let observed = crate::harness_state::read(
+        &crate::harness_state::harness_state_path(dir.path()), None,
+    ).unwrap();
+    assert_eq!(observed.evidence_incarnation.as_deref(), Some(session));
+    assert_eq!(observed.ownership_sequence, Some(sequence));
+    assert_eq!(observed.reason.as_deref(), Some("claimed"));
+    assert!(observed.exit.is_none());
+    let (mut launch, table) = fixture("codex");
+    launch.session = session.into();
+    launch.sequence = sequence;
+    launch.provider = None;
+    launch.connector = None;
+    assert!(prove(
+        &launch, launch.wrapper, 10, "codex", Role::Delivery, session, sequence,
+        |pid| read_table(&table, pid),
+    ).is_ok());
+    assert!(prove(
+        &launch, launch.wrapper, 50, "codex", Role::Delivery, session, sequence,
+        |pid| read_table(&table, pid),
+    ).is_err());
+}
+
+#[test]
+fn codex_native_preparation_establishes_prebind_custody_and_retains_owner_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().join("state");
+    let agent = dir.path().join("agent");
+    let prepared = crate::codex_app_server::prepare_native_launch(
+        &state, &agent, "seat", "runtime", "prebind-incarnation",
+    ).unwrap();
+    let launch = load(&agent).unwrap();
+    assert_eq!(launch.session, "prebind-incarnation");
+    assert!(launch.provider.is_none());
+    assert!(launch.connector.is_none());
+    let runtime: crate::codex_app_server::CodexRuntime = serde_json::from_slice(
+        &fs::read(state.join("runtime.json")).unwrap(),
+    ).unwrap();
+    assert_eq!(runtime.incarnation(), launch.session);
+    let canonical = crate::harness_state::harness_state_path(&agent);
+    let before = fs::read(&canonical).unwrap();
+    assert!(prove(
+        &launch, launch.wrapper, launch.wrapper.pid, "codex", Role::Delivery,
+        &launch.session, launch.sequence,
+        |pid| if pid == launch.wrapper.pid { Ok(launch.wrapper) } else { anyhow::bail!("no provider spawned") },
+    ).is_ok());
+    assert_eq!(observer_sequence(&agent, "codex", runtime.incarnation()).unwrap(), launch.sequence);
+    assert!(crate::codex_app_server::prepare_native_launch(
+        &state, &agent, "seat", "runtime", "competing-incarnation",
+    ).is_err());
+    assert_eq!(fs::read(&canonical).unwrap(), before);
+    assert_eq!(load(&agent).unwrap(), launch);
+    drop(prepared);
+}

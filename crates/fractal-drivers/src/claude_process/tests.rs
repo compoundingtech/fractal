@@ -1,6 +1,33 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[test]
+fn captured_custody_revalidates_inside_existing_process_and_harness_locks() {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path();
+    let sequence = crate::harness_state::claim(dir, "fixture", "claude", "primary").unwrap();
+    let wrapper = process(std::process::id()).unwrap();
+    let owner = Owner {
+        version: 1, session: "primary".into(), sequence, runtime: "fixture".into(),
+        wrapper, provider: None, closed: false,
+    };
+    fs::write(dir.join(FILE), serde_json::to_vec(&owner).unwrap()).unwrap();
+    // The supervisor creates the process lock; admission never creates one.
+    drop(lock(dir, true).unwrap());
+    let witness = capture(dir, "primary", sequence, wrapper.pid, wrapper, Caller::Wrapper).unwrap();
+    let _process_guard = lock(dir, false).unwrap();
+    crate::harness_state::with_current_ownership(dir, "primary", sequence, || {
+        assert!(try_lock(dir).is_err(), "the outer process lock must actually be held");
+        witness.revalidate()
+    }).unwrap();
+    let mut replacement = owner;
+    replacement.sequence += 1;
+    fs::write(dir.join(FILE), serde_json::to_vec(&replacement).unwrap()).unwrap();
+    assert!(witness.revalidate().is_err(), "captured custody cannot follow replaced bytes");
+    fs::remove_file(dir.join(FILE)).unwrap();
+    assert!(witness.revalidate().is_err(), "captured custody cannot downgrade to missing legacy");
+}
+
 fn fixture() -> (Owner, BTreeMap<u32, Process>) {
     let wrapper = Process {
         pid: 10,

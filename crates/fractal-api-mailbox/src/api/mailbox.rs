@@ -224,6 +224,9 @@ pub async fn attachment(
                 }
                 store.check_mailbox(&fence)
             })?;
+        } else {
+            fractal_api_core::api::native_role::capture(&checked_state, &fence, &peer)?
+                .validate()?;
         }
         store.check_mailbox(&fence)?;
         Ok(super::claude_channel_attached(
@@ -315,10 +318,25 @@ pub async fn receipt(
                 if !store.owns_mailbox_lease(&request.fence, owner)? {
                     return Err(St3Error::new("stale-mailbox-session", "another process owns this mailbox lease"));
                 }
-                store.append_native_mailbox_receipt_outcome(&input, &request.fence,
-                    payload.native_receipt.as_ref())
+                store.append_native_mailbox_receipt_outcome_checked(&input, &request.fence,
+                    payload.native_receipt.as_ref(), validate)
             })?
-        } else { store.append_mailbox_receipt_outcome(&input, &request.fence)? };
+        } else if let Some(outcome) = authority::with_argv_channel(
+            &checked_state, &request.fence, &checked_peer, |_, validate| {
+                store.append_native_mailbox_receipt_outcome_checked(
+                    &input, &request.fence, payload.native_receipt.as_ref(), validate,
+                )
+            },
+        )? {
+            outcome
+        } else {
+            let role = fractal_api_core::api::native_role::capture(
+                &checked_state, &request.fence, &checked_peer,
+            )?;
+            store.append_native_mailbox_receipt_outcome_checked(
+                &input, &request.fence, payload.native_receipt.as_ref(), &|| role.validate(),
+            )?
+        };
         // A message this store cannot read is treated as a work wake.
         let work_wake = store
             .message(&input.subject)

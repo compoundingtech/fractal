@@ -54,7 +54,7 @@ pub async fn bootstrap(
 
 enum Custody {
     Native(native_connector::Witness),
-    Claude { session: String, sequence: u64 },
+    Claude(claude_process::Witness),
     /// Only the already admitted exact capability survives an unwitnessed generation.
     Retained { owner: Authority, fence: Fence },
 }
@@ -89,7 +89,28 @@ fn select_wrapper(terminal: Process, recorded: Option<Process>, bound: bool) -> 
     Ok(wrapper)
 }
 
+
+fn connector_role(wrapper: Process, peer: &NativeDeliveryPeer, component: &str) -> native_connector::Role {
+    if peer.pid == wrapper.pid && (peer.archives_inbox || matches!(component, "title" | "events")) {
+        native_connector::Role::Wrapper
+    } else {
+        native_connector::Role::Delivery
+    }
+}
+
+/// A claimed session has custody before its first observation, but no activity/readiness.
+fn ownership_state_supported(record: &serde_json::Value, state: fractal_drivers::harness_state::Activity, events: bool) -> bool {
+    use fractal_drivers::harness_state::Activity;
+    let placeholder = record["state"] == "ended"
+        && record["reason"] == "superseded"
+        && record["exit"].is_null();
+    placeholder || state != Activity::Unknown && (state != Activity::Ended || events)
+}
 impl Proof {
+    pub fn wrapper(&self) -> Option<Process> {
+        self.physical.as_ref().map(|physical| physical.wrapper)
+    }
+
     pub fn require_publication(&self, publication: &crate::harness_events::Publication) -> Result<(), St3Error> {
         if publication.runtime_incarnation != self.fence.incarnation
             || publication.claim.fields.get("incarnation_id").and_then(serde_json::Value::as_str) != Some(self.fence.incarnation.as_str()) {
@@ -126,14 +147,7 @@ impl Proof {
         }
         match &self.custody {
             Custody::Native(witness) => witness.revalidate().map_err(internal),
-            Custody::Claude { session, sequence } => claude_process::with_caller(
-                &dir, session, *sequence, self.peer.pid, self.physical.as_ref().map(|physical| physical.wrapper),
-                if self.peer.archives_inbox { claude_process::Caller::Wrapper } else { claude_process::Caller::Channel },
-                |admission| {
-                    anyhow::ensure!(admission == claude_process::Admission::Primary, "native role requires witnessed Claude ownership");
-                    Ok(())
-                },
-            ).map_err(internal),
+            Custody::Claude(witness) => witness.revalidate().map_err(internal),
             Custody::Retained { owner, fence } => {
                 let present = if owner.provider == "claude" {
                     claude_process::recorded(&dir)
@@ -250,8 +264,7 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
         if runtime != &fence.incarnation || observed.harness.as_deref() != Some(provider)
             || observed.evidence_incarnation.as_deref() != Some(&owner.session)
             || observed.ownership_sequence != Some(owner.sequence)
-            || observed.state == fractal_drivers::harness_state::Activity::Unknown
-            || observed.state == fractal_drivers::harness_state::Activity::Ended && fence.component != "events" {
+            || !ownership_state_supported(&value, observed.state, fence.component == "events") {
             return Err(refused("unwitnessed custody cannot promote its exact admitted session or sequence"));
         }
         Custody::Retained { owner, fence: retained_fence }
@@ -262,8 +275,7 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
             let stamp = value["writtenAtMs"].as_u64().ok_or_else(|| refused("provider stamp absent"))?;
             let observed = fractal_drivers::harness_state::read_raw_at(raw, None, stamp);
             if observed.harness.as_deref() != Some(provider)
-                || observed.state == fractal_drivers::harness_state::Activity::Unknown
-                || (observed.state == fractal_drivers::harness_state::Activity::Ended && fence.component != "events") {
+                || !ownership_state_supported(&value, observed.state, fence.component == "events") {
                 return Err(refused("provider ownership is malformed, foreign or ended"));
             }
             Ok((observed.evidence_incarnation.filter(|value| !value.is_empty()).ok_or_else(|| refused("provider session absent"))?,
@@ -271,7 +283,10 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
         }).transpose()?;
         if provider == "claude" {
             let (session, sequence) = identity.ok_or_else(|| refused("Claude provider ownership absent"))?;
-            Custody::Claude { session, sequence }
+            Custody::Claude(claude_process::capture(
+                &dir, &session, sequence, peer.pid, wrapper,
+                if peer.archives_inbox { claude_process::Caller::Wrapper } else { claude_process::Caller::Channel },
+            ).map_err(internal)?)
         } else {
             let (session, sequence) = match identity {
                 Some(identity) => identity,
@@ -279,9 +294,7 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
                 None => return Err(refused("provider ownership absent")),
             };
             Custody::Native(native_connector::capture(&dir, wrapper, peer.pid, provider,
-                if peer.archives_inbox || fence.component == "events" && peer.pid == wrapper.pid {
-                    native_connector::Role::Wrapper
-                } else { native_connector::Role::Delivery }, &session, sequence).map_err(internal)?)
+                connector_role(wrapper, peer, &fence.component), &session, sequence).map_err(internal)?)
         }
     };
     let proof = Proof { state: state.clone(), fence: fence.clone(), peer: peer.clone(), physical, source, custody };
@@ -292,6 +305,41 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exact_claim_placeholder_grants_custody_not_terminal_or_unknown_activity() {
+        use fractal_drivers::harness_state::Activity;
+        let placeholder = serde_json::json!({
+            "state": "ended", "reason": "superseded", "exit": null,
+        });
+        assert!(ownership_state_supported(&placeholder, Activity::Unknown, false));
+        let actual_exit = serde_json::json!({
+            "state": "ended", "reason": "superseded", "exit": "success",
+        });
+        assert!(!ownership_state_supported(&actual_exit, Activity::Ended, false));
+        let unknown = serde_json::json!({ "state": "unknown", "reason": "unavailable", "exit": null });
+        assert!(!ownership_state_supported(&unknown, Activity::Unknown, false));
+        let malformed = serde_json::json!({ "state": "ended", "exit": null });
+        assert!(!ownership_state_supported(&malformed, Activity::Unknown, false));
+    }
+    #[test]
+    fn title_and_event_wrapper_roles_require_exact_physical_wrapper() {
+        let wrapper = Process { pid: 11, parent: 10, birth: 1 };
+        for transport in ["omp-channel", "pi-channel"] {
+            let mut peer = NativeDeliveryPeer {
+                agent: "agent/example/role".into(), transport, pid: wrapper.pid,
+                archives_inbox: false, peer_process: None,
+            };
+            for component in ["title", "events"] {
+                assert_eq!(connector_role(wrapper, &peer, component), native_connector::Role::Wrapper);
+            }
+            assert_eq!(connector_role(wrapper, &peer, "delivery"), native_connector::Role::Delivery);
+            peer.pid = 12;
+            peer.archives_inbox = true;
+            for component in ["title", "events", "delivery"] {
+                assert_eq!(connector_role(wrapper, &peer, component), native_connector::Role::Delivery);
+            }
+        }
+    }
     #[test]
     fn bound_wrapper_must_be_recorded_direct_terminal_child() {
         let terminal = Process { pid: 11, parent: 10, birth: 1 };

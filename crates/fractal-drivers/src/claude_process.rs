@@ -323,6 +323,54 @@ pub fn with_caller<T>(
     action(admission)
 }
 
+/// Immutable process custody captured before entering a caller's ownership-record lock.
+/// Revalidation does not acquire process or harness locks; callers must also revalidate
+/// their independently captured canonical provider ownership at the publication boundary.
+#[derive(Clone, Debug)]
+pub struct Witness {
+    dir: std::path::PathBuf,
+    bytes: Vec<u8>,
+    processes: Vec<Process>,
+}
+
+/// Capture a witnessed primary only; absence cannot become a legacy admission.
+pub fn capture(
+    dir: &Path,
+    session: &str,
+    sequence: u64,
+    pid: u32,
+    expected_wrapper: Process,
+    role: Caller<'_>,
+) -> Result<Witness> {
+    with_caller(dir, session, sequence, pid, Some(expected_wrapper), role.clone(), |admission| {
+        anyhow::ensure!(admission == Admission::Primary, refused("captured custody requires a primary witness"));
+        let bytes = read_owner(dir).map_err(classify_read)?;
+        let owner: Owner = serde_json::from_slice(&bytes).map_err(|error| classify_read(error.into()))?;
+        let processes = prove(&owner, pid, &role, process, arguments)?;
+        let witness = Witness { dir: dir.into(), bytes, processes };
+        witness.revalidate()?;
+        Ok(witness)
+    })
+}
+
+impl Witness {
+    fn validate_with(
+        &self,
+        read_record: impl Fn() -> Result<Vec<u8>>,
+        read_process: impl Fn(u32) -> Result<Process>,
+    ) -> Result<()> {
+        anyhow::ensure!(read_record()? == self.bytes, refused("captured Claude ownership changed"));
+        validate_proof(&self.processes, read_process)?;
+        anyhow::ensure!(read_record()? == self.bytes, refused("captured Claude ownership changed during validation"));
+        Ok(())
+    }
+
+    /// Recheck captured bytes and exact process generations without recursively locking.
+    pub fn revalidate(&self) -> Result<()> {
+        self.validate_with(|| read_owner(&self.dir).map_err(classify_read), process)
+    }
+}
+
 fn classify_read(error: anyhow::Error) -> anyhow::Error {
     if failure_kind(&error).is_some() {
         error

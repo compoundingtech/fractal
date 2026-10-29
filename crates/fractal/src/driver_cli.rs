@@ -2134,6 +2134,7 @@ fn spawn_codex_provider(
     state_dir: &Path,
     argv: &[String],
     start: ProviderStart,
+    prepared_launch: Option<fractal_drivers::codex_app_server::PreparedNativeLaunch>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     let prompt_answers = codex_prompt_answers(client, subject);
     let paths = paths.clone();
@@ -2160,6 +2161,7 @@ fn spawn_codex_provider(
                     paths.delivery_gate,
                     Some(prompt_answers),
                     thread,
+                    prepared_launch.context("a fresh Codex launch has no prepared ownership")?,
                 )
             }
             ProviderStart::Adopt(fractal_drivers::provider_session::DetachedSession::Codex {
@@ -2285,6 +2287,18 @@ async fn drive_codex_native(
     let prior_binding = std::fs::read(state_dir.join("binding.json")).ok();
     let inbox = fractal_drivers::message::inbox_dir(&agent_dir);
     let archive = fractal_drivers::message::archive_dir(&agent_dir);
+    let prepared_launch = if matches!(start, ProviderStart::Launch(_, _)) {
+        // Keep ownership locked from the prebind witness through provider supervision.
+        Some(fractal_drivers::codex_app_server::prepare_native_launch(
+            &state_dir,
+            &agent_dir,
+            &identity,
+            &runtime_id,
+            &incarnation,
+        )?)
+    } else {
+        None
+    };
     let mut mailbox =
         NativeMailbox::start(client, subject, &incarnation, "codex", &mut loop_state).await?;
     let mut observations = NativeObservations::start(&agent_dir, &incarnation)?.settle(settle);
@@ -2303,7 +2317,9 @@ async fn drive_codex_native(
     ))
         .then(|| codex_continued_thread(&argv))
         .flatten();
-    let mut task = spawn_codex_provider(client, subject, &paths, &state_dir, &argv, start);
+    let mut task = spawn_codex_provider(
+        client, subject, &paths, &state_dir, &argv, start, prepared_launch,
+    );
     let mut reported_session = None;
     // The Codex control pump keeps the subagent ledger; this driver records it on the seat.
     let mut subagents = fractal_daemon::subagents::Publisher::start(
