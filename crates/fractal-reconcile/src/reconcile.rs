@@ -125,6 +125,8 @@ const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
 // A failed checkout fetch or worktree command waits this long before Git runs again.
 const CHECKOUT_RETRY_MS: u128 = 30_000;
+/// How long a member's launch evidence, read once, is trusted before it is read again.
+const LAUNCH_EVIDENCE_RECHECK_MS: u128 = 60_000;
 // Workspace errors hold one schedule, without retrying filesystem I/O on every pass.
 const SCHEDULE_WORKSPACE_RETRY_MS: u128 = 30_000;
 // A deadline source that could not be read is read again this soon, so the deadlines it holds
@@ -1891,7 +1893,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
-                        this.incremental.finish_pass(now_ms().saturating_sub(started));
                         Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
@@ -6023,8 +6024,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let epoch = self.store.publication_evidence_epoch(&subject.subject)?;
                 if let Some(known) = known
                     && known.epoch == epoch
-                    && now.saturating_sub(known.checked_at_ms)
-                        < crate::incremental::FULL_PASS_INTERVAL_MS
+                    && now.saturating_sub(known.checked_at_ms) < LAUNCH_EVIDENCE_RECHECK_MS
                 {
                     None
                 } else {
@@ -10126,6 +10126,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         wrote: &[String],
     ) {
         crate::performance::record_correction(item);
+        smallclaims::profile::note("reconcile incremental correction");
         eprintln!(
             "st3: incremental correction: {subject} wrote {wrote:?} with no change among {} reads",
             reads.len()
@@ -21894,22 +21895,37 @@ version 2
         let (store, reconciler, run) = run_paused_on_its_allocation(Arc::new(
             Store::open(&root.path().join("store.sqlite"), "node").unwrap(),
         ));
+        let before = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
         let follower = tokio::spawn(reconciler.clone().follow_mission_reads());
         observe_state(&store, "resource/allocation", "resumed", "allocation-resumed");
         // What a write through the API does after it commits.
         reconciler.event_notify.send_modify(|generation| *generation += 1);
-        let ready = tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let step = store.mission_run(&run).unwrap().unwrap().steps[0].clone();
-                if step.status == "ready" {
-                    return step;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
+        // The step is agentless, so the follower's next evaluation admits it and completes it:
+        // `ready` can be gone before any read of the run. Its state history keeps it, and the
+        // follower wakes the pass after every evaluation that wrote, after that write.
+        let readied = || {
+            store
+                .claims_page(Some(&before.subject), None, 0, None, false, 500)
+                .unwrap()
+                .claims
+                .into_iter()
+                .find(|claim| {
+                    claim.kind == "step-run.state"
+                        && claim.body.pointer("/fields/status").and_then(Value::as_str)
+                            == Some("ready")
+                })
+        };
+        let ready = loop {
+            if let Some(ready) = readied() {
+                break ready;
             }
-        })
-        .await
-        .expect("the step is ready without a pass");
-        assert_eq!(ready.blocked_reason, None);
+            reconciler.notify.notified().await;
+        };
+        assert_eq!(ready.body.pointer("/fields/reason"), Some(&Value::Null));
+        assert_eq!(
+            ready.body.pointer("/fields/readiness_epoch"),
+            Some(&Value::from(before.readiness_epoch + 1))
+        );
         follower.abort();
     }
 
