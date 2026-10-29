@@ -144,6 +144,7 @@ pub use client_push::start_push_registration_cleanup;
 pub mod terminal_view;
 mod work_response;
 pub mod published_lists;
+mod launch_card;
 pub mod waiting_on;
 mod revision_changes;
 #[cfg(target_os = "linux")]
