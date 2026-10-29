@@ -545,3 +545,60 @@ async fn every_harness_reading_exports_while_the_graph_keeps_current_values() {
         "no seat identity in metric labels"
     );
 }
+
+/// Claim writes are counted as they are stored, per kind and writing node, so a write rate stays
+/// measurable after local trim deletes superseded claims. The first export marks where counting
+/// starts; each claim is counted once, and an export with nothing new stored sends no counters.
+#[tokio::test]
+async fn stored_claims_are_counted_once_per_kind_and_writer() {
+    let (collector, endpoint) = start_collector().await;
+    let store = Arc::new(Store::open_memory("node-a").unwrap());
+    let claim = |kind: &str, incarnation: &str| ClaimInput {
+        subject: "agent/node.ada".into(),
+        kind: kind.into(),
+        actor: Some("agent/node.ada".into()),
+        fields: serde_json::from_value(json!({"status": "running", "incarnation_id": incarnation})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    store.append_claim(&claim("runtime.observed", "inc-1")).unwrap();
+    let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
+    exporter.export_once(&store).await.unwrap();
+    let mut sizes = Vec::new();
+    for incarnation in ["inc-2", "inc-3"] {
+        sizes.push(store.append_claim(&claim("runtime.observed", incarnation)).unwrap().body.to_string().len() as u64);
+    }
+    exporter.export_once(&store).await.unwrap();
+    exporter.export_once(&store).await.unwrap();
+    let requests = collector.requests.lock().unwrap();
+    let points = |name: &str| {
+        requests
+            .iter()
+            .filter_map(|(_, body)| body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array())
+            .flatten()
+            .filter(|metric| metric["name"] == name)
+            .flat_map(|metric| metric["sum"]["dataPoints"].as_array().unwrap().clone())
+            .map(|point| {
+                let labels = point["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|attribute| attribute["value"]["stringValue"].as_str().unwrap().to_owned())
+                    .collect::<Vec<_>>();
+                (labels, point["asInt"].as_str().unwrap().parse::<u64>().unwrap())
+            })
+            .collect::<Vec<_>>()
+    };
+    let labels = vec!["runtime.observed".to_owned(), "node-a".to_owned()];
+    assert_eq!(
+        points("st_claims_stored_total"),
+        [(labels.clone(), 2)],
+        "the two claims stored after counting started, once, with nothing sent for an idle export"
+    );
+    let bytes = points("st_claim_body_bytes_stored_total");
+    assert_eq!(bytes.len(), 1);
+    assert_eq!(bytes[0].0, labels);
+    let bodies = sizes.iter().sum::<u64>();
+    assert!((bodies / 2..=bodies * 2).contains(&bytes[0].1), "{bytes:?} measures the bodies {sizes:?}");
+}

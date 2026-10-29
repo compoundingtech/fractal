@@ -11140,6 +11140,27 @@ impl crate::otlp::ObservationSource for Store {
             Ok(())
         })
     }
+
+    fn claim_index(&self) -> Result<u64> {
+        self.index()
+    }
+
+    fn claim_writes(&self, after: u64, through: u64) -> Result<Vec<crate::otlp::ClaimWrites>> {
+        let connection = self.readers.get();
+        let mut statement = connection.prepare_cached(
+            "SELECT kind, origin, count(*), sum(length(CAST(body AS BLOB))) FROM claims
+             WHERE store_index>?1 AND store_index<=?2 GROUP BY kind, origin ORDER BY kind, origin",
+        )?;
+        let rows = statement.query_map(params![after as i64, through as i64], |row| {
+            Ok(crate::otlp::ClaimWrites {
+                kind: row.get(0)?,
+                writer: row.get(1)?,
+                claims: row.get::<_, i64>(2)?.max(0) as u64,
+                bytes: row.get::<_, Option<i64>>(3)?.unwrap_or(0).max(0) as u64,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
 impl crate::incremental::ChangeSource for Store {

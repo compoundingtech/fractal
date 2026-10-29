@@ -83,6 +83,12 @@ seat's current state and usage, and each account's current limits. The same batc
 `st_account_limit_used_percent` on `/v1/metrics`, a gauge of the newest reading of each driver,
 account and window (`five_hour` or `weekly`); seat identities appear only in the log records.
 
+Each export also counts the claims this node stored since the previous export, written here or
+received from a peer, as `st_claims_stored_total` and `st_claim_body_bytes_stored_total` (delta
+sums labelled `kind` and `writer`, the writing node). Counting starts at the daemon's first export
+and reads each stored claim once, so the rates stay true after local trim deletes superseded
+claims; counting the claims that survive in the store would not.
+
 Claude and Codex response token buckets are `harness.timeline` usage observations. They retain
 the turn ID, model, agent, mission run, and step on the producing node. `local_usage_responses` remembers
 each counted provider response, so replay across harness incarnations does not count it again;
