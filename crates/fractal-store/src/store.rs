@@ -2116,6 +2116,13 @@ pub struct Store {
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
+    /// How long a person has to answer an ask that names no deadline: `[asks] default_deadline`.
+    pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
+    /// Whether asks get deadlines: `[asks] deadlines`, off by default.
+    pub ask_deadlines: std::sync::atomic::AtomicBool,
+    /// The store index up to which person answers were checked for overriding a deadline's
+    /// default; in memory, so a restart checks them again and the notice's key keeps it once.
+    pub person_answers_checked: std::sync::atomic::AtomicU64,
 }
 
 impl std::borrow::Borrow<GraphStore> for Store {
@@ -2484,7 +2491,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open explicitly registered shadow views beside Fractal's production admission and
@@ -2504,7 +2512,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Open a shared-memory store for sequential fixtures and short-lived tools.
@@ -2516,7 +2525,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default() })
+        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+            default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into() })
     }
 
     /// Simulate a different build's registry on this node.
@@ -15811,6 +15821,18 @@ pub fn try_project_simple_replication_tx(
         let Some((operation_id, request_digest)) = operation_parts(&claim.body) else {
             continue;
         };
+        // A claim a repair replaced decides no operation (`expected_operations`); its repair
+        // already brought the operation's row to the claims that remain.
+        let repaired: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=?1)",
+                [&claim.id],
+                |row| row.get(0),
+            )
+            .map_err(|error| incremental_claim_error(internal(error), claim, "operation-registry"))?;
+        if repaired {
+            continue;
+        }
         if claim.kind == "message.sent" && reconciled_message_operations.contains(operation_id) {
             continue;
         }

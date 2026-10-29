@@ -21,7 +21,7 @@ THE PLAN is a pure function of git data, so anyone holding the same refs can rec
                 of every live tree for rust-tests (main's scripts/rust-test-keys over main's .st/rust-test-inputs.json; a live tree
                 whose crates cannot be keyed keeps every rust-tests key)
   retention     `.st/evidence-retention.json` at --main (or --retention FILE): main_days, branch_days, grace_hours,
-                soft_records, cap_records
+                soft_records, cap_records, and an optional reason (text)
   as_of         main's tip commit time (or --as-of), printed in the plan
 A tree's records are deleted together or not at all, and a live tree's never: a record of a kept tree cannot disappear, so no
 verdict on a kept tree changes, and a dropped tree's verdict can only become "no record, run the check". An input key is the
@@ -170,13 +170,16 @@ def note_trees(repo, ids):
 
 
 def load_retention(text):
-    """The retention rules, strictly validated: every key present, numbers in range, nothing unknown."""
+    """The retention rules, strictly validated: every key present, numbers in range, nothing unknown but an optional `reason` (a
+    non-empty string saying why the numbers are what they are; JSON has no comments)."""
     try:
         value = json.loads(text)
     except ValueError as error:
         raise Usage(f'retention is not valid JSON: {error}')
-    if not isinstance(value, dict) or value.get('version') != 1 or set(value) != {'version', *RETENTION_KEYS}:
-        raise Usage(f'retention must be {{"version": 1, {", ".join(RETENTION_KEYS)}}} and nothing else')
+    if not isinstance(value, dict) or value.get('version') != 1 or set(value) - {'reason'} != {'version', *RETENTION_KEYS}:
+        raise Usage(f'retention must be {{"version": 1, {", ".join(RETENTION_KEYS)}}}, an optional reason, and nothing else')
+    if 'reason' in value and not (isinstance(value['reason'], str) and value['reason'].strip()):
+        raise Usage('retention: reason must be a non-empty string')
     if not all(isinstance(value[k], (int, float)) and not isinstance(value[k], bool) for k in RETENTION_KEYS):
         raise Usage('retention values must be numbers')
     if not 1 <= value['main_days'] <= 30 or value['branch_days'] < 1 or value['grace_hours'] < 0 or value['soft_records'] < 1 \

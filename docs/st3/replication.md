@@ -799,6 +799,8 @@ Each exchange also carries a claim-range summary: claim-range protocol version 1
 
 When the claims differ and an exchange moved no envelopes, the dialing worker walks the difference as the lowest-priority sync work, at most four round trips per exchange. Each round trip is an ordinary summary exchange whose inventory carries one bounded `claim_range_query`, and the peer answers in its exchange's `claim_ranges`: every non-empty top range (64 tops by the first six bits of a claim ID), then the leaves of at most 4 differing tops (4,096 leaves by the first three hex digits), then the IDs of at most 8 differing leaves (at most 4,096 IDs beyond the first leaf), then the envelopes carrying at most 512 claims the walker found it lacks. Those envelopes travel with the peer's ordinary exchange and are admitted like any other; no projection image or peer result is installed. A claim the walker has retired is never asked for, and a range the peer holds nothing in is not descended, since only the peer's claims can be missing here. A walk runs once for each pair of whole-set digests, so claims one side retired, or holds that the other lacks, cost one walk until either side's claims change; an answer from an index still folding claims in is asked again at the next exchange. A peer without the claim-range protocol ignores the query and is never walked.
 
+Between members that trim locally (`[trim] local`), the summary also carries `retired`: the same summary of the claim IDs the sender retired (`retired_claim_ids`, namespace 1 of the range index), sent only once that namespace has folded. A member that also trims locally compares it, and the walk descends the retired ranges beside the retained ones, in the same queries (`claim_range_query.retired`). A retired ID the peer lists and this member lacks is recorded as retired here when the answer arrives; nothing is fetched. So the set travels: a member never admits, asks for or serves a claim another member deleted, even when the claim comes from a member that still holds it or runs an older build. Recording one changes this member's retired digest, so an unfinished retired walk continues under the new pair. Ordinary members and older builds neither send nor read `retired`.
+
 Ranges that differ only by payloadless checkpoint tombstones never settle by envelope transport.
 A compact answer therefore lists the differing ranges that hold a live envelope first and the
 payloadless ones after, and each answer starts each group at a different range, so successive
@@ -1346,11 +1348,14 @@ members until a person excuses it. No claim family is trimmed locally yet.
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
 the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
-recorded, was not a deletion and leaves it. Admission then refuses a retired envelope or claim from
+recorded, was not a deletion and leaves it. From then on an identity enters the ledger only as it is
+deleted, in the deleting transaction, never when a cut records it: a cut that stops before trimming,
+or a chunk that rolls back, retires nothing a peer could learn. Admission then refuses a retired envelope or claim from
 any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
 peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
 held. It still syncs everything else with every peer as before. Turning the setting off stops
-reading the ledger as the authority.
+reading the ledger as the authority. The retired claim IDs travel between such members by claim-range walk, as
+"Protocol" describes.
 
 `[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
 finds this member and a peer answering differently; see [Answers across members](#answers-across-members).

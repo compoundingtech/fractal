@@ -1159,6 +1159,8 @@ async fn generated_client_conforms_over_the_real_unix_transport() {
         state
             .store
             .ask_person(&fractal_daemon::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: person.into(),
                 title: "Choose a date".into(),
