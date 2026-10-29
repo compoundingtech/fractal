@@ -3960,15 +3960,21 @@ mod retry_tests {
         let root = tempfile::tempdir().unwrap();
         let (local, failing, posts, dials, wake, tasks) =
             refused_fallback_peer(root.path(), 2).await;
-        let succeeded_after = |since: u128| {
+        // Waits for an exchange that failed after `since` and then for a success after that
+        // failure. A success alone is not the recovery: an exchange already in flight, or the
+        // follow-up of one that moved envelopes, can complete after `since` and before the
+        // preferred route breaks. The route's first retry comes about a second after its
+        // failure; the bound only catches a hang, as without the fix the route is never dialed
+        // again.
+        let recovered_after = |since: u128| {
             let local = local.clone();
-            // The route's first retry comes about a second after its failure. The bound leaves
-            // room for a loaded runner; without the fix the route is never dialed again.
             async move {
-                tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::time::timeout(Duration::from_secs(30), async {
                     loop {
-                        if let (Some(success), _) = local.replication_peer_transport("beacon")
-                            && success.at_unix_ms > since
+                        if let (Some(success), Some(failure)) =
+                            local.replication_peer_transport("beacon")
+                            && failure.at_unix_ms > since
+                            && success.at_unix_ms > failure.at_unix_ms
                         {
                             return success;
                         }
@@ -3978,7 +3984,7 @@ mod retry_tests {
                 .await
             }
         };
-        let success = succeeded_after(0)
+        let success = recovered_after(0)
             .await
             .expect("the preferred route must exchange again within its short back-off");
         assert_ne!(success.carrier, crate::replication::ReplicationCarrier::Fabric);
@@ -3999,9 +4005,10 @@ mod retry_tests {
         let posted = posts.load(Ordering::SeqCst);
         failing.store(2, Ordering::SeqCst);
         wake.send_modify(|generation| *generation += 1);
-        succeeded_after(before)
+        recovered_after(before)
             .await
             .expect("the preferred route recovers again without the refused one");
+        // The failed exchange's two broken POSTs, then the one that recovered.
         assert!(posts.load(Ordering::SeqCst) >= posted + 3);
         assert_eq!(fabric_dials(&dials), 1, "a refused route is held, not retried as a fault");
         for task in tasks {
