@@ -25,10 +25,11 @@ THE PLAN is a pure function of git data, so anyone holding the same refs can rec
   as_of         main's tip commit time (or --as-of), printed in the plan
 A tree's records are deleted together or not at all, and a live tree's never: a record of a kept tree cannot disappear, so no
 verdict on a kept tree changes, and a dropped tree's verdict can only become "no record, run the check". An input key is the
-same: all of its index refs or none. A dead tree or key whose newest record is younger than grace_hours is kept, unless more
-than soft_records remain: then the dead groups go oldest first (by their newest record). A record filed both as a tag and as a
-note is one record: it counts once. If the live set alone is over cap_records the tool prints it and exits 3, deleting
-nothing live.
+same: all of its index refs or none. A dead tree or key whose newest record is younger than grace_hours is always kept (a
+signing run pushes its first records before its branch, so its tree is dead until then); `grace_records` counts them.
+soft_records deletes nothing (it once deleted kept-by-grace groups oldest first, which since the live set outgrew it meant all of
+them, #4186); it is still read and checked. A record filed both as a tag and as a note is one record: it counts once. If the
+live set alone is over cap_records the tool prints it and exits 3, deleting nothing live.
 
 The FIRST LAYOUT (`refs/notes/evidence/<record>`, no tree in the name): its tree is read from the note. In a live tree it is
 MIGRATED (the tree-prefixed ref `refs/notes/evidence/<tree>/<record>` is created, then the old name removed); in a dead tree
@@ -384,16 +385,13 @@ def gc_plan(records, index, live, live_keys, retention, as_of):
             delete += [ref for ref, _, _, _ in names]
             reasons['deleted: dead input key' if group[0] == 'key' else 'deleted: dead tree'] += len(names)
     dead = [group for group, names in groups.items() if group[0] != 'unreadable' and not (live.get(group[1]) if group[0] == 'tree' else group[1:] in live_keys)]
+    # Grace is absolute: a dead group younger than grace_hours is never deleted, however many records remain. Until 2026-10-29 the
+    # soft limit deleted them oldest first while more than soft_records records remained, and since the live set alone passed
+    # soft_records (about 2026-10-23) that deleted every one, every night, including the first records of a signing run whose branch
+    # was not pushed yet (#4186). soft_records deletes nothing now; the summary says how many records grace keeps.
     deleted_groups = {group for group in dead if group not in {c[1] for c in candidates}}
     remaining = all_units - set().union(set(), *(units(g, groups[g]) for g in deleted_groups))
-    for newest, group, names in sorted(candidates):
-        if len(remaining) <= retention['soft_records']:
-            break
-        delete += [ref for ref, _, _, _ in names]
-        reasons['kept: grace'] -= len(names)
-        reasons['deleted: over the soft limit (oldest first)'] += len(names)
-        remaining -= units(group, names)
-        deleted_groups.add(group)
+    grace_units = set().union(set(), *(units(group, names) for _, group, names in candidates))
     delete = sorted(set(delete))
     doomed = set(delete)
     lengths_before = [len(r[0]) for r in records] + [len(i[0]) for i in index]
@@ -405,6 +403,7 @@ def gc_plan(records, index, live, live_keys, retention, as_of):
         'keys': sorted([g[1], g[2]] for g in deleted_groups if g[0] == 'key'),
         'refs_before': len(lengths_before), 'refs_after': len(lengths_after),
         'records_before': len(all_units), 'records_after': len(remaining), 'protected_records': len(live_units),
+        'grace_records': len(grace_units),
         'protected_refs': sum(len(names) for group, names in groups.items() if group[0] == 'unreadable' or group not in dead),
         'advertised_bytes_before': advertised_bytes(lengths_before), 'advertised_bytes_after': advertised_bytes(lengths_after),
         'reasons': {k: v for k, v in sorted(reasons.items()) if v},
