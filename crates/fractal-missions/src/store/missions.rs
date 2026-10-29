@@ -6889,6 +6889,8 @@ impl MissionsStore for Store {
                     let mut observer_fields = json!({
                         "status": "healthy",
                         "revision": desired_revision,
+                        // For a repository observer, only how far it has read: its version maps
+                        // stay in the polling member's GitHub plugin database.
                         "cursor": cursor,
                         "changed": changed,
                     });

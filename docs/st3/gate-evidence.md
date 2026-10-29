@@ -123,7 +123,13 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   of every open pull request head (`--open-heads-from FILE`, one commit a line; with `--fetch` each is fetched by id, so
   a fork's head works too) whatever its age; and the trees of main's first-parent commits within `main_days` of
   `as_of`, main's tip always.
-- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs.
+- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs, and every live tree's
+  per-crate `rust-tests` keys. Those keys come from main's `scripts/rust-test-keys` over main's `.st/rust-test-inputs.json`, as the gate keys a pull request
+  against its base. Until 2026-10-28 the per-crate keys were left out (the `rust-tests` policy declares no `inputs`), so a plan deleted
+  the crate keys that open pull requests' `rust-tests` decisions still chose. A live tree whose crates cannot be keyed, because a
+  manifest is unreadable, keeps every `rust-tests` key. In a partial clone (`--fetch`), the manifests the live trees lack are fetched
+  by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
+  unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
   change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (20,000).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
@@ -237,6 +243,16 @@ again after the GC line, which would turn their deletion into `missing` and let 
 being pending once the remote no longer has it, or after 24 hours if GC never deleted it, and is then logged again like
 any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
 next pull.
+
+A stalled pull alerts within minutes. `scripts/evidence-log-watch` (`scripts/evidence-log-watch.timer`, every 2 minutes)
+fetches only the head of `refs/evidence-log/main` from the remote, not the log host's own copy, so a pull that commits but
+does not publish counts as stalled too. It reads the `as_of` time from the head's subject. A head older than 360 s (three
+missed pulls, inside the verifier's 600 s) is a stall, and so is a head that cannot be read for that long. The watcher
+then runs `EVIDENCE_LOG_WATCH_NOTIFY`, a JSON argv with the alert line appended: once when the stall begins, hourly while
+it lasts, and once when the log moves again. A notification that fails is sent again on the next run. Not every gap is a
+stall. On 2026-10-28 a gate reported 21 per-crate passes as unlogged although the pulls ran on time: evidence-gc had
+written its GC lines (03:42Z) for keys whose deletion was still pending, and those keys belonged to open pull requests.
+GC now keeps the crate keys of live trees.
 
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
@@ -927,6 +943,46 @@ writes the record id to the job summary. The wiring is deliberately conservative
 - Until a producer writes a note for a check, that check never skips. At the time of writing no note exists for
   these two, so both run in full; the first skip needs a producer.
 
+### Our pull requests are signed or refused, never run
+
+Our pull requests are pre-signed (`scripts/st-test --all --push origin` before every push), so CI never runs their heavy jobs. CI is for
+other people's unsigned pull requests and for merge-queue groups. On 2026-10-27, 20 of our 45 pull request heads still ran CI in full,
+because a check had no valid note at the moment its gate looked. Those runs cost runner time, and the gate's quiet fallback hid them.
+
+`.st/evidence-signed-only.json` lists the openers this applies to (`openers`, GitHub logins: the account that opened the pull request,
+which GitHub authenticates). The gate reads it at the accepted BASE, like the author list, so a pull request cannot take itself off it.
+For a same-repository, non-draft `pull_request` run whose opener is listed, an enforced check that the gate would run is refused
+instead: `decision=refuse`, and the gate job's outputs carry `refuse=true` and a one-line `refusal`. That covers no note, a refused
+note, a note that was satisfied but not usable here (say, a protected file main changed since the branch point), and a gate that could
+not check the note. The refusal names the check and the reason, and ends with `sign it with scripts/st-test --all --push origin`. As
+with a skip, the outputs come from a marker step (`evidence refused: not signed`) and are the last thing it writes. A note that
+satisfied the verifier but cannot be used is usually a change to a file that decides skipping, covered only by a note another
+signer made for the same inputs. That run needs this tree signed on our own host, which `st-test` does not redo for a check it
+finds covered, so that refusal says `scripts/st-test --all --rerun --push origin`.
+
+A host note is not hidden by a newer one from CI. CI keeps signing the same inputs for other pull requests (every run of
+`typescript-client` whose inputs did not change carries the same key), and the latest record for a check decides. So on a branch that
+edits a protected file, CI's later pass used to shadow the host's note, and the check ran: #4138 itself ran `typescript-client` that
+way. When only our hosts' notes can cover the run (a `pull_request` run whose branch edits a protected file, compared in head-tree
+mode), the gate asks the base's verifier with `--prefer-levels host`. The newest passing host record then decides, unless a failing
+record is dated after it; a newer failure still decides, and every other rule applies to the record chosen.
+
+The check jobs act on it:
+
+- A job wired with the skip (`typescript-client`, `genie-freshness`, `ci-script-tests`) runs only its checkout. Every other step is
+  skipped, and a last step, `evidence refused: sign it with scripts/st-test --all --push origin`, prints the refusal and fails the job.
+- The Linux stages (`linux-test-build`, the test shards, clippy, fleet compatibility) do not start when `linux-gate`'s gate refuses.
+  The `linux-gate` aggregate fails at its first step with the refusal.
+- `fractal-web-execution` does not start, and `fractal-web` fails with the refusal when the change touches web inputs. With no web
+  input changed, nothing runs and the check passes, as before.
+
+Every other run is decided as before: another opener's pull request, a draft, a fork, a merge group, a push to main. So is a check
+whose skipping is not on (`enforce` false, `rust-tests` today, which is part of `linux-gate`), because no note can cover it. If the
+list is missing or unreadable at the base, or the gate cannot read the base, every run is decided as before, and so the check runs.
+A gate job that dies before it decides also leaves the check to run: the refusal comes only from a gate that positively decided. To
+fix a refused check, sign the head with `scripts/st-test --all --push origin` and push, or re-run the jobs once the notes are on the
+remote. A failed check never needs a new commit.
+
 ### The Linux group
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
@@ -1373,7 +1429,9 @@ protected file differs between the branch point and the base, or the current tip
 branch: that is about which tree, so it still falls back), except the three the gate and verifier only ever read at the base when they judge
 a note (`BASE_READ` in the gate: `.st/evidence-keys`, `.st/evidence-authors.json` and `.st/evidence-log-key`). The head tree's copy of
 those decides nothing, so a key rotation or an author-list change on main no longer voids head signatures made before it. A note the
-change distrusts (a dropped key, say) is still refused, by the lists as they are at the base. The protected files the branch ITSELF changes no longer make it fall back: they are
+change distrusts (a dropped key, say) is still refused, by the lists as they are at the base. Nor does main moving a protected file that the
+run's check does not use, when the base declares that check's CI inputs (see "A check's CI inputs" below): a change to the gate or the
+verifier on main keeps the head tree for linux-gate, say, and the decision line says `ci_inputs=kept`. The protected files the branch ITSELF changes no longer make it fall back: they are
 the run's protected changes, and a protected change skips only on a `pull_request` run whose note is a host level's (`OWN_LEVELS` in the gate),
 since 2026-10-26 (Nathan: our pull requests skip CI entirely). That is safe because the run is judged by the gate and verifier the workflow
 fetches from `BASE_SHA`, never the pull request's copies, and the merge queue runs every check in full, so a change to the machinery is tested
@@ -1400,6 +1458,37 @@ percentile 11 and the 99th 22, so the bound refuses only outliers. The merge que
 limits how much a green pull request can differ from what lands, not what lands. The number lives in the gate (read from the accepted base,
 a protected path), so changing it is a reviewed change like any other.
 
+### A check's CI inputs
+
+A lane entry in `.st/required-lanes.json` may declare `ci_inputs`: the protected CI files the check uses, in the forms a skip policy's
+`inputs` take plus three more:
+
+- `PATH` and `!PATH`: a file or directory, and one left out of a directory declared beside it;
+- `PATH::jobs.ID`: one job of a generated workflow. That is the job's block, the block of every job it `needs`, transitively, and the
+  workflow's top-level blocks (`on`, `env`, `permissions`, `concurrency`, ...), so a top-level `env` change moves every job's key;
+- `PATH::KEY.KEY`: one entry of a JSON file, such as `.st/required-lanes.json::lanes.linux-gate` or
+  `.st/evidence-skip-policy.json::checks.linux-gate`.
+
+When main moved protected files since a pull request's branch point, the gate (`branch_point_verdict`, with the run's check) projects the
+check's `ci_inputs` (as the base declares them, read with the base's verifier) at the branch point, the base and the current tip. If all
+three keys are equal, main moved nothing this check uses, and the head tree is still asked about (`ci_inputs=kept`). Otherwise it falls
+back as before (`ci_inputs=changed`). Every entry must also name something at all three revisions: an entry that names nothing (a
+job main renamed, a typo) would project to nothing everywhere and look unchanged however the job it meant changes, so it counts as changed. A lane with no `ci_inputs`, or a base that cannot say, keeps the earlier rule: any protected change on
+main falls back. `scripts/fractal-test` asks the same question for each check it signs before it decides to merge main in.
+
+ci-script-tests and genie-freshness declare none, because their own tests read the gate, the verifier, the policy and the lanes. A change
+to those therefore voids their signatures and no others: linux-gate, typescript-client, fractal-web and rust-tests keep theirs. fractal-web's
+scripts read all of `fleet.yml` and `workspace-ci.ts`, so it declares both whole.
+
+**Keeping the declarations honest.** `scripts/lane-definition-closure --check`, which genie-freshness runs on the whole tree, fails a lane
+that declares `ci_inputs` and executes or reads a protected file they leave out. A selector covers only its part, so a lane that reads the
+whole file must declare it whole; an excluded path is left out. It also fails an entry that names nothing in the tree (a file, job or JSON entry that isn't there),
+read with the verifier's own selector. Files only ever read at the base (`BASE_READ`) don't count. Notes carry
+nothing new: a head-tree note is about the head tree whichever way the gate decides, so older notes need no special case.
+
+`.st/rust-test-inputs.json` is not protected. It is data that changes with ordinary code, and the verifier reads it only at the base when it
+computes the per-crate keys.
+
 ### Which lane definition a pull request is held to
 
 A lane's definition paths are wide (all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` and the nextest and clippy settings for the Rust
@@ -1412,16 +1501,16 @@ the branch point (`definition_changed` otherwise: the pull request edits its lan
 `lane_definition_sha256` (`wrong_definition` otherwise). A level whose by_level rule says `"lane": "tree"` (the host level, since 2026-10-26)
 may edit its lane: its note must then carry the digest of the lane as the SIGNED tree defines it (the base's argv and paths, the tree's bytes;
 `tree_sha256` beside `sha256` in `lane_definition`), so it covers that edited definition and no other. `evidence-wrap` records that digest.
-The verifier refuses a lane base that is not an ancestor of the base, and one whose
-`.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's either way; the gate never
-uses a head tree whose branch point has another lane file anyway (it is a protected path). What this admits, stated plainly: a note made
+The verifier refuses a lane base that is not an ancestor of the base, and one
+whose entry for this lane in `.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's
+either way. Another lane's entry changing on main is not this lane's, and with "A check's CI inputs" the gate keeps the head tree then. What this admits, stated plainly: a note made
 with an older lane definition that main had accepted, for a pull request that changed none of it; the merge queue still tests the
 integrated tree with today's definition, `pull_request` only, sampling unchanged. A merge-tree run (a fallback, or a branch that holds the
 base) is held to the base as before. To keep the head tree the gate does not fetch the base again at depth 1 in head mode (that would cut the
 history the ancestry check reads).
 
 `scripts/fractal-test` signs and reports the same way: it takes the branch point of the commit it signs (the base itself when the branch holds the
-base's tip, or when the lane file changed on main since the branch left it), judges a lane edit against it, passes it to `evidence-wrap
+base's tip, or when main changed the lane entry of a check it signs since the branch left it), judges a lane edit against it, passes it to `evidence-wrap
 --lanes-from` (so the note carries its digest) and asks the verifier with `--lane-base`, in a run and under `--status`.
 
 ### Host keys
@@ -1496,13 +1585,28 @@ of persistent ones per ORIGIN (`~/.cache/st-test/pools/<hash of the normalised o
 untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
 and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
-host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
-its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
-takes a throwaway worktree too, since what a pool tree keeps is a warm cargo target, so it never waits behind building runs for a tree. Each check that is not one of those builds runs with `BUILD_ADMISSION_CLASS=light`, so the nix wrapper starts its `nix develop` shell as a light start rather than waiting in build admission as a heavy one (as the pre-sign worker starts `.#web` and `.#genie`); a building check never gets it, even when the caller set it. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+host's heavy slots plus one, counted as the cargo shim counts them: `CARGO_HEAVY_SLOTS`, else `~/.config/cargo-heavy-slots`, else 1; `off`
+runs in a fresh throwaway worktree as before) and `ST_TEST_POOL` its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
+takes a throwaway worktree too, since what a pool tree keeps is a warm cargo target, so it never waits behind building runs for a tree. Each check that is not one of those builds runs with `BUILD_ADMISSION_CLASS=light`, so the nix wrapper starts its `nix develop` shell as a light start rather than waiting in build admission as a heavy one (as the pre-sign worker starts `.#web` and `.#genie`); a building check never gets it, even when the caller set it. **Slot first:** a tree held while its run waits for a build slot is a tree nobody can use (2026-10-28: on one build host the slowest run waited
+42,265 s for a tree while linux-gate in the held trees waited 1,000-2,400 s at a time for a build slot), and a tree cannot be given back while a
+check is at work in it. So the best ticket takes a free tree only when a build started now would get a heavy slot at once: more of the shim's
+heavy slots (`$XDG_RUNTIME_DIR/cargo-slots/heavyN`, probed with a non-blocking `flock` and let go at once) are free than heavy tickets wait in
+its queue, and `build-admission check heavy` would admit it. Until then it holds no tree and says why once. After `TREE_SLOT_WAIT_LIMIT` (2700 s,
+the gate's own `MAX_WAIT_SECONDS`) of a free tree left for want of a slot it takes the tree anyway, so a host whose slots never come free first
+starves no run. A host without the shim's slots, or a gate that cannot be read, waits for nothing. Each run's record (and its summary) has
+`tree_wait_s` (the wait for its tree), `tree_slot_wait_s` (the part of it with a tree free, waiting for a slot), `tree_held_s` and
+`tree_blocked_s`: the time the build lane held the tree and built nothing, `tree_pre_start_s` before `ci-local` started (admission and the dev
+shell) plus `tree_slot_blocked_s` with every running `ci-local` stage waiting for a build slot (one stage's wait while another builds is not
+counted). **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
-its own exact tree: the tree is reset to the commit and cleaned every run, whoever used the slot before. The pool cap (`ST_TEST_POOL_MAX_GB`)
+its own exact tree: the tree is reset to the commit and cleaned every run, whoever used the slot before. A slot has one writer: its lease (an
+`flock` on `tree-N.lock`) ends with the run that held it, but not always with what that run started. On 2026-10-28 a seat restart killed a run
+during its checkout of `tree-2`, and the next five runs given the tree failed on the `index.lock` git left. So a free slot whose tree still has
+a process at work in it (read from `/proc`) is busy: it is skipped, named once per waiter, until those processes end. A leftover `index.lock`
+is removed before the checkout, and logged, only when no process is left in the tree. With one still there, the run fails rather than
+sharing the tree. The pool cap (`ST_TEST_POOL_MAX_GB`)
 evicts whole slots, least recently used first, the old per-clone layout included. When that tree has a
 `megarepo.lock`, its members are materialized under `repos/` first with the command CI's `megarepoApplyStep` runs (`mr apply`
 from the flake's effect-utils pin; a test pins the two together): `genie-freshness` imports `repos/effect-utils`, and the dev
@@ -1888,7 +1992,7 @@ values and `-` for none:
 ```
 evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
 reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false match=tree|inputs source_inputs=…
-tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… notes_fetch=ok|none|failed
+tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… ci_inputs=kept|changed|- notes_fetch=ok|none|failed
 policy_sha256=… keys_sha256=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
 ```
 

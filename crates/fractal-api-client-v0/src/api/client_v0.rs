@@ -20129,7 +20129,9 @@ mission "example/zero-run" state="ready" {
     /// While the newest entries are all hidden echoes, a change that concerns the conversation
     /// makes the replay refuse with an expired page cursor and the follower re-OPEN. It must wait
     /// before that next attempt: a refusal that opening again cannot cure is not retried at once.
-    #[tokio::test]
+    /// The clock is paused: the follower waits only on timers, so the windows below measure its
+    /// waits and not how long a loaded host takes to parse the transcript.
+    #[tokio::test(start_paused = true)]
     async fn timeline_send_identity_budget_expiry_does_not_reopen_in_a_hot_loop() {
         let root = tempfile::tempdir().unwrap();
         let (state, session_id) = hidden_echo_prefix_fixture(root.path());

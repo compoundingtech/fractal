@@ -36,7 +36,7 @@ fn cleanup_fixture() {
     let mut fixture = Command::new("python3")
         .arg(repo.join("scripts/fractal-test-process-test"))
         .arg("--boot-fixture")
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .arg(&mode)
         .spawn()
@@ -66,7 +66,7 @@ fn every_exit_reaps_the_daemon_even_when_the_rust_test_is_killed() {
     let output = Command::new("python3")
         .env("PYTHONDONTWRITEBYTECODE", "1")
         .arg(repo.join("scripts/fractal-test-process-test"))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(std::env::current_exe().unwrap())
         .output()
         .unwrap();
@@ -171,7 +171,7 @@ fn canary(harness: &str, scenario: &str) {
         } else {
             "scripts/fractal-boot-canaries/run"
         }))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .args([harness, scenario, "--bound", "180", "--scratch"])
         .arg(scratch.path())

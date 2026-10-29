@@ -572,7 +572,7 @@ changed in plain words (`+ step publish`, `~ review: goal, assignee`, `+ review:
 mission's own fields come first as `mission: …`, then the steps by path. Fields Fractal derives (a
 step's definition hash) are not named; what they derive from is. There are at most 200 lines;
 beyond that, `truncated` is true. The attention refresher computes the lines from the published
-revision the run runs now and the candidate (`crates/st3/src/api/revision_changes.rs`). A card
+revision the run runs now and the candidate (`crates/fractal-api-core/src/api/revision_changes.rs`). A card
 whose proposal or revisions Fractal no longer has carries no `revision`.
 
 The terminal UI's revision card reads them in its own PR; until then no client shows them.
