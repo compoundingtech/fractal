@@ -198,6 +198,11 @@ real Cargo and benign stand-in commands; it compiles no Rust.
 - `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
   previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
   metadata before running it; it does not rebuild the baseline or its PTY dependency.
+  It also runs the production mailbox bind handler against a pinned PTY 0.13.0
+  (`063ff7f`) metadata fixture without `daemonBootId`, with a live matching process
+  start token. The previous-release fleet test uses a stub PTY and covers replication,
+  not native channel admission; the metadata fixture independently covers the deployed
+  writer contract even when the devShell PTY advances.
 
 The primary test job proves that the two actual nextest inventories are disjoint and their union
 equals the full selected suite. The explicit zero-retry mail canaries run in a parallel job. The primary also

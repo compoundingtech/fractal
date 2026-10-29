@@ -10,6 +10,13 @@ logs="$RUNNER_TEMP/ci-logs"
 mkdir -p "$logs"
 
 fleet_compat() {
+  # Fleet runtime compatibility is separate from Fractal-to-Fractal replication.
+  # Exercise the deployed pty 0.13.0 record through the production mailbox bind handler,
+  # even when the devShell's newer pty writer would hide missing daemonBootId.
+  cargo test -p fractal-api-mailbox --locked --lib \
+    api::mailbox::tests::replay_native_tests::deployed_pty_0_13_0_record_without_boot_id_binds_mailbox \
+    -- --exact 2>&1 | tee "$logs/pty-mailbox-compat-result.log" || return
+  grep -q "test result: ok. 1 passed" "$logs/pty-mailbox-compat-result.log" || return
   local baseline
   baseline=$(python3 scripts/compat-baseline fleet "$RUNNER_TEMP/baseline") || return
 # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
