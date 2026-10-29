@@ -1,3 +1,13 @@
 record c77b8407f93662c4d89cd87820d81688a1c40817 genie-freshness 0 host/spindle 2026-10-29T01:28:07Z
 record 846aa22cae47dcdd7298913d4a32e8b3a554f11e ci-script-tests 0 host/spindle 2026-10-29T01:31:31Z
 record 407a00ffee2ed62002a80a05a439481c36704a0b linux-gate 0 host/spindle 2026-10-29T01:46:02Z
+record 1b0d2a562fdbed4ef999b524963b4e56de9f6337 rust-tests 0 host/spindle 2026-10-29T01:47:05Z
+record 1c48144a2d6c750a194927f7640ea5d6e468a776 rust-tests 0 host/spindle 2026-10-29T01:47:14Z
+record 51ed2e552cecc35d74862db3224ceba6497024c6 rust-tests 0 host/spindle 2026-10-29T01:47:14Z
+record 865d3709cc1c22fb040cdcfaf393b3c9738bcdd4 rust-tests 0 host/spindle 2026-10-29T01:47:13Z
+record a4d47e66400b6445c76681e883b4c9afc903141e rust-tests 0 host/spindle 2026-10-29T01:47:14Z
+record a6bade23c07e33d5dedb535f3b34ec9e9433047c rust-tests 0 host/spindle 2026-10-29T01:47:14Z
+record b5679085ac4b798ef83ea82bf5a86f5bf69eae9d rust-tests 0 host/spindle 2026-10-29T01:47:13Z
+record ca905d8ea64c05df7c861dcc19dce4c3b8a3aa48 rust-tests 0 host/spindle 2026-10-29T01:47:22Z
+record e66c7e00fb10996f74561d59012f911470708744 rust-tests 0 host/spindle 2026-10-29T01:47:13Z
+record e7755832791df3710274759d0285922d7b64b63b rust-tests 0 host/spindle 2026-10-29T01:47:13Z
