@@ -8036,22 +8036,26 @@ fn roster_fixture_checked_messages(
     let store = &fixture.store;
     let index = store.index().unwrap();
     for history in [false, true] {
-        let mut cold = client_agent_resources_uncached(store, history, index).unwrap();
-        add_agent_todos(store, &mut cold, index).unwrap();
-        for subject in subjects {
-            assert_eq!(roster_fixture_pending_delivery(&cold, subject), pending);
-        }
-        let selected = subjects.iter().cloned().collect::<BTreeSet<_>>();
-        let cached_selected = store.cached_agent_resources_for(index, history, Some(&selected), |changed| {
-            let mut cards = client_agent_resources_selected(store, history, index, changed)?;
-            add_agent_todos(store, &mut cards, index)?;
-            Ok(cards)
+        // On a pinned snapshot, as the refresher builds, like `checked_agent_cache`.
+        store.read_snapshot(|_| {
+            let mut cold = client_agent_resources_uncached(store, history, index).unwrap();
+            add_agent_todos(store, &mut cold, index).unwrap();
+            for subject in subjects {
+                assert_eq!(roster_fixture_pending_delivery(&cold, subject), pending);
+            }
+            let selected = subjects.iter().cloned().collect::<BTreeSet<_>>();
+            let cached_selected = store.cached_agent_resources_for(index, history, Some(&selected), |changed| {
+                let mut cards = client_agent_resources_selected(store, history, index, changed)?;
+                add_agent_todos(store, &mut cards, index)?;
+                Ok(cards)
+            }).unwrap();
+            let expected = cold.iter().filter(|card|
+                selected.contains(card["id"].as_str().unwrap())).cloned().collect::<Vec<_>>();
+            assert_eq!(cached_selected, expected, "selected history={history}");
+            let cached = client_agent_resources_cached(store, history, index).unwrap();
+            assert_eq!(cached, cold, "full history={history}");
+            Ok(())
         }).unwrap();
-        let expected = cold.iter().filter(|card|
-            selected.contains(card["id"].as_str().unwrap())).cloned().collect::<Vec<_>>();
-        assert_eq!(cached_selected, expected, "selected history={history}");
-        let cached = client_agent_resources_cached(store, history, index).unwrap();
-        assert_eq!(cached, cold, "full history={history}");
     }
 }
 
@@ -8776,6 +8780,22 @@ fn agent_roster_heartbeat_only_local_stream_hit_rate() {
                 "the rebuilt timeline cut must become reusable");
             Ok(())
         }).unwrap();
+    }
+}
+
+#[test]
+fn checked_roster_builds_wait_through_a_stalled_fault_read() {
+    // A loaded host can hold a card-fault read past 25 ms of wall time while it spends no CPU.
+    // The checked builds read as the refresher does, on a pinned snapshot, so that pause cannot
+    // degrade the cached side's faults and not the cold side's.
+    let store = roster_followup_store();
+    let index = store.index().unwrap();
+    for history in [false, true] {
+        let pause = Duration::from_millis(50);
+        Store::stall_next_card_fault_read_for_test(pause);
+        let started = Instant::now();
+        checked_agent_cache(&store, history, index);
+        assert!(started.elapsed() >= pause, "the stall must reach a card-fault read");
     }
 }
 
