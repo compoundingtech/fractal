@@ -551,3 +551,15 @@ accepted.
   payload arm and recursively covers the referenced definitions. Behavioral
   turn, resume, and receipt evidence is reviewed separately; a schema match
   alone does not claim it.
+
+### Must support rolling fleet upgrades
+
+- **R49 Adjacent-release fleet window:** A Fractal fleet must support adjacent
+  published releases N and N-1 together for at least 14 days without lost work,
+  duplicate schedule fires, or blocked schedules. Features requiring support
+  from every member activate only when all active members advertise support.
+  An older-release member returning after being offline for up to 30 days must
+  neither block nor corrupt the fleet. Downgrade is not required.
+  Implementation remains open in [#4002](https://github.com/compoundingtech/fractal/issues/4002);
+  the protocol design and acceptance evidence are in
+  [the compatibility contract](../st3/compatibility.md).
