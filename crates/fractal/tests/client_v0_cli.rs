@@ -1831,7 +1831,7 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
     assert!(listed["value"]["items"].as_array().unwrap().is_empty());
     assert!(
         !store
-            .events_after_bounded(0, 200)
+            .events_after_bounded(0, u64::MAX, 200)
             .unwrap()
             .iter()
             .any(|c| c.subject.starts_with("attention/"))

@@ -1854,6 +1854,11 @@ async fn client_event_pages_hand_out_no_cursor_past_the_published_index() {
         !page["value"]["resume_cursor"].as_str().unwrap().contains(&format!("/{second}")),
         "a resume cursor past the published index: {page}"
     );
+    // A tail read (no cursor) bounds its query before its limit: the unpublished event must
+    // not take the only place and leave the newest published one out.
+    let (status, tail) = client_json(app.clone(), "/v1/client/events?limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{tail}");
+    assert_eq!(sequences(&tail), vec![first], "the newest published event: {tail}");
 
     state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
     let (status, page) = client_json(app, &path).await;

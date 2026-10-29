@@ -14601,7 +14601,7 @@ subscription "watch/source" {
                 },
             )
             .unwrap();
-        let records = state.store.events_after_bounded(before, 10).unwrap();
+        let records = state.store.events_after_bounded(before, u64::MAX, 10).unwrap();
         let record = records
             .iter()
             .find(|record| record.subject == "attention/sync-demo")

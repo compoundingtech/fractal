@@ -4004,12 +4004,23 @@ impl Store {
     /// Local observations written after `after`, oldest first. The records carry the
     /// `store_index` of the claim each one follows.
     pub fn local_observations_after(&self, after: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
+        self.local_observations_after_through(after, i64::MAX as u64, limit)
+    }
+
+    /// [`Self::local_observations_after`], leaving out observations that follow a claim past
+    /// `through` (an event feed passes the published index, as `events_page` does).
+    pub fn local_observations_after_through(
+        &self,
+        after: u64,
+        through: u64,
+        limit: usize,
+    ) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha4f521b72fe3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "{LOCAL_OBSERVATION_COLUMNS} WHERE id > ?1 ORDER BY id LIMIT ?2"
+            "{LOCAL_OBSERVATION_COLUMNS} WHERE id > ?1 AND after_store_index <= ?3 ORDER BY id LIMIT ?2"
         ))?;
         let rows = statement.query_map(
-            params![after as i64, limit.min(i64::MAX as usize) as i64],
+            params![after as i64, limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64) as i64],
             |row| local_observation_from_row(&self.origin, row),
         )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -4058,13 +4069,19 @@ impl Store {
 
     /// The newest local observations, oldest first.
     pub fn local_observations_tail(&self, limit: usize) -> Result<Vec<ClaimRecord>> {
+        self.local_observations_tail_through(i64::MAX as u64, limit)
+    }
+
+    /// The newest local observations that follow a claim at or before `through`, oldest first.
+    pub fn local_observations_tail_through(&self, through: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hbe0f6965fe14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
-            "SELECT * FROM ({LOCAL_OBSERVATION_COLUMNS} ORDER BY id DESC LIMIT ?1) ORDER BY id"
+            "SELECT * FROM ({LOCAL_OBSERVATION_COLUMNS} WHERE after_store_index <= ?2 ORDER BY id DESC LIMIT ?1) ORDER BY id"
         ))?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], |row| {
-            local_observation_from_row(&self.origin, row)
-        })?;
+        let rows = statement.query_map(
+            params![limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64) as i64],
+            |row| local_observation_from_row(&self.origin, row),
+        )?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -5105,14 +5122,15 @@ impl Store {
         self.events_after_filtered(after, subject, None)
     }
 
-    pub fn events_after_bounded(&self, after: u64, limit: usize) -> Result<Vec<EventRecord>> {
+    /// The events after `after`, up to and including `through` (see `events_page`).
+    pub fn events_after_bounded(&self, after: u64, through: u64, limit: usize) -> Result<Vec<EventRecord>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare(
             "SELECT store_index, kind, subject, body FROM events
-             WHERE store_index > ?1 ORDER BY store_index LIMIT ?2",
+             WHERE store_index > ?1 AND store_index <= ?3 ORDER BY store_index LIMIT ?2",
         )?;
         let rows =
-            statement.query_map(params![after, limit.min(i64::MAX as usize) as i64], |row| {
+            statement.query_map(params![after, limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64)], |row| {
                 let body = row.get::<_, String>(3)?;
                 Ok(EventRecord {
                     store_index: row.get(0)?,
@@ -5124,13 +5142,14 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
-    pub fn events_tail_bounded(&self, limit: usize) -> Result<Vec<EventRecord>> {
+    /// The newest `limit` events at or before `through`, oldest first (see `events_page`).
+    pub fn events_tail_bounded(&self, through: u64, limit: usize) -> Result<Vec<EventRecord>> {
         let connection = self.readers.get();
         // Bound membership before fetching bodies. Ordering the joined view can make SQLite
         // visit every canonical claim, even when the response has a LIMIT.
         let sql = event_tail_sql(self.event_payload_migration_pending()?);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h09ab98dbcf94 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql)?;
-        let rows = statement.query_map([limit.min(i64::MAX as usize) as i64], |row| {
+        let rows = statement.query_map(params![limit.min(i64::MAX as usize) as i64, through.min(i64::MAX as u64)], |row| {
             let body = row.get::<_, String>(3)?;
             Ok(EventRecord {
                 store_index: row.get(0)?,
@@ -10315,16 +10334,18 @@ fn event_tail_sql(migrating: bool) -> &'static str {
     if migrating {
         "SELECT p.store_index,c.kind,p.subject,c.body FROM (
                  SELECT store_index,subject FROM (
-                     SELECT store_index,subject FROM event_positions ORDER BY store_index DESC LIMIT ?1
+                     SELECT store_index,subject FROM event_positions WHERE store_index<=?2
+                     ORDER BY store_index DESC LIMIT ?1
                  ) UNION ALL SELECT store_index,subject FROM (
-                     SELECT store_index,subject FROM local_event_payloads
+                     SELECT store_index,subject FROM local_event_payloads WHERE store_index<=?2
                      ORDER BY store_index DESC LIMIT ?1
                  ) legacy WHERE NOT EXISTS(SELECT 1 FROM event_positions n WHERE n.store_index=legacy.store_index)
                  ORDER BY store_index DESC LIMIT ?1
              ) p CROSS JOIN claims c ON c.store_index=p.store_index ORDER BY p.store_index"
     } else {
         "SELECT p.store_index,c.kind,p.subject,c.body FROM (
-                 SELECT store_index,subject FROM event_positions ORDER BY store_index DESC LIMIT ?1
+                 SELECT store_index,subject FROM event_positions WHERE store_index<=?2
+                 ORDER BY store_index DESC LIMIT ?1
              ) p CROSS JOIN claims c ON c.store_index=p.store_index ORDER BY p.store_index"
     }
 }

@@ -8384,7 +8384,7 @@ fn retention_event_tail_work_is_bounded_during_and_after_migration() {
         for migrating in [true, false] {
             let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfb3818e1a39a owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ event_tail_sql(migrating)).unwrap();
             let indices = statement
-                .query_map([3], |row| row.get::<_, u64>(0))
+                .query_map([3, i64::MAX], |row| row.get::<_, u64>(0))
                 .unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>()
                 .unwrap();
