@@ -27,6 +27,11 @@ pub(super) async fn run_replication(
                 println!("table-digest\t{table}\t{digest}");
             }
             println!("envelopes\t{}", status.received_envelopes);
+            // Records count only admitted envelopes; held ones show only here.
+            println!(
+                "envelopes-waiting\tpending={} unsigned={} fenced={}",
+                status.pending_envelopes, status.unsigned_envelopes, status.fenced_envelopes
+            );
             println!(
                 "records\tvalid={} pending={} waiting={} invalid={} repaired={} checkpointed={}",
                 status.valid_records,
