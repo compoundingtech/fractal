@@ -1383,8 +1383,8 @@ contains only stale-fence/rate-limited. Swift preserves unknown codes and `retry
 
 Legacy `custom.client.action-result` receipts cannot prove server authorship, even
 with a local origin and absent/null actor. A retry whose key has any such receipt
-fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
-side effects. This covers both actor-bearing old server receipts and old
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` and `retryable: false`
+before dispatch or side effects. This covers both actor-bearing old server receipts and old
 client-forged receipts; neither is silently upgraded or replayed. Inspect the
 original outcome before choosing a new key. New typed receipts replay normally.
 No stored claims are rewritten and no migration is required.

@@ -96,6 +96,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case attentionMigrated
     case issuerRequired
     case suspendAuthoredSessionSelection
+    case legacyActionReceiptUntrusted
     case arrangementExists
     case arrangementFolderExists
     case arrangementRetired
@@ -171,6 +172,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
+        case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
         case "arrangement-exists": .arrangementExists
         case "arrangement-folder-exists": .arrangementFolderExists
         case "arrangement-retired": .arrangementRetired
@@ -247,6 +249,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
+        case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"
         case .arrangementExists: "arrangement-exists"
         case .arrangementFolderExists: "arrangement-folder-exists"
         case .arrangementRetired: "arrangement-retired"
