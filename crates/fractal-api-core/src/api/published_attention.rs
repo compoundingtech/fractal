@@ -425,9 +425,10 @@ pub fn present_attention(
     crate::performance::task("attention/present", || present_rows(store, rows, fleet))
 }
 
-/// Give each prompt card's presentation its prompt: the calls without a result `pending` reads
-/// in its seat's conversation. The calls are as of this fold: a conversation changes no claim
-/// attention reads, so a card shows a newer call at the next fold, within a clock period.
+/// Give each prompt card's presentation its prompt: the call it asks about, while `pending` reads
+/// it without a result in its seat's conversation. The calls are as of this fold: a conversation
+/// changes no claim attention reads, so a card shows a newer call at the next fold, within a
+/// clock period.
 fn present_prompts(rows: &mut [Value], pending: Option<super::prompt_card::PendingCalls>) {
     let Some(pending) = pending else {
         return;
@@ -436,8 +437,9 @@ fn present_prompts(rows: &mut [Value], pending: Option<super::prompt_card::Pendi
         .iter_mut()
         .filter(|row| row["attention_kind"] == "harness-prompt" && row["presentation"].is_object())
     {
-        let calls = match row["source_id"].as_str() {
-            Some(seat) => pending(seat),
+        let seat = row["source_id"].as_str().map(str::to_owned);
+        let calls = || match seat {
+            Some(seat) => pending(&seat),
             None => Err("st does not know which seat shows this prompt".to_owned()),
         };
         row["presentation"]["prompt"] = super::prompt_card::prompt_card(row, calls);
@@ -630,7 +632,14 @@ mod tests {
                 "presentation": {"kind": "prompt"},
             }),
             json!({"attention_kind": "human-gate", "source_id": "agent/example/elm", "presentation": {"kind": "review"}}),
-            json!({"attention_kind": "harness-prompt", "source_id": "agent/example/ash", "presentation": {"kind": "prompt"}}),
+            json!({
+                "attention_kind": "harness-prompt",
+                "source_id": "agent/example/ash",
+                "action_parameters": {"prompt.respond": {"answers": ["allow", "deny"], "call_id": "call-b"}},
+                "presentation": {"kind": "prompt"},
+            }),
+            // A prompt that names no call reads no conversation.
+            json!({"attention_kind": "harness-prompt", "source_id": "agent/example/fir", "presentation": {"kind": "prompt"}}),
         ];
         let read = std::sync::Mutex::new(Vec::new());
         let pending = |seat: &str| {
@@ -646,7 +655,7 @@ mod tests {
         assert_eq!(rows[0]["presentation"]["prompt"]["allow"], true);
         assert!(rows[1]["presentation"].get("prompt").is_none());
         assert_eq!(rows[2]["presentation"]["prompt"]["unknown_reason"], "the seat runs elsewhere");
-        assert_eq!(rows[2]["presentation"]["prompt"]["answers"], json!([]));
+        assert_eq!(rows[3]["presentation"]["prompt"], json!({"calls": [], "answers": [], "allow": false}));
 
         // Without a reader, as in a fold that is not the refresher's, a card carries no prompt.
         let mut rows = vec![json!({"attention_kind": "harness-prompt", "source_id": "agent/example/oak", "presentation": {}})];

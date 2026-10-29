@@ -12983,7 +12983,7 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
         [json!({"call_id":"call-waiting","name":"shell","arguments":{"command":["make","release"]}})]
     );
     let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-waiting"}}});
-    let prompt = prompt_card::prompt_card(&row, Ok(calls));
+    let prompt = prompt_card::prompt_card(&row, || Ok(calls));
     assert_eq!(prompt["calls"][0]["input"], r#"{"command":["make","release"]}"#);
     assert_eq!(prompt["allow"], true);
 
