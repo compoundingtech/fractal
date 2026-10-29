@@ -35,6 +35,7 @@
     },
     "codex": {
       "family": "openai",
+      "reads": "shell",
       "model": null,
       "command": [
         "codex",

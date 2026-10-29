@@ -142,10 +142,16 @@ age, as the first version did, could remove a failure and keep the pass dated wi
 which the failure still shadowed: that tree then verified. `scripts/evidence-gc-test` checks these properties on 400
 random worlds against a model of the verifier, and end to end with the verifier on real records.
 
-**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is kept (a record written moments
-ago for a head the listing raced with) unless more than `soft_records` records remain: then dead groups go oldest
-first by their newest record. Records are counted, not refs, so a record filed as a tag and a note counts once. If the
-live set alone is over `cap_records`, nothing live is deleted, the set is printed and the exit status is 3.
+**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is always kept: a record written
+moments ago for a head the listing raced with, or the first records of a signing run, which pushes each record as its
+lane finishes and its branch only at the end. The summary's `grace_records` counts them. Records are counted, not refs,
+so a record filed as a tag and a note counts once. If the live set alone is over `cap_records`, nothing live is
+deleted, the set is printed and the exit status is 3.
+
+`soft_records` deletes nothing; it is still read and checked. Until 2026-10-29 dead groups in grace went oldest first
+while more than `soft_records` records remained. The live set alone has been over 3,000 records since about
+2026-10-23, so from then on every run deleted every dead group in grace: 20,836 refs on 2026-10-28 and 7,408 on
+2026-10-29, among them the first two records of a signing run whose branch was not pushed yet (#4186).
 
 **Measured 2026-10-21** (a dry run against the remote): 5,021 refs, 4,562 records; 960 branch tips within 30 days
 (their trees hold 434 refs) and 217 main trees within 3 days (2,593 refs); 155 dead trees and 22 dead keys are deleted
@@ -982,6 +988,16 @@ list is missing or unreadable at the base, or the gate cannot read the base, eve
 A gate job that dies before it decides also leaves the check to run: the refusal comes only from a gate that positively decided. To
 fix a refused check, sign the head with `scripts/st-test --all --push origin` and push, or re-run the jobs once the notes are on the
 remote. A failed check never needs a new commit.
+
+**Which base a pull request run is judged at.** The gate and everything it reads at the accepted base (the signed-only list, the
+author list, the keys, the policy) come from the first parent of the checked-out merge, `refs/pull/N/merge`: the base tip GitHub
+merged the head into, the same merge the gate judges. They used to come from the payload's `pull_request.base.sha`, which GitHub moves
+only on an open or a push: a reopen or a `ready_for_review` keeps the old one. On 2026-10-28 a reopen of #4144 ran its gate from main
+as it was before this list existed, so every check ran (46.6 runner minutes). The payload's base reaches the gate as `EVENT_BASE_SHA`
+(`event_base` on the decision line). A stale one in main's history decides nothing. One outside the history of the merge's first
+parent (a retargeted or rewritten base) is a doubt, and for a signed-only opener's enforced check it is a refusal
+(`reason=payload_base_outside_the_merge`): push again so GitHub records the current base, then re-run all jobs. A merge group and a
+push take the gate from their payload base, as before.
 
 ### The Linux group
 
@@ -1973,7 +1989,8 @@ A verifier that is missing, slow (30 seconds), crashes, prints invalid UTF-8 or 
 leaves `decision=run`.
 
 **The gate script comes from the accepted base, like the verifier.** The step runs
-`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy, and if the base has no
+`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy (for a `pull_request` run `BASE_SHA` is the merge's first
+parent, see "Which base a pull request run is judged at"), and if the base has no
 gate or it fails in any way the step reports `unavailable` and the check runs. A change that rewrites
 the gate therefore cannot make itself skip, and the protected-path rule above makes any such change
 run in full. What remains is the workflow file itself, which a same-repo change can edit; that is
