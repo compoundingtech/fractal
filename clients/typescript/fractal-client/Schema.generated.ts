@@ -4395,6 +4395,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "peer-too-old",
   "validation-failed",
   "idempotency-conflict",
+  "legacy-action-receipt-untrusted",
   "issuer-required",
   "suspend-authored-session-selection",
   "stale-fence",
