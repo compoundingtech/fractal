@@ -16,9 +16,9 @@ native id before deriving the subject or storing the observation; paths, command
 other native text are never stored verbatim as ids. The same native call in the same session
 of the same seat is always the same subject.
 
-The claim subject must match its `(agent, session, native_id)` parts. Cross-field subject
-validation is not implemented by this schema-only PR; it lands with the first production
-callers. Those callers must use the canonical hash before deriving the subject.
+The claim subject must match its `(agent, session, native_id)` parts. The OMP ingest
+route derives the subject itself from its authenticated runtime binding and canonical
+native digest; the caller cannot supply a claim subject.
 
 ## Claims
 
@@ -82,6 +82,48 @@ the resolution status is `expired`. Its original resolution and receipt remain a
 A question stays pending until the harness writes its end. The harness adapter writes `expired`
 or `cancelled` when the harness gives up on or withdraws a question; Fractal does not end a pending
 question by itself.
+
+## Live OMP observations
+
+`ST_OMP_WEB_ANSWERS=1` independently opts the daemon and managed OMP extension/channel
+into **observation only**. Every default is off. No answer sink is installed by this
+step; `harness.answer` remains unavailable with `adapter_missing`, even when ingestion
+is enabled. There is no ask override, terminal input, or native settlement path.
+
+The extension opens observation at `tool_execution_start`, using its finalized native
+arguments, not the earlier modifiable `tool_call` input. Native call ids are SHA-256
+digested before they enter the durable native-event outbox.
+Question ids are zero-based native array ordinals (`q0` first, `q15` sixteenth);
+option counts retain native order without sending labels. OMP single-select positional
+answers require one option (`required:true`); native multi-select permits no selected
+options (`required:false`). Other/note values never cross this observation path.
+
+Only the exact managed `driver omp` wrapper generation can ingest observations,
+through the local native route. Its kernel Unix connector PID/birth must agree with
+the physical terminal-wrapper witness, revalidated under the provider record lock.
+Its launch configuration must independently opt in. Agent, runtime incarnation and
+ready native-session binding must agree. Persons, tiles, ordinary agent requests
+and Fabric loopback cannot use that route. A close must refer to a question opened
+by that same binding; unknown/foreign closes write nothing. Replayed opens and closes
+are idempotent. A reused call identity with different descriptors is refused.
+
+Native successful completion records `answered_elsewhere`, a structured native timeout
+records `expired`, and error completion records `cancelled`. O1a records closure status
+only: resolution answers are empty and no person receipt is created. Disconnection,
+session switching, absence from a snapshot and elapsed time do not invent a closure.
+The durable outbox retains opens/closes across channel/daemon interruption; the
+extension also replays retained observations after a pipe reconnect. Retention is
+bounded at 256 observed calls per native session; once full, the extension stops
+observing new calls but retains the existing calls and their closes. A true native
+session switch starts a new observation set.
+Observations refused for a disabled receiver or a superseded runtime/session binding
+are retired without inventing a close, so they cannot block unrelated native events.
+
+Observation metadata is not a proof that a web selection can be executed. In particular,
+the current typed timeline lacks native preview/required presentation semantics.
+Unrepresentable asks stay unavailable. Delivery remains a separate, exact-build-gated
+change requiring a typed native pending-ask submission API and normal native formatting.
+
 
 ## Client reads and person answers
 
@@ -161,6 +203,9 @@ Invalid selections return `invalid-answer` and typed `details.reason`:
 `unknown_question`, `other_not_allowed` or `note_not_allowed`. Malformed envelopes
 return `validation-failed`. `not-answerable` carries `adapter_missing` or
 `adapter_unavailable`. These are non-retryable refusals, not successful answers.
+With a delivery adapter, `adapter_unavailable` after submitting may mean delivery is
+uncertain, not that native input was unchanged. Clients must re-read the question
+before retrying; never silently resubmit to changed content or with a fresh key.
 
 ## CLI
 
