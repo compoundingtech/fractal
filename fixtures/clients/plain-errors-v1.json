@@ -29,6 +29,13 @@
   },
   {
     "kind": "api",
+    "code": "agent-roster-not-ready",
+    "message": "server detail",
+    "plain": "st is still preparing the agents roster; try again shortly",
+    "human": "Fractal is still preparing the agents roster; try again shortly"
+  },
+  {
+    "kind": "api",
     "code": "stale-fence",
     "message": "that prompt is no longer waiting: it was answered or replaced",
     "plain": "that prompt is no longer waiting: it was answered or replaced",

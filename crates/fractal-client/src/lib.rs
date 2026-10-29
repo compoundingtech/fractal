@@ -967,6 +967,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::RuntimeListNotReady => {
             format!("{product} is still preparing the runtime list; try again shortly")
         }
+        ErrorCode::AgentRosterNotReady => {
+            format!("{product} is still preparing the agents roster; try again shortly")
+        }
         ErrorCode::RuntimeListEnded => {
             "the runtime list stopped updating; restart fractal".into()
         }

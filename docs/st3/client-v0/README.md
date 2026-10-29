@@ -2609,7 +2609,7 @@ cut-not-ready message/error as a barrier timeout if the publication is older. Th
 in-repo CLI mutation-following roster read; existing mutation commands' point-detail reads
 stay unchanged.
 
-Without an explicit cut, a read returns a retryable 503 (the stream sends `resync`) only before
+Without an explicit cut, a read returns a retryable 503 `agent-roster-not-ready` (the stream sends `resync`) only before
 a usable roster of the requested mode has been published, or after a full projection reset
 clears it. Current and history rosters remain separate: a history read never substitutes
 current-only membership.

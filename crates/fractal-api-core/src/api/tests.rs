@@ -8984,6 +8984,11 @@ async fn roster_resilience_unpublished_mode_keeps_the_bounded_wait_and_503() {
             assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(error.code, "agent-roster-not-ready");
             assert_eq!(started.elapsed(), AGENT_ROSTER_READ_WAIT);
+            // A client sees this code and a retry, not `internal`.
+            let envelope = client_error_envelope(error.status,
+                &json!({"code": error.code, "message": error.message}), "request/test");
+            assert_eq!((envelope["code"].as_str(), envelope["retryable"].as_bool()),
+                (Some("agent-roster-not-ready"), Some(true)));
         }
     }
 }

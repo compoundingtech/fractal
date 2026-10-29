@@ -1557,6 +1557,7 @@ export type ErrorCode = (
   | "stale-fence"
   | "cursor-gap"
   | "page-cursor-expired"
+  | "agent-roster-not-ready"
   | "agent-roster-cut-not-ready"
   | "message-selectors-not-ready"
   | "rate-limited"

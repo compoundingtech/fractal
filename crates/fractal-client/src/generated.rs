@@ -124,6 +124,7 @@ pub enum ErrorCode {
     StaleFence,
     CursorGap,
     PageCursorExpired,
+    AgentRosterNotReady,
     AgentRosterCutNotReady,
     MessageSelectorsNotReady,
     RateLimited,
