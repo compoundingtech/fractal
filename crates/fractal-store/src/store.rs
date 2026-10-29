@@ -43,6 +43,8 @@ pub mod arrangements_tests;
 pub mod authored_pull_requests_tests;
 #[cfg(test)]
 pub mod schedule_active_run_tests;
+#[cfg(test)]
+pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -8784,14 +8786,65 @@ fn latest_harness_of_incarnation_tx(
         .map_err(internal)
 }
 
+/// Whether readers fold the seat's harness to `latest` itself: no other observation of the
+/// seat is newer, and this incarnation has claimed or reported no work canonically after it,
+/// which the harness fold reads as working until a newer observation replicates. Both use the
+/// fold's canonical order, not arrival order: a replicated work claim can arrive before an
+/// observation it canonically follows.
+fn harness_view_rests_on_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+    incarnation: &str,
+    latest: &ClaimRecord,
+) -> Result<bool, St3Error> {
+    if latest_claim_of_kind_tx(transaction, subject, "harness.observed")?
+        .is_none_or(|claim| claim.id != latest.id)
+    {
+        return Ok(false);
+    }
+    // A canonical key leads with the accepted time, so only work accepted no earlier than the
+    // observation can follow it.
+    let accepted = latest.accepted_at_unix_ms.to_string();
+    let candidates = transaction
+        .prepare(
+            "SELECT id FROM claims INDEXED BY claims_actor_work_activity_index
+             WHERE actor=?1 AND json_extract(body, '$.fields.claim_incarnation')=?2
+               AND kind IN ('work.claimed','work.progress')
+               AND (length(accepted_at_unix_ms)>length(?3)
+                    OR (length(accepted_at_unix_ms)=length(?3) AND accepted_at_unix_ms>=?3))",
+        )
+        .map_err(internal)?
+        .query_map(params![subject, incarnation, accepted], |row| row.get::<_, String>(0))
+        .map_err(internal)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(internal)?;
+    if candidates.is_empty() {
+        return Ok(true);
+    }
+    let latest_key = canonical::claim_key(transaction, &latest.id).map_err(internal)?;
+    for work in candidates {
+        if canonical::claim_key(transaction, &work).map_err(internal)? > latest_key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Publish a harness observation when any field other than its observation time differs
 /// from the subject's latest replicated observation. When the harness stops working, its
 /// usage that is still only local replicates too.
+///
+/// An unchanged observation refreshes the replicated one at most once a minute, but only while
+/// the harness works or when `heartbeat` is set. A resting native driver re-stamps its state
+/// every five minutes; its event was admitted against the seat's running runtime row, so no
+/// reader needs that re-stamp replicated (a stuck runtime row is what makes the card overlay
+/// read a report's age). Those re-stamps were most of the fleet's `harness.observed` claims.
 fn publish_changed_harness_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     input: &ClaimInput,
     now: u128,
+    heartbeat: bool,
 ) -> Result<Option<ClaimRecord>, St3Error> {
     let latest = latest_harness_of_incarnation_tx(
         transaction,
@@ -8838,8 +8891,21 @@ fn publish_changed_harness_state_tx(
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
     let due_usage = now.saturating_sub(USAGE_PUBLISH_INTERVAL_MS);
-    // Refresh remote freshness at most once a minute, without manufacturing transitions.
-    if unchanged && latest.as_ref().is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000) {
+    // Refresh remote freshness at most once a minute, without manufacturing transitions. A
+    // working harness keeps refreshing: a wake counts as taken up by a working report accepted
+    // after it was sent. A resting one replicates its unchanged state only when readers would
+    // otherwise fold the seat to something newer than it.
+    let refreshed = latest
+        .as_ref()
+        .is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000);
+    if unchanged
+        && (refreshed
+            || (resting && !heartbeat
+                && match &latest {
+                    Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
+                    None => false,
+                }))
+    {
         if resting {
             publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage))?;
         }
@@ -17453,6 +17519,15 @@ pub fn seat_queue_joins_query() -> String {
     )
 }
 
+/// When seat `?1` joined run `?2`, a run its queue moves name that is no longer queued, and the
+/// run's status. `+step_runs.assignee` keeps SQLite on the run's own steps (`step_runs_run_index`):
+/// through the assignee index it read every step the seat was ever assigned, once per named run,
+/// and a seat that has moved its queue often names a hundred runs on every claim.
+pub const SEAT_QUEUE_NAMED_RUN_QUERY: &str =
+    "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
+     FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
+     WHERE +step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0";
+
 /// [`work_at_snapshot_query`] for one named actor `?1`. The reconciler reads each running seat's
 /// steps on every pass; the actor's steps are found through the assignee and lease indexes, and
 /// the few steps offered to several seats through their own index, instead of scanning every
@@ -17582,11 +17657,7 @@ pub fn seat_queue_inputs_of_tx(
     }
     drop(statement);
 
-    let mut statement = connection.prepare(
-        "SELECT MIN(CAST(step_runs.created_at_unix_ms AS INTEGER)), mission_runs.status
-         FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-         WHERE step_runs.assignee=?1 AND step_runs.run_id=?2 AND step_runs.agentless=0",
-    )?;
+    let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hefdad4fbcd1d owner=fractal_store::store TODO=trace-statement-and-value-representation */ SEAT_QUEUE_NAMED_RUN_QUERY)?;
     if let Some(only) = only {
         seats.retain(|seat, _| only.contains(seat));
     }
@@ -21277,7 +21348,9 @@ pub fn append_latest_observation_publication(
             }
             let published = match input.kind.as_str() {
                 "harness.observed" => {
-                    publish_changed_harness_state_tx(transaction, &graph.origin, input, now)?
+                    publish_changed_harness_state_tx(
+                        transaction, &graph.origin, input, now, event_runtime.is_none(),
+                    )?
                 }
                 "harness.usage" => {
                     publish_due_usage_tx(transaction, &graph.origin, input, &local, now)?
