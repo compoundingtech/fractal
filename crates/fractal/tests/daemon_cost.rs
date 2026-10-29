@@ -1987,9 +1987,9 @@ fn v2_arrangement_renames_are_bounded_with_hidden_and_absent_membership_history(
                     expected_subject: None,
                     idempotency_key: Some(format!("cost-membership-{operation}-{attempt}")),
                 };
-                let scope = work::SqliteWorkScope::start();
+                let before = work::total();
                 let claim = store.append_claim(&input).unwrap();
-                samples.push(scope.finish());
+                samples.push(work::total() - before);
                 let frontier = store.index().unwrap();
                 assert_eq!(store.ordered_memberships(MEMBERSHIP_SUBJECT, frontier, None, 10).unwrap(), page);
                 assert_eq!(store.ordered_membership_state(MEMBERSHIP_SUBJECT).unwrap().changed_index, claim.store_index);
