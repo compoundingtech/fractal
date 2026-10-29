@@ -1310,14 +1310,14 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
         if: needs.evidence-gate-genie-freshness.outputs.skip != 'true' && needs.evidence-gate-genie-freshness.outputs.refuse != 'true'
       - name: Restore the local Nix cache
         id: nix-cache
         if: (env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1') && needs.evidence-gate-genie-freshness.outputs.skip != 'true' && needs.evidence-gate-genie-freshness.outputs.refuse != 'true'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}"
           restore-keys: ""
       - name: Install Nix
@@ -1337,7 +1337,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -1469,14 +1469,14 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
         if: needs.evidence-gate-ci-script-tests.outputs.skip != 'true' && needs.evidence-gate-ci-script-tests.outputs.refuse != 'true'
       - name: Restore the local Nix cache
         id: nix-cache
         if: (env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1') && needs.evidence-gate-ci-script-tests.outputs.skip != 'true' && needs.evidence-gate-ci-script-tests.outputs.refuse != 'true'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix6-genie-closure-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', 'scripts/ci-nix-cache', 'scripts/ci-genie-cache-verify') }}"
           restore-keys: ""
       - name: Install Nix
@@ -1496,7 +1496,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -2003,7 +2003,7 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
       - id: build-snapshot
         name: Restore the exact-source build snapshot
         if: env.CI_LOCAL_CACHES != '1'
@@ -2027,7 +2027,7 @@ jobs:
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
@@ -2050,7 +2050,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -2188,13 +2188,13 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
       - name: Restore the local Nix cache
         id: nix-cache
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
@@ -2215,7 +2215,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -2412,13 +2412,13 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
       - name: Restore the local Nix cache
         id: nix-cache
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
@@ -2439,7 +2439,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -2633,13 +2633,13 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
       - name: Restore the local Nix cache
         id: nix-cache
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
@@ -2660,7 +2660,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -2854,13 +2854,13 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
       - name: Restore the local Nix cache
         id: nix-cache
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix5-linux-tests-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-linux-tests-${{ runner.os }}-
@@ -2881,7 +2881,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -3071,7 +3071,7 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
       - id: build-snapshot
         name: Restore the exact-source build snapshot
         if: env.CI_LOCAL_CACHES != '1'
@@ -3095,7 +3095,7 @@ jobs:
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-${{ github.job }}-${{ runner.os }}-
@@ -3118,7 +3118,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
@@ -3279,7 +3279,7 @@ jobs:
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
       - id: build-snapshot
         name: Restore the exact-source build snapshot
         if: env.CI_LOCAL_CACHES != '1'
@@ -3303,7 +3303,7 @@ jobs:
         if: env.CI_LOCAL_CACHES != '1' && env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: actions/cache/restore@v4
         with:
-          path: "${{ runner.temp }}/st-ci-cache"
+          path: "${{ runner.temp }}/fractal-ci-cache"
           key: "nix5-${{ github.job }}-${{ runner.os }}-${{ hashFiles('flake.lock', 'flake.nix', 'nix/**/*.nix', '.github/fleet-compat-baseline.json', '.github/messaging-compat-baseline.json') }}"
           restore-keys: |
             nix5-${{ github.job }}-${{ runner.os }}-
@@ -3326,7 +3326,7 @@ jobs:
         run: |
           # Cargo's home and the CI cache directory live under RUNNER_TEMP, not HOME: tests get an isolated HOME,
           # and actions/cache expands a leading tilde against the HOME of the step that runs it.
-          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/st-ci-cache" >> "$GITHUB_ENV"
+          printf 'CARGO_HOME=%s\nCI_CACHE_DIR=%s\n' "${CI_LOCAL_CARGO_HOME:-$RUNNER_TEMP/cargo-home}" "$RUNNER_TEMP/fractal-ci-cache" >> "$GITHUB_ENV"
           home="$RUNNER_TEMP/test-home"
           mkdir -p "$home" "$home/.config" "$home/.cache" "$home/.local/state"
           printf 'HOME=%s\nXDG_CONFIG_HOME=%s/.config\nXDG_CACHE_HOME=%s/.cache\nXDG_STATE_HOME=%s/.local/state\n' "$home" "$home" "$home" "$home" >> "$GITHUB_ENV"
