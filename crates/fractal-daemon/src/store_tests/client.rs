@@ -237,7 +237,11 @@ async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
     server.abort();
 }
 
-#[tokio::test]
+// The clock is paused, so time passes only while every task waits on a timer. The client's 30 ms
+// request deadline is then reached only by a daemon that does not answer, never by a loaded host
+// that has not yet run this runtime's server task: one such miss is a deadline gap, and the
+// follow backoff waits 5 to 15 s after it, past the read's bound below.
+#[tokio::test(start_paused = true)]
 async fn follow_reads_wait_for_a_typed_connect_outage_with_daemon_wait_zero() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
