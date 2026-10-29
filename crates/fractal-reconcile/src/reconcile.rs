@@ -38471,6 +38471,49 @@ mission "review" state="ready" {
   step "review" { agentless }
 }"#;
 
+    /// The host that starts a requested mission reads the request's discovery when the request
+    /// arrives, so an observation seals a request in the batch that holds its discovery, and the
+    /// two reach every member in one envelope.
+    #[test]
+    fn a_mission_request_travels_in_the_batch_of_its_discovery() {
+        let store = Store::open_memory("node").unwrap();
+        apply_source(&store, REDELIVERY_REVIEW_SOURCE, "review-mission");
+        let revision = store.mission_spec("review", None).unwrap().unwrap().revision;
+        let source = format!(
+            r#"version 2
+resource "repo" {{ kind "vcs.repository" }}
+observer "repo" {{ resource "resource/repo"; provider "github.repository"; locator "example/repo"; field "pull_requests" }}
+subscription "reviews" {{
+  observer "observer/repo"
+  on "pull_requests"
+  delivery "mission" {{ mission "review@{revision}"; resource "source"; workspace "/srv/reviews" }}
+}}"#
+        );
+        apply_source(&store, &source, "watch");
+        let observer_revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let subscriptions = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.subject == "subscription/reviews")
+            .map(|item| (item.subject, crate::graph::subscription_spec(&item.desired).unwrap()))
+            .collect::<Vec<_>>();
+        for pulls in [serde_json::json!([]), serde_json::json!([{"number": 4, "head": "a".repeat(40), "state": "open", "draft": false}])] {
+            store
+                .record_resource_observation("observer/repo", &observer_revision, None, "resource/repo", None,
+                    &serde_json::json!({"repository_id": 17, "pull_requests": pulls}), now_ms() + 60_000, &subscriptions, None)
+                .unwrap();
+        }
+        let request = store
+            .claims_for("subscription/reviews", Some("subscription.mission-requested"))
+            .unwrap()
+            .remove(0);
+        let discovery = request.body["fields"]["discovery"].as_str().unwrap();
+        let discovered = store.claim_by_id(discovery).unwrap().unwrap();
+        assert_eq!(discovered.kind, "resource.observed");
+        assert_eq!(request.batch_id, discovered.batch_id);
+    }
+
     #[test]
     fn replacement_intake_does_not_request_an_already_delivered_head() {
         let store = Store::open_memory("node").unwrap();

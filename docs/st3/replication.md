@@ -1195,6 +1195,16 @@ replication or a reader: it becomes a failing test, then a fix. Nothing repairs 
 
 A peer on a build without the route answers 404 and is not compared.
 
+Some readers fold a subject's claims rather than read its newest one. A trim can keep every
+key's newest claim and still change what they answer, by dropping an older claim they fold: a
+dropped credential transition moves a seat's needs-login since (#4237). So the daemon's summary
+also covers the readers the checkpoint proof reads (`checkpoint_rules::subject_answers`):
+current harness, status history, actual state and source, incarnations and working since,
+reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`) and step
+(`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
+`reader/NAME`, keyed by subject with a digest of the answer, and narrows to subjects like any
+kind. A subject still written at the cut is left out that day, as a kind's moving keys are.
+
 ### First sync
 
 A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first

@@ -4182,6 +4182,63 @@ async fn retention_event_http_envelope_preserves_pacing_continuation_and_410() {
 }
 
 #[tokio::test]
+async fn event_pages_hand_out_no_cursor_past_the_published_index() {
+    // `agents new` consumed its seat's readiness events from a page, then read the seat at a
+    // snapshot taken from the published index, still before them ("starting"), and waited 30 s
+    // for events after a cursor it had already passed. The order it relies on: whatever cursor
+    // a page hands out, the next client snapshot is at least that new.
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let append = |number: usize| {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: "custom/test/published".into(),
+                kind: "custom.test.recorded".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("published-{number}")),
+            })
+            .unwrap()
+            .store_index
+    };
+    let first = append(0);
+    let second = append(1);
+    // As between a commit and its writer publishing the index under load: SQL readers already
+    // see the second claim, and a client snapshot is still taken at the first.
+    state.store.committed_index.store(first, std::sync::atomic::Ordering::Release);
+    let app = router(state.clone());
+    let page = |after: u64| {
+        let app = app.clone();
+        async move {
+            let (status, page) = get_request(
+                app,
+                &format!("/v1/events/page?after={after}&subject=custom%2Ftest%2Fpublished&wait=false"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            page.get("value").cloned().unwrap_or(page)
+        }
+    };
+    // Consume, then read: the read must not be older than what was consumed.
+    let consumed = page(first).await;
+    let read = new_client_snapshot(&state).store_index;
+    assert_eq!(read, first);
+    assert_eq!(consumed["items"], json!([]), "an event the next read cannot show: {consumed}");
+    assert_eq!(consumed["next_after"], Value::Null, "a cursor past the next read at {read}: {consumed}");
+    assert_eq!(consumed["frontier"], json!(first), "{consumed}");
+
+    // Once the writer publishes the index, the cursor the client kept reads the event.
+    state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
+    let consumed = page(first).await;
+    assert_eq!(consumed["items"][0]["store_index"], json!(second), "{consumed}");
+    assert_eq!(consumed["next_after"], json!(second), "{consumed}");
+    assert!(new_client_snapshot(&state).store_index >= second);
+}
+
+#[tokio::test]
 async fn retention_event_pages_advance_by_scanned_rows_and_refuse_stale_cursors() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
