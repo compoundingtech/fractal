@@ -1345,10 +1345,11 @@ the same batches. Everything else is kept, as a protected claim is, and envelope
 of a seat's needs-login state, which no projection digest covers. Two checks stand in for the
 proof. A plan that would drop the newest claim of any subject and kind is refused before anything
 is recorded. While deleting, every chunk compares the projection digests before and after and
-stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, and
-halts local trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
+stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, opens
+an operational fault (`local-trim-stopped`) for the agent `[trim] notify` names, and halts local
+trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
 such a member, by an agent (`--as agent/...`); the stopped cut is set aside and the next day's cut
-goes on. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+goes on, and the resume ends the fault. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
 The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
 disk cannot hold.
 
