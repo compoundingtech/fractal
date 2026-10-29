@@ -216,7 +216,7 @@ fn a_plan_that_would_drop_the_newest_claim_of_a_key_stops_before_deleting_anythi
         .extension::<crate::store::answers_check::TrimSettings>()
         .notify
         .lock()
-        .unwrap() = Some("agent/fleet/operations".into());
+        .unwrap() = Some("agent/example/operations".into());
     store.set_trim_fault(Some(smallclaims::store::TrimFault::DropNewest));
     let actions = step(&store, &context);
     assert_eq!(kinds(&actions), ["graph-changed"]);
@@ -240,14 +240,14 @@ fn a_plan_that_would_drop_the_newest_claim_of_a_key_stops_before_deleting_anythi
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     };
-    assert_eq!(faults(), [("operational.failure".to_string(), "agent/fleet/operations".to_string())]);
+    assert_eq!(faults(), [("operational.failure".to_string(), "agent/example/operations".to_string())]);
     // Halted until resumed; an agent may resume a member that trims locally, which ends the fault.
     assert!(step(&store, &context).is_empty());
-    store.resume_checkpoints("agent/fleet/operations", "looked at the plan").unwrap();
-    store.recover_local_trim_stops("agent/fleet/operations", "looked at the plan").unwrap();
+    store.resume_checkpoints("agent/example/operations", "looked at the plan").unwrap();
+    store.recover_local_trim_stops("agent/example/operations", "looked at the plan").unwrap();
     assert_eq!(faults().last().unwrap().0, "operational.recovered");
     assert!(step(&store, &context).is_empty(), "the stopped cut is set aside, not retried");
-    assert!(store.resume_checkpoints("agent/fleet/operations", " ").is_err());
+    assert!(store.resume_checkpoints("agent/example/operations", " ").is_err());
 }
 
 proptest! {
