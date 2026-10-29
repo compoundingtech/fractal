@@ -28,6 +28,24 @@ fleet_compat() {
   grep -q "test result: ok. 1 passed" "$logs/compat-result.log"
 }
 
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.
+# Only the default sentinel selects a layout; explicit paths are never rewritten.
+keyed_clippy_policy() {
+  if [[ "$CI_KEYED_CLIPPY_POLICY" != auto ]]; then
+    printf '%s\n' "$CI_KEYED_CLIPPY_POLICY"
+    return
+  fi
+  python3 -I - <<'PY'
+import os
+path = '.fractal/evidence-skip-policy.json'
+try:
+    os.lstat(path)
+except FileNotFoundError:
+    path = '.st/evidence-skip-policy.json'
+print(path)
+PY
+}
+
 clippy_and_codegen() {
   python3 scripts/ci-build-snapshot-test || return
   python3 scripts/build-stamp-watch-test || return
@@ -51,7 +69,9 @@ clippy_and_codegen() {
   # must not depend on the policy file (lane-definition-closure --check), so without CI_KEYED_CLIPPY_POLICY the check is not run.
   # --warn while linux-clippy is in shadow: no default local run checks it yet, so a failure would first show in the merge queue.
   if [ -n "${CI_KEYED_CLIPPY_POLICY:-}" ]; then
-    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$CI_KEYED_CLIPPY_POLICY" --jsonl 'clippy-*.jsonl' --warn || return
+    local policy
+    policy=$(keyed_clippy_policy) || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$policy" --jsonl 'clippy-*.jsonl' --warn || return
   fi
   cargo run --locked -p fractal-client-codegen -- --check
 }

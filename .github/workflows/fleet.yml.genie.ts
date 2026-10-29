@@ -649,7 +649,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         BASE_INPUTS_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
         // linux-clippy's own run checks what its compiles read against its input key (scripts/dep-info-check); linux-gate's local run
         // of the same stage does not, so linux-gate never depends on the policy file.
-        CI_KEYED_CLIPPY_POLICY: '.st/evidence-skip-policy.json',
+        // arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve the checkout layout at execution, not generation.
+        CI_KEYED_CLIPPY_POLICY: 'auto',
       },
     }),
     'linux-fleet-compat': linuxStageJob({
@@ -807,7 +808,11 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-wrap" --check 
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           env: { BASE_SHA: '${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}' },
-          run: `git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+          run: `# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+key_path=.st/evidence-keys
+if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/evidence-notes" \\
   --keys "$RUNNER_TEMP/evidence-keys" --checks "linux-gate,${[...evidenceStageNames, ...evidenceStepNames, ...evidenceLaneNames].join(',')}" --remote origin | tee "$RUNNER_TEMP/evidence-publish.json"`,
         },
@@ -906,7 +911,11 @@ HOME="$home" python3 "$RUNNER_TEMP/evidence-base/scripts/ci-rust-test-notes" sig
           if: "${{ steps.configure.outcome == 'success' }}",
           'continue-on-error': true,
           run: `[ -d "$RUNNER_TEMP/rust-test-notes" ] || { echo "nothing was signed"; exit 0; }
-git show "$BASE_SHA:.st/evidence-keys" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::no .st/evidence-keys at the base commit; nothing is published"; exit 1; }
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config: fall back only on absence at this base.
+key_entry=$(git ls-tree --full-tree "$BASE_SHA" -- .fractal/evidence-keys) || exit 1
+key_path=.st/evidence-keys
+if [ -n "$key_entry" ]; then key_path=.fractal/evidence-keys; fi
+git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys" || { echo "::warning::cannot read evidence keys at the base commit; nothing is published"; exit 1; }
 python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_TEMP/rust-test-notes" --keys "$RUNNER_TEMP/evidence-keys" \\
   --checks rust-tests --limit 400 --remote origin`,
         },
