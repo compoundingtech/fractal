@@ -112,9 +112,10 @@ pub fn bind_refused(fence: &crate::mailbox::Fence, code: &str) {
     }
 }
 
+/// Successful admission supersedes refusal evidence from the previous incarnation as well.
 pub fn bind_recovered(fence: &crate::mailbox::Fence) {
-    if let Ok(mut rows) = presence().refusals.lock()
-        && rows.get(&fence.subject).is_some_and(|r| r.incarnation == fence.incarnation)
+    if fence.component == "delivery"
+        && let Ok(mut rows) = presence().refusals.lock()
     {
         rows.remove(&fence.subject);
     }
@@ -129,6 +130,22 @@ fn unix_ms() -> u64 {
 #[cfg(test)]
 mod refusal_tests {
     use super::*;
+
+    #[test]
+    fn successor_binding_clears_predecessor_refusal_for_incarnation_agnostic_reads() {
+        let subject = "agent/example/refused-predecessor-healthy-successor";
+        let old = crate::mailbox::Fence::new(subject, "old", "delivery");
+        let new = crate::mailbox::Fence::new(subject, "new", "delivery");
+        bind_refused(&old, "mailbox-runtime-indeterminate");
+        bind_recovered(&new);
+        record_fenced(&new, &json!({
+            "transport":"omp-channel", "ready":true, "pid":std::process::id(),
+            "image":presence().image,
+        }).to_string());
+        let known = known(subject).expect("successor heartbeat is visible to message delivery");
+        assert_ne!(known.state, "refused");
+        assert!(!known.reason.as_deref().unwrap_or_default().contains("mailbox-runtime-indeterminate"));
+    }
 
     #[tokio::test]
     async fn bind_422_exports_refusal_and_writes_warning() {

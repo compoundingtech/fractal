@@ -115,11 +115,14 @@ impl Fence {
                     return Ok(());
                 }
                 Err(error) => {
+                    let retrying = api_error_code(&error).is_none_or(retryable_mailbox_bind_code);
                     if let Some((status, code, _, _)) = api_error_parts(&error)
                         && mailbox_bind_refusal(status, code)
                     {
-                        let _ = write_driver_log(&self.subject, &format!("warning: delivery refused: {code} (HTTP {status}); retrying"));
+                        let action = if retrying { "retrying" } else { "not retrying" };
+                        let _ = write_driver_log(&self.subject, &format!("warning: delivery refused: {code} (HTTP {status}); {action}"));
                     }
+                    if !retrying { return Err(error); }
                     tokio::time::sleep(retry.failed(&error)).await;
                 }
             }

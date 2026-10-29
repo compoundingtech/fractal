@@ -674,11 +674,14 @@ map to `other`; their original text remains in the warning log and API reason.
 Free-form diagnostic text is never exported as a label.
 
 The value is seconds since the current normalized state began in this daemon
-lifetime. `delivery.since_unix_ms` supplies the initial clock when available;
-otherwise the clock starts at the first successful metrics refresh. Repeated
-refusals, unknown-to-stale transitions, and binary-version changes within `live`
-do not reset it. State or runtime-incarnation changes do reset it. A single
-off-scrape worker refreshes membership and cached projection data, with at least
+lifetime. `delivery.since_unix_ms` seeds the initial age once when available;
+otherwise age starts at the first successful metrics refresh. Thereafter a
+monotonic clock advances age: wall-clock corrections cannot move it backward
+or forward. Repeated refusals, unknown-to-stale transitions, and binary-version
+changes within `live` do not reset it. State or runtime-incarnation changes do
+reset it. The worker holds a roster-publication subscription for its lifetime,
+so heartbeat expiry, refusal and recovery keep refreshing without any UI reader.
+A single off-scrape worker refreshes membership and cached projection data, with at least
 30 seconds of rest after each refresh (or its elapsed duration if longer).
 Failures retain the last complete summary. Collection only reads this summary
 and advances ages; it does no store, graph, process, or filesystem reads.

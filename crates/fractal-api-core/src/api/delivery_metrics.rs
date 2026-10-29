@@ -20,8 +20,20 @@ pub struct Summary {
 struct Series {
     state: &'static str,
     incarnation: Option<String>,
-    since_unix_ms: u128,
+    clock: StateClock,
     attributes: [KeyValue; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StateClock {
+    observed_at: Instant,
+    initial_age: Duration,
+}
+
+impl StateClock {
+    fn age_at(self, now: Instant) -> Duration {
+        self.initial_age.saturating_add(now.saturating_duration_since(self.observed_at))
+    }
 }
 
 /// Fixed metric vocabulary. Arbitrary API codes remain visible in the API/log, but never
@@ -38,7 +50,7 @@ fn refusal_reason(reason: Option<&str>) -> &'static str {
     }
 }
 
-fn summarize_rows(agents: Vec<String>, rows: &[Value], previous: &Summary, now: u128) -> Summary {
+fn summarize_rows(agents: Vec<String>, rows: &[Value], previous: &Summary, now: u128, observed_at: Instant) -> Summary {
     let rows = rows.iter().filter_map(|row| row["id"].as_str().map(|id| (id, row)))
         .collect::<BTreeMap<_, _>>();
     let series = agents.into_iter().map(|agent| {
@@ -55,13 +67,19 @@ fn summarize_rows(agents: Vec<String>, rows: &[Value], previous: &Summary, now: 
             refusal_reason(delivery.and_then(|delivery| delivery["reason"].as_str()))
         } else { "" };
         let incarnation = row.and_then(|row| row["incarnation_id"].as_str());
-        let since_unix_ms = previous.series.get(&agent)
+        // Seed once from the API's wall timestamp, then advance exclusively on monotonic time.
+        // Preserve the clock across unchanged states even when the wall clock is corrected.
+        let clock = previous.series.get(&agent)
             .filter(|previous| previous.state == state && previous.incarnation.as_deref() == incarnation)
-            .map_or_else(|| delivery.and_then(|delivery| delivery["since_unix_ms"].as_u64())
-                .map_or(now, u128::from), |previous| previous.since_unix_ms);
+            .map_or_else(|| {
+                let since = delivery.and_then(|delivery| delivery["since_unix_ms"].as_u64())
+                    .map_or(now, u128::from);
+                StateClock { observed_at, initial_age: Duration::from_millis(
+                    u64::try_from(now.saturating_sub(since)).unwrap_or(u64::MAX)) }
+            }, |previous| previous.clock);
         let attributes = [KeyValue::new("st.agent", agent.clone()),
             KeyValue::new("st.delivery.state", state), KeyValue::new("st.delivery.reason", reason)];
-        (agent, Series { state, incarnation: incarnation.map(str::to_owned), since_unix_ms, attributes })
+        (agent, Series { state, incarnation: incarnation.map(str::to_owned), clock, attributes })
     }).collect();
     Summary { series }
 }
@@ -70,7 +88,7 @@ fn summarize(store: &Store, previous: &Summary) -> anyhow::Result<Summary> {
     let agents = super::mailbox_metrics::managed_agents_owned_by_local_host(store)?;
     let publication = store.agents_publication();
     Ok(summarize_rows(agents, publication.as_ref().map_or(&[], |publication| publication.rows()),
-        previous, client_now_ms()))
+        previous, client_now_ms(), Instant::now()))
 }
 
 pub fn register_metrics(meter: &Meter, summary: Arc<RwLock<Summary>>) {
@@ -78,11 +96,10 @@ pub fn register_metrics(meter: &Meter, summary: Arc<RwLock<Summary>>) {
         .with_unit("s")
         .with_description("Seconds since this locally owned managed agent's delivery state began; no binding is stale")
         .with_callback(move |observer| {
-            let now = client_now_ms();
+            let now = Instant::now();
             let summary = summary.read().unwrap_or_else(std::sync::PoisonError::into_inner);
             for series in summary.series.values() {
-                let age = Duration::from_millis(u64::try_from(now.saturating_sub(series.since_unix_ms))
-                    .unwrap_or(u64::MAX)).as_secs_f64();
+                let age = series.clock.age_at(now).as_secs_f64();
                 observer.observe(age, &series.attributes);
             }
         }).build();
@@ -92,9 +109,22 @@ pub fn register_metrics(meter: &Meter, summary: Arc<RwLock<Summary>>) {
 /// and clocks, rather than emitting a partial set or resetting an alert's age.
 pub fn start(store: &Arc<Store>) {
     if !crate::otel::metrics_enabled() { return; }
+    let _worker = spawn_worker(store, Arc::new(RwLock::new(Summary::default())),
+        opentelemetry::global::meter("st3"), REFRESH_PAUSE);
+}
+
+pub(super) fn spawn_worker(
+    store: &Arc<Store>,
+    summary: Arc<RwLock<Summary>>,
+    meter: Meter,
+    refresh_pause: Duration,
+) -> tokio::task::JoinHandle<()> {
+    // A cached read alone is not demand: without this receiver the roster owner can stop
+    // folding when the last UI disconnects, freezing heartbeat/refusal/recovery evidence.
+    let publication_demand = store.subscribe_agents_publications();
     let store = Arc::downgrade(store);
     tokio::spawn(async move {
-        let summary = Arc::new(RwLock::new(Summary::default()));
+        let _publication_demand = publication_demand;
         let mut registered = false;
         loop {
             let Some(store) = store.upgrade() else { return; };
@@ -110,16 +140,16 @@ pub fn start(store: &Arc<Store>) {
                 Ok(Ok(next)) => {
                     *summary.write().unwrap_or_else(std::sync::PoisonError::into_inner) = next;
                     if !registered {
-                        register_metrics(&opentelemetry::global::meter("st3"), Arc::clone(&summary));
+                        register_metrics(&meter, Arc::clone(&summary));
                         registered = true;
                     }
                 }
                 Ok(Err(error)) => eprintln!("st3: WARN delivery metrics refresh failed: {error:#}"),
                 Err(error) => eprintln!("st3: WARN delivery metrics refresh task failed: {error}"),
             }
-            tokio::time::sleep(REFRESH_PAUSE.max(started.elapsed())).await;
+            tokio::time::sleep(refresh_pause.max(started.elapsed())).await;
         }
-    });
+    })
 }
 
 #[cfg(test)]
@@ -137,7 +167,7 @@ mod tests {
             json!({"id":agents[3], "state":"stopped"}),
             json!({"id":"agent/remote/excluded", "delivery":{"state":"current"}}),
         ];
-        let summary = summarize_rows(agents.clone(), &rows, &Summary::default(), 10_000);
+        let summary = summarize_rows(agents.clone(), &rows, &Summary::default(), 10_000, Instant::now());
         assert_eq!(summary.series.len(), 5);
         assert_eq!(summary.series[&agents[0]].state, "live");
         for index in [1, 3, 4] { assert_eq!(summary.series[&agents[index]].state, "stale"); }
@@ -145,9 +175,26 @@ mod tests {
             assert_eq!(summary.series[&agents[index]].attributes[2], KeyValue::new("st.delivery.reason", ""));
         }
         assert_eq!(summary.series[&agents[2]].attributes[2], KeyValue::new("st.delivery.reason", "mailbox-runtime-indeterminate"));
-        let repeated = summarize_rows(agents.clone(), &rows, &summary, 20_000);
-        for agent in &agents { assert_eq!(repeated.series[agent].since_unix_ms, summary.series[agent].since_unix_ms); }
+        let repeated = summarize_rows(agents.clone(), &rows, &summary, 20_000, Instant::now());
+        for agent in &agents { assert_eq!(repeated.series[agent].clock, summary.series[agent].clock); }
         assert_eq!(refusal_reason(Some("delivery refused: arbitrary-new-code")), "other");
+    }
+
+    #[test]
+    fn state_age_ignores_wall_clock_corrections_and_preserves_unchanged_refreshes() {
+        let agent = "agent/example/monotonic";
+        let rows = vec![json!({"id":agent, "incarnation_id":"one",
+            "delivery":{"state":"stale", "since_unix_ms":900_000}})];
+        let mono = Instant::now();
+        let initial = summarize_rows(vec![agent.into()], &rows, &Summary::default(), 1_000_000, mono);
+        assert_eq!(initial.series[agent].clock.age_at(mono).as_secs(), 100);
+        let backward = summarize_rows(vec![agent.into()], &rows, &initial,
+            1, mono + Duration::from_secs(10));
+        assert_eq!(backward.series[agent].clock.age_at(mono + Duration::from_secs(10)).as_secs(), 110);
+        let forward = summarize_rows(vec![agent.into()], &rows, &backward,
+            99_000_000, mono + Duration::from_secs(20));
+        assert_eq!(forward.series[agent].clock.age_at(mono + Duration::from_secs(20)).as_secs(), 120);
+        assert_eq!(forward.series[agent].clock, initial.series[agent].clock);
     }
 
     #[test]
@@ -162,7 +209,10 @@ mod tests {
         let rows = vec![json!({"id":agents[0],"delivery":{"state":"current"}}),
             json!({"id":agents[1],"delivery":{"state":"stale"}}),
             json!({"id":agents[2],"delivery":{"state":"refused","reason":"delivery refused: mailbox-runtime-indeterminate"}})];
-        let summary = summarize_rows(agents.clone(), &rows, &Summary::default(), client_now_ms().saturating_sub(700_000));
+        let now = client_now_ms();
+        let mut rows = rows;
+        for row in &mut rows { row["delivery"]["since_unix_ms"] = json!(now.saturating_sub(700_000)); }
+        let summary = summarize_rows(agents.clone(), &rows, &Summary::default(), now, Instant::now());
         register_metrics(&provider.meter("st3"), Arc::new(RwLock::new(summary)));
         provider.force_flush().unwrap();
         let finished = exporter.get_finished_metrics().unwrap();
