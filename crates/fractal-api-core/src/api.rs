@@ -114,6 +114,7 @@ mod delivery_probes;
 mod end_reason;
 mod github_watch;
 pub mod harness_events;
+pub mod native_role;
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod mission_eligibility_doctor;
@@ -741,6 +742,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/harness-events", post(harness_events::publish))
+        .route("/v1/native-connectors/bootstrap", post(native_role::bootstrap))
         .route("/v1/harness-prompts/state", get(harness_events::prompt_state))
         .route("/v1/harness-prompts/answer", get(harness_events::prompt_answer))
         .route("/v1/messages/{message_id}/claims", post(messages::post_message_claim))
@@ -6579,11 +6581,12 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     if let Some(pid) = peer_pid {
                         request.extensions_mut().insert(LocalPeer {
                             pid,
-                            peer_process,
+                            peer_process: peer_process.clone(),
                             ancestor: bound_agent.clone(),
                         });
                     }
-                    if let Some(peer) = delivery_peer {
+                    if let Some(mut peer) = delivery_peer {
+                        peer.peer_process = peer_process;
                         request.extensions_mut().insert(peer);
                     }
                     if let Some(caller) = caller {
@@ -6668,6 +6671,23 @@ pub struct NativeDeliveryPeer {
     pub transport: &'static str,
     pub pid: u32,
     pub archives_inbox: bool,
+    pub peer_process: Option<fractal_runtime::PeerProcessIdentity>,
+}
+
+impl NativeDeliveryPeer {
+    /// Authenticate the connector generation captured from the accepted socket.
+    pub fn require_kernel(&self) -> Result<(), St3Error> {
+        let identity = self.peer_process.as_ref().ok_or_else(|| {
+            St3Error::new("native-role-unavailable", "native connector kernel identity is unavailable")
+        })?;
+        if identity.pid() != self.pid {
+            return Err(St3Error::new("native-role-refused", "native connector PID differs from its kernel identity"));
+        }
+        identity.validate().map_err(|error| {
+            St3Error::new("native-role-refused", format!("native connector generation is no longer current: {error:#}"))
+        })?;
+        Ok(())
+    }
 }
 
 fn native_delivery_peer(pid: u32) -> Option<NativeDeliveryPeer> {
@@ -6707,6 +6727,7 @@ fn native_delivery_identity(
         transport,
         pid,
         archives_inbox,
+        peer_process: None,
     })
 }
 /// Capture the kernel connector generation, independently of generic local auth.

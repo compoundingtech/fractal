@@ -821,13 +821,11 @@ impl CodexInboxDelivery {
         // The pty session whose liveness vouches for the record is the wrapper's task: the
         // runtime ID names the pty registry entry, and only aliases the identity on
         // driver-expanded seats — a hand-authored seat may declare a different task ID.
-        // The session token is the runtime incarnation the wrapper already minted: the pump and
-        // the wrapper's terminal writer are the same session and must own the same records. The
-        // claim is a WRITTEN act — it atomically supersedes whatever a predecessor left,
-        // including a still-fresh live record the pty-name probe cannot distinguish.
-        // Observability must never kill the launch: a claim that cannot be written degrades to
-        // a token-only writer (refused by records it does not own, so it can only under-report)
-        // with a warning, and delivery proceeds.
+        // The session token is the runtime incarnation the wrapper already minted. Fresh launches
+        // claimed it before spawning the app-server; adoption retains that exact sequence from
+        // the launch witness. An older wrapper without a witness reuses the matching canonical
+        // observed-state sequence without taking a new claim or creating connector custody.
+        // Unavailable ownership leaves an honest token-only writer that can only under-report.
         let harness_writer = {
             let writer = harness_state::Writer::new(
                 &config.agent_dir,
@@ -835,16 +833,13 @@ impl CodexInboxDelivery {
                 "codex",
                 Some(runtime.runtime_id().to_string()),
             );
-            match harness_state::claim(
-                &config.agent_dir,
-                config.identity.clone(),
-                "codex",
-                runtime.incarnation(),
+            match crate::native_connector::observer_sequence(
+                &config.agent_dir, "codex", runtime.incarnation(),
             ) {
                 Ok(claimed_seq) => writer.with_ownership(runtime.incarnation(), claimed_seq),
                 Err(error) => {
                     tracing::warn!(
-                        "st codex: observed-state claim failed; degrading to token-only: {error:#}"
+                        "st codex: observed-state ownership unavailable; retaining token-only writer: {error:#}"
                     );
                     writer.with_session(runtime.incarnation())
                 }
@@ -3301,7 +3296,16 @@ fn run_controlled_owned(
         }
     }
     diagnostics.record("appServerStarting", json!({ "safeFallback": false }))?;
+    let sequence = harness_state::claim(
+        &delivery.agent_dir, delivery.identity.clone(), "codex", runtime.incarnation(),
+    )?;
+    crate::native_connector::begin(
+        &delivery.agent_dir, "codex", runtime.incarnation(), sequence,
+    )?;
     let mut server = spawn_controlled_app_server(&codex_argv[0], &server_args, &socket_path, &log)?;
+    crate::native_connector::spawned(
+        &delivery.agent_dir, "codex", runtime.incarnation(), sequence, server.id(),
+    )?;
     let result = diagnostics
         .record("appServerStarted", json!({ "pid": server.id() }))
         .and_then(|_| {

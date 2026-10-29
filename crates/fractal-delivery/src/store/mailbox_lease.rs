@@ -163,6 +163,13 @@ pub trait MailboxLeaseStore {
             fence: &Fence,
             authority: &Authority,
         ) -> Result<(), St3Error>;
+    /// Read an existing, unrevoked capability without creating or rotating custody.
+    fn current_mailbox_fence(
+            &self,
+            subject: &str,
+            incarnation: &str,
+            component: &str,
+        ) -> Result<Option<Fence>, St3Error>;
     fn mailbox_lease_authority(
             &self,
             fence: &Fence,
@@ -323,6 +330,23 @@ impl MailboxLeaseStore for Store {
         check_declaration(&tx, fence, authority, &self.origin)?;
         record(&tx, fence, authority)?;
         tx.commit().map_err(internal)
+    }
+
+    fn current_mailbox_fence(
+            &self,
+            subject: &str,
+            incarnation: &str,
+            component: &str,
+        ) -> Result<Option<Fence>, St3Error> {
+        let request = Fence::new(subject, incarnation, component);
+        let held = lease(&self.readers.get(), &request)?
+            .and_then(|(held, _, revoked)| {
+                (!revoked && held.incarnation == incarnation).then_some(held)
+            });
+        if let Some(held) = &held {
+            self.check_mailbox_custody_fence(held)?;
+        }
+        Ok(held)
     }
 
     fn mailbox_lease_authority(

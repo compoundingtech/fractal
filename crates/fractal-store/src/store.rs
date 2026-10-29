@@ -20816,6 +20816,8 @@ pub struct ClaimCommitContext<'a> {
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
+    /// Revalidate external custody inside the writer transaction, before any mutation.
+    pub writer_validate: Option<&'a (dyn Fn() -> Result<(), St3Error> + Send + Sync)>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
 }
@@ -20874,18 +20876,20 @@ pub fn append_claim_with_commit_context(
         let connection = graph.readers.get();
         admission(&connection)?;
         let input = identities::normalize_claim_input(&connection, input)?;
-        return append_local_observation_fenced(graph, &input, event_runtime);
+        return append_local_observation_checked(graph, &input, event_runtime, context.writer_validate);
     }
     if latest_retention(&input.kind) {
         let connection = graph.readers.get();
         admission(&connection)?;
         let input = identities::normalize_claim_input(&connection, input)?;
-        return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
+        return append_latest_observation_publication_with_validation(
+            graph, &input, now_ms(), event_runtime, context.writer_validate,
+        ).map(|(record, appended, _)| (record, appended));
     }
     // One claim in a savepoint of the writer's next batch; its caller hears back once that
     // batch commits.
-    graph.connection
-        .batched(|transaction| -> Result<(ClaimRecord, bool), St3Error> {
+    harness_event_writer(graph, context.writer_validate,
+        |transaction| -> Result<(ClaimRecord, bool), St3Error> {
             let normalized_input = if context.signature.is_none() {
                 identities::normalize_claim_input(transaction, input)?
             } else { std::borrow::Cow::Borrowed(input) };
@@ -21210,7 +21214,20 @@ pub fn append_claim_with_commit_context(
             }
             Ok(outcome)
         })
-        .map_err(|error| St3Error::new("internal", error))?
+}
+
+// Keep custody revalidation in the same writer savepoint as every retention path.
+fn harness_event_writer<T: Send>(
+    graph: &GraphStore,
+    validate: Option<&(dyn Fn() -> Result<(), St3Error> + Send + Sync)>,
+    write: impl FnOnce(&Transaction<'_>) -> Result<T, St3Error> + Send,
+) -> Result<T, St3Error> {
+    graph.connection.batched(|transaction| {
+        if let Some(validate) = validate {
+            validate()?;
+        }
+        write(transaction)
+    }).map_err(internal)?
 }
 
 pub fn validate_claim_input(input: &ClaimInput) -> Result<(), St3Error> {
@@ -21272,10 +21289,17 @@ fn append_local_observation_fenced(
     input: &ClaimInput,
     event_runtime: Option<&str>,
 ) -> Result<(ClaimRecord, bool), St3Error> {
+    append_local_observation_checked(graph, input, event_runtime, None)
+}
+
+fn append_local_observation_checked(
+    graph: &GraphStore,
+    input: &ClaimInput,
+    event_runtime: Option<&str>,
+    validate: Option<&(dyn Fn() -> Result<(), St3Error> + Send + Sync)>,
+) -> Result<(ClaimRecord, bool), St3Error> {
     validate_local_observation(input)?;
-    graph
-        .connection
-        .batched(|transaction| {
+    harness_event_writer(graph, validate, |transaction| {
             check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
             // Action receipts have an owner-local empty-slot CAS, not a replicated
             // subject-head fence. Check and insert under the same writer transaction.
@@ -21290,7 +21314,6 @@ fn append_local_observation_fenced(
             }
             insert_local_observation_tx(transaction, &graph.origin, input, now_ms())
         })
-        .map_err(|error| St3Error::new("internal", error))?
 }
 
 /// Record an observation of `latest` retention. The local observation log keeps every
@@ -21321,10 +21344,29 @@ pub fn append_latest_observation_publication(
     now: u128,
     event_runtime: Option<&str>,
 ) -> Result<(ClaimRecord, bool, bool), St3Error> {
+    append_latest_observation_publication_with_validation(graph, input, now, event_runtime, None)
+}
+
+/// Revalidate native custody at the writer boundary before recording any observation.
+pub fn append_latest_observation_publication_checked(
+    graph: &GraphStore,
+    input: &ClaimInput,
+    now: u128,
+    event_runtime: Option<&str>,
+    validate: &(dyn Fn() -> Result<(), St3Error> + Send + Sync),
+) -> Result<(ClaimRecord, bool, bool), St3Error> {
+    append_latest_observation_publication_with_validation(graph, input, now, event_runtime, Some(validate))
+}
+
+fn append_latest_observation_publication_with_validation(
+    graph: &GraphStore,
+    input: &ClaimInput,
+    now: u128,
+    event_runtime: Option<&str>,
+    validate: Option<&(dyn Fn() -> Result<(), St3Error> + Send + Sync)>,
+) -> Result<(ClaimRecord, bool, bool), St3Error> {
     validate_local_observation(input)?;
-    graph
-        .connection
-        .batched(|transaction| {
+    harness_event_writer(graph, validate, |transaction| {
             check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
             let (mut local, appended) =
                 insert_local_observation_tx(transaction, &graph.origin, input, now)?;
@@ -21380,7 +21422,6 @@ pub fn append_latest_observation_publication(
             }
             Ok((published.unwrap_or(local), true, status_transition))
         })
-        .map_err(|error| St3Error::new("internal", error))?
 }
 
 /// Record a native limits report in the local observation log, and replicate it as a claim
@@ -21392,10 +21433,29 @@ pub fn append_limits_publication(
     now: u128,
     event_runtime: Option<&str>,
 ) -> Result<(ClaimRecord, bool), St3Error> {
+    append_limits_publication_with_validation(graph, input, now, event_runtime, None)
+}
+
+/// Revalidate native custody before changing either local reports or replicated limits.
+pub fn append_limits_publication_checked(
+    graph: &GraphStore,
+    input: &ClaimInput,
+    now: u128,
+    event_runtime: Option<&str>,
+    validate: &(dyn Fn() -> Result<(), St3Error> + Send + Sync),
+) -> Result<(ClaimRecord, bool), St3Error> {
+    append_limits_publication_with_validation(graph, input, now, event_runtime, Some(validate))
+}
+
+fn append_limits_publication_with_validation(
+    graph: &GraphStore,
+    input: &ClaimInput,
+    now: u128,
+    event_runtime: Option<&str>,
+    validate: Option<&(dyn Fn() -> Result<(), St3Error> + Send + Sync)>,
+) -> Result<(ClaimRecord, bool), St3Error> {
     validate_local_observation(input)?;
-    graph
-        .connection
-        .batched(|transaction| {
+    harness_event_writer(graph, validate, |transaction| {
             check_harness_event_runtime(transaction, &input.subject, event_runtime)?;
             let (local, appended) =
                 insert_local_observation_tx(transaction, &graph.origin, input, now)?;
@@ -21423,7 +21483,6 @@ pub fn append_limits_publication(
             )
             .map(|claim| (claim, true))
         })
-        .map_err(|error| St3Error::new("internal", error))?
 }
 
 /// Shared tables the projection digest covers, with the columns each leaves out.

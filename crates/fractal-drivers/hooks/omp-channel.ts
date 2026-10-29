@@ -14,6 +14,8 @@
 // a slow channel starts the session
 // without restored context rather than hanging it.
 import childProcess from "node:child_process";
+import http from "node:http";
+import { Duplex } from "node:stream";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -55,6 +57,44 @@ const SESSION = "ST_OMP_CHANNEL_SESSION";
 const SEQ = "ST_OMP_CHANNEL_SEQ";
 const EXPECTED_NATIVE_SESSION = "ST_OMP_CHANNEL_EXPECTED_NATIVE_SESSION";
 const RESUME_GENERATION = "ST_OMP_CHANNEL_RESUME_GENERATION";
+const SOCKET = "ST_OMP_CHANNEL_SOCKET";
+const INCARNATION = "ST_OMP_CHANNEL_INCARNATION";
+
+// The Unix peer's exact provider generation is the authority, not these readable facts.
+const registerConnector = (
+  child: childProcess.ChildProcess,
+  socket: string,
+  facts: Record<string, unknown>,
+): void => {
+  const startup = child.stdio[3];
+  const fail = () => {
+    if (startup instanceof Duplex) startup.destroy();
+    child.kill();
+  };
+  if (!(startup instanceof Duplex) || child.pid === undefined) return fail();
+  startup.on("error", fail);
+  const body = JSON.stringify({ ...facts, connector_pid: child.pid });
+  const request = http.request({
+    socketPath: socket,
+    path: "/v1/native-connectors/bootstrap",
+    method: "POST",
+    headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+    agent: false,
+  }, (response) => {
+    response.resume();
+    response.on("error", fail);
+    response.on("end", () => {
+      if (response.statusCode !== undefined && response.statusCode >= 200 &&
+          response.statusCode < 300 && child.exitCode === null && child.signalCode === null) {
+        startup.end(Buffer.from([1]));
+      } else fail();
+    });
+  });
+  request.on("error", fail);
+  request.setTimeout(HELLO_TIMEOUT_MS, () => request.destroy());
+  child.once("exit", () => request.destroy());
+  request.end(body);
+};
 
 // omp starts the session even if st is slow to answer. Restored context is worth a short wait
 // and never worth a hung agent.
@@ -107,6 +147,8 @@ type Stash = {
   runtimeId?: string;
   session?: string;
   seq?: string;
+  socket?: string;
+  incarnation?: string;
   expectedNativeSession?: string;
   resumeGeneration?: string;
   child?: childProcess.ChildProcess;
@@ -250,6 +292,8 @@ const stash = (): Stash => {
       runtimeId: readEnv(RUNTIME_ID, true),
       session: readEnv(SESSION, true),
       seq: readEnv(SEQ, true),
+      socket: readEnv(SOCKET, true),
+      incarnation: readEnv(INCARNATION, true),
       expectedNativeSession: readEnv(EXPECTED_NATIVE_SESSION, true),
       resumeGeneration: readEnv(RESUME_GENERATION, true),
     };
@@ -260,6 +304,8 @@ const stash = (): Stash => {
   removeEnv(RUNTIME_ID);
   removeEnv(SESSION);
   removeEnv(SEQ);
+  removeEnv(SOCKET);
+  removeEnv(INCARNATION);
   removeEnv(EXPECTED_NATIVE_SESSION);
   removeEnv(RESUME_GENERATION);
   return globals.__stOmpChannel;
@@ -381,10 +427,12 @@ export default function (pi: ExtensionAPI) {
     writeEnv(channelEnv, SEQ, seq);
     writeEnv(channelEnv, EXPECTED_NATIVE_SESSION, expectedNativeSession);
     writeEnv(channelEnv, RESUME_GENERATION, resumeGeneration);
+    const bootstrap = state.socket !== undefined;
+    if (bootstrap) writeEnv(channelEnv, "ST_NATIVE_CONNECTOR_BOOTSTRAP_FD", "3");
     const child = childProcess.spawn(
       bin,
       ["--catalog", catalog, "driver", "omp-channel", "--identity", identity],
-      { stdio: ["pipe", "pipe", "inherit"], env: channelEnv },
+      { stdio: ["pipe", "pipe", "inherit", bootstrap ? "pipe" : "ignore"], env: channelEnv },
     );
     state.child = child;
 
@@ -410,6 +458,10 @@ export default function (pi: ExtensionAPI) {
       // uncaught exception without a listener. Retire the channel instead — fail-open.
       child.stdin.on("error", retire);
       child.on("exit", retire);
+      if (state.socket !== undefined) registerConnector(child, state.socket, {
+        subject: identity, runtime_incarnation: state.incarnation, harness: "omp",
+        session, sequence: seq === undefined ? undefined : Number(seq),
+      });
 
       const send = (frame: Record<string, unknown>) => {
         if (child.stdin.destroyed) return;

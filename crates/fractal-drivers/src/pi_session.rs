@@ -185,13 +185,16 @@ mod tests {
 }
 
 /// Launch a native graph-owned session without legacy presence transport.
+/// `extra_env` carries the configured daemon socket and selected runtime generation to the extension.
 pub fn run_native(
     paths: &crate::driver_paths::Paths,
     identity: String,
     runtime_id: String,
     argv: Vec<String>,
+    extra_env: &[(String, String)],
 ) -> Result<()> {
-    let environment = paths.environment(&identity);
+    let mut environment = paths.environment(&identity);
+    environment.extend_from_slice(extra_env);
     pi_family_session::run_for_paths(
         &paths.root,
         &paths.agent_dir,

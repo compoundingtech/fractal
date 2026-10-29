@@ -304,7 +304,7 @@ mod tests {
                         pid: 7, peer_process: None, ancestor: Some("agent/test".into()),
                     }); }
                     _ => { request.extensions_mut().insert(super::super::super::NativeDeliveryPeer {
-                        agent: "agent/test".into(), transport: "omp-channel", pid: 7, archives_inbox: false,
+                        peer_process: None, agent: "agent/test".into(), transport: "omp-channel", pid: 7, archives_inbox: false,
                     }); }
                 }
                 assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN, "{path}");

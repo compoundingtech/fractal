@@ -226,6 +226,28 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
     Ok(())
 }
 
+/// Only a local provider peer can register the connector for this exact runtime generation.
+fn native_connector_environment(
+    client: &Client,
+    driver: &str,
+    incarnation: &str,
+) -> Result<Vec<(String, String)>> {
+    let (socket_env, incarnation_env) = match driver {
+        "omp" => ("ST_OMP_CHANNEL_SOCKET", "ST_OMP_CHANNEL_INCARNATION"),
+        "pi" => ("ST_PI_CHANNEL_SOCKET", "ST_PI_CHANNEL_INCARNATION"),
+        _ => return Ok(Vec::new()),
+    };
+    let socket = client
+        .socket_path()
+        .context("native pi-family connector bootstrap requires a Unix daemon socket")?
+        .to_str()
+        .context("native pi-family connector bootstrap requires a UTF-8 Unix socket path")?;
+    Ok(vec![
+        (socket_env.into(), socket.into()),
+        (incarnation_env.into(), incarnation.into()),
+    ])
+}
+
 async fn run_st2_native_driver(
     client: &Client,
     subject: &str,
@@ -250,6 +272,7 @@ async fn run_st2_native_driver(
         );
     }
     let incarnation = wait_for_agent_incarnation(client, subject).await?;
+    let mut provider_environment = native_connector_environment(client, driver, &incarnation)?;
     // A driver launched while the daemon restarts waits for it; exiting here would end the seat.
     retry_while_daemon_unreachable(subject, || {
         publish_harness_state(
@@ -352,7 +375,6 @@ async fn run_st2_native_driver(
         argv
     };
     // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-    let mut provider_environment = Vec::new();
     if driver == "omp" {
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(tool_call_id) =
@@ -395,12 +417,7 @@ async fn run_st2_native_driver(
     let task = spawn_st3_provider(
         driver,
         &paths,
-        ProviderStart::Launch(
-            argv,
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-            provider_environment,
-            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-        ),
+        ProviderStart::Launch(argv, provider_environment),
     );
     drive_st2_native(
         client,
@@ -415,12 +432,7 @@ async fn run_st2_native_driver(
 }
 
 enum ProviderStart {
-    Launch(
-        Vec<String>,
-        // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-        Vec<(String, String)>,
-        // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-    ),
+    Launch(Vec<String>, Vec<(String, String)>),
     Adopt(fractal_drivers::provider_session::DetachedSession),
 }
 
@@ -437,12 +449,7 @@ fn spawn_st3_provider(
     }
     tokio::task::spawn_blocking(move || {
         let outcome = match start {
-        ProviderStart::Launch(
-            argv,
-            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-            environment,
-            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-        ) => match driver.as_str() {
+        ProviderStart::Launch(argv, environment) => match driver.as_str() {
             "claude" => fractal_drivers::claude_session::run_controlled_paths_with_primary_ownership(
                 &paths.resolved(),
                 paths.identity,
@@ -458,15 +465,14 @@ fn spawn_st3_provider(
                 paths.identity,
                 paths.runtime_id,
                 argv,
+                &environment,
             ),
             "omp" => fractal_drivers::omp_session::run_native(
                 &paths.resolved(),
                 paths.identity,
                 paths.runtime_id,
                 argv,
-                // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
                 &environment,
-                // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
             ),
             "opencode" => fractal_drivers::opencode_session::run_with_paths(
                 &paths.resolved(),
@@ -1444,6 +1450,10 @@ async fn run_pi_channel(
     catalog: &Path,
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt as _;
+
+    // New provider launches release fd3 only after their exact connector is registered.
+    // Legacy channels and reexec adoption have no marker and keep their existing startup.
+    fractal_drivers::pi_channel::wait_for_native_connector_bootstrap()?;
 
     let identity = subject.strip_prefix("agent/").unwrap_or(subject);
     let resumed = match fractal_drivers::reexec::resume_path(fractal_drivers::reexec::CHANNEL_RESUME_ENV) {
@@ -2806,6 +2816,34 @@ fn renewal_minute(subject: &str) -> Result<Option<u64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_connector_environment_uses_the_configured_socket_and_runtime_generation() {
+        let client = Client::unix("/tmp/isolated-native-connector/daemon.sock");
+        for driver in ["omp", "pi"] {
+            let prefix = driver.to_ascii_uppercase();
+            assert_eq!(
+                native_connector_environment(&client, driver, "runtime-generation-42").unwrap(),
+                vec![
+                    (format!("ST_{prefix}_CHANNEL_SOCKET"), "/tmp/isolated-native-connector/daemon.sock".into()),
+                    (format!("ST_{prefix}_CHANNEL_INCARNATION"), "runtime-generation-42".into()),
+                ],
+            );
+        }
+        assert!(native_connector_environment(&client, "claude", "runtime-generation-42").unwrap().is_empty());
+    }
+
+    #[test]
+    fn native_connector_environment_refuses_http_for_new_pi_family_launches() {
+        let client = Client::new(
+            fractal_daemon::client::Endpoint::parse("http://127.0.0.1:1").unwrap(),
+        );
+        for driver in ["omp", "pi"] {
+            let error = native_connector_environment(&client, driver, "runtime-generation-42")
+                .unwrap_err();
+            assert!(error.to_string().contains("requires a Unix daemon socket"));
+        }
+    }
 
     /// The idle-minute boot canary's property at its cause: an idle provider's driver tick reads
     /// no graph delivery control at all, and waiting mail reads it once per tick. Both mailbox

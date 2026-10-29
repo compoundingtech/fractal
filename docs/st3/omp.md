@@ -50,6 +50,24 @@ binding becomes authoritative. A later in-process session switch replaces the na
 predecessor and binds the new session. When OMP exposes its session-file getter, the
 session and ready frames also carry that exact JSONL path for transcript readers.
 
+Native delivery connectors authenticate their role with a kernel peer generation and a
+bootstrap witness, following the pattern from #2315 O1a and #4107. The native
+harness-event publication route requires the same custody. The physical PTY launch
+selects the wrapper; its launch record identifies the provider generation. The OMP
+extension registers its exact spawned connector from the provider's own local Unix
+connection before releasing that connector's startup pipe. Pi uses the same protocol.
+The configured socket and runtime generation are handed off as
+`ST_OMP_CHANNEL_SOCKET` and `ST_OMP_CHANNEL_INCARNATION` (or the `ST_PI_CHANNEL_*`
+equivalents). Session and sequence labels remain freshness fences after the role proof.
+
+An existing live mailbox lease retains its exact process generation, capability and
+provider session across daemon restart and driver adoption. An older generation without
+a launch witness can continue that already-bound custody, but cannot acquire a new role,
+rotate its capability, or promote to another provider ownership sequence through that
+continuation path. A natural fresh launch establishes the bootstrap witness. PTY records
+without a daemon boot ID still require a matching live process-start token and the same
+connector-role proof.
+
 ## Exact-build admission
 
 An ordinary launch parses OMP's own unambiguous `MAJOR.MINOR.PATCH` release and measures

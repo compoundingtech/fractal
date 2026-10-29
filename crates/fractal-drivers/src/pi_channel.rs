@@ -188,7 +188,37 @@ fn confirm_omp_channel_session(
     Ok(())
 }
 
+static CONNECTOR_BOOTSTRAP_READY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Only new launches carry this descriptor; reexec/adoption must not replay startup.
+pub fn wait_for_native_connector_bootstrap() -> Result<()> {
+    if CONNECTOR_BOOTSTRAP_READY.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(());
+    }
+    let Some(fd) = crate::reexec::native_connector_bootstrap_fd() else {
+        return Ok(());
+    };
+    anyhow::ensure!(fd == "3", "invalid native connector bootstrap descriptor");
+    #[cfg(unix)]
+    {
+        use std::io::Read as _;
+        use std::os::fd::FromRawFd as _;
+        // SAFETY: the new-launch protocol transfers ownership of inherited fd 3 to
+        // this startup gate. It is consumed and closed before any mailbox is opened.
+        let mut startup = unsafe { std::fs::File::from_raw_fd(3) };
+        let mut ready = [0_u8; 1];
+        startup.read_exact(&mut ready).context("waiting for native connector registration")?;
+        anyhow::ensure!(ready == [1], "native connector registration was refused");
+        CONNECTOR_BOOTSTRAP_READY.store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    anyhow::bail!("native connector bootstrap requires Unix");
+}
+
 fn run_for(catalog_root: &Path, identity: &str, kind: &ChannelKind) -> Result<()> {
+    wait_for_native_connector_bootstrap()?;
     let agent_dir =
         message::resolve_declared_dir(catalog_root, identity, &crate::run::detect_host())?
             .with_context(|| {

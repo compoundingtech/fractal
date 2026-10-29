@@ -95,6 +95,7 @@ mod tests {
                 transport,
                 pid: 37,
                 archives_inbox: true,
+                peer_process: None,
             };
             for (id, phase) in [
                 ("fresh", "sent"),

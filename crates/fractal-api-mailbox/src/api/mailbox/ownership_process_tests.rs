@@ -518,12 +518,10 @@ async fn nested_real_peers_never_change_primary_attachment_or_recovery() {
                 ("primary", "would-have-admitted"),
                 ("secondary", "would-have-refused"),
             ] {
-                let peer = NativeDeliveryPeer {
-                    agent: SUBJECT.into(),
-                    transport: "claude-channel",
-                    pid: pids[role],
-                    archives_inbox: false,
-                };
+                let peer = NativeDeliveryPeer { peer_process: tests::fixture_direct_peer_process(pids[role]), agent: SUBJECT.into(),
+                transport: "claude-channel",
+                pid: pids[role],
+                archives_inbox: false, };
                 assert!(delivery_presence::begin_legacy_shape(&legacy, peer.pid));
                 authority::capture_legacy_shape(&state, &legacy, &peer);
                 let assessment =

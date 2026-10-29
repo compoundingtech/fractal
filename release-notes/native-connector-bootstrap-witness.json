@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Native delivery connectors authenticate their role with a kernel peer generation and a bootstrap witness; native harness-event publication requires the same custody.",
+  "replay": {"status": "none", "detail": "Graph replay and projections are unchanged."},
+  "schema": {"status": "changed", "detail": "Fresh native wrapper launches write a local process-generation bootstrap witness. No replicated claim schema or database migration changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Native bind, subscribe/repair, receipts, attachment and harness-event publication require authenticated connector custody, following #2315 O1a and #4107. OMP/Pi extensions register their exact connector from the trusted provider generation before releasing startup. Session/sequence remain freshness fences. Boot-ID-less PTY records retain matching start-token compatibility without relaxing role proof."},
+  "downtime": {"status": "none", "detail": "Already-bound live channels retain their exact persisted lease, kernel process generation and provider ownership through daemon restart and driver adoption. No fleet-wide harness restart is required."},
+  "manual": {"status": "none", "detail": "Fresh launches establish the witness automatically. An older generation without a witness can retain its existing exact live custody but cannot acquire new native custody or promote to a different ownership sequence through that continuation path."},
+  "recovery": {"status": "none", "detail": "Existing mailbox capabilities and provider state remain usable by previous builds. New local launch-witness files do not alter replicated state."}
+}

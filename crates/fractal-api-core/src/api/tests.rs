@@ -1699,6 +1699,7 @@ fn mailbox_reads_do_not_renew_a_native_delivery_beat() {
         transport: "omp-channel",
         pid: 37,
         archives_inbox: false,
+        peer_process: None,
     };
     record_legacy_poll(Some(&peer), Some("agent/eval/other-mailbox"), false);
     record_legacy_poll(Some(&peer), Some(recipient), true);
@@ -12405,6 +12406,37 @@ async fn message_pages_are_bounded_and_stable_across_new_writes() {
     assert_eq!(exact["content"], "body 204");
 }
 #[tokio::test]
+async fn harness_event_endpoint_refuses_kernel_peer_without_admitted_native_role() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subject = "agent/example/event-no-role";
+    let source = format!(
+        "version 2\nagent \"example/event-no-role\" {{ host {:?}; workspace \"/tmp\"; harness \"claude\" {{}} }}",
+        state.node,
+    );
+    let intent = crate::graph::parse_test_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "event-missing-role").unwrap();
+    state.store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: "runtime.observed".into(), actor: Some(subject.into()),
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("runtime-no-role")),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let request = json!({"runtime_incarnation":"runtime-no-role", "sequence":1,
+        "claim":{"subject":subject,"kind":"harness.observed","actor":subject,
+            "fields":{"state":"idle","driver":"claude","incarnation_id":"runtime-no-role"},
+            "evidence":[],"idempotency_key":"fixture-no-role"}});
+    let app = router(state.clone())
+        .layer(Extension(super::harness_events::tests::peer(subject)));
+    let (status, body) = json_request(app, "/v1/harness-events", request).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "native-role-unavailable");
+    assert!(state.store.latest_claim(subject, Some("harness.observed")).unwrap().is_none());
+}
+
+#[tokio::test]
 async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtime() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -12424,19 +12456,16 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
             idempotency_key: None,
         })
         .unwrap();
+    super::harness_events::tests::admitted_connector(&state, subject, "runtime-a");
     let request = json!({"runtime_incarnation":"runtime-a", "sequence":1,
         "claim":{"subject":subject,"kind":"harness.observed","actor":subject,
-            "fields":{"state":"idle","driver":"claude","incarnation_id":"runtime-a"},
+            "fields":{"state":"idle","driver":"claude","incarnation_id":"runtime-a",
+                "evidence_incarnation":"event-provider","ownership_sequence":1},
             "evidence":[],"idempotency_key":"fixture-event"}});
     let app = router(state);
     let (status, _) = json_request(app.clone(), "/v1/harness-events", request.clone()).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let peer = NativeDeliveryPeer {
-        agent: "agent/example/foreign".into(),
-        transport: "claude-channel",
-        pid: 7,
-        archives_inbox: true,
-    };
+    let peer = super::harness_events::tests::peer("agent/example/foreign");
     let (status, _) = json_request(
         app.clone().layer(Extension(peer)),
         "/v1/harness-events",
@@ -12444,12 +12473,7 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    let peer = NativeDeliveryPeer {
-        agent: subject.into(),
-        transport: "claude-channel",
-        pid: 7,
-        archives_inbox: true,
-    };
+    let peer = super::harness_events::tests::peer(subject);
     let app = app.layer(Extension(peer));
     let (status, first) =
         json_request(app.clone(), "/v1/harness-events", request.clone()).await;
