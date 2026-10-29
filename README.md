@@ -166,8 +166,8 @@ The Fractal web transcript reads native conversation block visibility and typed 
 and harness-hidden records do not draw rows, including tool invocations and orphan results;
 hidden results are never attached to visible tool calls. Unsupported records draw an explicit
 marker with a redacted, size-capped Inspect disclosure rather than raw JSON or harness envelopes.
-Run `pnpm check:st-coverage` in
-`apps/fractal-web` to check the renderer vocabulary against the st client schema; use
+Run `pnpm check:fractal-coverage` in
+`apps/fractal-web` to check the renderer vocabulary against the Fractal client schema; use
 `bun apps/fractal-web/scripts/replay-transcript.ts DIRECTORY...` to audit saved timeline pages.
 
 [Contributing](docs/development.md#contributing) covers source builds, checks, and repository layout.

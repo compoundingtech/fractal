@@ -991,7 +991,7 @@ fn output(path: &Path, contents: &str, check: bool) -> Result<()> {
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
         if current != contents {
             bail!(
-                "{} is stale; run `cargo run -p fractal-client-codegen --bin st3-client-codegen`",
+                "{} is stale; run `cargo run -p fractal-client-codegen`",
                 path.display()
             );
         }
@@ -1683,7 +1683,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "st3-client-codegen-{}-{nonce}-{name}",
+            "fractal-client-codegen-{}-{nonce}-{name}",
             std::process::id()
         ))
     }

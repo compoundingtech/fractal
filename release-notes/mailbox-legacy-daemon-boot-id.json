@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Admit legacy mailbox PTY records with a matching live daemon start token",
+  "replay": { "status": "none", "detail": "No replay semantics change." },
+  "schema": { "status": "none", "detail": "No persistent schema changes." },
+  "rules": { "status": "none", "detail": "No checkpoint rules changes." },
+  "compatibility": { "status": "changed", "detail": "As authorized on 2026-10-28, exact-name mailbox observations admit legacy PTY metadata without daemonBootId only when daemonPid agrees with the observed PID and its nonempty start token matches the live process. Existing boot IDs remain strictly checked. Missing, dead or mismatched process identities are not admitted." },
+  "downtime": { "status": "unknown", "detail": "No deployment or restart was performed; normal binary deployment is required." },
+  "manual": { "status": "changed", "detail": "LEGACY(remove after host pty writes daemonBootId; tracked by the st→fractal migration)." },
+  "recovery": { "status": "none", "detail": "No runtime records or mailbox leases are rewritten." }
+}
