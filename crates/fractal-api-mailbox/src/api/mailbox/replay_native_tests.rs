@@ -142,6 +142,7 @@ async fn deployed_pty_0_13_0_record_without_boot_id_binds_mailbox() {
     use tower::ServiceExt;
 
     let fixture = NativeReplay::new("fleet-pty-compat");
+    // sqlite-large-value: allow-for-now lv-h6442986de9b5 owner=fractal_api_mailbox::api::mailbox::replay_native_tests TODO=trace-statement-and-value-representation
     let mut record: Value = serde_json::from_str(include_str!("pty-0.13.0-063ff7f.json")).unwrap();
     assert!(record.get("daemonBootId").is_none());
     record["daemonPid"] = json!(fixture.peer.pid);
