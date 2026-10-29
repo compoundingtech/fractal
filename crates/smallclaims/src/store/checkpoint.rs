@@ -992,6 +992,8 @@ fn prove(
     // A VFS refusal latches SQLITE_FULL. The disposable copy is removed after this function
     // returns, so do not issue a rollback SQL statement from Transaction::drop on an error.
     if vfs.is_some() { transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore); }
+    // Each phase is a span, so a proof's cost shows by phase in the profile.
+    let span = crate::profile::span_with_io("proof.keep_sealed");
     // Keep only the sealed set.
     transaction.execute_batch(
         /* sqlite-large-value: allow-for-now lv-h298c5b9a94f9 owner=smallclaims::store::checkpoint TODO=chunk-or-reference-variable-columns */ "CREATE TEMP TABLE sealed_claims(id TEXT PRIMARY KEY);
@@ -1020,28 +1022,39 @@ fn prove(
         keep_sealed_claims_in_canonical_order(&transaction)?;
         transaction
     };
+    drop(span);
+    let span = crate::profile::span_with_io("proof.replay_before");
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_before = graph_digest(&transaction)?;
     let digests_before = projection_digest::tables(&transaction)?;
+    drop(span);
+    let span = crate::profile::span_with_io("proof.answers_before");
     let mut subjects = 0;
     let mut diagnostics = Vec::new();
     record_answers(runtime, &transaction, input, 0, &mut subjects, &mut diagnostics)?;
     if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
         store_answer(&transaction, 0, GLOBAL_ANSWERS, &answers)?;
     }
+    drop(span);
+    let span = crate::profile::span_with_io("proof.drop");
     // As a trim does: tombstones first, which readers that walk ancestry pass through.
     let checkpoint = checkpoint_name(input.cut_unix_ms());
     input.envelope_pages(&mut |envelopes| record_checkpoint_tombstones_tx(&transaction, &checkpoint, envelopes, &[]))?;
     input.claim_pages(&mut |claims| record_checkpoint_tombstones_tx(&transaction, &checkpoint, &[], claims))?;
     input.claim_pages(&mut |claims| delete_dropped_rows_tx(&transaction, &[], claims))?;
     input.envelope_pages(&mut |envelopes| delete_dropped_rows_tx(&transaction, envelopes, &[]))?;
+    drop(span);
+    let span = crate::profile::span_with_io("proof.replay_after");
     runtime.replay_checkpoint_projections(&transaction)?;
     let graph_digest_after = graph_digest(&transaction)?;
+    drop(span);
+    let span = crate::profile::span_with_io("proof.answers_after");
     record_answers(runtime, &transaction, input, 1, &mut subjects, &mut diagnostics)?;
     if let Some(answers) = runtime.checkpoint_global_answers(&transaction)? {
         store_answer(&transaction, 1, GLOBAL_ANSWERS, &answers)?;
     }
     let mut mismatches = recorded_answer_mismatches(&transaction)?;
+    drop(span);
     if graph_digest_before != graph_digest_after {
         mismatches.splice(
             0..0,
@@ -1074,6 +1087,7 @@ fn prove(
             }
         }
     }
+    let _span = crate::profile::span_with_io("proof.rollback");
     transaction.rollback()?;
     Ok(proof)
 }
@@ -1983,10 +1997,12 @@ impl Store {
         ownership.mark(&copy)?;
         let result = (|| {
             if let Some(space) = &space { space.check_now()?; }
+            let span = crate::profile::span_with_io("proof.copy");
             self.copy_store_to_guarded(&copy, vfs.as_ref())?;
             if let (Some(space), Some(vfs)) = (&space, &vfs) {
                 space.check_copied_image(&copy, vfs)?;
             }
+            drop(span);
             prove_on_scratch_copy(&*self.runtime, &copy, input, vfs.as_ref())
         })();
         if let Some(vfs) = &vfs

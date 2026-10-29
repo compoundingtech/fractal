@@ -243,6 +243,8 @@ pub mod checkpoint_tests;
 #[cfg(test)]
 pub mod checkpoint_identity_reuse_tests;
 #[cfg(test)]
+mod checkpoint_proof_span_tests;
+#[cfg(test)]
 pub mod provenance_tests;
 #[cfg(test)]
 pub mod mission_model_tests;
