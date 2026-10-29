@@ -92,6 +92,7 @@ pub mod repair_ledger;
 pub mod retired;
 pub mod retired_facts;
 pub mod runtime;
+mod signature_backfill;
 pub mod transport_observation_index;
 pub mod writer_heads;
 
@@ -839,6 +840,8 @@ pub struct Store {
     admission_schema_digest: std::sync::OnceLock<String>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// Where the scan for signatures missing on admitted envelopes stands.
+    signature_backfill: Mutex<signature_backfill::SignatureBackfill>,
     /// Read-only sealed view; never populated with the client's local-signer fallback.
     sealed_fleet_cache: Mutex<Option<(i64, crate::fleet::FleetView)>>,
     /// The member part of the trust roots, folded at the `fleet_generation` shown.
@@ -1204,6 +1207,7 @@ impl Store {
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
+            signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
             projection: Mutex::new(()),
@@ -2577,8 +2581,19 @@ impl Store {
         Ok(unsigned.len())
     }
 
-    /// Envelopes this node holds but cannot admit until their writer's signature arrives.
+    /// Signatures this node asks its peers for: first those of envelopes it holds until their
+    /// writer's signature arrives, then those missing on envelopes it admitted before their
+    /// writer's window was keyed. See `signature_backfill`.
     pub fn replication_signature_requests(&self) -> Result<Vec<ReplicaEnvelopeId>> {
+        let mut requests = self.held_signature_requests()?;
+        requests.extend(
+            self.signature_backfill_requests(REPLICATION_SIGNATURE_LIMIT - requests.len())?,
+        );
+        Ok(requests)
+    }
+
+    /// Envelopes this node holds but cannot admit until their writer's signature arrives.
+    fn held_signature_requests(&self) -> Result<Vec<ReplicaEnvelopeId>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT writer, sequence, envelope_hash FROM replica_envelope_holds
@@ -6699,7 +6714,12 @@ impl Store {
         let snapshot = self.replication_snapshot()?;
         let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
-        let signature_requests = self.replication_signature_requests()?;
+        // A guard summary stays on this node, so it asks no peer and advances no scan.
+        let signature_requests = if include_buckets {
+            self.replication_signature_requests()?
+        } else {
+            self.held_signature_requests()?
+        };
         Ok(ReplicationExchange {
             peer: self.origin.clone(),
             fleet_id: fleet_id.to_owned(),
@@ -9169,6 +9189,11 @@ impl Store {
             waiting_claims,
             invalid_records: count("invalid")?,
             repaired_records: count("repaired")?,
+            pending_envelopes: connection.query_row(
+                "SELECT COUNT(*) FROM replica_envelopes WHERE receipt_state='pending'",
+                [],
+                |row| row.get(0),
+            )?,
             unsigned_envelopes: connection.query_row(
                 "SELECT COUNT(*) FROM replica_envelope_holds WHERE reason='unsigned'",
                 [],
