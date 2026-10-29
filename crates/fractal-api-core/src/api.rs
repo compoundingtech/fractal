@@ -1885,6 +1885,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "projection-detail-invalid-source"
         | "cursor-gap"
         | "page-cursor-expired"
+        | "agent-roster-not-ready"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
