@@ -11716,3 +11716,13 @@ fn a_seats_harness_diagnostics_are_read_again_only_when_they_change() {
     assert_eq!(reads(), before + 3, "a trimmed diagnostic stayed");
     assert_eq!(store.harness_diagnostics(subject).unwrap()[0].id, later.id);
 }
+
+#[test]
+fn a_parked_seat_lookup_seeks_each_seat_and_never_ranges_over_every_decision() {
+    let store = Store::open_memory("node").unwrap();
+    let plan = query_plan(&store, crate::store::PARKED_SEATS_SQL, params![r#"["agent/node.worker"]"#, 10]);
+    // Both the raise and the running observation it must follow are seeks on the seat's own
+    // (subject, kind, store_index) history, not a range over every seat's decisions of one kind.
+    assert_eq!(plan.iter().filter(|step| step.contains("claims_subject_kind_index (subject=? AND kind=?")).count(), 2, "{plan:?}");
+    assert!(!plan.iter().any(|step| step.contains("claims_kind_index")), "{plan:?}");
+}
