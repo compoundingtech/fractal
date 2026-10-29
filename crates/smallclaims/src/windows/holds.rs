@@ -550,8 +550,8 @@ pub fn holds_during<T>(work: impl FnOnce() -> T) -> (T, Holds) {
 }
 
 /// A paged bulk path says what one writer hold covered: `count` of `unit`. It reports once per
-/// hold, from the thread that asked for the hold, before it gives the writer back. Kept only
-/// inside a `holds_during` scope; anywhere else it is one thread-local read.
+/// hold, from the thread that asked for the hold. Kept only inside a `holds_during` scope;
+/// anywhere else it is one thread-local read.
 pub fn covered(unit: &'static str, count: usize) {
     OBSERVER.with(|observer| {
         if let Some(observed) = observer.borrow().as_ref() {

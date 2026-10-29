@@ -6964,7 +6964,10 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
     ) -> Result<ReplicationReceipt, St3Error> {
-        self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())
+        let receipt = self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())?;
+        // One exchange is received in one writer hold.
+        crate::windows::holds::covered("received envelopes", input.envelopes.len());
+        Ok(receipt)
     }
 
     pub /* sqlite-large-value-flow: allow-for-now flow-h7818827323a6 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_via(
@@ -7135,7 +7138,6 @@ impl Store {
                 Ok((received, duplicate, signatures, received_at))
             })(&transaction)?;
             transaction.commit().map_err(internal)?;
-            crate::windows::holds::covered("received envelopes", input.envelopes.len());
             counts
         };
         // Only a response to our own dial is carrier evidence for a locally initiated
