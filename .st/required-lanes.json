@@ -91,6 +91,12 @@
         "scripts/ci-web-shell",
         "scripts/ci-web-shell-inputs.jq",
         "scripts/ci-web-shell-test"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml",
+        ".github/workflows/workspace-ci.ts",
+        ".st/evidence-skip-policy.json::checks.fractal-web",
+        ".st/required-lanes.json::lanes.fractal-web"
       ]
     },
     "genie-freshness": {
@@ -270,6 +276,11 @@
         "tests",
         "vendor",
         "wit"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.linux-gate",
+        ".st/evidence-skip-policy.json::checks.linux-gate",
+        ".st/required-lanes.json::lanes.linux-gate"
       ]
     },
     "rust-tests": {
@@ -365,6 +376,14 @@
         "tests",
         "vendor",
         "wit"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.evidence-gate-rust-tests",
+        ".github/workflows/fleet.yml::jobs.evidence-note-rust-tests",
+        ".st/evidence-skip-policy.json::checks.rust-tests",
+        ".st/required-lanes.json::lanes.rust-tests",
+        "scripts/ci-rust-test-result",
+        "scripts/rust-test-keys"
       ]
     },
     "typescript-client": {
@@ -435,6 +454,11 @@
         "packages/fractal-ui/package.json5",
         "packages/fractal-ui/package.yaml",
         "packages/fractal-ui/pnpm-workspace.yaml"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.typescript-client",
+        ".st/evidence-skip-policy.json::checks.typescript-client",
+        ".st/required-lanes.json::lanes.typescript-client"
       ]
     }
   }
