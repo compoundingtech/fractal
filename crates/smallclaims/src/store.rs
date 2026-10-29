@@ -4194,6 +4194,9 @@ pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 /// Maximum envelopes admitted per writer transaction. Admission can take several milliseconds
 /// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
 pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
+/// Maximum repairs applied per writer transaction. On a populated store each repair costs a few
+/// milliseconds even when it is already applied, so a page stays near 50 ms.
+pub const REPAIR_CHUNK_CLAIMS: usize = 16;
 /// Payload bytes admission prepares ahead of its loans: a budget on payload, not a bound on
 /// resident memory. Decoded envelopes wait for the loan that admits them next to their payloads,
 /// so the set holds roughly twice this plus its structures, and one envelope larger than this is
@@ -8201,27 +8204,53 @@ impl Store {
 
     /// Apply each recorded repair on its own. A repair that cannot be applied is recorded as an
     /// unhealthy projection that names it, so one bad repair never stops replication or startup.
+    ///
+    /// Repairs are applied in id order, `REPAIR_CHUNK_CLAIMS` to a writer hold. Every call applies
+    /// every recorded repair again, and one already applied changes nothing, so a call stopped
+    /// between pages resumes by starting over. A repair recorded after the list is read is applied
+    /// by the next call; whoever records one calls this after it.
     pub fn apply_replication_repairs(&self) -> Result<usize> {
-        let mut connection = self.connection.write();
         let _timing = time_stage(&self.replication_timers.repair);
-        let transaction = connection.transaction()?;
-        let mut statement = transaction
-            .prepare("SELECT id, body FROM claims WHERE kind='record.repaired' ORDER BY id")?;
-        let repairs = statement
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })?
+        let repairs = self
+            .readers
+            .get()
+            .prepare("SELECT id FROM claims WHERE kind='record.repaired' ORDER BY id")?
+            .query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        let applying = repairs.len();
+        let mut changed = 0;
+        for page in repairs.chunks(REPAIR_CHUNK_CLAIMS) {
+            changed += self.apply_replication_repair_page(page)?;
+            #[cfg(test)]
+            if STOP_BETWEEN_REPAIR_PAGES.with(std::cell::Cell::take) {
+                anyhow::bail!("stopped between repair pages");
+            }
+        }
+        Ok(changed)
+    }
+
+    /// One writer hold of `apply_replication_repairs`: these repairs, in this order.
+    fn apply_replication_repair_page(&self, page: &[String]) -> Result<usize> {
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction()?;
         let mut changed = 0;
         let mut operation_ids = BTreeSet::new();
-        for (repair_claim, body) in repairs {
+        for repair_claim in page {
+            let Some(body) = transaction
+                .query_row(
+                    "SELECT body FROM claims WHERE id=?1 AND kind='record.repaired'",
+                    [repair_claim],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+            else {
+                // Gone since the list was read, as if it had never been listed.
+                continue;
+            };
             transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h3d6340f426fa owner=smallclaims::store TODO=trace-statement-and-value-representation */ "SAVEPOINT apply_repair")?;
             let result = apply_replication_repair_with_operations_tx(
                 &*self.runtime,
                 &transaction,
-                &repair_claim,
+                repair_claim,
                 &body,
             );
             match result {
@@ -8247,10 +8276,11 @@ impl Store {
             }
         }
         if changed != 0 {
+            // A page's operation rows are brought to its repairs in its own transaction.
             repair_operations_tx(&transaction, &operation_ids.into_iter().collect::<Vec<_>>())?;
         }
         transaction.commit()?;
-        crate::windows::holds::covered("applied repairs", applying);
+        crate::windows::holds::covered("applied repairs", page.len());
         drop(connection);
         if changed != 0 {
             self.runtime.forget_views();
@@ -9964,6 +9994,8 @@ thread_local! {
     static SEALS_PREPARED_AGAIN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Signer selections sealing made under the writer on this thread.
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.
+    static STOP_BETWEEN_REPAIR_PAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 pub fn apply_replication_repair_tx(
