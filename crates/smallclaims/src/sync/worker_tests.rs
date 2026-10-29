@@ -3847,6 +3847,220 @@ mod retry_tests {
         }
     }
 
+    /// A peer with a preferred HTTP route that breaks its next `broken` POSTs before it works,
+    /// and a Fabric fallback whose grants refuse this node. Returns the local store, the HTTP
+    /// route's remaining broken POSTs and POST count, the Fabric dial log, the wake, and the
+    /// tasks to abort. One failed exchange is two broken POSTs: the send and its one retry on a
+    /// fresh connection.
+    async fn refused_fallback_peer(
+        root: &Path,
+        broken: usize,
+    ) -> (
+        Arc<Store>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        PathBuf,
+        watch::Sender<u64>,
+        Vec<tokio::task::JoinHandle<()>>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let fleet_id = "5b0d7a52-7f43-4c3e-9a51-2f2d6c1e8b70";
+        let auth = FleetAuth::test(fleet_id, &[23; 32]);
+        let local = Arc::new(plain_open(&root.join("harbor.db"), "harbor").unwrap());
+        let remote = Arc::new(plain_open(&root.join("beacon.db"), "beacon").unwrap());
+        for store in [&local, &remote] {
+            store.bind_fleet(fleet_id).unwrap();
+        }
+        let failing = Arc::new(AtomicUsize::new(broken));
+        let posts = Arc::new(AtomicUsize::new(0));
+        let (left, counted) = (failing.clone(), posts.clone());
+        let app = peer_router(
+            PeerState {
+                backend: Local(remote.clone()),
+                node: "beacon".into(),
+                auth: auth.clone(),
+                fleet: FleetContext::legacy(BTreeSet::from(["harbor".into()])),
+                outbound_notify: watch::channel(0).0,
+            },
+            Router::new(),
+        )
+        .layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let (left, counted) = (left.clone(), counted.clone());
+                async move {
+                    if request.method() == axum::http::Method::POST {
+                        counted.fetch_add(1, Ordering::SeqCst);
+                        if left
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                            .is_ok()
+                        {
+                            // A broken stream, as a member restarting under a deploy leaves.
+                            return Response::new(Body::from_stream(futures_util::stream::once(
+                                async {
+                                    Err::<Bytes, _>(std::io::Error::from(
+                                        std::io::ErrorKind::ConnectionReset,
+                                    ))
+                                },
+                            )));
+                        }
+                    }
+                    next.run(request).await
+                }
+            },
+        ));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let dials = root.join("dials");
+        let program = root.join("fabric");
+        std::fs::write(&program, format!(
+            "#!/bin/sh\necho \"$1 $2\" >> '{}'\necho '{{\"error\":{{\"code\":\"peer_not_permitted_for_service\",\"class\":\"refusal\",\"message\":\"peer not permitted for service st3-peer-v1\",\"peer\":null,\"service\":\"st3-peer-v1\"}}}}'\nexit 77\n",
+            dials.display()
+        )).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut fleet = FleetContext::legacy(BTreeSet::from(["beacon".into()]));
+        fleet.fabric = Some(Fabric::new(program));
+        let (routes, receiver) = watch::channel(vec![
+            Route::Http(url),
+            Route::Fabric {
+                node: "beacon".into(),
+                protocol: "st3-peer-v1".into(),
+            },
+        ]);
+        let wake = watch::channel(0).0;
+        let worker = tokio::spawn(dial_peer(
+            Local(local.clone()),
+            "harbor".into(),
+            "beacon".into(),
+            receiver,
+            auth,
+            fleet,
+            wake.subscribe(),
+        ));
+        let keep_routes = tokio::spawn(async move {
+            routes.closed().await;
+        });
+        (local, failing, posts, dials, wake, vec![server, worker, keep_routes])
+    }
+
+    fn fabric_dials(log: &Path) -> usize {
+        std::fs::read_to_string(log).unwrap_or_default().lines().count()
+    }
+
+    /// #4152: the preferred route fails once (its member restarts) and the worker fails over to
+    /// a Fabric route the member's grants refuse. The refusal is that route's answer, not the
+    /// peer's: the worker reports it as `refused`, returns to the preferred route on that route's
+    /// own short back-off, and holds the refused route instead of redialing it as if it were a
+    /// network fault.
+    #[tokio::test]
+    async fn a_refused_fallback_route_never_stalls_the_preferred_one() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        let (local, failing, posts, dials, wake, tasks) =
+            refused_fallback_peer(root.path(), 2).await;
+        let succeeded_after = |since: u128| {
+            let local = local.clone();
+            // The route's first retry comes about a second after its failure. The bound leaves
+            // room for a loaded runner; without the fix the route is never dialed again.
+            async move {
+                tokio::time::timeout(Duration::from_secs(15), async {
+                    loop {
+                        if let (Some(success), _) = local.replication_peer_transport("beacon")
+                            && success.at_unix_ms > since
+                        {
+                            return success;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+            }
+        };
+        let success = succeeded_after(0)
+            .await
+            .expect("the preferred route must exchange again within its short back-off");
+        assert_ne!(success.carrier, crate::replication::ReplicationCarrier::Fabric);
+        assert_eq!(fabric_dials(&dials), 1, "the refused route was dialed once");
+        let peer = local
+            .replication_status(true, None, &["beacon".into()])
+            .unwrap()
+            .peers
+            .remove(0);
+        assert_eq!(peer.status, "up", "a working route makes the peer up");
+        assert!(peer.refusal_reason.is_none());
+        let failed = peer.last_failed_exchange.expect("the refusal stays as the last failure");
+        assert_eq!(failed.carrier, crate::replication::ReplicationCarrier::Fabric);
+
+        // Another brief failure of the preferred route does not redial the refused one: it is
+        // held, and the preferred route is retried on its own.
+        let before = crate::store::now_ms();
+        let posted = posts.load(Ordering::SeqCst);
+        failing.store(2, Ordering::SeqCst);
+        wake.send_modify(|generation| *generation += 1);
+        succeeded_after(before)
+            .await
+            .expect("the preferred route recovers again without the refused one");
+        assert!(posts.load(Ordering::SeqCst) >= posted + 3);
+        assert_eq!(fabric_dials(&dials), 1, "a refused route is held, not retried as a fault");
+        for task in tasks {
+            task.abort();
+        }
+    }
+
+    /// A peer whose every route fails keeps the long, accumulating back-off: the refused route
+    /// is held and reported as `refused`, and the failing route is not retried faster for it.
+    #[tokio::test]
+    async fn a_peer_whose_every_route_fails_keeps_the_long_back_off() {
+        use std::sync::atomic::Ordering;
+        let root = tempfile::tempdir().unwrap();
+        let (local, _failing, posts, dials, _wake, tasks) =
+            refused_fallback_peer(root.path(), usize::MAX).await;
+        let started = std::time::Instant::now();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while fabric_dials(&dials) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the worker fails over to the refused route");
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let elapsed = started.elapsed();
+        // Attempts no closer together than the back-off's shortest jitter allows, plus the one
+        // return to the preferred route right after the refusal.
+        let mut allowed = 1;
+        let mut earliest = Duration::ZERO;
+        loop {
+            earliest += PeerBackoff::delay(allowed as u32 - 1, 0);
+            if earliest > elapsed {
+                break;
+            }
+            allowed += 1;
+        }
+        let attempts = posts.load(Ordering::SeqCst).div_ceil(2);
+        assert!(
+            (1..=allowed + 1).contains(&attempts),
+            "{attempts} attempts in {elapsed:?}"
+        );
+        assert_eq!(fabric_dials(&dials), 1, "a refused route is held, not retried as a fault");
+        let peer = local
+            .replication_status(true, None, &["beacon".into()])
+            .unwrap()
+            .peers
+            .remove(0);
+        assert_eq!(peer.status, "refused", "{peer:?}");
+        assert!(
+            peer.refusal_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("that member's Fabric grants"))
+        );
+        assert!(peer.last_successful_exchange.is_none());
+        for task in tasks {
+            task.abort();
+        }
+    }
+
     #[test]
     fn absent_members_cost_a_few_attempts_per_hour_after_exponential_backoff() {
         // Use the shortest jitter so this bounds the most aggressive retry schedule.

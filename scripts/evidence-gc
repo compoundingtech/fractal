@@ -17,7 +17,9 @@ THE PLAN is a pure function of git data, so anyone holding the same refs can rec
                 retention.branch_days of as_of: open pull request heads and merge-queue tips are branches; the tree of every
                 open pull request head (--open-heads-from) whatever its age; and the trees of main's first-parent commits
                 within retention.main_days of as_of, main's tip always
-  live keys     the input key each live tree projects to, for every check whose policy declares inputs
+  live keys     the input key each live tree projects to, for every check whose policy declares inputs, and the per-crate keys
+                of every live tree for rust-tests (main's scripts/rust-test-keys over main's .st/rust-test-inputs.json; a live tree
+                whose crates cannot be keyed keeps every rust-tests key)
   retention     `.st/evidence-retention.json` at --main (or --retention FILE): main_days, branch_days, grace_hours,
                 soft_records, cap_records
   as_of         main's tip commit time (or --as-of), printed in the plan
@@ -64,6 +66,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 
 sys.dont_write_bytecode = True
 
@@ -77,6 +80,11 @@ BATCH = 500
 TIPS = 'refs/evidence-gc/tips/'
 RETENTION_PATH = '.st/evidence-retention.json'
 RETENTION_KEYS = ('main_days', 'branch_days', 'grace_hours', 'soft_records', 'cap_records')
+# The per-crate check: its policy declares no `inputs`, because each crate has a key of its own (scripts/rust-test-keys over main's
+# .st/rust-test-inputs.json, as the gate keys a pull request against its base). Those keys are live keys too (2026-10-28: a plan
+# with only the policy's `inputs` deleted the crate keys an open pull request's rust-tests decision had just chosen).
+PER_CRATE_CHECK = 'rust-tests'
+RUST_TEST_KEYS, RUST_TEST_INPUTS = 'scripts/rust-test-keys', '.st/rust-test-inputs.json'
 
 
 class Refused(Exception):
@@ -249,6 +257,72 @@ def protected_keys(repo, trees, policy_text, repository):
             if key:
                 keys.add((check, key))
     return keys
+
+
+def crate_keys(repo, trees, main, index, prefetch=None):
+    """({(PER_CRATE_CHECK, key)}, report): the per-crate keys every live tree projects to, by main's scripts/rust-test-keys over main's
+    .st/rust-test-inputs.json, with the verifier's own projection. Fail closed: when main has no such tool or file nothing is keyed this
+    way, but once it has them, a live tree whose crates cannot be keyed (a manifest that cannot be read or parsed) keeps EVERY index key
+    of the check, since the keys it would protect are unknown. `prefetch`, when given, is called with the trees first (a partial clone
+    fetches the manifests it lacks in one go). report: {'trees': keyed, 'keys': protected, 'unreadable': [tree, ...] (the first 5)}."""
+    report = {'trees': 0, 'keys': 0, 'unreadable': []}
+    tool = git(repo, 'show', f'{main}:{RUST_TEST_KEYS}', check=False)
+    if tool.returncode != 0 or git(repo, 'cat-file', '-e', f'{main}:{RUST_TEST_INPUTS}', check=False).returncode != 0:
+        return set(), report
+    with tempfile.TemporaryDirectory(prefix='evidence-gc-keys-') as scratch:
+        path = os.path.join(scratch, 'rust-test-keys')
+        with open(path, 'wb') as handle:
+            handle.write(tool.stdout)
+        loader = importlib.machinery.SourceFileLoader('rust_test_keys_for_gc', path)
+        module = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+        loader.exec_module(module)
+    project = verifier_module().project
+    if prefetch:
+        prefetch(sorted(trees))
+    keys, unreadable = set(), []
+    try:
+        inputs = module.read_inputs(repo, main)
+    except module.Failure:
+        unreadable.append(main)
+    else:
+        for tree in sorted(trees):
+            try:
+                found = module.keys(repo, tree, inputs, project)
+            except module.Failure:
+                unreadable.append(tree)
+                continue
+            report['trees'] += 1
+            keys |= {(PER_CRATE_CHECK, key) for key, _ in found.values() if key}
+    if unreadable:
+        keys |= {(check, key) for _, check, key, _, _ in index if check == PER_CRATE_CHECK}
+    report.update(keys=len(keys), unreadable=unreadable[:5])
+    return keys, report
+
+
+def prefetch_manifests(repo, remote, header):
+    """For crate_keys in a partial clone (`--filter=blob:none`): the Cargo.toml blobs of the given trees and main's inputs file that are
+    not here yet, fetched by id in batches, so keying hundreds of trees does not lazily fetch each manifest on its own. Best effort: a
+    blob still missing after it makes its tree unreadable, which crate_keys counts as a reason to keep every key."""
+    def prefetch(trees):
+        wanted = set()
+        for tree in trees:
+            listed = git(repo, 'ls-tree', '-r', '--full-tree', tree, check=False).stdout.decode(errors='replace')
+            for line in listed.splitlines():
+                meta, _, path = line.partition('\t')
+                parts = meta.split()
+                if len(parts) == 3 and parts[1] == 'blob' and (path == 'Cargo.toml' or path.endswith('/Cargo.toml')
+                                                              or path == RUST_TEST_INPUTS):
+                    wanted.add(parts[2])
+        if not wanted:
+            return
+        checked = subprocess.run(['git', '-C', repo, 'cat-file', '--batch-check=%(objectname) %(objecttype)'],
+                                 input='\n'.join(sorted(wanted)).encode() + b'\n', capture_output=True, timeout=600,
+                                 env=dict(os.environ, GIT_NO_LAZY_FETCH='1', LC_ALL='C'))
+        missing = [line.split()[0] for line in checked.stdout.decode().splitlines() if line.endswith(' missing')]
+        for start in range(0, len(missing), BATCH):
+            git(repo, 'fetch', '--no-tags', '-q', '--no-write-fetch-head', '--filter=blob:none', remote, *missing[start:start + BATCH],
+                header=header, check=False)
+    return prefetch
 
 
 def advertised_bytes(count_name_lengths):
@@ -540,6 +614,9 @@ def main(argv):
         policy = git(args.repo, 'show', f'{args.policy_from or args.main}:.st/evidence-skip-policy.json', check=False)
         policy_text = policy.stdout.decode() if policy.returncode == 0 else ''
         live_keys = protected_keys(args.repo, set(live), policy_text, args.repository) if policy_text else set()
+        crate_live, crates = crate_keys(args.repo, set(live), args.main, index,
+                                        prefetch_manifests(args.repo, args.remote, header) if args.fetch else None)
+        live_keys |= crate_live
         inputs = {'records': sorted(records), 'index': sorted(index), 'live': sorted(live.items()), 'live_keys': sorted(live_keys),
                   'retention': retention, 'as_of': as_of}
         plan = gc_plan(records, index, live, live_keys, retention, as_of)
@@ -550,7 +627,7 @@ def main(argv):
                    'live_trees': {'branch_tips': sum(1 for r in live.values() if r == 'branch-tip'),
                                   'open_pull_requests': sum(1 for r in live.values() if r == 'open-pull-request'),
                                   'main_window': sum(1 for r in live.values() if r == 'main-window')},
-                   'trees_deleted': len(plan['trees']), 'keys_deleted': len(plan['keys']),
+                   'crate_keys': crates, 'trees_deleted': len(plan['trees']), 'keys_deleted': len(plan['keys']),
                    **{k: v for k, v in plan.items() if k not in ('delete', 'migrate', 'trees', 'keys', 'groups')}}
         if args.plan_out:
             with open(args.plan_out, 'w') as handle:
