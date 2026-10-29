@@ -328,7 +328,9 @@ polling member's; reading from an earlier point only reads more again. A reposit
 recorded facts is a baseline, which delivers nothing.
 
 A database file the daemon cannot use, damaged or from a newer build, is set aside beside it as
-`github.sqlite3.set-aside-*` and replaced by an empty one, and the daemon starts. A read that
+`github.sqlite3.set-aside-*` and replaced by an empty one, and the daemon starts. It does not
+start only when the directory cannot be made, the file cannot be moved aside, or no database
+opens in its place: each names the path and the cause. A read that
 fails is the observer's fault, and a later pass polls it again. An observer whose poll cannot keep
 its cursor there is `degraded` with error code `github-plugin-database`: it retries the write each
 minute and does not ask GitHub again until the database takes the cursor.

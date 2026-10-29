@@ -3337,6 +3337,7 @@ async fn cli_send_reply_read_archive_search_and_attachments_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     let image = daemon.root.path().join("copper.png");
     std::fs::write(&image, b"\x89PNG\r\n\x1a\nCopper image").unwrap();
     let arguments = [
@@ -3475,6 +3476,7 @@ async fn cli_silent_kinds_and_count_reads_survive_restart() {
     }
     let mut daemon = Daemon::new().await;
     daemon.worker();
+    daemon.apply("version 2\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-peer-recipient");
     const PEER: &str = "agent/example/peer";
     let send = |key: &'static str, flag: &'static str| {
         vec![
@@ -3638,6 +3640,9 @@ async fn cli_aged_unread_cleanup_preserves_fresh_and_read_mail_across_restart() 
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
+    // Seed before the aged mail so the writer's monotonic clock does not make it fresh.
+    daemon.store().set_write_clock_at(now - 7_200_000).unwrap();
+    daemon.apply("version 2\nagent \"example/reader\" { workspace \"/tmp\"; command \"true\"; restart never }\nagent \"example/other\" { workspace \"/tmp\"; command \"true\"; restart never }\n", "coverage-cleanup-recipients");
     let mut messages = BTreeMap::new();
     for (name, recipient, phase, fresh) in [
         ("old-sent", READER, "sent", false),

@@ -13,6 +13,7 @@ use axum::response::Response;
 use serde_json::Value;
 use fractal_daemon::api::AppState;
 use fractal_daemon::store::Store;
+use fractal_daemon::SeatsStoreCore;
 use tokio::sync::{Notify, watch};
 
 const WORKER: &str = "agent/example/worker";
@@ -73,6 +74,11 @@ async fn counted_daemon(
         private_notes: Default::default(),
     };
     let store = state.store.clone();
+    let intent = fractal_daemon::parse_intent(
+        "version 2\nagent \"example/worker\" { workspace \"/tmp\"; command \"true\" }\nagent \"example/peer\" { workspace \"/tmp\"; command \"true\" }",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&intent, "fixture-recipients").unwrap();
     let requests = Arc::new(Requests::default());
     let app = fractal_daemon::api::router(state)
         .layer(axum::middleware::from_fn_with_state(requests.clone(), record));
