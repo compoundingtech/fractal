@@ -144,8 +144,11 @@ including reuse across generic client actions, private-notes writes and harness 
 in either direction. Private-notes writes retain their owner-local exact-request recovery,
 current ownership checks and fence validation; the shared graph reservation never replays
 private content or private fences.
-Harness receipts stay solely in the existing compact resolution. An unknown key is
-new; a new key after resolution returns `already_resolved` before adapter or answer
+Harness receipts stay solely in the existing compact resolution. Shared-key admission
+seeks owner-authored receipts through an actor/key expression index; it never scans the
+indefinitely retained resolved-question collection. The index supplies candidates only:
+the canonical first resolution and owner provenance still decide trust. An unknown key
+is new; a new key after resolution returns `already_resolved` before adapter or answer
 validation, but still requires current authority, snapshot provenance and question/runtime
 fences. The result is an ordinary completed action with a nested `harness_answer`
 containing its status and the authoritative resolution. `accepted` acknowledges adapter
