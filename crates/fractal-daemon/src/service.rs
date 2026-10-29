@@ -1140,6 +1140,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
+Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n\
 {instance_environment}{cache_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
@@ -1194,6 +1195,7 @@ After=network.target\n\
 Type=simple\n\
 ExecStart={exec_start}\n\
 Environment=MALLOC_ARENA_MAX=2\n\
+Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n\
 {instance_environment}Restart=on-failure\n\
 RestartSec=5s\n\
 Nice=0\n\
@@ -1281,14 +1283,12 @@ fn render_launchd_program_plist(
 }
 
 fn plist_environment(variables: &[(String, String)]) -> String {
-    if variables.is_empty() {
-        return String::new();
-    }
     let entries = variables
         .iter()
         .map(|(name, value)| format!("<key>{}</key><string>{}</string>", xml_escape(name), xml_escape(value)))
         .collect::<String>();
-    format!("  <key>EnvironmentVariables</key><dict>{entries}</dict>\n")
+    // current_exe() resolves aliases to the physical st3 image for native services.
+    format!("  <key>EnvironmentVariables</key><dict><key>FRACTAL_SUPPRESS_DEPRECATION</key><string>1</string>{entries}</dict>\n")
 }
 
 fn xml_escape(value: &str) -> String {
@@ -1365,7 +1365,7 @@ mod tests {
         assert!(render_systemd_user_unit(&spec)
             .contains("Environment=SMALLCLAIMS_READ_CACHE_KIB=1024\n"));
         assert!(render_launchd_plist(&spec).contains(
-            "<key>EnvironmentVariables</key><dict><key>SMALLCLAIMS_READ_CACHE_KIB</key><string>1024</string></dict>"
+            "<key>SMALLCLAIMS_READ_CACHE_KIB</key><string>1024</string>"
         ));
         assert!(!render_systemd_replication_unit(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
         assert!(!render_launchd_replication_plist(&spec).contains("SMALLCLAIMS_READ_CACHE_KIB"));
@@ -1469,6 +1469,7 @@ mod tests {
         assert!(unit.contains("--peer-listen 0.0.0.0:31313 --peer-listen-allow-plain-http"));
         assert!(unit.contains("MemoryMax=1024M"));
         assert!(unit.contains("Environment=MALLOC_ARENA_MAX=2"));
+        assert!(unit.contains("Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("Nice=0"));
         assert!(unit.contains("CPUWeight=1000\nIOWeight=1000\n"));
@@ -1482,6 +1483,7 @@ mod tests {
         assert!(!replication.contains("IOWeight"));
         assert!(replication.contains("KillMode=control-group"));
         assert!(replication.contains("Environment=MALLOC_ARENA_MAX=2"));
+        assert!(replication.contains("Environment=FRACTAL_SUPPRESS_DEPRECATION=1\n"));
         assert!(replication.contains("--fleet-id 1f91ca65-7793-48cc-866e-ac15690130e1"));
         assert!(replication.contains("--shared-secret-file /var/lib/st3/fleet.secret"));
         Ok(())
@@ -1515,13 +1517,18 @@ mod tests {
         assert!(plist.contains("<key>RunAtLoad</key><true/>"));
         assert!(plist.contains("<key>SuccessfulExit</key><false/>"));
         assert!(plist.contains("<key>ProcessType</key><string>Interactive</string>"));
-        assert!(!plist.contains("<key>EnvironmentVariables</key>"));
+        assert!(plist.contains(
+            "<key>EnvironmentVariables</key><dict><key>FRACTAL_SUPPRESS_DEPRECATION</key><string>1</string></dict>"
+        ));
         assert!(plist.contains("<key>NumberOfFiles</key><integer>8192</integer>"));
         assert!(plist.contains("st3.stdout.log"));
         assert!(plist.contains("Application Support/st3"));
 
         let replication = render_launchd_replication_plist(&spec);
         assert!(replication.contains("<key>ProcessType</key><string>Background</string>"));
+        assert!(replication.contains(
+            "<key>EnvironmentVariables</key><dict><key>FRACTAL_SUPPRESS_DEPRECATION</key><string>1</string></dict>"
+        ));
         Ok(())
     }
 
