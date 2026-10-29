@@ -21,20 +21,43 @@ loads no keychain, 1Password item or device-profile file.
 On mbp2025, `services.attentionTray.enable = true` imports the Home Manager
 module. Its activation bundle installs `~/Applications/AttentionTray.app`, signs
 it ad-hoc, registers it with Launch Services and converges the GUI launch agent
-`com.schickling.attention.tray`. The job starts at login and is kept alive;
-there is no separate Login Items or SMAppService enrollment. Activation changes
-restart it once, and unchanged activation does not restart it.
+`com.schickling.attention.tray`. Its `KeepAlive.PathState` condition starts it
+only while the configured profile exists; `RunAtLoad` is absent. An unpaired
+installation is inert, including across unrelated Home Manager activations.
+Once paired, missing web prerequisites fail with a clear wrapper log under
+`ThrottleInterval = 60`, not a tight loop. There is no separate Login Items or
+SMAppService enrollment. Changed paired payloads restart once; unchanged
+activation does not restart the process.
+
+Activation verification checks only installed build/configuration facts
+(signature and registered launchd job). Runtime credentials and web availability
+are checked by both the launcher and the separate `attention-tray-readiness`
+command, never by the Home Manager activation. The module asserts that the
+rendered XML has `PathState` and no `RunAtLoad`.
+This matches [launchd.plist(5)](https://www.manpagez.com/man/5/launchd.plist/osx-10.11.6.php):
+`PathState = true` keeps the job alive while the path exists; unlike
+`SuccessfulExit`, it does not imply `RunAtLoad`. The shared activation helper
+installs the rendered plist directly; neither nix-darwin nor HM adds a launch
+condition. Filesystem notifications can be lossy: if a completed pairing does
+not start it, inspect the resolved domain and kickstart only this paired job.
 
 The stable wrapper reads one dedicated paired-device profile at
-`~/.config/attention-tray/fractal/stui-devices.json` (regular, owned, `0600`;
-parent `0700`). It accepts exactly one `person/schickling` device and exports
-its endpoint and bearer only to the app process. Never put this bearer into
-Nix options, launchd environment configuration, shell arguments or logs.
+`~/.config/attention-tray/fractal/stui-devices.json` (regular, owned, readable
+owner-only `0400` or `0600`; parent `0700`). It accepts exactly one
+`person/schickling` device whose `session.scopes` is exactly the pinned
+`--read-only` observation set: `read.projections`, `read.glasses`, `terminal.read`.
+Missing scopes, extra scopes and a broader person grant fail closed. The profile
+stores that session at pinned `device.rs:166-176`; `generated.rs:4522` supplies
+the scopes field and CLI `main.rs:2023` defines the read-only set.
+Its endpoint and bearer are exported only to the app process. Never put the
+bearer into Nix options, launchd configuration, shell arguments or logs.
 
 The Fractal URL has one source of truth: the configured local Fractal daemon's
 `<services.smalltalk.stateDir>/web-launch-url`. This is the same private
 rendezvous consumed by `fractal web`; the wrapper retains only the HTTP origin,
-not its one-use login token. Missing profile or rendezvous fails explicitly.
+not its one-use login token. The same owner-only file check applies to this
+rendezvous and to the device profile. Missing runtime prerequisites do not
+block activation: an explicit launcher/readiness diagnostic identifies them.
 The web listener is not the paired API carrier: do not send the device bearer
 to the browser listener or forward the privileged daemon socket.
 
@@ -221,8 +244,11 @@ nix run .#mbp2025-substrate-deploy -- -m "Install paired Attention tray for pend
 
 This is the AGENTS.md entrypoint, not `home-manager switch` or
 `darwin-rebuild`. Do not sit at an interactive sudo prompt. Pairing and local
-web availability are prerequisites: otherwise the tray cannot show asks or
-open authenticated links.
+web availability are runtime-readiness prerequisites, not activation
+prerequisites: merging and activating before pairing is safe. Activation
+verifies only build/config facts, and the agent stays idle until the profile
+exists. Once paired, the wrapper logs unavailable web state under the 60-second
+launchd throttle.
 
 ### 4. Root agent verifies; Johannes checks the UI
 
@@ -232,11 +258,16 @@ On mbp2025 in the active GUI session:
 nix run .#nix.activations.aarch64-darwin.mbp2025.attention-tray.verify
 codesign --verify --deep --strict "$HOME/Applications/AttentionTray.app"
 launchctl print "gui/$(id -u)/com.schickling.attention.tray"
+attention-tray-readiness
 ```
 
 The shared domain resolver selects `gui/<uid>` when Aqua exists, else
 `user/<uid>`; use that same resolved domain for inspection outside a GUI
-session. Expect one job with a live PID and no repeated nonzero exits.
+session. Before pairing, expect a registered but idle job; activation verify
+must pass and `attention-tray-readiness` must report `not paired: <path> missing`.
+After pairing and browser startup, the separate readiness command validates
+private-file modes, exact read-only scopes, runtime configuration and a live
+launchd PID; expect no repeated nonzero exits.
 Logs are `~/.local/state/attention-tray/{stdout,stderr}.log`; do not dump
 credential files or process environments when diagnosing failures.
 
