@@ -1813,6 +1813,55 @@ async fn client_post_json_person(
 }
 
 #[tokio::test]
+async fn client_event_pages_hand_out_no_cursor_past_the_published_index() {
+    // A commit is visible to readers before its writer publishes the store index that client
+    // snapshots read at. An event or resume cursor past that index lets a client consume a change,
+    // read the resource it names at the older index, and wait for an event that already came.
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    let append = |number: usize| {
+        state
+            .store
+            .append_claim(&fractal_daemon::model::ClaimInput {
+                subject: "custom/test/published".into(),
+                kind: "custom.test.recorded".into(),
+                actor: None,
+                fields: Default::default(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("published-{number}")),
+            })
+            .unwrap()
+            .store_index
+    };
+    let first = append(0);
+    let second = append(1);
+    state.store.committed_index.store(first, std::sync::atomic::Ordering::Release);
+    let app = fractal_daemon::api::router(state.clone());
+    let path = format!("/v1/client/events?after=event-cursor/{}/{first}", state.node);
+    let (status, page) = client_json(app.clone(), &path).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let sequences = |page: &Value| {
+        page["value"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["sequence"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert!(sequences(&page).iter().all(|sequence| *sequence <= first), "an event past the published index: {page}");
+    assert!(
+        !page["value"]["resume_cursor"].as_str().unwrap().contains(&format!("/{second}")),
+        "a resume cursor past the published index: {page}"
+    );
+
+    state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
+    let (status, page) = client_json(app, &path).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert!(sequences(&page).contains(&second), "{page}");
+}
+
+#[tokio::test]
 async fn completed_read_surface_is_versioned_and_cursor_gaps_require_resync() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());

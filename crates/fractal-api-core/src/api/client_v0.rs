@@ -4027,6 +4027,10 @@ pub async fn events(
     let (records, oldest, newest) = loop {
         let (records, oldest, newest) =
             super::read_deadline::query(&state.store, "/v1/client/events", || {
+                // No event or cursor past the published index that client snapshots read at, as
+                // an event page (`read_event_page`): a commit is visible here before its writer
+                // publishes it, and the next read of the resource it names must already show it.
+                let through = state.store.index().map_err(ApiError::internal)?;
                 state
                     .store
                     .read_snapshot(|_| {
@@ -4040,12 +4044,13 @@ pub async fn events(
                         ) {
                             return Ok(Err(error));
                         }
-                        let records = if query.after.is_some() {
+                        let mut records = if query.after.is_some() {
                             feed_events_after(&state.store, after, limit.saturating_add(1))?
                         } else {
                             feed_events_tail(&state.store, limit)?
                         };
-                        Ok(Ok((records, oldest, newest)))
+                        records.retain(|(record, _)| record.store_index <= through);
+                        Ok(Ok((records, oldest, newest.min(through))))
                     })
                     .map_err(ApiError::internal)?
             })?;

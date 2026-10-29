@@ -5044,9 +5044,13 @@ impl Store {
     /// One keyset page at the caller's pinned snapshot. Owner filtering never expands the
     /// indexed scan; the continuation records the last inspected event even for an empty answer.
     /// Both subject and owner filters run after the bounded global membership scan.
+    /// The events after `after`, up to and including `through`: a caller passes the published
+    /// index (`index()`) so that no cursor it hands out runs ahead of what a read snapshot taken
+    /// from that index shows. A commit is visible to SQL readers before the writer publishes it.
     pub fn events_page(
         &self,
         after: u64,
+        through: u64,
         subject: Option<&str>,
         owner_run: Option<&str>,
         limit: usize,
@@ -5055,10 +5059,10 @@ impl Store {
         let connection = self.readers.get();
         // Keep the global last-scanned-event contract without adding a subject index.
         let sql = "SELECT store_index,kind,subject,body FROM events
-             WHERE store_index>?1 ORDER BY store_index LIMIT ?2";
+             WHERE store_index>?1 AND store_index<=?3 ORDER BY store_index LIMIT ?2";
         let raw = connection
             .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3051ca7c80f3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ sql)?
-            .query_map(params![after, limit.saturating_add(1)], |row| {
+            .query_map(params![after, limit.saturating_add(1), through], |row| {
                 let body = row.get::<_, String>(3)?;
                 Ok(EventRecord {
                     store_index: row.get(0)?,
