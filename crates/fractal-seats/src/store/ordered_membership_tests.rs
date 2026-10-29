@@ -61,8 +61,27 @@ fn declare(store: &Store, member: &str, command: &str, key: &str) {
     publish(store, format!("version 2\nagent {id:?} {{ workspace \"/tmp\"; command {command:?}; }}\n"), key);
 }
 
-fn retire(store: &Store, member: &str, key: &str) {
-    publish(store, format!("version 2\nstop {member:?}\n"), key);
+// Exercise historical desired-body retirement without claiming that terminal agent.retired
+// identities can be revived. Append durable authority and run the real desired/membership projectors.
+fn desired_fixture(store: &Store, member: &str, body: Value) -> ClaimRecord {
+    let desired: DesiredSubject = serde_json::from_value(json!({
+        "subject":member,"kind":"stop","desired":body
+    })).unwrap();
+    let predecessors = store.latest_claim(member, Some("intent.desired")).unwrap()
+        .map(|record| vec![record.id]).unwrap_or_default();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    let record = append_claim_tx(&transaction, &store.origin, member, "intent.desired",
+        Some("person/ada"), &serde_json::to_value(&desired).unwrap(), &predecessors, None).unwrap();
+    select_replicated_desired(&transaction, &record, &desired).unwrap();
+    ordered_membership::flush(&transaction).unwrap();
+    transaction.commit().unwrap();
+    record
+}
+
+fn desired_retirement_fixture(store: &Store, member: &str, key: &str) {
+    let authority = store.latest_claim(member, Some("intent.desired")).unwrap().unwrap();
+    desired_fixture(store, member, json!({"retirement":authority.id,"fixture":key}));
 }
 
 fn rows(store: &Store) -> Vec<Value> {
@@ -109,7 +128,7 @@ fn membership_state_tracks_same_count_edits_and_is_not_checkpoint_authority() {
     assert_eq!(second.live_count, first.live_count);
     assert_eq!(second.changed_index, store.index().unwrap());
     assert!(second.changed_index > first.changed_index);
-    retire(&store, SEAT_B, "state-retire-b");
+    desired_retirement_fixture(&store, SEAT_B, "state-retire-b");
     let retired = store.ordered_membership_state(CONTAINER).unwrap();
     assert_eq!(retired.live_count, 1);
     assert!(retired.changed_index > second.changed_index);
@@ -142,7 +161,7 @@ fn lifecycle_frontier_survives_projection_rebuild_and_heal() {
     declare(&store, SEAT_A, "true", "rebuild-state-a");
     declare(&store, SEAT_B, "true", "rebuild-state-b");
     edit(&store, json!([place(SEAT_A, None, "a0"), place(SEAT_B, None, "a1")]));
-    retire(&store, SEAT_B, "rebuild-retire-b");
+    desired_retirement_fixture(&store, SEAT_B, "rebuild-retire-b");
     let before = store.ordered_membership_state(CONTAINER).unwrap();
     assert_eq!(before.live_count, 1);
     let expected = rows(&store);
@@ -249,7 +268,7 @@ fn pair_projection_before_create_preserves_container_revision_and_restores_visib
 }
 
 #[test]
-fn retirement_hides_but_same_identity_redeclaration_restores_retained_position() {
+fn desired_retirement_marker_hides_and_redeclaration_restores_retained_position() {
     let store = Store::open_memory("membership-lifecycle").unwrap();
     create(&store);
     declare(&store, SEAT_A, "true", "declare-a");
@@ -263,7 +282,7 @@ fn retirement_hides_but_same_identity_redeclaration_restores_retained_position()
     let frontier = store.index().unwrap();
     assert!(!store.ordered_memberships_changed(frontier, frontier).unwrap());
 
-    retire(&store, SEAT_A, "retire-a");
+    desired_retirement_fixture(&store, SEAT_A, "retire-a");
     assert!(rows(&store).is_empty());
     assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0);
     assert_eq!(head(&store, SEAT_A), retained);
@@ -302,7 +321,7 @@ fn runtime_stopped_suspended_and_running_do_not_retire_a_declared_member() {
         assert_eq!(head(&store, SEAT_A), retained);
         assert_eq!(lifecycle(&store, SEAT_A), declared);
     }
-    retire(&store, SEAT_A, "retire-a");
+    desired_retirement_fixture(&store, SEAT_A, "retire-a");
     store.append_claim(&claim(SEAT_A, "runtime.observed", json!({"status":"running","runtime_id":"late-runtime"}))).unwrap();
     assert!(rows(&store).is_empty(), "a runtime observation cannot resurrect a retired declaration");
     assert_eq!(head(&store, SEAT_A), retained);
@@ -325,7 +344,7 @@ fn unknown_member_is_retained_until_declaration_and_explicit_remove_stays_absent
     let retained = head(&store, SEAT_A);
     assert!(retained.0.is_none());
     assert_eq!(retained.1, removed.id);
-    retire(&store, SEAT_A, "retire-a");
+    desired_retirement_fixture(&store, SEAT_A, "retire-a");
     declare(&store, SEAT_A, "echo again", "redeclare-a");
     assert!(rows(&store).is_empty());
     assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0);
@@ -851,7 +870,7 @@ fn keyset_small_windows_skip_many_hidden_pairs_and_seek_the_live_order_index() {
     assert!(details.iter().any(|detail| detail.contains("SEARCH ordered_membership_live")), "{details:?}");
     assert!(details.iter().all(|detail| !detail.contains("TEMP B-TREE") && !detail.contains("SCAN ordered_membership_heads")), "{details:?}");
     drop(connection);
-    retire(&store, SEAT_A, "retire-page-a");
+    desired_retirement_fixture(&store, SEAT_A, "retire-page-a");
     assert!(store.ordered_memberships(CONTAINER, through, None, 1).is_err(), "old frontiers must not silently read the new projection");
     assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 2);
 }
@@ -863,7 +882,7 @@ fn local_admission_counts_live_pairs_and_replication_never_truncates_at_the_limi
     create(&a);
     let limit = super::ordered_membership::MAX_LIVE_MEMBERS;
     let mut kdl = String::from("version 2\n");
-    for index in 0..=limit {
+    for index in 0..=limit + 1 {
         kdl.push_str(&format!("agent \"limit/seat-{index:05}\" {{ workspace \"/tmp\"; command \"true\"; }}\n"));
     }
     publish(&a, kdl, "declare-limit-seats");
@@ -880,17 +899,39 @@ fn local_admission_counts_live_pairs_and_replication_never_truncates_at_the_limi
     let index = a.index().unwrap();
     assert!(a.edit_ordered_memberships(&membership_input(json!([place(&overflow, None, "a0")])), &BTreeMap::new()).is_err());
     assert_eq!(a.index().unwrap(), index);
-    edit(&b, json!([place(&overflow, None, "a0")]));
+    let second_overflow = format!("agent/limit/seat-{:05}", limit + 1);
+    edit(&b, json!([place(&overflow, None, "a0"), place(&second_overflow, None, "a0")]));
     sync(&a, &b);
     sync(&b, &a);
-    let converged_count = u64::try_from(limit + 1).unwrap();
+    let converged_count = u64::try_from(limit + 2).unwrap();
     assert_eq!(a.ordered_membership_count(CONTAINER).unwrap(), converged_count);
     assert_eq!(b.ordered_membership_count(CONTAINER).unwrap(), converged_count);
     assert_eq!(membership_digests(&a), membership_digests(&b));
+    // Canonical replication may exceed local admission. Shrinking and reordering that
+    // authority must remain possible even when the result is still above the limit.
+    let removed = edit(&a, json!([{"op":"remove","member":second_overflow}]));
+    let still_over_limit = u64::try_from(limit + 1).unwrap();
+    assert_eq!(a.ordered_membership_count(CONTAINER).unwrap(), still_over_limit);
+    assert_eq!(head(&a, &second_overflow).0, None);
+    assert_eq!(head(&a, &second_overflow).1, removed.id);
+    let reordered = edit(&a, json!([place(&overflow, None, "a2")]));
+    assert_eq!(a.ordered_membership_count(CONTAINER).unwrap(), still_over_limit);
+    assert_eq!(head(&a, &overflow).0, Some(json!({"bucket":null,"key":"a2"})));
+    assert_eq!(head(&a, &overflow).1, reordered.id);
+    let index = a.index().unwrap();
+    let digests = membership_digests(&a);
+    assert!(a.edit_ordered_memberships(&membership_input(json!([
+        place(&second_overflow, None, "a1")
+    ])), &BTreeMap::new()).is_err(), "a positive net delta above the limit must fail");
+    assert_eq!(a.index().unwrap(), index);
+    assert_eq!(membership_digests(&a), digests);
+    sync(&a, &b);
+    assert_eq!(b.ordered_membership_count(CONTAINER).unwrap(), still_over_limit);
+    assert_eq!(membership_digests(&a), membership_digests(&b));
     let first = "agent/limit/seat-00000";
     let retained = head(&a, first);
-    retire(&a, first, "retire-limit-first");
-    retire(&a, &overflow, "retire-limit-overflow");
+    desired_retirement_fixture(&a, first, "retire-limit-first");
+    desired_retirement_fixture(&a, &overflow, "retire-limit-overflow");
     assert_eq!(a.ordered_membership_count(CONTAINER).unwrap(), u64::try_from(limit - 1).unwrap());
     declare(&a, SEAT_A, "true", "declare-replacement-seat");
     edit(&a, json!([place(SEAT_A, None, "a1")]));
@@ -948,7 +989,7 @@ fn replay_rebuild_replication_and_checkpoint_retain_raw_hidden_and_absent_author
     let mut remove_input = membership_input(json!([{"op":"remove","member":SEAT_A}]));
     remove_input.actor = first_input.actor.clone();
     let removed = store.edit_ordered_memberships(&remove_input, &BTreeMap::new()).unwrap();
-    retire(&store, SEAT_B, "retire-b");
+    desired_retirement_fixture(&store, SEAT_B, "retire-b");
     for number in 0..5 {
         let mut noise = claim("daemon/membership-noise", "daemon.diagnostic",
             json!({"severity":"warning","code":"membership-checkpoint-noise","reason":format!("sample {number}")}));
@@ -992,4 +1033,175 @@ fn replay_rebuild_replication_and_checkpoint_retain_raw_hidden_and_absent_author
     assert_eq!(head(&store, SEAT_A), retained[0]);
     assert_eq!(head(&store, SEAT_B), retained[1]);
     assert_eq!(head(&store, SEAT_C), retained[2]);
+}
+
+#[test]
+fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
+    use fractal_schema::lifecycle::VisibilityPolicy::{
+        Arrangement, DesiredDeclaration, Document, Glass, MissionDeclaration, RetainedClaim,
+    };
+    // This is an executable inventory, not a sample of policies: any new family or policy
+    // change must supply an end-to-end fixture before this exact registry comparison passes.
+    let fixtures = [
+        ("account", "account/membership", DesiredDeclaration),
+        ("agent", SEAT_A, DesiredDeclaration),
+        ("arrangement", "arrangement/person/ada/019a0000-0000-7000-8000-000000000202", Arrangement),
+        ("attention", "attention/membership", RetainedClaim),
+        ("doc", "doc/membership-registry", Document),
+        ("exec", "exec/membership/work", DesiredDeclaration),
+        ("external", "external/github/user/membership", RetainedClaim),
+        ("glass", "glass/person/ada/019a0000-0000-7000-8000-000000000203", Glass),
+        ("host", "host/membership", DesiredDeclaration),
+        ("lane", "lane/membership/work", DesiredDeclaration),
+        ("message", "message/membership-registry", RetainedClaim),
+        ("mission", "mission/membership-registry", MissionDeclaration),
+        ("mission-run", "mission-run/membership", RetainedClaim),
+        ("observer", "observer/membership/work", DesiredDeclaration),
+        ("person", "person/membership", RetainedClaim),
+        ("planning-session", "planning-session/membership", RetainedClaim),
+        ("resource", "resource/membership", DesiredDeclaration),
+        ("schedule", "schedule/membership", DesiredDeclaration),
+        ("subscription", "subscription/membership", DesiredDeclaration),
+    ];
+    assert_eq!(
+        fractal_schema::lifecycle::registry().entries()
+            .map(|entry| (entry.family, entry.visibility, entry.sources)).collect::<Vec<_>>(),
+        fixtures.iter().map(|(family, _, policy)| (*family, *policy, policy.sources()))
+            .collect::<Vec<_>>(),
+        "every lifecycle registry entry must have an explicit exercised fixture"
+    );
+    for (family, member, policy) in fixtures {
+        assert_eq!(fractal_schema::lifecycle::registry().member(member).unwrap().family, family);
+        let store = Store::open_memory(&format!("membership-registry-{family}")).unwrap();
+        create(&store);
+        let placed = edit(&store, json!([place(member, None, "a0")]));
+        let retained = head(&store, member);
+        assert!(rows(&store).is_empty(), "{family}: a pair alone must not declare its member");
+        assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0, "{family}");
+        match policy {
+            DesiredDeclaration | RetainedClaim => {
+                // A durable desired claim is also a retained claim. Using the same authority
+                // for both policies makes their different retirement semantics observable.
+                desired_fixture(&store, member, json!({"fixture":"declared"}));
+            }
+            Arrangement => {
+                store.edit_arrangement(&claim(member, "arrangement.edited",
+                    json!({"owner":"person/ada","version":2,"operations":[{"op":"create","name":"Member"}]})),
+                    &BTreeMap::new()).unwrap();
+            }
+            Document => {
+                store.put_document(member, b"registry member", &None, "registry-document").unwrap();
+            }
+            Glass => {
+                store.append_claim(&claim(member, "glass.upserted", json!({
+                    "body":{"name":"Member","layout":{"tabs":[{"pane":"opaque:membership"}]}},
+                    "base_revision":null
+                }))).unwrap();
+            }
+            MissionDeclaration => {
+                publish(&store, "version 2\nmission \"membership-registry\" state=\"ready\" { goal \"Exercise lifecycle authority.\" }\n".into(),
+                    "registry-mission");
+            }
+        }
+        assert_eq!(members(&store), vec![member], "{family}: declaration must flush visibility");
+        assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 1, "{family}");
+        assert!(lifecycle(&store, member).0, "{family}");
+        assert_eq!(head(&store, member), retained, "{family}");
+        assert_eq!(rows(&store)[0]["revision"], placed.id, "{family}");
+        match policy {
+            DesiredDeclaration | RetainedClaim => {
+                desired_retirement_fixture(&store, member, "registry-retirement");
+                let stays_visible = policy == RetainedClaim;
+                assert_eq!(lifecycle(&store, member).0, stays_visible, "{family}");
+                assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(),
+                    u64::from(stays_visible), "{family}");
+                assert_eq!(members(&store), if stays_visible { vec![member] } else { vec![] }, "{family}");
+                desired_fixture(&store, member, json!({"fixture":"redeclared"}));
+                assert_eq!(members(&store), vec![member], "{family}: same identity restores its position");
+            }
+            Arrangement => {
+                store.edit_arrangement(&claim(member, "arrangement.edited",
+                    json!({"owner":"person/ada","operations":[{"op":"retire"}]})),
+                    &BTreeMap::new()).unwrap();
+                assert!(rows(&store).is_empty(), "{family}");
+            }
+            Glass => {
+                let revision = store.latest_claim(member, Some("glass.upserted")).unwrap().unwrap().id;
+                store.append_claim(&claim(member, "glass.deleted", json!({"base_revision":revision}))).unwrap();
+                assert!(rows(&store).is_empty(), "{family}");
+            }
+            MissionDeclaration => {
+                store.retire_mission(member, "person/ada", "registry-mission-retired").unwrap();
+                assert!(rows(&store).is_empty(), "{family}");
+            }
+            Document => {
+                store.put_document(member, b"new immutable registry version", &None, "registry-document-next").unwrap();
+                assert_eq!(members(&store), vec![member], "{family}: rebinding retains visibility");
+            }
+        }
+        assert_eq!(head(&store, member), retained, "{family}: lifecycle must not rewrite pair authority");
+        let expected = rows(&store);
+        assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(),
+            u64::try_from(expected.len()).unwrap(), "{family}");
+        let digests = membership_digests(&store);
+        let replica = Store::open_memory(&format!("membership-registry-{family}-replica")).unwrap();
+        sync(&store, &replica);
+        for target in [&store, &replica] {
+            assert_eq!(rows(target), expected, "{family}: replication");
+            assert_eq!(membership_digests(target), digests, "{family}: replication witnesses");
+            target.rebuild_claim_projections().unwrap();
+            assert_eq!(rows(target), expected, "{family}: projection rebuild");
+            assert_eq!(membership_digests(target), digests, "{family}: rebuilt witnesses");
+            assert_eq!(head(target, member), retained, "{family}: retained pair");
+        }
+    }
+}
+
+#[test]
+fn declared_stop_keeps_membership_but_terminal_retirement_hides_and_refuses_redeclaration() {
+    use super::retirements::RetirementsStore as _;
+    let store = Store::open_memory("membership-stop-versus-terminal-retirement").unwrap();
+    create(&store);
+    declare(&store, SEAT_A, "true", "stop-distinction-declare");
+    edit(&store, json!([place(SEAT_A, None, "a5")]));
+    let retained = head(&store, SEAT_A);
+    let declared = lifecycle(&store, SEAT_A);
+    publish(&store, format!("version 2\nstop {SEAT_A:?}\n"), "ordinary-stop");
+    assert_eq!(store.selected_desired_kind(SEAT_A).unwrap().as_deref(), Some("stop"));
+    assert_eq!(members(&store), vec![SEAT_A], "ordinary stop is not retirement");
+    assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 1);
+    assert!(lifecycle(&store, SEAT_A).0);
+    assert_ne!(lifecycle(&store, SEAT_A).1, declared.1);
+    assert_eq!(head(&store, SEAT_A), retained);
+    declare(&store, SEAT_A, "echo rearmed", "ordinary-stop-redeclare");
+    assert_eq!(members(&store), vec![SEAT_A], "stopped identities may be redeclared");
+    assert_eq!(head(&store, SEAT_A), retained);
+    let token = store.selected_desired_token(SEAT_A).unwrap().unwrap();
+    let (retired, appended) = store.retire_agent(SEAT_A, "person/ada", "Work finished",
+        &token, None, "terminal-membership-retirement", &[]).unwrap();
+    assert!(appended);
+    let marker: String = store.readers.get().query_row(
+        "SELECT json_extract(body,'$.retirement') FROM desired WHERE subject=?1",
+        [SEAT_A], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(marker, retired.id);
+    assert!(rows(&store).is_empty());
+    assert_eq!(store.ordered_membership_count(CONTAINER).unwrap(), 0);
+    assert!(!lifecycle(&store, SEAT_A).0);
+    assert_eq!(head(&store, SEAT_A), retained);
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"ada/seat-a\" { workspace \"/tmp\"; command \"true\"; }\n", &store.origin).unwrap();
+    assert_eq!(store.apply_internal(&intent, "terminal-redeclare-refused").unwrap_err().code,
+        "recipient-retired");
+    assert!(rows(&store).is_empty(), "terminal identity cannot be resurrected");
+    let replica = Store::open_memory("membership-terminal-replica").unwrap();
+    sync(&store, &replica);
+    let digests = membership_digests(&store);
+    for target in [&store, &replica] {
+        target.rebuild_claim_projections().unwrap();
+        assert!(rows(target).is_empty());
+        assert_eq!(target.ordered_membership_count(CONTAINER).unwrap(), 0);
+        assert_eq!(head(target, SEAT_A), retained);
+        assert_eq!(membership_digests(target), digests);
+    }
 }

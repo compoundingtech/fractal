@@ -2436,14 +2436,23 @@ this primitive does not migrate historical winners or convert an existing arrang
 If offline v1 and v2 creates collide on one identity, retained unrepaired v1 creation or
 placement authority preserves the v1 layout; the v2 pair records remain retained but inactive.
 
+**Lock-step reader rollout:** upgrade every client that reads an owner's arrangement list
+or collection stream to a version-2-aware decoder **before creating that owner's first v2
+layout**. The list is not filtered by a reader-negotiated body version: an older decoder
+that requires `placements` cannot decode a list containing a v2 body. The advertised
+`arrangements` capability version 2 discovers server support; it does not negotiate an
+older response shape. Keeping v1 layouts supported does not make old list readers
+compatible with v2 layouts. Coordinate these reader upgrades before enabling v2 writers.
+
 Read `GET /v1/client/arrangements/{person_name}/{uuid}/memberships?person=person%2FNAME`.
 The response is an `OrderedMembershipPage`, with `collection: "ordered-memberships"` and
 rows `{id, container, member, position: {bucket, key}, revision}`. `id` equals the member's
 stable subject; root is an explicit null bucket. Indexed order is `(effective bucket, key,
 member)`, with root first. Cursors bind the person, container, limit and snapshot; repeat those
 filters and reread after `page-cursor-expired`. Retired or unknown members are hidden, not
-deleted. Same-ID redeclaration restores the retained position, while runtime stopped or
-suspended observations do not retire a declaration.
+deleted. Where a family's lifecycle permits same-ID redeclaration, it restores the retained
+position. An ordinary declared `stop`, and runtime stopped or suspended observations,
+do not retire a declaration; a terminal retirement remains hidden under that family's rules.
 
 Submit `arrangement.membership.edit` with `{subject, owner, operations}`. Each operation is
 either `{op: "place", member, bucket: null | FolderId, key}` or `{op: "remove", member}`.
@@ -2452,7 +2461,9 @@ claim order. Removal retains an absent winner. These are claim-backed pair recor
 new graph subjects. Real actors, owner checks, idempotency receipts and subject fences use
 the ordinary action protocol; a supplied container fence must match in the writer transaction.
 Local admission allows 4,096 live members, not 4,096 lifetime pairs, and never truncates a
-replicated union. An edit has at most 1,024 unique operations and a 1 MiB serialized bound.
+replicated union. If a union is already over the limit, removal and reordering remain allowed;
+only a positive net increase that leaves it over the limit is refused. An edit has at most
+1,024 unique operations and a 1 MiB serialized bound.
 
 Subscribe with `{kind: "subscribe", id, collection: "ordered-memberships", person,
 subject: ArrangementId, limit}`. This bounded held window emits typed membership snapshots

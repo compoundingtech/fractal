@@ -82,7 +82,7 @@ fn lifecycle_at(connection: &Connection, subject: &str) -> Result<(bool, String)
     let Some(entry) = lifecycle::registry().subject(subject) else { return Ok((false, String::new())); };
     let state: Option<(bool, String)> = match entry.visibility {
         VisibilityPolicy::DesiredDeclaration => connection.query_row(
-            "SELECT kind!='stop',claim_id FROM desired WHERE subject=?1", [subject],
+            "SELECT json_extract(body,'$.retirement') IS NULL,claim_id FROM desired WHERE subject=?1", [subject],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?,
         VisibilityPolicy::MissionDeclaration => connection.query_row(
@@ -127,22 +127,28 @@ fn container_live(connection: &Connection, container: &str) -> Result<bool> {
     }
 }
 
-struct ContainerView {
+#[derive(PartialEq, Eq)]
+pub(super) struct ContainerView {
     live: bool,
     buckets: BTreeMap<String, Option<String>>,
 }
 
-fn container_view(transaction: &Transaction<'_>, container: &str) -> Result<ContainerView> {
-    let live = container_live(transaction, container)?;
-    remember_lifecycle(transaction, container)?;
+pub(super) fn container_projection(connection: &Connection, container: &str) -> Result<ContainerView> {
+    let live = container_live(connection, container)?;
     let buckets = if live {
         let capability = lifecycle::registry().subject(container).and_then(|entry| entry.ordered_membership.as_ref())
             .context("ordered membership container capability")?;
         match capability.effective_bucket {
-            EffectiveBucket::ArrangementFolders { .. } => arrangements::effective_buckets(transaction, container)?,
+            EffectiveBucket::ArrangementFolders { .. } => arrangements::effective_buckets(connection, container)?,
         }
     } else { BTreeMap::new() };
     Ok(ContainerView { live, buckets })
+}
+
+fn container_view(transaction: &Transaction<'_>, container: &str) -> Result<ContainerView> {
+    let view = container_projection(transaction, container)?;
+    remember_lifecycle(transaction, container)?;
+    Ok(view)
 }
 
 fn refresh_pair(transaction: &Transaction<'_>, container: &str, member: &str, index: u64, view: &ContainerView) -> Result<()> {
@@ -176,13 +182,22 @@ fn refresh_pair(transaction: &Transaction<'_>, container: &str, member: &str, in
     Ok(())
 }
 
-pub fn container_changed(transaction: &Transaction<'_>, container: &str, index: u64) -> Result<()> {
-    let mut statement = transaction.prepare_cached("SELECT member FROM ordered_membership_heads WHERE container=?1 ORDER BY member")?;
-    let members = statement.query_map([container], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    drop(statement);
-    if !members.is_empty() {
+pub(super) fn container_changed(transaction: &Transaction<'_>, container: &str, index: u64, previous: ContainerView) -> Result<()> {
+    // An indexed existence probe, unlike collecting retained heads, is independent
+    // of hidden/absent history. Names and losing register writes do not change the
+    // effective folder mapping or container visibility.
+    let has_members: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM ordered_membership_heads WHERE container=?1)",
+        [container], |row| row.get(0),
+    )?;
+    if has_members {
         let view = container_view(transaction, container)?;
-        for member in &members { refresh_pair(transaction, container, member, index, &view)?; }
+        if previous != view {
+            let mut statement = transaction.prepare_cached("SELECT member FROM ordered_membership_heads WHERE container=?1 ORDER BY member")?;
+            let members = statement.query_map([container], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            drop(statement);
+            for member in &members { refresh_pair(transaction, container, member, index, &view)?; }
+        }
     }
     if arrangements::version(transaction, container)? == 2 {
         transaction.execute(
@@ -190,7 +205,7 @@ pub fn container_changed(transaction: &Transaction<'_>, container: &str, index: 
              ON CONFLICT(container) DO UPDATE SET changed_index=MAX(changed_index,excluded.changed_index)",
             params![container,index],
         )?;
-    } else if members.is_empty() {
+    } else if !has_members {
         // A delayed legacy create can deactivate a previously observed v2 create.
         // Keep count rows for retained raw pairs, but not for an inactive empty container.
         transaction.execute(/* sqlite-large-value: allow-for-now lv-hf8a19ac0ce17 owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM ordered_membership_counts WHERE container=?1", [container])?;
@@ -325,9 +340,10 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
     if !container_live(transaction, &input.subject).map_err(internal)? {
         return Err(St3Error::new("invalid-arrangement-operations", "ordered memberships require a live version-2 arrangement; existing version-1 placements require explicit migration"));
     }
-    let mut count: i64 = transaction.query_row(
+    let initial_count: i64 = transaction.query_row(
         "SELECT COALESCE((SELECT live_count FROM ordered_membership_counts WHERE container=?1),0)", [&input.subject], |row| row.get(0),
     ).map_err(internal)?;
+    let mut count = initial_count;
     for operation in operations {
         let (member, next_present) = match operation {
             Operation::Place { member,.. } => (member,true),
@@ -339,7 +355,7 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
         let next = next_present && lifecycle_at(transaction, &member).map_err(internal)?.0;
         count += i64::from(next) - i64::from(previous);
     }
-    if count > MAX_LIVE_MEMBERS as i64 {
+    if count > MAX_LIVE_MEMBERS as i64 && count > initial_count {
         return Err(St3Error::new("arrangement-limit", "ordered membership admission exceeds 4096 live entries; hidden lifetime pairs do not count"));
     }
     Ok(())

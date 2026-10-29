@@ -75,6 +75,7 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
     let operations = schema::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
     let owner = schema::owner(&claim.subject).map_err(anyhow::Error::new)?;
     let key = canonical::sortable_key(&canonical::claim_key(transaction, &claim.id)?);
+    let membership_before = ordered_membership::container_projection(transaction, &claim.subject)?;
     transaction.execute(/* sqlite-large-value: allow-for-now lv-h578768b2ae12 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO arrangements(subject,owner,revision,winner,updated_at,changed_index) VALUES(?1,?2,?3,?4,?5,?6)
         ON CONFLICT(subject) DO UPDATE SET revision=CASE WHEN excluded.winner>arrangements.winner THEN excluded.revision ELSE arrangements.revision END,
         updated_at=CASE WHEN excluded.winner>arrangements.winner THEN excluded.updated_at ELSE arrangements.updated_at END,
@@ -121,7 +122,7 @@ fn project_owner<'a>(transaction: &Transaction<'_>, claim: &'a ClaimRecord) -> R
         transaction.execute(/* sqlite-large-value: allow-for-now lv-h40e8b57085c3 owner=fractal_store::store::arrangements TODO=bound-or-reference-values-and-reclamation */ "UPDATE arrangement_registers SET value='1'
             WHERE subject=?1 AND register='version' AND value!='1'", [&claim.subject])?;
     }
-    ordered_membership::container_changed(transaction, &claim.subject, claim.store_index)?;
+    ordered_membership::container_changed(transaction, &claim.subject, claim.store_index, membership_before)?;
     Ok(owner)
 }
 
