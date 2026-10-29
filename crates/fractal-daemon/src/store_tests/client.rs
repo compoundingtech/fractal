@@ -103,19 +103,24 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
     let store = Arc::new(crate::store::Store::open_memory("message-retry").unwrap());
-    let state = crate::api::AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(tokio::sync::Notify::new()),
-    event_notify: tokio::sync::watch::channel(0).0,
-    node: "message-retry".into(),
-    state_dir: directory.path().into(),
-    pty_root: directory.path().join("pty"),
-    pty_binary: "pty".into(),
-    fleet_id: None,
-    configured_peers: vec![],
-    client_relay: None,
-    native_session_home: None,
-    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = crate::api::AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(tokio::sync::Notify::new()),
+        event_notify: tokio::sync::watch::channel(0).0,
+        node: "message-retry".into(),
+        state_dir: directory.path().into(),
+        pty_root: directory.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let app = crate::api::router(state).layer(axum::middleware::from_fn(

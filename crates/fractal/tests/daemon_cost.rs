@@ -51,6 +51,7 @@ use fractal_daemon::MissionsStore;
 use fractal_daemon::SeatsStore;
 use fractal_daemon::SeatsStoreCore;
 use fractal_daemon::{GitChangesStore, WatchesStore};
+use fractal_daemon::HarnessQuestionsStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -77,6 +78,33 @@ use tokio::sync::{Notify, watch};
 use crate::daemon_bench::{
     FLEET, NODE, PEER, Subjects, claim_input, fleet_subjects, generated_stores, listed, stub_pty,
 };
+
+/// Only the cost fixture can enable this sink; invalid answers must never reach settlement.
+struct CostHarnessQuestionSink(std::sync::atomic::AtomicBool);
+
+impl fractal_daemon::api::HarnessQuestionSettleSink for CostHarnessQuestionSink {
+    fn availability(
+        &self,
+        _question: &fractal_daemon::api::HarnessQuestion,
+    ) -> Result<(), fractal_daemon::api::HarnessQuestionAdapterError> {
+        if self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            Ok(())
+        } else {
+            Err(fractal_daemon::api::HarnessQuestionAdapterError::Missing)
+        }
+    }
+
+    fn settle(
+        &self,
+        _question: &fractal_daemon::api::HarnessQuestion,
+        _answers: &BTreeMap<String, fractal_schema::harness_questions::Answer>,
+    ) -> Result<
+        BTreeMap<String, fractal_schema::harness_questions::Answer>,
+        fractal_daemon::api::HarnessQuestionAdapterError,
+    > {
+        unreachable!("cost probes must refuse before native settlement")
+    }
+}
 
 /// How many times more work a request may do at the larger scale, for the same answer.
 const GROWTH: f64 = 3.0;
@@ -599,6 +627,11 @@ const PROBES: &[Probe] = &[
     get(
         "GET /v1/client/arrangements/{person_name}/{uuid}",
         ARRANGEMENT_PATH,
+    ),
+    get("GET /v1/client/harness-questions", "/v1/client/harness-questions"),
+    get(
+        "GET /v1/client/harness-questions/{*id}",
+        "/v1/client/harness-questions/{harness_question}",
     ),
     post("POST /v1/sets/preview", "/v1/sets/preview", |_, attempt| {
         owned_set_request(&format!("preview-{attempt}"))
@@ -1493,17 +1526,22 @@ mission "cost/history" state="ready" {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = fractal_daemon::api::router(AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: NODE.into(),
-    state_dir: root.path().join("state"),
-    pty_root: root.path().join("pty"),
-    pty_binary: stub_pty(root.path()),
-    fleet_id: None, configured_peers: Vec::new(), client_relay: None,
-    native_session_home: Some(root.path().join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  });
+    let app = fractal_daemon::api::router(AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.path().join("state"),
+        pty_root: root.path().join("pty"),
+        pty_binary: stub_pty(root.path()),
+        fleet_id: None, configured_peers: Vec::new(), client_relay: None,
+        native_session_home: Some(root.path().join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    });
     let mut measurements = Vec::new();
     for run in 0..100 {
         let view = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
@@ -2381,6 +2419,30 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .await
             .unwrap()
     };
+    let harness_question = {
+        let store = store.clone();
+        tokio::task::spawn_blocking(move || {
+            store.append_claim(&ClaimInput {
+                subject: "agent/ada".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("agent/ada".into()),
+                fields: serde_json::from_value(json!({
+                    "status": "running", "runtime_id": "cost-question-runtime",
+                    "incarnation_id": "cost-question-runtime", "terminal": true,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.observe_harness_question(&fractal_daemon::store::harness_questions::QuestionObservation {
+                agent: "agent/ada".into(),
+                session: "cost-question-session".into(),
+                native_id: "cost-question-call".into(),
+                runtime_incarnation: "cost-question-runtime".into(),
+                questions: vec![fractal_schema::harness_questions::Question {
+                    id: "q0".into(), options: 2, multi: false, required: true,
+                }],
+            }).unwrap()
+        }).await.unwrap()
+    };
     let claims = store.index().unwrap();
 
     let socket = root.join("st3.sock");
@@ -2409,19 +2471,29 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         ..Default::default()
     })
     .unwrap();
-    let state = AppState { owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: NODE.into(),
-    state_dir: root.join("state"),
-    pty_root: root.join("pty"),
-    pty_binary: pty,
-    fleet_id: Some(FLEET.into()),
-    configured_peers: vec![PEER.into()],
-    client_relay: relay,
-    native_session_home: Some(root.join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+    let state = AppState {
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.join("state"),
+        pty_root: root.join("pty"),
+        pty_binary: pty,
+        fleet_id: Some(FLEET.into()),
+        configured_peers: vec![PEER.into()],
+        client_relay: relay,
+        native_session_home: Some(root.join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
+    let harness_sink = Arc::new(CostHarnessQuestionSink(
+        std::sync::atomic::AtomicBool::new(false),
+    ));
+    let mut state = state;
+    state.harness_question_sink = Some(harness_sink.clone());
     let paired_router = fractal_daemon::api::fabric_router(state.clone());
     let seeded_cut = store.index().unwrap();
     fractal_daemon::api::start_published_lists(&state);
@@ -2489,6 +2561,10 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         store.append_claim(&running).unwrap();
     }
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert(
+        "harness_question",
+        urlencoding::encode(&harness_question.id).into_owned(),
+    );
     fixture.items.insert("usage_since", usage_window.0.to_string());
     fixture.items.insert("usage_until", usage_window.1.to_string());
     fixture.items.insert(
@@ -2808,6 +2884,57 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         }
     }
     costs.insert(COLD_AGENTS.to_owned(), Cost::least(&samples));
+
+    for (invalid, code, reason) in [
+        (false, "not-answerable", "adapter_missing"),
+        (true, "invalid-answer", "unknown_option"),
+    ] {
+        harness_sink.0.store(invalid, std::sync::atomic::Ordering::Relaxed);
+        let mut samples = Vec::new();
+        for attempt in 0..4 {
+            let current = fractal_client::Client::unix_as(&socket, ARRANGEMENT_OWNER)
+                .harness_question(&harness_question.id)
+                .await.unwrap();
+            let request = json!({
+                "api_version": "st3.client.v0",
+                "id": format!("action/harness-answer-cost-{invalid}-{attempt}"),
+                "type": "harness.answer",
+                "idempotency_key": format!("harness-answer-cost-key-{invalid}-{attempt}"),
+                "fence": {
+                    "snapshot_id": current.snapshot.id,
+                    "subject_revisions": {
+                        current.value.header.id: current.value.header.revision,
+                    },
+                    "runtime_incarnation": current.value.runtime_incarnation,
+                },
+                "parameters": {
+                    "question": harness_question.id,
+                    "answers": {"q0": {"positions": [if invalid { 2 } else { 1 }]}},
+                },
+            });
+            let cost = counted(|| async {
+                let error = arrangement_person
+                    .post::<_, Value>("/v1/client/actions", &request)
+                    .await.expect_err("the harness answer cost probe must refuse");
+                assert_eq!(fractal_daemon::client::api_error_code(&error), Some(code), "{error:#}");
+                assert_eq!(
+                    fractal_daemon::client::api_error_parts(&error)
+                        .and_then(|(_, _, _, details)| details.get("reason")).and_then(Value::as_str),
+                    Some(reason),
+                    "{error:#}",
+                );
+                Ok(json!({"reason": reason}))
+            }).await;
+            if attempt > 0 {
+                samples.push(cost);
+            }
+        }
+        costs.insert(
+            format!("POST /v1/client/actions (harness.answer {code})"),
+            Cost::least(&samples),
+        );
+    }
+    harness_sink.0.store(false, std::sync::atomic::Ordering::Relaxed);
 
     // The summary a peer asks for before each exchange, after the daemon wrote a few claims.
     let mut samples = Vec::new();

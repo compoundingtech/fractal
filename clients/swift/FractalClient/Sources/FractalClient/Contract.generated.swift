@@ -13,6 +13,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case arrangementEdit = "arrangement.edit"
     case attentionResolve = "attention.resolve"
     case customReply = "custom.reply"
+    case harnessAnswer = "harness.answer"
     case laneApprove = "lane.approve"
     case laneJoin = "lane.join"
     case laneLeave = "lane.leave"
@@ -63,6 +64,8 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
 }
 
 public enum ReadOperation: String, CaseIterable, Sendable {
+    case harnessQuestionsList = "harness-questions.list"
+    case harnessQuestionsGet = "harness-questions.get"
     case notesList = "notes.list"
     case customSubjectsList = "custom-subjects.list"
     case customSubjectsGet = "custom-subjects.get"
@@ -146,6 +149,8 @@ public enum ReadOperation: String, CaseIterable, Sendable {
 }
 
 public let fractalClientReadPaths: [ReadOperation: String] = [
+    .harnessQuestionsList: "/v1/client/harness-questions",
+    .harnessQuestionsGet: "/v1/client/harness-questions/{id}",
     .notesList: "/v1/client/notes",
     .customSubjectsList: "/v1/client/custom-subjects",
     .customSubjectsGet: "/v1/client/custom-subjects/{id}",

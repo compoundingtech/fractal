@@ -26,6 +26,9 @@ Existing query options and optional defaults keep their positions: for example,
 `resourcesList(filters, pageOptions, { signal })`. Cancellation is checked before fetching
 and after asynchronous credentials/discovery; the signal stays attached to native fetch while
 the JSON body is consumed. Cancellation does not prove an action was not delivered and never retries it.
+The manifest read ids `harness-questions.list` and `harness-questions.get` map to
+`harnessQuestions(queryOptions, requestOptions)` and `harnessQuestion(id, requestOptions)`;
+their public helper names do not include the manifest's `list`/`get` suffixes.
 
 `collectionStream` resolves to the pre-open command surface. Its optional `onOpen` callback
 reports actual WebSocket readiness once, before buffered commands flush. Commands issued inside
@@ -142,6 +145,7 @@ Object constraints beside `oneOf` apply to every generated branch, including sha
 Source break for general pairing callers: `PairingBegin` and `PairedSession` are now untagged unions (`PersonPairingBegin | AssistantPairingBegin`, `PersonPairedSession | AssistantPairedSession`), so callers that read `person_id` or person-only fields off the generic types must narrow to the person variant first; `person_id` is optional on shared projections such as `Device`. Person-only callers can switch to the `PersonPairingBegin`/`PersonPairedSession` types and keep their existing shape. The Rust person variants enforce `deny_unknown_fields`.
 
 Inline semantic keywords provide branded strings and subject references, UTC instants, durations, and redacted credentials. Integer codecs reject unsafe JavaScript integers on decode and encode. Duration codecs round to whole wire units on encode; second durations preserve exact safe-integer units without overflowing millisecond precision. Recursive Glass layouts remain validated through suspended schemas.
+Subject-reference schemas retain authored string-length bounds as well as their family identity checks.
 
 After the root frozen install, run the focused rich checks with:
 

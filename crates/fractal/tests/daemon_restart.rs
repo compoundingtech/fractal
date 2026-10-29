@@ -71,19 +71,24 @@ impl Daemon {
     }
 
     fn state(&self) -> AppState {
-        AppState { owning_person: None,
-        store: self.store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: self.event_notify.clone(),
-        node: "restart-node".into(),
-        state_dir: self.root.join("daemon"),
-        pty_root: self.root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+        AppState {
+            owning_person: None,
+            store: self.store.clone(),
+            notify: Arc::new(Notify::new()),
+            event_notify: self.event_notify.clone(),
+            node: "restart-node".into(),
+            state_dir: self.root.join("daemon"),
+            pty_root: self.root.join("pty"),
+            pty_binary: PathBuf::from("pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        }
     }
 
     // Dropping this runtime also closes upgraded WebSocket connections, just as exiting

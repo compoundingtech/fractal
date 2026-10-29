@@ -114,6 +114,10 @@ mod delivery_probes;
 mod end_reason;
 mod github_watch;
 pub mod harness_events;
+mod harness_questions;
+pub use harness_questions::{
+    HarnessQuestion, HarnessQuestionAdapterError, HarnessQuestionSettleSink, live_input_session,
+};
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod mission_eligibility_doctor;
@@ -240,6 +244,8 @@ pub struct AppState {
     pub client_relay: Option<crate::peer::ClientRelay>,
     pub native_session_home: Option<std::path::PathBuf>,
     pub planner_default: PlannerSpec,
+    /// Native answering is unavailable unless an adapter is explicitly installed.
+    pub harness_question_sink: Option<Arc<dyn HarnessQuestionSettleSink>>,
     /// Caller-bound assistant read receipts committed off the request path. Shut it down before
     /// the store closes; the last state reference to drop commits what remains.
     pub assistant_receipts: Arc<client_v0::assistant::receipts::ReceiptWriter>,
@@ -1854,6 +1860,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "unsupported-capability"
         | "validation-failed"
         | "idempotency-conflict"
+        | "invalid-answer"
+        | "not-answerable"
         | "idempotency-key-expired"
         | "issuer-required"
         | "suspend-authored-session-selection"
@@ -10645,13 +10653,7 @@ pub async fn input_session_as(
     {
         return Ok(Json(session_control_response(&subject, &result)));
     }
-    let session = live_session(state, &subject, Some(&request.expected_incarnation))?;
-    if !session.terminal {
-        return Err(ApiError::bad(St3Error::new(
-            "unsupported-capability",
-            "session input requires a terminal session",
-        )));
-    }
+    let session = live_input_session(state, &subject, &request.expected_incarnation)?;
     let bytes = match request.mode {
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)

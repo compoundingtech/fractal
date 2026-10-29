@@ -94,6 +94,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case validationFailed
     case idempotencyConflict
     case attentionMigrated
+    case invalidAnswer, notAnswerable
     case issuerRequired
     case suspendAuthoredSessionSelection
     case arrangementExists
@@ -169,6 +170,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "idempotency-conflict": .idempotencyConflict
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
+        case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "arrangement-exists": .arrangementExists
         case "arrangement-folder-exists": .arrangementFolderExists
@@ -244,6 +246,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .idempotencyConflict: "idempotency-conflict"
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
+        case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .arrangementExists: "arrangement-exists"
         case .arrangementFolderExists: "arrangement-folder-exists"
@@ -557,7 +560,120 @@ public struct UsageResource: Codable, Sendable, Identifiable {
     public let value: UsagePeriod
     enum CodingKeys: String, CodingKey { case id, kind, revision, updatedAt = "updated_at", value }
 }
+public struct HarnessQuestionItem: Codable, Sendable { public let id: String; public let options: UInt32; public let multi, required: Bool }
+public struct HarnessAnswerInput: Codable, Sendable { public let positions: [UInt32]; public init(positions: [UInt32]) { self.positions = positions } }
+public struct HarnessResolvedAnswer: Codable, Sendable { public let positions: [UInt32]; public let timedOut: Bool; enum CodingKeys: String, CodingKey { case positions, timedOut = "timed_out" } }
+public enum HarnessQuestionResolutionStatus: Codable, Sendable, Equatable {
+    case answered
+    case answeredElsewhere
+    case expired
+    case cancelled
+    case unknown(String)
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = switch raw {
+        case "answered": .answered
+        case "answered_elsewhere": .answeredElsewhere
+        case "expired": .expired
+        case "cancelled": .cancelled
+        default: .unknown(raw)
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        let raw = switch self {
+        case .answered: "answered"
+        case .answeredElsewhere: "answered_elsewhere"
+        case .expired: "expired"
+        case .cancelled: "cancelled"
+        case .unknown(let value): value
+        }
+        var container = encoder.singleValueContainer(); try container.encode(raw)
+    }
+}
+public struct HarnessQuestionResolution: Codable, Sendable { public let status: HarnessQuestionResolutionStatus; public let revision: String; public let answers: [String: HarnessResolvedAnswer]; public let resolvedAt: UInt64; enum CodingKeys: String, CodingKey { case status, revision, answers, resolvedAt = "resolved_at" } }
+public enum HarnessQuestionAnswerabilityState: Codable, Sendable, Equatable {
+    case available
+    case unavailable
+    case unknown(String)
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = switch raw {
+        case "available": .available
+        case "unavailable": .unavailable
+        default: .unknown(raw)
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        let raw = switch self {
+        case .available: "available"
+        case .unavailable: "unavailable"
+        case .unknown(let value): value
+        }
+        var container = encoder.singleValueContainer(); try container.encode(raw)
+    }
+}
+public enum HarnessQuestionAnswerabilityReason: Codable, Sendable, Equatable {
+    case adapterMissing
+    case adapterUnavailable
+    case resolved
+    case unknown(String)
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = switch raw {
+        case "adapter_missing": .adapterMissing
+        case "adapter_unavailable": .adapterUnavailable
+        case "resolved": .resolved
+        default: .unknown(raw)
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        let raw = switch self {
+        case .adapterMissing: "adapter_missing"
+        case .adapterUnavailable: "adapter_unavailable"
+        case .resolved: "resolved"
+        case .unknown(let value): value
+        }
+        var container = encoder.singleValueContainer(); try container.encode(raw)
+    }
+}
+public struct HarnessQuestionAnswerability: Codable, Sendable { public let state: HarnessQuestionAnswerabilityState; public let reason: HarnessQuestionAnswerabilityReason? }
+public struct HarnessQuestionResource: Codable, Sendable, Identifiable {
+    public let kind, id, revision, updatedAt, agent, session, nativeID, runtimeIncarnation: String
+    public let questions: [HarnessQuestionItem]
+    public let observedAt: UInt64
+    public let resolution: HarnessQuestionResolution?
+    public let answer: HarnessQuestionAnswerability
+    enum CodingKeys: String, CodingKey { case kind, id, revision, updatedAt = "updated_at", agent, session, nativeID = "native_id", runtimeIncarnation = "runtime_incarnation", questions, observedAt = "observed_at", resolution, answer }
+}
+public struct HarnessAnswerParameters: Codable, Sendable { public let question: String; public let answers: [String: HarnessAnswerInput]; public init(question: String, answers: [String: HarnessAnswerInput]) { self.question = question; self.answers = answers } }
+public enum HarnessAnswerStatus: Codable, Sendable, Equatable {
+    case accepted
+    case alreadyResolved
+    case unknown(String)
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = switch raw {
+        case "accepted": .accepted
+        case "already_resolved": .alreadyResolved
+        default: .unknown(raw)
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        let raw = switch self {
+        case .accepted: "accepted"
+        case .alreadyResolved: "already_resolved"
+        case .unknown(let value): value
+        }
+        var container = encoder.singleValueContainer(); try container.encode(raw)
+    }
+}
+public struct HarnessAnswerResult: Codable, Sendable { public let status: HarnessAnswerStatus; public let resolution: HarnessQuestionResolution }
+public enum HarnessInvalidAnswerReason: String, Codable, Sendable { case unknownOption = "unknown_option", tooMany = "too_many", requiredMissing = "required_missing", emptySingle = "empty_single", tooLong = "too_long", unknownQuestion = "unknown_question", otherNotAllowed = "other_not_allowed", noteNotAllowed = "note_not_allowed" }
+public struct HarnessInvalidAnswerDetails: Codable, Sendable { public let reason: HarnessInvalidAnswerReason }
+public enum HarnessNotAnswerableReason: String, Codable, Sendable { case adapterMissing = "adapter_missing", adapterUnavailable = "adapter_unavailable" }
+public struct HarnessNotAnswerableDetails: Codable, Sendable { public let reason: HarnessNotAnswerableReason }
 public enum Resource: Codable, Sendable, Identifiable {
+    case harnessQuestion(HarnessQuestionResource)
     case connectedClient(ConnectedClientResource), usage(UsageResource)
     case summary(SummaryResource)
     case attention(AttentionResource), message(MessageResource), launch(LaunchResource), launchVariant(LaunchVariantResource), launchDecision(LaunchDecisionResource), launchApproval(LaunchApprovalResource), mission(MissionResource), work(WorkResource), agent(AgentResource), runtime(RuntimeResource), observer(ObserverResource), subscription(SubscriptionResource), lane(LaneResource), machine(MachineResource), device(DeviceResource), operation(OperationResource), history(HistoryResource), session(SessionResource), glass(GlassResource), ownedSet(OwnedSetResource)
@@ -568,6 +684,7 @@ public enum Resource: Codable, Sendable, Identifiable {
     private struct Discriminator: Decodable { let kind: String }
     public init(from decoder: Decoder) throws {
         switch try Discriminator(from: decoder).kind {
+        case "harness-question": self = .harnessQuestion(try HarnessQuestionResource(from: decoder))
         case "connected-client": self = .connectedClient(try ConnectedClientResource(from: decoder))
         case "usage": self = .usage(try UsageResource(from: decoder))
         case "summary": self = .summary(try SummaryResource(from: decoder))
@@ -597,6 +714,7 @@ public enum Resource: Codable, Sendable, Identifiable {
     }
     public func encode(to encoder: Encoder) throws {
         switch self {
+        case .harnessQuestion(let v): try v.encode(to: encoder)
         case .connectedClient(let v): try v.encode(to: encoder)
         case .usage(let v): try v.encode(to: encoder)
         case .summary(let v): try v.encode(to: encoder)
@@ -624,7 +742,7 @@ public enum Resource: Codable, Sendable, Identifiable {
         case .unknown(let v): try v.encode(to: encoder)
         }
     }
-    public var id: String { switch self { case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
+    public var id: String { switch self { case .harnessQuestion(let v): v.id; case .connectedClient(let v): v.id; case .usage(let v): v.id; case .summary(let v): v.id; case .attention(let v): v.id; case .message(let v): v.id; case .launch(let v): v.id; case .launchVariant(let v): v.id; case .launchDecision(let v): v.id; case .launchApproval(let v): v.id; case .mission(let v): v.id; case .work(let v): v.id; case .agent(let v): v.id; case .runtime(let v): v.id; case .observer(let v): v.id; case .subscription(let v): v.id; case .lane(let v): v.id; case .machine(let v): v.id; case .device(let v): v.id; case .operation(let v): v.id; case .history(let v): v.id; case .session(let v): v.id; case .glass(let v): v.id; case .arrangement(let v): v.id; case .ownedSet(let v): v.id; case .unknown(let v): v.id } }
 }
 /// A resource of a kind this client does not model: its header, and every field as sent.
 public struct UnknownResource: Codable, Sendable, Identifiable {
@@ -771,6 +889,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func arrangementEdit(id: String, idempotencyKey: String, fence: Fence, parameters: ArrangementEditParameters) throws -> Self { try .init(id: id, type: .arrangementEdit, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func attentionResolve(id: String, idempotencyKey: String, fence: Fence, parameters: AttentionResolveParameters) throws -> Self { try .init(id: id, type: .attentionResolve, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func customReply(id: String, idempotencyKey: String, fence: Fence, parameters: CustomReplyParameters) throws -> Self { try .init(id: id, type: .customReply, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func harnessAnswer(id: String, idempotencyKey: String, fence: Fence, parameters: HarnessAnswerParameters) throws -> Self { try .init(id: id, type: .harnessAnswer, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func laneApprove(id: String, idempotencyKey: String, fence: Fence, parameters: LaneChangeParameters) throws -> Self { try .init(id: id, type: .laneApprove, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func laneJoin(id: String, idempotencyKey: String, fence: Fence, parameters: LaneChangeParameters) throws -> Self { try .init(id: id, type: .laneJoin, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func laneLeave(id: String, idempotencyKey: String, fence: Fence, parameters: LaneChangeParameters) throws -> Self { try .init(id: id, type: .laneLeave, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -874,7 +993,7 @@ public enum TerminalInputMode: String, Codable, Sendable { case line, raw, key }
 public struct TerminalInputParameters: Codable, Sendable { public var terminalID: String; public var mode: TerminalInputMode; public var value: String; public init(terminalID: String, mode: TerminalInputMode, value: String) { self.terminalID = terminalID; self.mode = mode; self.value = value }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", mode, value } }
 public struct TerminalResizeParameters: Codable, Sendable { public var terminalID: String; public var rows: UInt16; public var columns: UInt16; public init(terminalID: String, rows: UInt16, columns: UInt16) { self.terminalID = terminalID; self.rows = rows; self.columns = columns }; enum CodingKeys: String, CodingKey { case terminalID = "terminal_id", rows, columns } }
 public struct TerminalAttachment: Codable, Sendable { public let attachmentID: String; public let terminalID: String; public let runtimeIncarnation: String; public let ownerHostID: String; public let streamURL: String; public let streamCapability: String?; public let state: String; public let expiresAt: String; public let reusable: Bool?; public let ttlS: UInt64?; public let retryHint: String?; enum CodingKeys: String, CodingKey { case attachmentID = "attachment_id", terminalID = "terminal_id", runtimeIncarnation = "runtime_incarnation", ownerHostID = "owner_host_id", streamURL = "stream_url", streamCapability = "stream_capability", state, expiresAt = "expires_at", reusable, ttlS = "ttl_s", retryHint = "retry_hint" } }
-public struct ActionResult: Codable, Sendable { public let kind: String; public let actionID: String; public let operationID: String; public let status: String; public let affectedIDs: [String]; public let snapshotID: String; public let terminalAttachment: TerminalAttachment?; public let privateNotes: PrivateNotesFence?; public let arrangementRevision: String?; enum CodingKeys: String, CodingKey { case kind, actionID = "action_id", operationID = "operation_id", status, affectedIDs = "affected_ids", snapshotID = "snapshot_id", terminalAttachment = "terminal_attachment", privateNotes = "private_notes", arrangementRevision = "arrangement_revision" } }
+public struct ActionResult: Codable, Sendable { public let kind: String; public let actionID: String; public let operationID: String; public let status: String; public let affectedIDs: [String]; public let snapshotID: String; public let terminalAttachment: TerminalAttachment?; public let privateNotes: PrivateNotesFence?; public let arrangementRevision: String?; public let harnessAnswer: HarnessAnswerResult?; enum CodingKeys: String, CodingKey { case kind, actionID = "action_id", operationID = "operation_id", status, affectedIDs = "affected_ids", snapshotID = "snapshot_id", terminalAttachment = "terminal_attachment", privateNotes = "private_notes", arrangementRevision = "arrangement_revision", harnessAnswer = "harness_answer" } }
 
 public typealias ClientDiagnosticUuid = String
 public typealias ClientDiagnosticMilliseconds = UInt64

@@ -359,7 +359,34 @@ fn assistant_pairing_is_disjoint_from_person_delegation() {
 #[test]
 fn generated_resource_union_decodes_all_kinds() {
     let resources: Vec<Resource> = serde_json::from_slice(&fixture("resources.json")).unwrap();
-    assert_eq!(resources.len(), 18);
+    assert_eq!(resources.len(), 19);
+    let question = resources
+        .iter()
+        .find_map(|resource| match resource {
+            Resource::HarnessQuestion(question) => Some(question),
+            _ => None,
+        })
+        .expect("the fixture must decode a typed harness question, not an unknown resource");
+    assert_eq!(question.header.id, "harness-question/00ca25ee5d0da6af852c81a5ee4949df");
+    assert_eq!(question.header.revision, "claim/ada-observed");
+    assert_eq!(question.agent, "agent/ada");
+    assert_eq!(question.session, "ada-session");
+    assert_eq!(question.runtime_incarnation, "ada-incarnation-1");
+    assert_eq!(question.observed_at, 1793008800000);
+    assert_eq!(question.questions, vec![HarnessQuestionItem {
+        id: "q0".into(),
+        options: 2,
+        multi: false,
+        required: true,
+    }]);
+    assert!(question.resolution.is_none());
+    assert_eq!(question.answer.state, HarnessQuestionAnswerabilityState::Unavailable);
+    assert_eq!(question.answer.reason, Some(HarnessQuestionAnswerabilityReason::AdapterMissing));
+    let typed = Resource::HarnessQuestion(question.clone());
+    let encoded = serde_json::to_value(&typed).unwrap();
+    assert_eq!(encoded["kind"], "harness-question");
+    let round_trip: Resource = serde_json::from_value(encoded).unwrap();
+    assert_eq!(round_trip, typed);
     let lane = resources
         .iter()
         .find_map(|resource| match resource {
