@@ -61,7 +61,7 @@ const INCARNATION = "ST_OMP_CHANNEL_INCARNATION";
 const registerConnector = (
   child: childProcess.ChildProcess,
   socket: string,
-  facts: Record<string, unknown>,
+  facts: Record<string, unknown> & { subject: string },
 ): void => {
   const startup = child.stdio[3];
   const fail = () => {
@@ -70,7 +70,8 @@ const registerConnector = (
   };
   if (!(startup instanceof Duplex) || child.pid === undefined) return fail();
   startup.on("error", fail);
-  const body = JSON.stringify({ ...facts, connector_pid: child.pid });
+  const subject = facts.subject.startsWith("agent/") ? facts.subject : `agent/${facts.subject}`;
+  const body = JSON.stringify({ ...facts, subject, connector_pid: child.pid });
   const request = http.request({
     socketPath: socket,
     path: "/v1/native-connectors/bootstrap",

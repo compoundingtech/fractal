@@ -24,8 +24,9 @@ const loadRegistration = async (asset) => {
 for (const crate of ['fractal-drivers', 'fractal-daemon']) {
   for (const harness of ['omp', 'pi']) {
     const asset = `${crate}/hooks/${harness}-channel.ts`;
-    for (const status of [204, 403]) {
-      test(`${asset}: ${status} gates the actual spawned child`,
+    for (const { status, subject } of [204, 403].flatMap((status) =>
+      ['node.worker', 'agent/node.worker'].map((subject) => ({ status, subject })))) {
+      test(`${asset}: ${subject} ${status} gates the actual spawned child`,
         { skip: process.platform === 'win32', timeout: 10000 }, async (t) => {
           const register = await loadRegistration(asset);
           const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'native-bootstrap-'));
@@ -46,7 +47,7 @@ for (const crate of ['fractal-drivers', 'fractal-daemon']) {
           child.stdout.setEncoding('utf8').on('data', (chunk) => { output += chunk; });
           const exited = once(child, 'close');
           const requestReceived = once(server, 'request');
-          const facts = { subject: 'host.worker', runtime_incarnation: 'runtime-1',
+          const facts = { subject, runtime_incarnation: 'runtime-1',
             harness, session: 'session-1', sequence: 7 };
           register(child, socket, facts);
           const [request, response] = await requestReceived;
@@ -54,7 +55,7 @@ for (const crate of ['fractal-drivers', 'fractal-daemon']) {
           for await (const chunk of request) body += chunk;
           assert.equal(request.method, 'POST');
           assert.equal(request.url, '/v1/native-connectors/bootstrap');
-          assert.deepEqual(JSON.parse(body), { ...facts, connector_pid: child.pid });
+          assert.deepEqual(JSON.parse(body), { ...facts, subject: 'agent/node.worker', connector_pid: child.pid });
           assert.equal(output, '', 'connector cannot proceed while registration is pending');
           response.writeHead(status).end();
           const [code, signal] = await exited;
@@ -65,6 +66,7 @@ for (const crate of ['fractal-drivers', 'fractal-daemon']) {
           } else {
             assert.notEqual(code, 0);
             assert.equal(output, '', 'refused registration must never release the connector');
+            assert.equal(child.stdio[3].destroyed, true, 'refusal closes the startup pipe without authorizing it');
           }
         });
     }

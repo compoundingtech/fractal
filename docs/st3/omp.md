@@ -56,6 +56,9 @@ harness-event publication route requires the same custody. The physical PTY laun
 selects the wrapper; its launch record identifies the provider generation. The OMP
 extension registers its exact spawned connector from the provider's own local Unix
 connection before releasing that connector's startup pipe. Pi uses the same protocol.
+Registration uses the canonical `agent/<identity>` subject even though the channel
+launch environment carries the bare identity. A refused registration closes the startup
+pipe without its authorization byte and stops that connector before native admission.
 The configured socket and runtime generation are handed off as
 `ST_OMP_CHANNEL_SOCKET` and `ST_OMP_CHANNEL_INCARNATION` (or the `ST_PI_CHANNEL_*`
 equivalents). Session and sequence labels remain freshness fences after the role proof.

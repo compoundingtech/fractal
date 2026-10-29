@@ -460,3 +460,7 @@ mod tests {
         assert!(peer.require_kernel().is_err());
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "native_role_bootstrap_tests.rs"]
+mod bootstrap_tests;
