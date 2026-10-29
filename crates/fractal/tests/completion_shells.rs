@@ -63,6 +63,7 @@ fn st3() -> PathBuf {
 /// An operator environment: no seat identity, config and state under `root`, daemon at `socket`.
 fn environment(command: &mut Command, root: &Path, socket: &Path) {
     command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        .env("FRACTAL_SUPPRESS_DEPRECATION", "1")
         .env_remove("ST_MISSION_RUN")
         .env_remove("PTY_SESSION")
         .env_remove("COMPLETE")
