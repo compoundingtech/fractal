@@ -20,6 +20,13 @@ use super::checkpoint_agreement::{
 use super::*;
 use crate::replication::InventoryCheckpoint;
 
+/// The kinds a member that trims locally drops, each by its audited rule in
+/// `crates/fractal-schema/retention.toml` and with a test that every reader of it answers the
+/// same from the full and the trimmed log. A kind joins only with such a test. The audited
+/// `harness.observed` rule stays out: dropping a credential transition moves the `since` of a
+/// seat's needs-login state, which no projection digest covers.
+pub const LOCAL_TRIM_KINDS: &[&str] = &["observer.observed"];
+
 /// At most this many envelopes deleted per transaction.
 pub const TRIM_CHUNK_ENVELOPES: usize = 2_000;
 
@@ -437,6 +444,7 @@ impl Store {
         }
         let _completion = super::checkpoint_completion::Completion::outer();
         let staged = self.checkpoint_staged_set(cut, None, &context.scratch)?;
+        staged.protect_all_but(LOCAL_TRIM_KINDS)?;
         let plan = self.plan_staged_checkpoint(&staged)?;
         {
             let mut fault = self.trim_fault.lock().unwrap_or_else(PoisonError::into_inner);

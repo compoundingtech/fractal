@@ -1105,6 +1105,22 @@ impl StagedSet {
             .optional()?)
     }
 
+    /// Keep every claim of a kind not in `kinds`, as the guards keep a protected claim, and
+    /// forget any plan made without that, so the next plan drops only those kinds.
+    pub fn protect_all_but(&self, kinds: &[&str]) -> Result<()> {
+        let transaction = self.staging.unchecked_transaction()?;
+        transaction.execute(
+            &format!(
+                "UPDATE claims SET protected=1 WHERE protected=0 AND kind NOT IN ({})",
+                vec!["?"; kinds.len()].join(", ")
+            ),
+            rusqlite::params_from_iter(kinds),
+        )?;
+        transaction.execute("UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Mark the newest claim of the set dropped, as a planner defect would. `TrimFault` only.
     pub(super) fn drop_newest_for_test(&self) -> Result<()> {
         self.staging.execute(

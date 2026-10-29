@@ -2,19 +2,30 @@
 //! the audited retention rules, and every reader answers the same from the full log and the
 //! trimmed one.
 use super::*;
-use crate::store::checkpoint_agreement_tests_shared_attention_tests::{FLEET, context, kinds, step};
-use crate::store::tests_shared_seats::graph_digest_of;
+use crate::store::checkpoint_agreement_tests_shared_attention_tests::{context, kinds, step};
+use crate::store::tests_shared_seats::{TEST_FLEET, graph_digest_of};
 use proptest::prelude::*;
 
 const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
 const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked"];
 
-fn local_member(name: &str) -> Store {
-    let store = Store::open_memory(name).unwrap();
-    store.bind_fleet(FLEET).unwrap();
+/// A member with both seats declared, so the seat readers have something to answer.
+fn member(trims_locally: bool) -> Store {
+    let store = Store::open_memory("node").unwrap();
+    store.bind_fleet(TEST_FLEET).unwrap();
+    let source = "version 2\nagent \"amber\" { command \"true\" }\nagent \"birch\" { command \"true\" }\n";
+    let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+    let plan = store
+        .mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &plan.subject_tokens, "local-trim").unwrap();
     store.import_retired_identities_paced(|_| {}).unwrap();
-    store.trim_locally(true).unwrap();
+    store.trim_locally(trims_locally).unwrap();
     store
+}
+
+fn local_member(_name: &str) -> Store {
+    member(true)
 }
 
 /// One write of a random history.
@@ -43,10 +54,10 @@ fn write() -> impl Strategy<Value = Write> {
 fn apply(store: &Store, write: &Write, n: usize) {
     let (subject, kind, fields) = match write {
         Write::Observer { observer, status, cursor } => {
-            let mut fields = BTreeMap::from([
-                ("observer".into(), json!(format!("observer/watch-{observer}"))),
-                ("status".into(), json!(["ok", "changed", "failed"][usize::from(*status)])),
-            ]);
+            let mut fields = BTreeMap::from([(
+                "status".into(),
+                json!(["ok", "changed", "failed"][usize::from(*status)]),
+            )]);
             if let Some(cursor) = cursor {
                 fields.insert("cursor".into(), json!(format!("cursor-{cursor}")));
             }
@@ -54,6 +65,23 @@ fn apply(store: &Store, write: &Write, n: usize) {
         }
         Write::Harness { seat, incarnation, state, restamp, provider_auth } => {
             let seat = SEATS[usize::from(*seat)];
+            // The incarnation runs, so the seat readers fold its observations. The key makes
+            // this one claim per incarnation.
+            store
+                .append_claim(&ClaimInput {
+                    subject: seat.into(),
+                    kind: "runtime.observed".into(),
+                    actor: Some(seat.into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("running")),
+                        ("runtime_id".into(), json!(seat.trim_start_matches("agent/"))),
+                        ("incarnation_id".into(), json!(format!("{seat}-{incarnation}"))),
+                    ]),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("runtime:{seat}-{incarnation}")),
+                })
+                .unwrap();
             let mut fields = BTreeMap::from([
                 ("state".into(), json!(STATES[usize::from(*state)])),
                 ("driver".into(), json!("codex")),
@@ -87,7 +115,7 @@ fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let mut seats = Vec::new();
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
-        let history = seat_status::history_at(&connection, seat, now, u64::MAX).unwrap();
+        let history = seat_status::history_at(&connection, seat, now, i64::MAX as u64).unwrap();
         seats.push(format!("{seat}: {harness:?} {history}"));
     }
     (graph_digest_of(store), seats)
@@ -130,7 +158,7 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
 fn an_ordinary_member_does_not_trim_locally() {
     let scratch = tempfile::tempdir().unwrap();
     let context = context(scratch.path(), 0);
-    let store = Store::open_memory("alder").unwrap();
+    let store = member(false);
     for n in 0..10 {
         apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
     }
@@ -193,4 +221,28 @@ proptest! {
             prop_assert!(store.claim_by_id(id).unwrap().is_some(), "the newest claim {} stays", id);
         }
     }
+}
+
+/// The audited `harness.observed` rule drops a credential transition whose loss moves the
+/// `since` of a needs-login seat (ready without provider auth, then with, then without again),
+/// which no projection digest covers. Until a rule keeps it, local trim leaves the kind whole.
+#[test]
+fn local_trim_leaves_harness_observations_whole() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    let history = [(1, false), (0, true), (1, false)];
+    for (n, (state, provider_auth)) in history.into_iter().enumerate() {
+        let write = Write::Harness { seat: 0, incarnation: 0, state, restamp: false, provider_auth: Some(provider_auth) };
+        apply(&store, &write, n);
+    }
+    for n in 3..20 {
+        apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
+    }
+    let harness = claims_of(&store, "harness.observed");
+    let before = answers(&store, context.now_unix_ms);
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    assert_eq!(claims_of(&store, "harness.observed"), harness);
+    assert_eq!(claims_of(&store, "observer.observed"), 1);
+    assert_eq!(answers(&store, context.now_unix_ms), before);
 }
