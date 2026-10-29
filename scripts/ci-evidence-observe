@@ -29,6 +29,10 @@ NOTES = 'refs/notes/evidence/'
 TAGS = 'refs/tags/evidence/'
 OID = re.compile(r'^(?:[0-9a-f]{40}|[0-9a-f]{64})$')
 DEFAULT_OBSERVER = ['st', 'sekrets', '--', 'st3', 'evidence', 'observe-ci']
+# The observer's private bare repository (`scratch_repo` in its profile's evidence-ci.json) is provisioned by the runner host's operator;
+# the observer never creates it. Missing, git cannot enter it; present but not bare, the observer refuses it (#4205).
+SCRATCH_MISSING = re.compile(r"git rev-parse: fatal: cannot change to '([^']+)'")
+SCRATCH_NOT_BARE = 'observer requires its private bare repository'
 
 
 class Failure(Exception):
@@ -86,6 +90,12 @@ def observe(argv, repository, run_id, attempt, artifact):
             text = err.read().decode(errors='replace').strip()[-2000:]
             if run_conclusion(repository, run_id, attempt) in ('cancelled', 'skipped'):
                 raise Cancelled(text)
+            missing = SCRATCH_MISSING.search(text)
+            if missing or SCRATCH_NOT_BARE in text:
+                where = f'{missing.group(1)} does not exist' if missing else 'its scratch_repo is not a bare repository'
+                raise Failure(f"the observer's private bare repository is not provisioned on this runner ({where}): the runner host's "
+                              "operator creates it once, as the runner user, with `git init --bare` at the scratch_repo of the observer "
+                              "profile's evidence-ci.json (#4205); the observer never creates it")
             raise Failure(f'{command[0]} failed ({done.returncode}): {text}')
         out.seek(0)
         try:

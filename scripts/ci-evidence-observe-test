@@ -87,7 +87,7 @@ if sys.argv[sys.argv.index('--run') + 1] == '8':
     print('observer cannot read run 8', file=sys.stderr)
     sys.exit(1)
 if os.environ.get('OBSERVER_EXIT'):
-    print('missing or ambiguous CI job: linux-gate', file=sys.stderr)
+    print(os.environ.get('OBSERVER_ERROR', 'missing or ambiguous CI job: linux-gate'), file=sys.stderr)
     sys.exit(int(os.environ['OBSERVER_EXIT']))
 print(open({str(response_file)!r}).read())
 """)
@@ -164,6 +164,16 @@ else:
     done, out = execute(answer([], b''), scratch=tmp / 'broken', env={'OBSERVER_EXIT': '2', 'GH_CONCLUSION': 'success'})
     assert done.returncode == 1 and 'linux-gate' in out['failures'][0], 'the same exit on a finished run is a failure'
     print('passed: a cancelled run is nothing to attest; the same observer failure on a finished run still fails')
+
+    # The runner's private bare repository was never provisioned (#4205): the failure names it, not a raw git error.
+    lost = "st: git rev-parse: fatal: cannot change to '/var/cache/runner/observer.git': No such file or directory"
+    done, out = execute(answer([], b''), scratch=tmp / 'unprovisioned', env={'OBSERVER_EXIT': '1', 'GH_CONCLUSION': 'success', 'OBSERVER_ERROR': lost})
+    assert done.returncode == 1 and out['failures'][0].startswith("the observer's private bare repository is not provisioned"), out
+    assert '/var/cache/runner/observer.git does not exist' in out['failures'][0] and 'git init --bare' in out['failures'][0], out
+    refused = 'Error: observer requires its private bare repository'
+    done, out = execute(answer([], b''), scratch=tmp / 'notbare', env={'OBSERVER_EXIT': '1', 'GH_CONCLUSION': 'success', 'OBSERVER_ERROR': refused})
+    assert done.returncode == 1 and 'scratch_repo is not a bare repository' in out['failures'][0], out
+    print('passed: an unprovisioned or non-bare observer repository is a named failure that says who creates it')
 
     remote = tmp / 'remote.git'
     git(tmp, 'init', '-q', '--bare', str(remote))
