@@ -4182,6 +4182,63 @@ async fn retention_event_http_envelope_preserves_pacing_continuation_and_410() {
 }
 
 #[tokio::test]
+async fn event_pages_hand_out_no_cursor_past_the_published_index() {
+    // `agents new` consumed its seat's readiness events from a page, then read the seat at a
+    // snapshot taken from the published index, still before them ("starting"), and waited 30 s
+    // for events after a cursor it had already passed. The order it relies on: whatever cursor
+    // a page hands out, the next client snapshot is at least that new.
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let append = |number: usize| {
+        state
+            .store
+            .append_claim(&ClaimInput {
+                subject: "custom/test/published".into(),
+                kind: "custom.test.recorded".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(format!("published-{number}")),
+            })
+            .unwrap()
+            .store_index
+    };
+    let first = append(0);
+    let second = append(1);
+    // As between a commit and its writer publishing the index under load: SQL readers already
+    // see the second claim, and a client snapshot is still taken at the first.
+    state.store.committed_index.store(first, std::sync::atomic::Ordering::Release);
+    let app = router(state.clone());
+    let page = |after: u64| {
+        let app = app.clone();
+        async move {
+            let (status, page) = get_request(
+                app,
+                &format!("/v1/events/page?after={after}&subject=custom%2Ftest%2Fpublished&wait=false"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{page}");
+            page.get("value").cloned().unwrap_or(page)
+        }
+    };
+    // Consume, then read: the read must not be older than what was consumed.
+    let consumed = page(first).await;
+    let read = new_client_snapshot(&state).store_index;
+    assert_eq!(read, first);
+    assert_eq!(consumed["items"], json!([]), "an event the next read cannot show: {consumed}");
+    assert_eq!(consumed["next_after"], Value::Null, "a cursor past the next read at {read}: {consumed}");
+    assert_eq!(consumed["frontier"], json!(first), "{consumed}");
+
+    // Once the writer publishes the index, the cursor the client kept reads the event.
+    state.store.committed_index.store(second, std::sync::atomic::Ordering::Release);
+    let consumed = page(first).await;
+    assert_eq!(consumed["items"][0]["store_index"], json!(second), "{consumed}");
+    assert_eq!(consumed["next_after"], json!(second), "{consumed}");
+    assert!(new_client_snapshot(&state).store_index >= second);
+}
+
+#[tokio::test]
 async fn retention_event_pages_advance_by_scanned_rows_and_refuse_stale_cursors() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
@@ -4482,7 +4539,10 @@ async fn retention_event_timeout_rereads_a_new_unsignaled_floor() {
 #[tokio::test]
 async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
     let root = tempfile::tempdir().unwrap();
-    let state = state(root.path());
+    let mut state = state(root.path());
+    // A file store, as the daemon runs: the waiter reads while this test appends, and in
+    // shared-cache memory that read fails at once with "database table is locked".
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let waiter_state = state.clone();
     let waiter = tokio::spawn(async move {
         let response = events(
@@ -8036,22 +8096,26 @@ fn roster_fixture_checked_messages(
     let store = &fixture.store;
     let index = store.index().unwrap();
     for history in [false, true] {
-        let mut cold = client_agent_resources_uncached(store, history, index).unwrap();
-        add_agent_todos(store, &mut cold, index).unwrap();
-        for subject in subjects {
-            assert_eq!(roster_fixture_pending_delivery(&cold, subject), pending);
-        }
-        let selected = subjects.iter().cloned().collect::<BTreeSet<_>>();
-        let cached_selected = store.cached_agent_resources_for(index, history, Some(&selected), |changed| {
-            let mut cards = client_agent_resources_selected(store, history, index, changed)?;
-            add_agent_todos(store, &mut cards, index)?;
-            Ok(cards)
+        // On a pinned snapshot, as the refresher builds, like `checked_agent_cache`.
+        store.read_snapshot(|_| {
+            let mut cold = client_agent_resources_uncached(store, history, index).unwrap();
+            add_agent_todos(store, &mut cold, index).unwrap();
+            for subject in subjects {
+                assert_eq!(roster_fixture_pending_delivery(&cold, subject), pending);
+            }
+            let selected = subjects.iter().cloned().collect::<BTreeSet<_>>();
+            let cached_selected = store.cached_agent_resources_for(index, history, Some(&selected), |changed| {
+                let mut cards = client_agent_resources_selected(store, history, index, changed)?;
+                add_agent_todos(store, &mut cards, index)?;
+                Ok(cards)
+            }).unwrap();
+            let expected = cold.iter().filter(|card|
+                selected.contains(card["id"].as_str().unwrap())).cloned().collect::<Vec<_>>();
+            assert_eq!(cached_selected, expected, "selected history={history}");
+            let cached = client_agent_resources_cached(store, history, index).unwrap();
+            assert_eq!(cached, cold, "full history={history}");
+            Ok(())
         }).unwrap();
-        let expected = cold.iter().filter(|card|
-            selected.contains(card["id"].as_str().unwrap())).cloned().collect::<Vec<_>>();
-        assert_eq!(cached_selected, expected, "selected history={history}");
-        let cached = client_agent_resources_cached(store, history, index).unwrap();
-        assert_eq!(cached, cold, "full history={history}");
     }
 }
 
@@ -8779,6 +8843,22 @@ fn agent_roster_heartbeat_only_local_stream_hit_rate() {
     }
 }
 
+#[test]
+fn checked_roster_builds_wait_through_a_stalled_fault_read() {
+    // A loaded host can hold a card-fault read past 25 ms of wall time while it spends no CPU.
+    // The checked builds read as the refresher does, on a pinned snapshot, so that pause cannot
+    // degrade the cached side's faults and not the cold side's.
+    let store = roster_followup_store();
+    let index = store.index().unwrap();
+    for history in [false, true] {
+        let pause = Duration::from_millis(50);
+        Store::stall_next_card_fault_read_for_test(pause);
+        let started = Instant::now();
+        checked_agent_cache(&store, history, index);
+        assert!(started.elapsed() >= pause, "the stall must reach a card-fault read");
+    }
+}
+
 #[tokio::test]
 async fn agent_roster_cache_reuse_preserves_changed_for_existing_subscribers() {
     let root = tempfile::tempdir().unwrap();
@@ -8918,6 +8998,73 @@ async fn roster_resilience_fault_deadline_publishes_current_fields_and_retries()
 }
 
 #[tokio::test]
+async fn roster_resilience_refresher_fault_reads_degrade_only_at_the_wall_backstop() {
+    for history in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        let card = |cards: &[Value], id: &str| cards.iter().find(|card| card["id"] == id).unwrap().clone();
+        roster_resilience_runtime(store, "agent/known-clear", "old");
+        refresh_agent_roster(store, history).unwrap();
+        // The refresher folds on a pinned snapshot outside any request. A scheduling pause past
+        // the 25 ms work allowance spends no query work, so the fault read still answers.
+        roster_resilience_runtime(store, "agent/new-paused", "new");
+        Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
+        refresh_agent_roster(store, history).unwrap();
+        let (_, paused, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        assert!(card(&paused, "agent/new-paused")["fault"].is_null(), "a pause is not a fault deadline");
+        // A page read stalled past the backstop still ends and degrades as documented.
+        roster_resilience_runtime(store, "agent/known-clear", "new");
+        roster_resilience_runtime(store, "agent/new-stalled", "new");
+        Store::stall_next_card_fault_read_for_test(
+            crate::store::mailbox_lease::CARD_FAULT_PINNED_WALL_BACKSTOP + std::time::Duration::from_millis(50));
+        refresh_agent_roster(store, history).expect("a stalled fault read must still publish");
+        let cut = store.index().unwrap();
+        let (published, stalled, _) = store.published_agent_roster(cut, history).unwrap();
+        assert_eq!(published, cut);
+        assert_eq!(card(&stalled, "agent/known-clear")["runtime_ids"], json!(["runtime/new"]));
+        assert!(card(&stalled, "agent/known-clear")["fault"].is_null());
+        assert_eq!(card(&stalled, "agent/new-stalled")["fault"], "fault status unknown");
+        refresh_agent_roster(store, history).unwrap();
+        let (_, retried, _) = store.published_agent_roster(cut, history).unwrap();
+        assert!(card(&retried, "agent/new-stalled")["fault"].is_null());
+    }
+}
+
+#[test]
+fn roster_folds_outside_a_request_and_a_snapshot_read_faults_through_scheduling_pauses() {
+    for history in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = &state(root.path()).store;
+        let subject = "agent/faulted";
+        roster_resilience_runtime(store, subject, "new");
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "operational.failure".into(), actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
+                "incarnation":"one", "reason":"fixture loss", "reviewer":subject,
+                "title":"Mailbox lost", "severity":"error", "targets":[subject]})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let cut = store.index().unwrap();
+        // Test folds call these directly, with no request budget and no pinned snapshot. A
+        // pause past the 25 ms work allowance spends no query work: the card keeps its fault.
+        for name in ["cold", "cached", "exact"] {
+            Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
+            let started = std::time::Instant::now();
+            let cards = match name {
+                "cold" => client_agent_resources_uncached(store, history, cut),
+                "cached" => client_agent_resources_cached(store, history, cut),
+                _ => client_exact_agent_resources(store, history, cut, subject),
+            }.unwrap();
+            assert!(started.elapsed() >= std::time::Duration::from_millis(60), "the {name} fold must read the stalled faults");
+            let card = cards.iter().find(|card| card["id"] == subject).unwrap();
+            assert_eq!(card["fault"], "fixture loss", "the {name} fold must keep the real fault");
+        }
+    }
+}
+
+#[tokio::test]
 async fn roster_resilience_always_expired_fault_reads_publish_from_the_first_attempt_per_mode() {
     for history in [false, true] {
         let root = tempfile::tempdir().unwrap();
@@ -8984,6 +9131,11 @@ async fn roster_resilience_unpublished_mode_keeps_the_bounded_wait_and_503() {
             assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(error.code, "agent-roster-not-ready");
             assert_eq!(started.elapsed(), AGENT_ROSTER_READ_WAIT);
+            // A client sees this code and a retry, not `internal`.
+            let envelope = client_error_envelope(error.status,
+                &json!({"code": error.code, "message": error.message}), "request/test");
+            assert_eq!((envelope["code"].as_str(), envelope["retryable"].as_bool()),
+                (Some("agent-roster-not-ready"), Some(true)));
         }
     }
 }
@@ -10055,6 +10207,9 @@ fn agent_state_requires_current_harness_evidence_for_native_drivers() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let store = state.store.clone();
+    // Cards build as the roster refresher does, on a pinned snapshot. Unpinned and outside a
+    // request, a card-fault read has a 25 ms wall bound that a loaded host can spend waiting.
+    let cards = |index: u64| store.read_snapshot(|_| client_agent_resources(&store, false, "snapshot", index)).unwrap();
     let source = r#"
 version 2
 mission "agent-health" state="ready" {
@@ -10113,8 +10268,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-runtime".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "starting");
     assert_eq!(resources[0]["host_id"], "host/node");
     assert!(resources[0]["last_activity_at"].is_null());
@@ -10140,8 +10294,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-ready".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
     assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
 
@@ -10154,7 +10307,7 @@ mission "agent-health" state="ready" {
         }).unwrap();
     };
     harness("claude", "incarnation-1", "agent-health-foreign-provider");
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["driver"], "codex");
     assert_eq!(resources[0]["state"], "starting");
     assert!(resources[0]["harness_state"].is_null(), "wrong-provider readiness must not survive the cached card");
@@ -10168,19 +10321,21 @@ mission "agent-health" state="ready" {
     let recorded = store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
     let repeated = store.record_runtime_failure(episode, &fault, "mailbox-channel-lost").unwrap();
     assert_eq!(recorded.request, repeated.request);
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    // A loaded host can hold the card-fault read past 25 ms of wall time without CPU work.
+    Store::stall_next_card_fault_read_for_test(Duration::from_millis(50));
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "waiting");
     assert_eq!(resources[0]["harness_state"], "indeterminate");
     assert_eq!(resources[0]["blocked_on"], "channel");
     assert_eq!(resources[0]["fault"], fault.reason);
     harness("codex", "incarnation-1", "agent-health-superficial-ready");
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "waiting", "ready alone cannot clear a mailbox fault");
-    let historic = client_agent_resources(&store, false, "snapshot", healthy_cut).unwrap();
+    let historic = cards(healthy_cut);
     assert_eq!(historic[0]["state"], "running");
     assert!(historic[0]["fault"].is_null(), "the historical cut must not observe a later fault");
     store.recover_operational_failure(episode, "authenticated replay control", "agent-health-repaired").unwrap();
-    let resources = client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "running");
     assert!(resources[0]["fault"].is_null());
     assert_eq!(resources[0]["next_work_id"], queued);
@@ -10203,8 +10358,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-ended".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["state"], "failed");
     store
         .append_claim(&ClaimInput {
@@ -10224,8 +10378,7 @@ mission "agent-health" state="ready" {
             idempotency_key: Some("agent-health-crashed".into()),
         })
         .unwrap();
-    let resources =
-        client_agent_resources(&store, false, "snapshot", store.index().unwrap()).unwrap();
+    let resources = cards(store.index().unwrap());
     assert_eq!(
         resources.len(),
         1,
@@ -12670,6 +12823,28 @@ mission "overview-renamed" state="ready" {
             serde_json::to_value(&expected.mission_provenance).unwrap(),
         );
     }
+}
+
+#[tokio::test]
+async fn native_recipient_preflight_refuses_unknown_without_writing_and_accepts_runtime_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let before = state.store.index().unwrap();
+    let (status, error) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "unknown-recipient");
+    assert_eq!(error["details"]["recipient"], "agent/ada/tester");
+    assert_eq!(state.store.index().unwrap(), before);
+    roster_fixture_append(&state.store, "agent/ada/tester", "runtime.observed", json!({
+        "status": "stopped", "runtime_id": "tester", "incarnation_id": "fixture",
+    }));
+    let (status, recipient) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::OK, "{recipient}");
+    assert_eq!(recipient["recipient_identity"], "agent/ada/tester");
+    let (status, error) = get_request(app, "/v1/messages/recipient?to=person%2Fada").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "person-has-no-inbox");
 }
 
 #[test]

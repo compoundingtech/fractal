@@ -117,6 +117,7 @@ pub mod harness_events;
 pub mod mailbox;
 pub mod mail_backlog;
 pub mod delivery_metrics;
+pub mod mailbox_metrics;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
@@ -739,6 +740,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(records::withdraw_attention),
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/recipient", get(messages::recipient))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/harness-events", post(harness_events::publish))
@@ -790,6 +792,14 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/internal/replication/checkpoint-need",
             post(replication::replication_checkpoint_need),
+        )
+        .route(
+            "/v1/internal/replication/answers",
+            post(replication::replication_answers),
+        )
+        .route(
+            "/v1/internal/replication/answers-check",
+            post(replication::replication_answers_check),
         )
         .route(
             "/v1/internal/replication/checkpoint-adopt",
@@ -1845,6 +1855,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "identity-cycle"
+        | "identity-occupied"
+        | "identity-retired-source"
+        | "identity-cross-kind"
+        | "identity-unknown"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
         | "invalid-custody-successor"
@@ -1853,9 +1868,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
+        | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
         | "idempotency-key-expired"
+        | "legacy-action-receipt-untrusted"
         | "issuer-required"
         | "suspend-authored-session-selection"
         | "arrangement-exists"
@@ -1879,6 +1896,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "projection-detail-invalid-source"
         | "cursor-gap"
         | "page-cursor-expired"
+        | "agent-roster-not-ready"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
@@ -1912,6 +1930,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "message-send-unconfirmed"
         | "response-budget-exceeded"
         | "content-not-text"
+        | "invalid-document-reference"
+        | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
         "launch-review-not-authorized"
@@ -2392,6 +2412,22 @@ where
     Ok((Extension(snapshot), Json(page)))
 }
 
+/// This host's replication as a stream frame states it (`sync`, docs/st3/client-v0/collections.md,
+/// Sync on the stream): a page's notice, or `level` said explicitly, since on the stream an
+/// absent `sync` is unknown.
+pub fn client_stream_sync(state: &AppState) -> Value {
+    match client_sync_notice(state) {
+        Some(notice) => json!({"state": notice.state, "peers": notice.peers}),
+        None => json!({"state": "level"}),
+    }
+}
+
+/// Whether this host is catching up with a peer and whether it has diverged from one: the two
+/// flags [`client_sync_notice`] reads before naming any peer, cheap enough to weigh on a commit.
+pub fn replication_flags(state: &AppState) -> (bool, bool) {
+    (state.store.replication_catching_up(), state.store.replication_diverged())
+}
+
 /// A host catching up with a peer can show early history as current, and a host whose graph
 /// diverged from a peer's can show it wrong, so each page it serves says so and with whom.
 pub fn client_sync_notice(state: &AppState) -> Option<ClientSyncNotice> {
@@ -2479,8 +2515,13 @@ pub async fn client_capabilities(
     // The request snapshot may predate a checkpoint or legacy conversion. Advertise the
     // frontier and floor from one current read so the SDK's first event request can resume.
     let store = state.store.clone();
-    let (oldest, newest) =
-        blocking_store(move || store.read_snapshot(|_| store.event_bounds())).await?;
+    let (oldest, newest) = blocking_store(move || {
+        // No further than the published index, as an event page (`read_event_page`).
+        let through = store.index()?;
+        store.read_snapshot(|_| store.event_bounds())
+            .map(|(oldest, newest)| (oldest, newest.min(through)))
+    })
+    .await?;
     let oldest = oldest.saturating_sub(1);
     let cursor = format!("event-cursor/{}/{newest}", state.node);
     let capabilities = client_v0::capabilities(&state, &session);
@@ -2904,11 +2945,21 @@ pub fn client_agent_resources_cached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    store.cached_agent_resources(snapshot_index, history, |changed| {
+    pinned_unless_enclosed(store, || store.cached_agent_resources(snapshot_index, history, |changed| {
         let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
         add_agent_todos(store, &mut items, snapshot_index)?;
         Ok(items)
-    })
+    }))
+}
+
+/// Run a roster fold that neither a request nor a snapshot encloses in a snapshot of its own,
+/// as the refresher's is. Its card-fault capture is then bounded by its CPU work clock, not by
+/// the 25 ms wall bound a scheduling pause on a loaded host can spend.
+fn pinned_unless_enclosed<T>(store: &Store, fold: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    if smallclaims::read_budget::current().is_some() || store.readers.has_pinned_reader() {
+        return fold();
+    }
+    store.read_snapshot_unindexed(fold)
 }
 
 /// One agent's card for an exact agent selector, folded in its own projection rather than
@@ -2919,7 +2970,7 @@ pub fn client_exact_agent_resources(
     snapshot_index: u64,
     agent: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
+    pinned_unless_enclosed(store, || store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
         // A selected cold card needs only its own queue metadata, never roster refs.
         let metadata = changed.filter(|(_, previous)| previous.is_empty())
             .map(|(subjects, _)| agent_queue_metadata(store, subjects)).transpose()?;
@@ -2929,7 +2980,7 @@ pub fn client_exact_agent_resources(
         let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
         add_agent_todos(store, &mut items, snapshot_index)?;
         Ok(items)
-    })
+    }))
 }
 
 // Freeze membership, ordering and the inexpensive declaration/queue metadata. The expensive
@@ -3389,13 +3440,15 @@ pub fn client_agent_resources_uncached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = store.status_for_subject_prefix_at(
-        "agent/",
-        Some(snapshot_index),
-        history,
-        crate::store::ClaimsReduction::Summary,
-    )?;
-    client_agent_resources_from_status(store, history, snapshot_index, None, status)
+    pinned_unless_enclosed(store, || {
+        let status = store.status_for_subject_prefix_at(
+            "agent/",
+            Some(snapshot_index),
+            history,
+            crate::store::ClaimsReduction::Summary,
+        )?;
+        client_agent_resources_from_status(store, history, snapshot_index, None, status)
+    })
 }
 
 fn client_agent_resources_selected(
@@ -10029,7 +10082,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
     let subject = query.subject.clone();
     let owner = query.owner_run.clone();
     blocking_store(move || {
+        // A commit is visible here before its writer publishes the store index that client
+        // snapshots read at. A cursor past that index would let a client read a resource older
+        // than the events it already consumed, then wait for events that already came.
+        let through = store.index()?;
         store.read_snapshot(|frontier| {
+            let frontier = frontier.min(through);
             let (oldest, newest) = store.event_bounds()?;
             let floor = oldest.saturating_sub(1);
             if after < floor || after > newest {
@@ -10040,12 +10098,12 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     details: Box::new(serde_json::Map::from_iter([
                         ("full_resync".into(), json!(true)),
                         ("resume_floor".into(), json!(floor)),
-                        ("frontier".into(), json!(newest)),
+                        ("frontier".into(), json!(newest.min(through))),
                     ])),
                 }));
             }
             let (items, next_after, has_more) =
-                store.events_page(after, subject.as_deref(), owner.as_deref(), limit)?;
+                store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
             Ok(Ok(EventPage {
                 items,
                 next_after,

@@ -26,8 +26,7 @@ struct Daemon {
     socket: PathBuf,
     store: Arc<Store>,
     event_notify: watch::Sender<u64>,
-    server: Option<tokio::task::JoinHandle<()>>,
-    isolated_server: Option<(tokio::sync::oneshot::Sender<()>, std::thread::JoinHandle<()>)>,
+    server: Option<(tokio::sync::oneshot::Sender<()>, std::thread::JoinHandle<()>)>,
 }
 
 impl Daemon {
@@ -55,7 +54,6 @@ impl Daemon {
             store: Arc::new(store),
             event_notify: watch::channel(0_u64).0,
             server: None,
-            isolated_server: None,
         }
     }
 
@@ -68,6 +66,10 @@ impl Daemon {
     async fn start_admitted_protocol(&mut self) {
         let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(self.state());
         self.start_isolated_app(app).await;
+    }
+
+    async fn start_isolated_app(&mut self, app: axum::Router) {
+        self.serve(app, true).await;
     }
 
     fn state(&self) -> AppState {
@@ -86,9 +88,22 @@ impl Daemon {
         planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
     }
 
-    // Dropping this runtime also closes upgraded WebSocket connections, just as exiting
-    // the daemon does. Aborting only the listener would leave those tasks alive.
-    async fn start_isolated_app(&mut self, app: axum::Router) {
+    async fn start_with_binding(&mut self, native: bool) {
+        let app = fractal_daemon::api::router(self.state());
+        self.serve(app, native).await;
+    }
+
+    /// The API `start` serves, with `routes` added to it.
+    async fn start_with_routes(&mut self, routes: axum::Router) {
+        let app = fractal_daemon::api::router(self.state()).merge(routes);
+        self.serve(app, false).await;
+    }
+
+    // The API serves on a runtime of its own. Dropping it at `stop` ends every connection the
+    // way exiting the daemon does: upgraded WebSocket connections, and requests still in flight.
+    // Aborting only the listener would leave those tasks alive, and a request accepted just
+    // before the stop could still read the graph afterwards and answer from it.
+    async fn serve(&mut self, app: axum::Router, bound: bool) {
         let socket = self.socket.clone();
         let store = self.store.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -99,35 +114,20 @@ impl Daemon {
                 .build()
                 .unwrap();
             runtime.block_on(async {
-                tokio::select! {
-                    result = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store) => {
-                        result.unwrap();
+                let serve = async {
+                    if bound {
+                        fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store).await
+                    } else {
+                        fractal_daemon::api::serve_unix(&socket, app).await
                     }
+                };
+                tokio::select! {
+                    result = serve => result.unwrap(),
                     _ = stopped => {}
                 }
             });
         });
-        self.isolated_server = Some((stop, thread));
-        wait_until(
-            "the isolated daemon accepts connections",
-            Duration::from_secs(5),
-            || std::os::unix::net::UnixStream::connect(&self.socket).is_ok(),
-        )
-        .await;
-    }
-
-    async fn start_with_binding(&mut self, native: bool) {
-        let state = self.state();
-        let socket = self.socket.clone();
-        self.server = Some(tokio::spawn(async move {
-            let store = state.store.clone();
-            let app = fractal_daemon::api::router(state);
-            if native {
-                let _ = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store).await;
-            } else {
-                let _ = fractal_daemon::api::serve_unix(&socket, app).await;
-            }
-        }));
+        self.server = Some((stop, thread));
         wait_until(
             "the daemon accepts connections",
             Duration::from_secs(5),
@@ -138,13 +138,9 @@ impl Daemon {
 
     /// Stop the API the way an exiting daemon does: the socket file stays and refuses.
     async fn stop(&mut self) {
-        if let Some((stop, thread)) = self.isolated_server.take() {
+        if let Some((stop, thread)) = self.server.take() {
             let _ = stop.send(());
             tokio::task::spawn_blocking(move || thread.join().unwrap()).await.unwrap();
-        }
-        if let Some(server) = self.server.take() {
-            server.abort();
-            let _ = server.await;
         }
         wait_until(
             "the stopped daemon refuses new connections",
@@ -238,10 +234,7 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        if let Some(server) = self.server.take() {
-            server.abort();
-        }
-        if let Some((stop, thread)) = self.isolated_server.take() {
+        if let Some((stop, thread)) = self.server.take() {
             let _ = stop.send(());
             let _ = thread.join();
         }
@@ -962,6 +955,63 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     );
 }
 
+/// How a request ended: the first bytes of an answer, or a close before any.
+#[derive(Debug, PartialEq)]
+enum Ending {
+    Answered(String),
+    Closed,
+}
+
+/// Send one request and wait up to 10 s for it to end. A timeout fails the test: it shows
+/// neither an answer nor a close.
+fn request_ending(socket: &Path, path: &str) -> Ending {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: st3\r\n\r\n").unwrap();
+    let mut buffer = [0u8; 4096];
+    match stream.read(&mut buffer) {
+        Ok(0) => Ending::Closed,
+        Ok(read) => Ending::Answered(String::from_utf8_lossy(&buffer[..read]).into_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ending::Closed,
+        Err(error) => panic!("the request was neither answered nor closed: {error}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_daemon_cannot_answer_a_request_it_was_already_handling() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(directory.path());
+    // A handler that says it has started, then waits until the test lets it answer.
+    let (entered, handler_entered) = std::sync::mpsc::channel::<()>();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = {
+        let release = release.clone();
+        axum::routing::get(move || {
+            let (entered, release) = (entered.clone(), release.clone());
+            async move {
+                let _ = entered.send(());
+                release.acquire().await.unwrap().forget();
+                "answered after the stop"
+            }
+        })
+    };
+    daemon.start_with_routes(axum::Router::new().route("/test/held", held)).await;
+    let socket = daemon.socket.clone();
+    let client = std::thread::spawn(move || request_ending(&socket, "/test/held"));
+    tokio::task::spawn_blocking(move || handler_entered.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the held handler starts");
+    daemon.stop().await;
+    // A handler that outlived the stop answers now: stopping only the listener left it running.
+    release.add_permits(1);
+    let ending = tokio::task::spawn_blocking(move || client.join().unwrap()).await.unwrap();
+    assert_eq!(ending, Ending::Closed);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail() {
     if fractal_daemon::test_support::supervise_test() {
@@ -1077,7 +1127,11 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         "the driver wrote into the seat's terminal: {terminal}"
     );
     let log = driver_log(root);
-    assert!(log.contains("is not reachable"), "{log}");
+    // The outage shows up as a refused connection, or as a page request the stop cut short.
+    assert!(
+        log.contains("is not reachable") || log.contains("closed the connection before it answered"),
+        "{log}"
+    );
     assert!(log.contains("may be restarting"), "{log}");
     assert!(
         log.contains("retrying every 1s until the daemon is back"),

@@ -216,23 +216,48 @@ fn observe(unit: &str) -> Result<ScopeRetirementProof> {
     );
     let mut proof = properties(unit, std::str::from_utf8(&output.stdout)?)?;
     if proof.load_state == "loaded" {
-        let path = group_path(unit, &proof.control_group)?;
-        let before = std::fs::metadata(&path)?;
-        ensure!(before.is_dir(), "work scope cgroup is not a directory");
-        let events = std::fs::read_to_string(path.join("cgroup.events"))?;
-        is_populated(&events)?;
-        let after = std::fs::metadata(&path)?;
-        ensure!(
-            (before.dev(), before.ino()) == (after.dev(), after.ino()),
-            "work scope cgroup changed during capture"
-        );
-        proof.cgroup = Some(CgroupEnding {
-            device: before.dev(),
-            inode: before.ino(),
-            events,
-        });
+        proof.cgroup = capture_cgroup(&group_path(unit, &proof.control_group)?)?;
     }
     Ok(proof)
+}
+
+/// The cgroup of a scope the manager just reported loaded. The manager removes an emptied scope's
+/// cgroup on its own schedule, so it can vanish between that answer and these reads (ENOENT, or
+/// ENODEV for a file opened just before): then this capture holds no cgroup evidence, so it proves
+/// no ending, and the manager's next answer reports the unit gone.
+fn capture_cgroup(path: &Path) -> Result<Option<CgroupEnding>> {
+    fn vanished<T>(result: std::io::Result<T>) -> std::io::Result<Option<T>> {
+        match result {
+            Ok(value) => Ok(Some(value)),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ENODEV) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    let Some(before) = vanished(std::fs::metadata(path))? else {
+        return Ok(None);
+    };
+    ensure!(before.is_dir(), "work scope cgroup is not a directory");
+    let Some(events) = vanished(std::fs::read_to_string(path.join("cgroup.events")))? else {
+        return Ok(None);
+    };
+    is_populated(&events)?;
+    let Some(after) = vanished(std::fs::metadata(path))? else {
+        return Ok(None);
+    };
+    ensure!(
+        (before.dev(), before.ino()) == (after.dev(), after.ino()),
+        "work scope cgroup changed during capture"
+    );
+    Ok(Some(CgroupEnding {
+        device: before.dev(),
+        inode: before.ino(),
+        events,
+    }))
 }
 
 /// Read-only ending evidence for an already operation-bound work or server scope.
@@ -337,6 +362,35 @@ mod tests {
             empty.cgroup.as_mut().unwrap().events = events.into();
             assert!(empty.validate(UNIT).is_err(), "{events}");
         }
+    }
+
+    #[test]
+    fn a_cgroup_removed_after_the_manager_answered_proves_no_ending() {
+        let root = tempfile::tempdir().unwrap();
+        let scope = root.path().join(UNIT);
+        // The manager reported the scope loaded and then removed its emptied cgroup.
+        assert!(capture_cgroup(&scope).unwrap().is_none());
+        let mut loaded = properties(
+            UNIT,
+            &format!("LoadState=loaded\nActiveState=inactive\nControlGroup=/user.slice/{UNIT}\n"),
+        )
+        .unwrap();
+        loaded.cgroup = capture_cgroup(&scope).unwrap();
+        assert!(
+            loaded.validate_ending(UNIT, true).is_err(),
+            "no ending without its cgroup"
+        );
+        std::fs::create_dir(&scope).unwrap();
+        // A directory without its events file is also mid-removal.
+        assert!(capture_cgroup(&scope).unwrap().is_none());
+        std::fs::write(scope.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        loaded.cgroup = capture_cgroup(&scope).unwrap();
+        loaded.validate_ending(UNIT, true).unwrap();
+        std::fs::write(scope.join("cgroup.events"), "populated maybe\n").unwrap();
+        assert!(
+            capture_cgroup(&scope).is_err(),
+            "a present cgroup is still read strictly"
+        );
     }
 }
 

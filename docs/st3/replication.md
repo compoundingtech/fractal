@@ -1151,6 +1151,58 @@ for it; a daemon that never checks shows neither the line nor the row. A miss is
 other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
 replication check fails `st doctor` as above.
 
+### Answers across members
+
+A member that trims on its own (`[trim] local`) deletes claims its peers may still hold, so two
+members stop holding the same claims and their envelope and claim digests no longer settle a
+comparison. What must still agree is what readers answer. `smallclaims::answers`
+summarizes that per claim kind, at a cut, so members can compare it:
+
+- A kind's answer for one key, a subject and the writer that wrote it, is the key's newest claim
+  in canonical order. A trim keeps every key's newest claim, so trimming changes no answer.
+- A key counts once its newest claim is older than the cut. A key with a newer claim is still
+  moving and is left out; the cut never selects an older claim, which a trimmed member may no
+  longer hold.
+- Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
+  keys and answers. `claims` is compared only between members that trim the same way.
+- Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
+  difference narrows to a bucket and then to its keys without listing a whole kind.
+
+A summary reads every claim, one kind per statement on a reader connection: about a minute and a
+half on a store of three million claims. It is taken once a day and kept, never per request. The
+property test `a_trim_that_keeps_each_newest_claim_answers_the_same` holds the trim invariant for
+random histories and cuts.
+
+Once a day each member compares its answers with every peer it dials. The cut is the start of the
+UTC day, and the check waits an hour into the day so replication has brought every member what
+was written before it. A member asks a peer only after an exchange with it moved nothing, over the
+signed peer route `/v1/peer/answers`, authenticated like an exchange. The daemon computes its
+answers on a thread of its own and keeps them twenty minutes, answering `pending` until it has
+them, so a request never waits for a pass over the store.
+
+When a kind differs the member compares again every half hour, when both members have computed
+again and counted any claim that arrived late. A difference that lasts two hours is narrowed:
+bucket digests for each differing kind, then the keys of the differing buckets. The member records
+one `operational.failure` on its own `daemon/NODE` subject with the condition
+`answers-disagreement`, an episode per member pair, and a `reproduction` that names every
+differing kind with its counts and up to twenty keys, each with both members' answers. The fault
+goes to the agent `[trim] notify` names (`notify = "agent/..."`), or the fleet's fault agent
+without it. While the pair's fault is open, later differences add nothing; the first check of the
+pair that agrees ends it with `operational.recovered`. Each difference is a bug in trimming,
+replication or a reader: it becomes a failing test, then a fix. Nothing repairs it from a peer.
+
+A peer on a build without the route answers 404 and is not compared.
+
+Some readers fold a subject's claims rather than read its newest one. A trim can keep every
+key's newest claim and still change what they answer, by dropping an older claim they fold: a
+dropped credential transition moves a seat's needs-login since (#4237). So the daemon's summary
+also covers the readers the checkpoint proof reads (`checkpoint_rules::subject_answers`):
+current harness, status history, actual state and source, incarnations and working since,
+reconcile decisions, usage, loop and timing. They run for every seat (`agent/*`) and step
+(`step-run/*`) whose newest claim is older than the cut. Each field is its own pseudo-kind,
+`reader/NAME`, keyed by subject with a digest of the answer, and narrows to subjects like any
+kind. A subject still written at the cut is left out that day, as a kind's moving keys are.
+
 ### First sync
 
 A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first
@@ -1288,9 +1340,20 @@ sealing. Every participant must seal, so this stops trimming for the whole fleet
 checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
-and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
-it stops the old checkpoints on the other members until a person excuses it. No claim family is
-trimmed locally yet.
+and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
+members until a person excuses it. No claim family is trimmed locally yet.
+
+On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
+what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
+the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
+recorded, was not a deletion and leaves it. Admission then refuses a retired envelope or claim from
+any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
+peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
+held. It still syncs everything else with every peer as before. Turning the setting off stops
+reading the ledger as the authority.
+
+`[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
+finds this member and a peer answering differently; see [Answers across members](#answers-across-members).
 
 ## Recovery
 

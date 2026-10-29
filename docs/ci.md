@@ -198,6 +198,11 @@ real Cargo and benign stand-in commands; it compiles no Rust.
 - `linux-fleet-compat`: the fleet compatibility test against `.github/fleet-compat-baseline.json`'s
   previous-release native archive. CI verifies its pinned SHA-256 and embedded source/target
   metadata before running it; it does not rebuild the baseline or its PTY dependency.
+  It also runs the production mailbox bind handler against a pinned PTY 0.13.0
+  (`063ff7f`) metadata fixture without `daemonBootId`, with a live matching process
+  start token. The previous-release fleet test uses a stub PTY and covers replication,
+  not native channel admission; the metadata fixture independently covers the deployed
+  writer contract even when the devShell PTY advances.
 
 The primary test job proves that the two actual nextest inventories are disjoint and their union
 equals the full selected suite. The explicit zero-retry mail canaries run in a parallel job. The primary also
@@ -296,6 +301,14 @@ the recipient's local message arrival; channel readiness records an observation,
 `.config/nextest.toml` gives the messaging fault matrix and the fleet reconnect test, both with
 real multi-minute outages, first priority so their retries fit the CI test window. Failed tests
 retry twice with fixed 30-second delays; a retry pass is reported as flaky, not a gate failure.
+A test still running after 10 minutes (`slow-timeout = { period = "60s", terminate-after = 10 }`) is killed and
+fails as TIMEOUT, retried like any other failure, so a hung test fails its run within about 31 minutes instead of
+holding it until the job's timeout-minutes in CI, or forever in a local `scripts/st-test`. The longest tests take under
+2 minutes. `scripts/ci-linux`'s `nextest_timeout_check`, run before the tests on shard 1 and in every unpartitioned local
+run, refuses a ci profile or override without that bound or looser than it, then runs real nextest on a scratch crate whose
+test hangs: it must be killed, exit 100 and carry a `test timeout` failure in the JUnit report, which
+`scripts/ci-rust-test-result` counts as FAIL. It is a function in `ci-linux` rather than a script of its own because a new
+file the stage runs would have to join `.st/required-lanes.json`.
 The messaging fault cases need the pinned historical st3 (`.github/messaging-compat-baseline.json`).
 CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separate nextest process, runs
 `scripts/messaging-compat-binary`, which prints the checksum-verified previous-release executable from
