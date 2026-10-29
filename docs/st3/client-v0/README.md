@@ -1440,7 +1440,7 @@ list of v0 action discriminators, required capabilities and parameter types. The
 [schema](schemas/client-v0.schema.json) defines those parameters and the `Fence` fields;
 the action-specific sections below describe the required revisions and incarnations.
 Use the generated clients to construct typed requests from the current resource snapshot.
-Pairing begin and completion are commands in the manifest's `commands` object, sent to
+Pairing begin and completion are entries in the manifest's `commands` list, sent to
 `POST /v1/client/pairings` and `POST /v1/client/pairings/{id}/complete`.
 Only `pairing.revoke` is a pairing action.
 
