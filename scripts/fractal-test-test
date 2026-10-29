@@ -2181,7 +2181,7 @@ class PoolQueue(unittest.TestCase):
         queue.mkdir()
         now = 10_000 * 10**9
         live = os.getpid()
-        names = {'old-50': f'050.{now - 200 * 60 * 10**9:019d}.{live}',   # 200 minutes: aged to the floor, 5
+        names = {'old-50': f'050.{now - 100 * 60 * 10**9:019d}.{live}',   # 100 minutes (inside the 2 hour maximum wait): aged to the floor, 5
                  'p0': f'003.{now - 10**9:019d}.{live}',                  # under the floor: never aged, always first
                  'new-12': f'012.{now - 10**9:019d}.{live}',
                  'young-50': f'050.{now - 5 * 60 * 10**9:019d}.{live}',  # 5 minutes: 48
@@ -2192,6 +2192,46 @@ class PoolQueue(unittest.TestCase):
             order = [name for _, _, name in st_test.tree_queue(queue, now)]
         self.assertEqual(order, [names['p0'], names['old-50'], names['new-12'], names['young-50']])
         self.assertFalse((queue / names['dead']).exists())
+
+    def test_a_stream_of_rank_3_tickets_cannot_hold_a_rank_50_ticket_past_the_maximum_wait(self):
+        queue = Path(self.tmp.name) / 'queue-max-wait'
+        queue.mkdir()
+        live = os.getpid()
+        limit = st_test.PRIORITY_MAX_WAIT_SECONDS * 10**9
+        start = 10_000_000 * 10**9
+        starved = f'050.{start - 1:019d}.{live}'                                  # one nanosecond older than the first rank-3 ticket: no tie
+        (queue / starved).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            for minute in range(0, 200):                                         # a new rank-3 ticket every minute for more than three hours
+                now = start + minute * 60 * 10**9
+                fresh = f'003.{now:019d}.{live}'
+                (queue / fresh).touch()
+                order = [name for _, _, name in st_test.tree_queue(queue, now)]
+                if now - (start - 1) < limit:
+                    self.assertNotEqual(order[0], starved, minute)                # inside the limit the ranks decide
+                else:
+                    self.assertEqual(order[0], starved, minute)                   # at the limit the old ticket is first, ahead of every younger rank-3 ticket
+                    break
+            else:
+                self.fail('the rank-50 ticket never reached the front')
+        self.assertGreaterEqual(minute * 60, st_test.PRIORITY_MAX_WAIT_SECONDS)
+
+    def test_tickets_past_the_maximum_wait_go_first_and_oldest_first_among_themselves(self):
+        queue = Path(self.tmp.name) / 'queue-overdue'
+        queue.mkdir()
+        live = os.getpid()
+        now = 10_000_000 * 10**9
+        limit = st_test.PRIORITY_MAX_WAIT_SECONDS * 10**9
+        names = {'overdue-3-older': f'003.{now - limit - 5 * 10**9:019d}.{live}',
+                 'overdue-50': f'050.{now - limit - 2 * 10**9:019d}.{live}',
+                 'overdue-12-newest': f'012.{now - limit:019d}.{live}',
+                 'p0-young': f'003.{now - 10**9:019d}.{live}',
+                 'young-50': f'050.{now - 60 * 10**9:019d}.{live}'}
+        for name in names.values():
+            (queue / name).touch()
+        with mock.patch.object(st_test, 'process_started_ns', return_value=None):
+            order = [name for _, _, name in st_test.tree_queue(queue, now)]
+        self.assertEqual(order, [names['overdue-3-older'], names['overdue-50'], names['overdue-12-newest'], names['p0-young'], names['young-50']])
 
     def test_a_ticket_whose_pid_was_reused_by_a_younger_process_is_dropped(self):
         queue = self.root / 'queue'

@@ -879,6 +879,7 @@ def evict_to_cap(base, limit_gb, keep=None):
 
 
 PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
+PRIORITY_MAX_WAIT_SECONDS = 2 * 3600  # a pool-tree ticket that has waited this long is served before every younger ticket whatever its rank (oldest first): ranks under the floor never age, so without a limit a steady stream of them starves rank-50 runs indefinitely (hetz2, 2026-10-29: five rank-50 tickets waited 4 to 12.5 hours)
 
 
 def priority_rank(environment=None):
@@ -912,7 +913,8 @@ def process_started_ns(pid):
 
 
 def tree_queue(queue, now_ns):
-    """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival. A ticket
+    """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival, except that a
+    ticket past PRIORITY_MAX_WAIT_SECONDS goes before all the others, oldest first (a limit on starvation, which ranks under the floor would otherwise cause). A ticket
     whose process is gone is removed, and so is one whose pid now names a process that started after the ticket was taken (a waiter killed
     with SIGKILL leaves its ticket; a reused pid must not keep its place)."""
     found = []
@@ -935,6 +937,8 @@ def tree_queue(queue, now_ns):
                 os.unlink(queue / name)
             continue
         effective = rank if rank < PRIORITY_FLOOR else max(PRIORITY_FLOOR, rank - (now_ns - nanos) // (PRIORITY_AGING_SECONDS * 10**9))
+        if now_ns - nanos >= PRIORITY_MAX_WAIT_SECONDS * 10**9:
+            effective = -1  # past the maximum wait: ahead of every ticket that has not, and the overdue ones among themselves by arrival
         found.append((effective, nanos, name))
     return sorted(found)
 
