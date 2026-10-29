@@ -89,6 +89,8 @@ impl Store {
                 })
                 .or_insert((incarnation.start, end));
         }
+        // This node signs its own envelopes and never asks for them.
+        windows.remove(&self.origin);
         let connection = self.readers.get();
         let mut scan = connection.prepare_cached(SCAN_SQL)?;
         let mut receipt = connection.prepare_cached(
