@@ -11,6 +11,7 @@ Use these documents for implementation details:
 - [Mission graph runtime](mission-graph-runtime.md) defines the KDL language and execution model.
 - [Configuration and KDL](../site/reference/configuration.md) defines day-to-day publication and revision workflows.
 - [Owned sets](owned-sets.md) defines complete membership publication, source ordering and retirement.
+- [Accountable fleet roots](accountable-roots.md) defines person-authored trace attribution and its upgrade and rollback requirements.
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
 - [Free mode](../site/reference/configuration.md#free-mode): within a fleet, an agent may do anything the person who
   runs the fleet may do, as itself, until principals and grants land.
