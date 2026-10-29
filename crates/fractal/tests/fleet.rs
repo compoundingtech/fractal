@@ -17,7 +17,7 @@ use fractal_daemon::client::Client;
 use fractal_daemon::model::ClaimInput;
 
 fn st3() -> &'static str {
-    test_env!("CARGO_BIN_EXE_st3-fixture")
+    test_env!("CARGO_BIN_EXE_fractal-fixture")
 }
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";

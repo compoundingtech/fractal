@@ -933,7 +933,7 @@ pub(super) async fn run_fleet(endpoint: &Endpoint, command: FleetCommand, json_o
             }
             if use_services {
                 fractal_daemon::service::install(Config::load_with_fleet(None)?)?;
-                println!("st3 now runs local-only on this machine.");
+                println!("Fractal now runs local-only on this machine.");
             } else {
                 println!("{}", leave_restart_hint(json_output));
             }

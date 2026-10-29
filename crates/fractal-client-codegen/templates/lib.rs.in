@@ -1013,6 +1013,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::RuntimeListNotReady => {
             format!("{product} is still preparing the runtime list; try again shortly")
         }
+        ErrorCode::AgentRosterNotReady => {
+            format!("{product} is still preparing the agents roster; try again shortly")
+        }
         ErrorCode::RuntimeListEnded => {
             "the runtime list stopped updating; restart fractal".into()
         }
@@ -1073,6 +1076,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
         | ErrorCode::SuspendAuthoredSessionSelection
+        | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
         | ErrorCode::PrivateNotesCarrierConflict
         | ErrorCode::PrivateNotesUnreachable
@@ -3543,6 +3547,25 @@ mod tests {
             assert_ne!(code, ErrorCode::Unknown, "{raw}");
             assert_eq!(serde_json::to_value(code).unwrap(), *raw);
         }
+    }
+
+    #[test]
+    fn a_retryable_code_this_client_does_not_know_stays_retryable() {
+        // An older client meets a newer daemon's code (as clients before agent-roster-not-ready
+        // meet the agents roster's 503): it reads the code as unknown and still retries.
+        let envelope: ErrorEnvelope = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/test",
+            "code": "a-code-from-a-newer-daemon",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        }))
+        .unwrap();
+        assert_eq!(envelope.code, ErrorCode::Unknown);
+        let error = ClientError::Api(envelope.code.clone(), envelope.message.clone(), Box::new(envelope));
+        assert!(error.is_transient());
     }
 
     #[test]

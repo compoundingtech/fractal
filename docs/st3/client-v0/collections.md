@@ -399,12 +399,20 @@ projects a different graph than, with the same `SyncPeer` a page's `sync` carrie
 `SyncNotice`, which is absent while level, it says `level` explicitly: on the stream an absent
 `sync` means unknown, as from a daemon that does not send it, never level.
 
+A window an incremental view source reads (the daemon admits one for no collection yet) carries
+none, since such a source's reads say nothing when no row changed.
+
 A daemon that sends it puts it on every `snapshot` frame of the collection, and on a `changes`
 frame only when it changed since the subscription's previous frame: its state, or which peers
 (by `host_id`) are named, including the change back to `level`. A peer's counts moving is not a
 change. A client that missed a changes frame learns the current value from the next snapshot,
 which every resubscribe gets. A client on a daemon that sends none keeps reading a page's `sync`
 (`GET /v1/client/attention?limit=1`).
+
+The daemon sends a change on the window's next frame. A host that starts or stops catching up or
+diverging rereads its attention windows on that commit, paced like any reread (within 1.5 s).
+Another peer named, or a measurement grown too old to say the host is behind, waits for the
+window's next read, which comes at least every 30 s while it is subscribed.
 
 A state this client does not know, or a shape the schema forbids (`level` with peers, or another
 state without them), reads as unknown, never level, and the frame is kept: the Rust client reads

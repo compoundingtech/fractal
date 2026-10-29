@@ -369,6 +369,8 @@ struct SpanStat {
     cpu_ns: u64,
     sql_ns: u64,
     sql_count: u64,
+    /// This thread's reads during the span, for spans opened with `span_with_io`.
+    io: ThreadIo,
 }
 
 impl Acc {
@@ -435,6 +437,7 @@ impl Totals {
             into.cpu_ns += span.cpu_ns;
             into.sql_ns += span.sql_ns;
             into.sql_count += span.sql_count;
+            into.io.add(span.io);
         }
         for (note, count) in &acc.notes {
             *into.notes.entry(note.clone()).or_default() += count;
@@ -837,6 +840,7 @@ pub struct Span {
     cpu_started: u64,
     sql_started: u64,
     sql_count_started: u64,
+    io_started: Option<ThreadIo>,
 }
 
 pub fn span(name: &str) -> Option<Span> {
@@ -855,13 +859,25 @@ pub fn span(name: &str) -> Option<Span> {
         cpu_started: thread_cpu_ns(),
         sql_started,
         sql_count_started,
+        io_started: None,
     })
+}
+
+/// `span`, also counting the thread's reads: bytes read from disk and bytes read at all, so a
+/// stage's reads that missed the page cache show apart from those it served from memory. Reading
+/// the counters costs two reads of `/proc/thread-self/io`, so this is for a pass's stages, not
+/// for each item in them.
+pub fn span_with_io(name: &str) -> Option<Span> {
+    let mut span = span(name)?;
+    span.io_started = Some(ThreadIo::now());
+    Some(span)
 }
 
 impl Drop for Span {
     fn drop(&mut self) {
         let wall = nanos(self.started.elapsed());
         let cpu = thread_cpu_ns().saturating_sub(self.cpu_started);
+        let io = self.io_started.map(|started| ThreadIo::now().since(started)).unwrap_or_default();
         CURRENT.with(|current| {
             let current = current.borrow();
             let Some(op) = current.as_ref() else {
@@ -877,6 +893,7 @@ impl Drop for Span {
             span.cpu_ns += cpu;
             span.sql_ns += sql;
             span.sql_count += sql_count;
+            span.io.add(io);
         });
     }
 }
@@ -1075,6 +1092,8 @@ fn spans_json(acc: &Acc) -> Vec<Value> {
                 "cpu_ms": ms(span.cpu_ns),
                 "sql_ms": ms(span.sql_ns),
                 "sql_count": span.sql_count,
+                "disk_read_mb": mb(span.io.read_bytes),
+                "io_read_mb": mb(span.io.rchar),
             })
         })
         .collect()
@@ -1766,6 +1785,50 @@ mod tests {
     #[test]
     fn compact_sql_collapses_whitespace() {
         assert_eq!(compact_sql("SELECT a\n     FROM b"), "SELECT a FROM b");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_stage_span_counts_its_reads_and_an_item_span_does_not() {
+        // Profiling is process-global, so this runs in a child with its own enabled profiler.
+        const CHILD: &str = "ST3_PROFILE_STAGE_IO_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let directory = tempfile::tempdir().unwrap();
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "profile::tests::a_stage_span_counts_its_reads_and_an_item_span_does_not",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("ST3_PROFILE_DIR", directory.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "isolated stage I/O test failed");
+            return;
+        }
+        init_from_env();
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), vec![7_u8; 1 << 20]).unwrap();
+        let op = Op::start("task invented-pass", None).unwrap();
+        {
+            let _entered = op.enter();
+            {
+                let _stage = span_with_io("stage/invented");
+                assert_eq!(fs::read(file.path()).unwrap().len(), 1 << 20);
+            }
+            {
+                let _item = span("item/invented");
+                assert_eq!(fs::read(file.path()).unwrap().len(), 1 << 20);
+            }
+        }
+        let acc = op.0.acc.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(acc.spans["stage/invented"].io.rchar >= 1 << 20, "the stage read a mebibyte");
+        assert_eq!(acc.spans["item/invented"].io.rchar, 0, "an item span reads no counters");
+        let spans = spans_json(&acc);
+        let stage = spans.iter().find(|span| span["name"] == "stage/invented").unwrap();
+        assert!(stage["io_read_mb"].as_f64().unwrap() >= 1.0);
+        assert!(stage.get("disk_read_mb").is_some());
     }
 
     #[test]
