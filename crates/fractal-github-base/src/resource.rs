@@ -11,7 +11,11 @@ use anyhow::{Context as _, Result, bail};
 pub mod github_gates;
 mod github_repository;
 pub mod github_workflows;
-pub use github_repository::{RECENT_COMMENTS, merge_recent_comments, recent_comment_key};
+pub use github_repository::{
+    RECENT_COMMENTS, merge_recent_comments, recent_comment_key, replicated_cursor,
+};
+#[cfg(any(test, feature = "test-support"))]
+pub use github_repository::test_github;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
