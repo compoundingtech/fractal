@@ -6,6 +6,8 @@ order: 5
 
 # Your first mission
 
+KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+
 Use the worker from [Your first agent](first-agent.md). Run this in its workspace and substitute your own person name for `ada`.
 
 ## Declare a small result
@@ -13,7 +15,68 @@ Use the worker from [Your first agent](first-agent.md). Run this in its workspac
 ```sh
 cd "$HOME/fractal/garden"
 mkdir -p missions
-cat > missions/first-note.kdl <<'EOF'
+```
+
+Save the KDL variant as `missions/first-note.kdl`.
+
+```ts group=first-note variant=effect
+import { Effect } from 'effect'
+import { Fractal } from 'fractal/effect'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'garden/first-note',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'WELCOME.md introduces this workspace in one short paragraph.',
+    constraints: [
+      'Only create WELCOME.md. Do not modify other files or publish anything.',
+    ],
+  },
+  () => Effect.gen(function* () {
+    yield* Fractal.step({
+      id: 'write',
+      timeout: '15m',
+      goal: 'WELCOME.md exists and contains a short introduction to this workspace.',
+    }).pipe(Effect.provide(Fractal.Worker.layer(worker)))
+  }),
+)
+```
+
+```ts group=first-note variant=ts
+import { Fractal } from 'fractal'
+import { worker } from '../worker'
+
+const ada = Fractal.person({ id: 'ada' })
+
+export const mission = Fractal.mission(
+  {
+    id: 'garden/first-note',
+    state: 'ready',
+    timeout: '1h',
+    reportTo: ada,
+    goal: 'WELCOME.md introduces this workspace in one short paragraph.',
+    constraints: [
+      'Only create WELCOME.md. Do not modify other files or publish anything.',
+    ],
+  },
+  async () => {
+    await Fractal.Worker.provide(worker, async () => {
+      await Fractal.step({
+        id: 'write',
+        timeout: '15m',
+        goal: 'WELCOME.md exists and contains a short introduction to this workspace.',
+      })
+    })
+  },
+)
+```
+
+```kdl group=first-note variant=kdl
 version 2
 mission "garden/first-note" state="ready" {
   goal "WELCOME.md introduces this workspace in one short paragraph."
@@ -23,7 +86,9 @@ mission "garden/first-note" state="ready" {
     goal "WELCOME.md exists and contains a short introduction to this workspace."
   }
 }
-EOF
+```
+
+```sh
 fractal apply missions/first-note.kdl --as person/ada --dry-run
 fractal apply missions/first-note.kdl --as person/ada
 fractal missions start garden/first-note --id garden/first-note/one \
