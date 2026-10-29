@@ -1,4 +1,4 @@
-// q101 STOPGAP: remove this module and its fromTimeline hook when st adapters preserve OMP
+// q101 STOPGAP: remove this module and its fromTimeline hook when Fractal adapters preserve OMP
 // customType/details as typed TimelineBlocks (including Unsupported), and the four curated
 // envelope projection tests pass against those blocks. external_sessions.rs currently drops them.
 // This is a bounded, whole-body producer-grammar recognizer, NOT an XML/prose classifier.
@@ -26,7 +26,7 @@ export const ompNoticeExcerpt = (payload: string): string => {
   return (line ?? 'Full result available in details.').replace(/^#+\s+|^[-*]\s+/g, '').replaceAll('**', '').slice(0, 200)
 }
 
-const taskNotice = (body: string, raw: string): HarnessNotice | undefined => {
+const taskNotice = (body: string, raw: string): Extract<HarnessNotice, { readonly _tag: 'SubagentResult' }> | undefined => {
   const match = taskPattern.exec(body)
   if (match === null) return undefined
   const [, taskId, agent, status, duration, lines, size, abortReason, error, output, fullOutput, preview, mergeSummary] = match
@@ -46,7 +46,7 @@ export const q101OmpEnvelopeStopgap = ({ id, role, sender, text, at }: {
   readonly id: string; readonly role: Role; readonly sender?: Sender; readonly text: string; readonly at: string
 }): EventItem | undefined => {
   if (role !== 'system' || sender?.kind === 'human' || text.length > 65536) return undefined
-  let notice: HarnessNotice | undefined
+  let notice: Extract<HarnessNotice, { readonly _tag: 'SubagentResult' | 'BackgroundJob' | 'Irc' | 'Compaction' }> | undefined
   if (text.startsWith('[omp compaction]\n') && text.length > 17) {
     notice = { _tag: 'Compaction', payload: text.slice(17), raw: text }
   } else {

@@ -81,6 +81,15 @@ fn replicated_rename_request_digest_survives_canonical_json_field_order() {
 fn rename_resolves_old_and_current_names_without_replacing_declaration() {
     let store = Store::open_memory("example").unwrap();
     let token = declare(&store, ORIGINAL);
+    store.append_claim(&ClaimInput {
+        subject: ORIGINAL.into(), kind: "runtime.observed".into(),
+        actor: Some("person/robin".into()),
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("example-incarnation")),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
     let native = store.append_claim(&ClaimInput {
         subject: ORIGINAL.into(), kind: "harness.session-file".into(),
         actor: Some("person/robin".into()),

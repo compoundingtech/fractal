@@ -189,6 +189,8 @@ export const motionVars = stylex.defineVars({
   ease: 'ease', linear: 'linear', surfaceTransform: 'scale(0.98)',
 })
 
+/** Numeric twin of `motionVars.standard` for imperative motion such as the eased return to the transcript end. */
+export const motionNumbers = { standard: 200 } as const
 export const elevationVars = stylex.defineVars({
   popover: '0 18px 44px -18px rgb(0 0 0 / 80%)',
   dialog: '0 24px 64px -24px rgb(0 0 0 / 65%)',

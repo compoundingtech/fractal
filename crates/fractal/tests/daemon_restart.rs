@@ -26,8 +26,7 @@ struct Daemon {
     socket: PathBuf,
     store: Arc<Store>,
     event_notify: watch::Sender<u64>,
-    server: Option<tokio::task::JoinHandle<()>>,
-    isolated_server: Option<(tokio::sync::oneshot::Sender<()>, std::thread::JoinHandle<()>)>,
+    server: Option<(tokio::sync::oneshot::Sender<()>, std::thread::JoinHandle<()>)>,
 }
 
 impl Daemon {
@@ -55,7 +54,6 @@ impl Daemon {
             store: Arc::new(store),
             event_notify: watch::channel(0_u64).0,
             server: None,
-            isolated_server: None,
         }
     }
 
@@ -70,27 +68,42 @@ impl Daemon {
         self.start_isolated_app(app).await;
     }
 
-    fn state(&self) -> AppState {
-        AppState {
-            owning_person: None,
-            store: self.store.clone(),
-            notify: Arc::new(Notify::new()),
-            event_notify: self.event_notify.clone(),
-            node: "restart-node".into(),
-            state_dir: self.root.join("daemon"),
-            pty_root: self.root.join("pty"),
-            pty_binary: PathBuf::from("pty"),
-            fleet_id: None,
-            configured_peers: Vec::new(),
-            client_relay: None,
-            native_session_home: None,
-            planner_default: fractal_daemon::model::PlannerSpec::default(),
-        }
+    async fn start_isolated_app(&mut self, app: axum::Router) {
+        self.serve(app, true).await;
     }
 
-    // Dropping this runtime also closes upgraded WebSocket connections, just as exiting
-    // the daemon does. Aborting only the listener would leave those tasks alive.
-    async fn start_isolated_app(&mut self, app: axum::Router) {
+    fn state(&self) -> AppState {
+        AppState { owning_person: None,
+        store: self.store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: self.event_notify.clone(),
+        node: "restart-node".into(),
+        state_dir: self.root.join("daemon"),
+        pty_root: self.root.join("pty"),
+        pty_binary: PathBuf::from("pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
+    }
+
+    async fn start_with_binding(&mut self, native: bool) {
+        let app = fractal_daemon::api::router(self.state());
+        self.serve(app, native).await;
+    }
+
+    /// The API `start` serves, with `routes` added to it.
+    async fn start_with_routes(&mut self, routes: axum::Router) {
+        let app = fractal_daemon::api::router(self.state()).merge(routes);
+        self.serve(app, false).await;
+    }
+
+    // The API serves on a runtime of its own. Dropping it at `stop` ends every connection the
+    // way exiting the daemon does: upgraded WebSocket connections, and requests still in flight.
+    // Aborting only the listener would leave those tasks alive, and a request accepted just
+    // before the stop could still read the graph afterwards and answer from it.
+    async fn serve(&mut self, app: axum::Router, bound: bool) {
         let socket = self.socket.clone();
         let store = self.store.clone();
         let (stop, stopped) = tokio::sync::oneshot::channel();
@@ -101,35 +114,20 @@ impl Daemon {
                 .build()
                 .unwrap();
             runtime.block_on(async {
-                tokio::select! {
-                    result = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store) => {
-                        result.unwrap();
+                let serve = async {
+                    if bound {
+                        fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store).await
+                    } else {
+                        fractal_daemon::api::serve_unix(&socket, app).await
                     }
+                };
+                tokio::select! {
+                    result = serve => result.unwrap(),
                     _ = stopped => {}
                 }
             });
         });
-        self.isolated_server = Some((stop, thread));
-        wait_until(
-            "the isolated daemon accepts connections",
-            Duration::from_secs(5),
-            || std::os::unix::net::UnixStream::connect(&self.socket).is_ok(),
-        )
-        .await;
-    }
-
-    async fn start_with_binding(&mut self, native: bool) {
-        let state = self.state();
-        let socket = self.socket.clone();
-        self.server = Some(tokio::spawn(async move {
-            let store = state.store.clone();
-            let app = fractal_daemon::api::router(state);
-            if native {
-                let _ = fractal_daemon::api::serve_unix_bound(&socket, &socket, app, store).await;
-            } else {
-                let _ = fractal_daemon::api::serve_unix(&socket, app).await;
-            }
-        }));
+        self.server = Some((stop, thread));
         wait_until(
             "the daemon accepts connections",
             Duration::from_secs(5),
@@ -140,13 +138,9 @@ impl Daemon {
 
     /// Stop the API the way an exiting daemon does: the socket file stays and refuses.
     async fn stop(&mut self) {
-        if let Some((stop, thread)) = self.isolated_server.take() {
+        if let Some((stop, thread)) = self.server.take() {
             let _ = stop.send(());
             tokio::task::spawn_blocking(move || thread.join().unwrap()).await.unwrap();
-        }
-        if let Some(server) = self.server.take() {
-            server.abort();
-            let _ = server.await;
         }
         wait_until(
             "the stopped daemon refuses new connections",
@@ -240,10 +234,7 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
-        if let Some(server) = self.server.take() {
-            server.abort();
-        }
-        if let Some((stop, thread)) = self.isolated_server.take() {
+        if let Some((stop, thread)) = self.server.take() {
             let _ = stop.send(());
             let _ = thread.join();
         }
@@ -270,7 +261,7 @@ async fn wait_until_for(limit: Duration, mut condition: impl FnMut() -> bool) ->
 /// A seat process launched with the environment the reconciler gives it, but with every home
 /// and state directory inside the test root.
 fn seat_command(root: &Path, socket: &Path) -> Command {
-    let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
     // Its own process group, so stopping the seat also stops the stand-in provider.
     command
         .process_group(0)
@@ -443,6 +434,50 @@ while not (home / 'provider-finish').exists():
     )
     .await;
     driver
+}
+
+/// Linux analogue of Claude's policy refusal: the provider prints a warning but stays
+/// alive. An isolated API and HOME prove this does not become a failed process exit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claude_channel_policy_banner_keeps_driver_alive_and_channel_unattached() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
+    let mut daemon = Daemon::new(root);
+    let seat = "agent/grove/policy-orchid";
+    let incarnation = "policy-orchid:one";
+    declare_claude(&daemon, seat);
+    daemon.observe_running(seat, incarnation);
+    daemon.start_admitted_protocol().await;
+    let provider = "printf '%s\\n' '--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)' 'Inbound messages will be silently dropped' 'Have an administrator set channelsEnabled: true in managed settings to enable'; exec sleep 300";
+    let mut driver = TestSeat(Some(
+        seat_command(root, &daemon.socket)
+            .env("ST_AGENT", seat)
+            .env("ST3_MAILBOX_TRANSPORT", "push")
+            .env("ST3_CLAUDE_ATTACH_WINDOW_MS", "50")
+            .args(["driver", "claude", "--subject", seat, "--", "sh", "-c", provider])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn().unwrap(),
+    ));
+    wait_until("the policy-blocked driver reports no attachment", Duration::from_secs(10), || {
+        assert_alive(&mut driver, "policy-blocked driver");
+        daemon.has_diagnostic(seat, incarnation, "claude-channel-unattached")
+    }).await;
+    // Read only the three flushed banner lines; the still-running provider owns the pipe.
+    let mut output = BufReader::new(driver.stdout.take().unwrap());
+    let mut banner = String::new();
+    output.read_line(&mut banner).unwrap();
+    output.read_line(&mut banner).unwrap();
+    output.read_line(&mut banner).unwrap();
+    assert!(banner.contains("blocked by org policy") && banner.contains("channelsEnabled"));
+    assert_alive(&mut driver, "policy-blocked driver after banner");
+    request_driver_stop(&driver);
+    native_exit_finishes(root, &mut driver, Duration::from_secs(8)).await;
+    daemon.stop().await;
 }
 
 fn request_driver_stop(driver: &Child) {
@@ -690,7 +725,7 @@ time.sleep(300)
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .args(["driver", "claude", "--subject", seat, "--", "python3", "-c", provider,
-                test_env!("CARGO_BIN_EXE_st3-fixture")])
+                test_env!("CARGO_BIN_EXE_fractal-fixture")])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -920,6 +955,63 @@ async fn title_failure(pty_session: Option<&str>, expected_session: &str) {
     );
 }
 
+/// How a request ended: the first bytes of an answer, or a close before any.
+#[derive(Debug, PartialEq)]
+enum Ending {
+    Answered(String),
+    Closed,
+}
+
+/// Send one request and wait up to 10 s for it to end. A timeout fails the test: it shows
+/// neither an answer nor a close.
+fn request_ending(socket: &Path, path: &str) -> Ending {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: st3\r\n\r\n").unwrap();
+    let mut buffer = [0u8; 4096];
+    match stream.read(&mut buffer) {
+        Ok(0) => Ending::Closed,
+        Ok(read) => Ending::Answered(String::from_utf8_lossy(&buffer[..read]).into_owned()),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => Ending::Closed,
+        Err(error) => panic!("the request was neither answered nor closed: {error}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stopped_daemon_cannot_answer_a_request_it_was_already_handling() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(directory.path());
+    // A handler that says it has started, then waits until the test lets it answer.
+    let (entered, handler_entered) = std::sync::mpsc::channel::<()>();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let held = {
+        let release = release.clone();
+        axum::routing::get(move || {
+            let (entered, release) = (entered.clone(), release.clone());
+            async move {
+                let _ = entered.send(());
+                release.acquire().await.unwrap().forget();
+                "answered after the stop"
+            }
+        })
+    };
+    daemon.start_with_routes(axum::Router::new().route("/test/held", held)).await;
+    let socket = daemon.socket.clone();
+    let client = std::thread::spawn(move || request_ending(&socket, "/test/held"));
+    tokio::task::spawn_blocking(move || handler_entered.recv_timeout(Duration::from_secs(10)))
+        .await
+        .unwrap()
+        .expect("the held handler starts");
+    daemon.stop().await;
+    // A handler that outlived the stop answers now: stopping only the listener left it running.
+    release.add_permits(1);
+    let ending = tokio::task::spawn_blocking(move || client.join().unwrap()).await.unwrap();
+    assert_eq!(ending, Ending::Closed);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail() {
     if fractal_daemon::test_support::supervise_test() {
@@ -1035,7 +1127,11 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         "the driver wrote into the seat's terminal: {terminal}"
     );
     let log = driver_log(root);
-    assert!(log.contains("is not reachable"), "{log}");
+    // The outage shows up as a refused connection, or as a page request the stop cut short.
+    assert!(
+        log.contains("is not reachable") || log.contains("closed the connection before it answered"),
+        "{log}"
+    );
     assert!(log.contains("may be restarting"), "{log}");
     assert!(
         log.contains("retrying every 1s until the daemon is back"),
@@ -1045,7 +1141,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
         log.contains("native conversation delivery resumed"),
         "{log}"
     );
-    assert!(!log.contains("st3 up"), "{log}");
+    assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1139,7 +1235,7 @@ async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     assert!(stderr.is_empty(), "the channel wrote to stderr: {stderr}");
     let log = driver_log(root);
     assert!(log.contains("may be restarting"), "{log}");
-    assert!(!log.contains("st3 up"), "{log}");
+    assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1433,7 +1529,7 @@ fn a_cli_command_says_the_daemon_is_unreachable_and_never_to_start_it() {
     );
     assert!(stderr.contains("was not reachable for 1s"), "{stderr}");
     assert!(stderr.contains("Nothing was sent"), "{stderr}");
-    assert!(!stderr.contains("st3 up"), "{stderr}");
+    assert!(!stderr.contains("st3 up") && !stderr.contains("fractal up"), "{stderr}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2228,7 +2324,7 @@ time.sleep(300)
                 "python3",
                 "-c",
                 provider,
-                test_env!("CARGO_BIN_EXE_st3-fixture"),
+                test_env!("CARGO_BIN_EXE_fractal-fixture"),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

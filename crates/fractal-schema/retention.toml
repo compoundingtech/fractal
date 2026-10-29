@@ -31,6 +31,10 @@
 "deploy.stop-lifted" = { class = "durable" }
 "deploy.compat-signoff" = { class = "durable" }
 "agent.account" = { class = "durable" }
+"agent.launcher-bound" = { class = "durable", log = "local" }
+"agent.helper-launched" = { class = "durable", log = "local" }
+"custom.client.action-result" = { class = "durable" }
+"client.action-result" = { class = "durable", log = "local" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
 "agent.queue.moved" = { class = "durable" }
@@ -66,6 +70,7 @@
 "gate.result" = { class = "durable" }
 "gate.review-verdict" = { class = "durable" }
 "gate.review-withdrawn" = { class = "durable" }
+"gate.reviewer-reassigned" = { class = "durable" }
 "github.posted" = { class = "durable" }
 "glass.deleted" = { class = "durable" }
 "glass.upserted" = { class = "durable" }
@@ -122,6 +127,7 @@
 "owned-set.revised" = { class = "durable" }
 "person.delegation-set" = { class = "durable" }
 "person.directive-note-set" = { class = "durable" }
+"person.rename.completed" = { class = "durable" }
 "planning-session.approved" = { class = "durable" }
 "planning-session.cancelled" = { class = "durable" }
 "planning-session.candidate-submitted" = { class = "durable" }
@@ -200,6 +206,7 @@
 "work.person-asked" = { class = "durable" }
 "work.person-cancelled" = { class = "durable" }
 "work.person-done" = { class = "durable" }
+"work.person-reassigned" = { class = "durable" }
 "work.progress" = { class = "durable" }
 "work.released" = { class = "durable" }
 "work.renewed" = { class = "current", pending = "the step timing fold reads every renewal" }

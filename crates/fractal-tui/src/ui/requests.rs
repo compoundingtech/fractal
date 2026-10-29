@@ -105,7 +105,7 @@ pub fn pane_for(subject: &str) -> Result<Pane, String> {
     if subject.len() > "doc/".len() && subject.starts_with("doc/") {
         return Ok(Pane::Document(subject.to_owned()));
     }
-    Err("st ui open shows agent/…, mission/…, mission-run/…, machine/… or doc/…".into())
+    Err("fractal ui open shows agent/…, mission/…, mission-run/…, machine/… or doc/…".into())
 }
 
 /// Where this person's requests wait on this device.

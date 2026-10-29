@@ -137,7 +137,7 @@ pub async fn stream(
     let upgrade = upgrade.and_then(|Extension(context)| context.0);
     authorize(&session, query.mode)?;
     // This protocol subscribes in the upgrade request, without a JSON subscribe command.
-    let first_frame = subscription_first_frame("terminal", "raw", upgrade.as_ref())
+    let first_frame = subscription_first_frame("terminal", "raw", upgrade.as_ref(), None)
         .map(|first| first.span);
     let protocols = headers
         .get_all(SEC_WEBSOCKET_PROTOCOL)

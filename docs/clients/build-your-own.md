@@ -11,7 +11,7 @@ workspace CI. Its application code is about 400 lines, with no dependency on the
 ## Run the example first
 
 Use a checkout and the Rust development environment described in the [root README](../../README.md).
-Have st running locally with at least one agent; the [getting-started guide](../getting-started.md)
+Have Fractal running locally with at least one agent; the [getting-started guide](../getting-started.md)
 sets that up. Choose a person already in your fleet; `person/avery` below is an invented example.
 
 ```sh
@@ -21,13 +21,13 @@ cargo run --locked -p fractal-client-tui -- person/avery /tmp/example-st3.sock
 ```
 
 Without an explicit socket, the example passes `ST3_ENDPOINT` to `discover_unix_endpoint`, then
-uses the normal st config and XDG runtime/state discovery. `Client::unix_as` is for the trusted
-local socket, where st allows the local user to select the person. It does not authenticate a
+uses the normal Fractal config and XDG runtime/state discovery. `Client::unix_as` is for the trusted
+local socket, where Fractal allows the local user to select the person. It does not authenticate a
 remote device. For remote access, pair a device and use its credential as described below.
 
 Up/Down selects an agent. Type a single-line message and press Enter to send it to the displayed
 agent. Esc clears the draft or discards an uncertain-send retry; Ctrl-C quits. Discarding a retry
-cannot retract a message st already accepted. The first bounded window contains at most 200
+cannot retract a message Fractal already accepted. The first bounded window contains at most 200
 agents. The conversation follows its end, showing the recent page and saying when earlier
 history exists. This example has no history scrolling, search, terminal attachment, fold toggles,
 read acknowledgements, attachments or persistent cache; the pieces for those are described below.
@@ -47,11 +47,11 @@ Open [main.rs](../../examples/client-tui/src/main.rs) for startup/input and
 | Typed reads, action parameters/fences, errors and streams | [`fractal-client`](../../crates/fractal-client/README.md) | [`@fractal/client`](../../clients/typescript/fractal-client/README.md) |
 | Live joined windows, member rotation and reconnect/resubscribe | [`fractal-feed`](../../crates/fractal-feed/README.md): `run_members`, `Command`, `Update` | Generated client's `collectionStream` and `applyWindow`; the caller owns reconnect/member selection (there is no TS feed package) |
 | Timeline revisions, earlier pages, transcript cleaning and delivery joins | [`fractal-conversation-ui`](../../crates/fractal-conversation-ui/README.md): `Timeline`, `Frame`, `adapt::conversation` | [`@fractal/views`](../../clients/typescript/fractal-views/README.md): `applyConversation`, `applyOlderPage`, `readOlder`, `conversationEntries` |
-| Conversation drawing, folds, selection and pane interactions | Enable `fractal-conversation-ui`'s `ratatui` feature for `Cache`/`Theme`; model-only `State` emits `PaneIntent`s | `st3-views` supplies folding, simplified tool rows and entry types; your renderer draws them |
-| Mission words, precedence, queue state and step identity | `fractal-ui-model::missions::adapt`, borrowing typed projections and caller display policies | Phone-specific mission derivation remains in `apps/ios/missionsView.ts`; it is not part of `st3-views` |
-| Session discovery, Home rows, request/answer formatting | Typed client resources; no single Rust package for all these views | `st3-views`: `sessionView`, `homeView`, `requestView` |
+| Conversation drawing, folds, selection and pane interactions | Enable `fractal-conversation-ui`'s `ratatui` feature for `Cache`/`Theme`; model-only `State` emits `PaneIntent`s | `@fractal/views` supplies folding, simplified tool rows and entry types; your renderer draws them |
+| Mission words, precedence, queue state and step identity | `fractal-ui-model::missions::adapt`, borrowing typed projections and caller display policies | Phone-specific mission derivation remains in `apps/ios/missionsView.ts`; it is not part of `@fractal/views` |
+| Session discovery, Home rows, request/answer formatting | Typed client resources; no single Rust package for all these views | `@fractal/views`: `sessionView`, `homeView`, `requestView` |
 | Private read-only display cache | `fractal-feed::cache` and `model::Model` | Phone's cache remains application code; it is not a shared TS cache API |
-| Device-signing data and reported client name | Typed signature parameters in `fractal-client`; caller owns key/signing; `set_client_name` reports your app | `st3-views`'s `deviceSigning` builds canonical bytes/parameters, and `clientName` formats caller-supplied product/version/build |
+| Device-signing data and reported client name | Typed signature parameters in `fractal-client`; caller owns key/signing; `set_client_name` reports your app | `@fractal/views`'s `deviceSigning` builds canonical bytes/parameters, and `clientName` formats caller-supplied product/version/build |
 
 These are repository source packages, not crates published on crates.io or npm. In a Rust app
 inside this checkout, use path dependencies like the [example manifest](../../examples/client-tui/Cargo.toml).
@@ -181,7 +181,7 @@ Pass the feed a standard update sender and a Tokio command receiver. Drain updat
 UI loop. An agents `Window` replaces the ordered agent rows; keep selection by resource ID,
 not row index. `Connected` means the socket opened, not that rows loaded: wait for a live
 window before enabling actions. `Offline` preserves the last display while disabling sends.
-`Converse { targets: vec![agent_id] }` asks st to join that agent's transcript and Fractal.
+`Converse { targets: vec![agent_id] }` asks Fractal to join that agent's transcript and Fractal.
 Apply conversation frames through `Timeline`, then feed `adapt::conversation` into `Cache`.
 Do not append frames blindly: entries can be revised, streams can replace their window, and
 an agent can restart into another session. The feed can follow at most three conversations.
@@ -296,5 +296,5 @@ pnpm --filter @fractal/views typecheck
 The example tests use a terminal test backend and a loopback test gateway with the real client
 and feed: they check stable selection, stale/offline behavior, shared transcript rendering,
 subscription composition, fenced message parameters and unchanged idempotency on retry. They
-need no running daemon or paired device. Run server-backed st3 tests outside an agent seat's
+need no running daemon or paired device. Run server-backed Fractal tests outside an agent seat's
 `ST_AGENT` environment, as the repository's contribution constraints require.

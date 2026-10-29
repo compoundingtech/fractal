@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Alert when the published evidence log stops moving: a stalled pull is a page within minutes, not a puzzle hours later.
+
+  scripts/evidence-log-watch --remote URL --state DIR --notify JSON_ARGV [--max-age SECONDS] [--repeat SECONDS] [--now UNIX]
+
+The log host pulls every 2 minutes (scripts/evidence-log.timer) and every pull commits, so the head of `refs/evidence-log/main` ON THE
+REMOTE names a time (`as_of=` in its subject) that is never more than a few minutes old. One run (scripts/evidence-log-watch.timer runs it
+every 2 minutes) fetches that one commit into a small repository of its own under --state and reads its age. Older than --max-age (default
+360 s: three missed pulls, well inside the verifier's own LOG_MAX_AGE of 600 s) is a stall; so is a head that cannot be read (no ref, a
+fetch that fails, no time in its subject) for longer than --max-age. It reads the remote, not the log host's own repository, so a pull
+that commits but never publishes is a stall too.
+
+On a stall the --notify argv is run with one line appended as its last argument: once when the stall begins, again every --repeat
+seconds (default 3600) while it lasts, and once when the log moves again. The state between runs is one small JSON file under --state.
+
+  exit 0  the log is current    exit 1  stalled    exit 2  usage    exit 3  a notification failed (it is tried again on the next run)
+"""
+import argparse
+import datetime
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+sys.dont_write_bytecode = True
+
+LOG = 'refs/evidence-log/main'
+SEEN = 'refs/evidence-log/watched'
+STAMP = re.compile(r'(?:^| )as_of=(\S+)')
+MAX_AGE = 360
+REPEAT = 3600
+
+
+def git(repo, *args):
+    clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    return subprocess.run(['git', '-C', repo, '-c', 'core.hooksPath=/dev/null', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', *args],
+                          capture_output=True, timeout=120, env=dict(clean, GIT_TERMINAL_PROMPT='0', LC_ALL='C'))
+
+
+def published_as_of(repo, remote):
+    """(unix time, head) of the remote's log head, or (None, why) when it cannot be read."""
+    if not os.path.isdir(os.path.join(repo, 'objects')):
+        done = subprocess.run(['git', 'init', '-q', '--bare', repo], capture_output=True)
+        if done.returncode != 0:
+            return None, f'cannot create {repo}'
+    try:
+        done = git(repo, 'fetch', '-q', '--no-tags', '--depth=1', remote, f'+{LOG}:{SEEN}')
+    except subprocess.TimeoutExpired:
+        return None, 'the fetch of the log head timed out'
+    if done.returncode != 0:
+        return None, f'the fetch of the log head failed: {done.stderr.decode(errors="replace").strip()[-160:]}'
+    shown = git(repo, 'show', '-s', '--format=%H%x00%s', SEEN)
+    head, _, subject = shown.stdout.decode(errors='replace').strip().partition('\0')
+    stamp = STAMP.search(subject)
+    if shown.returncode != 0 or not stamp:
+        return None, f'the log head {head[:12] or "?"} names no time'
+    try:
+        when = datetime.datetime.fromisoformat(stamp.group(1).replace('Z', '+00:00'))
+    except ValueError:
+        return None, f'the log head {head[:12]} has an unreadable time {stamp.group(1)!r}'
+    if when.tzinfo is None:
+        return None, f'the log head {head[:12]} names a time without a zone'
+    return when.timestamp(), head
+
+
+def load(path):
+    try:
+        with open(path) as handle:
+            state = json.load(handle)
+        return state if isinstance(state, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save(path, state):
+    temporary = f'{path}.{os.getpid()}'
+    with open(temporary, 'w') as handle:
+        json.dump(state, handle)
+    os.replace(temporary, path)
+
+
+def iso(unix):
+    return datetime.datetime.fromtimestamp(unix, datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def step(state, now, as_of, detail, max_age, repeat):
+    """PURE. (new state, line to send or None, stalled): one look at the log. `as_of` is the head's time or None when it could not be
+    read (`detail` says why; else it is the head). A head that cannot be read counts as stalled once it has been unreadable for longer
+    than max_age; until then the last readable time stands."""
+    state = dict(state)
+    if as_of is not None:
+        state['last_as_of'], state['last_head'] = as_of, detail
+        state.pop('unreadable_since', None)
+        age = now - as_of
+        why = f'the published evidence log head {detail[:12]} is {round(age)}s old (as_of {iso(as_of)}; at most {max_age}s expected)'
+    else:
+        state.setdefault('unreadable_since', now)
+        age = now - state['unreadable_since']
+        why = f'the published evidence log head cannot be read for {round(age)}s: {detail}'
+    stalled = age > max_age
+    line = None
+    if stalled:
+        if 'stalled_since' not in state:
+            state['stalled_since'] = now - max(0.0, age - max_age)
+            line = f'evidence log STALLED: {why}. The log host\'s pull (evidence-log.timer) is not publishing.'
+        elif now - state.get('told_at', 0) >= repeat:
+            line = f'evidence log still stalled since {iso(state["stalled_since"])}: {why}.'
+        if line:
+            state['told_at'] = now
+    elif 'stalled_since' in state:
+        line = f'evidence log moving again: {why}; it was stalled from {iso(state["stalled_since"])} ({round(now - state["stalled_since"])}s).'
+        state.pop('stalled_since')
+        state.pop('told_at', None)
+    return state, line, stalled
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
+    parser.add_argument('--remote', required=True)
+    parser.add_argument('--state', required=True, help='directory for the small repository and the state file')
+    parser.add_argument('--notify', required=True, help='JSON argv; the alert line is appended as its last argument')
+    parser.add_argument('--max-age', type=int, default=MAX_AGE)
+    parser.add_argument('--repeat', type=int, default=REPEAT)
+    parser.add_argument('--now', type=float, default=None)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return 2 if error.code else 0
+    try:
+        notify = json.loads(args.notify)
+    except ValueError:
+        notify = None
+    if not isinstance(notify, list) or not notify or not all(isinstance(part, str) for part in notify):
+        print('evidence-log-watch: --notify must be a JSON array of strings', file=sys.stderr)
+        return 2
+    os.makedirs(args.state, exist_ok=True)
+    path = os.path.join(args.state, 'watch.json')
+    as_of, detail = published_as_of(os.path.join(args.state, 'head.git'), args.remote)
+    now = time.time() if args.now is None else args.now
+    before = load(path)
+    state, line, stalled = step(before, now, as_of, detail, args.max_age, args.repeat)
+    code = 1 if stalled else 0
+    if line:
+        print(line, flush=True)
+        try:
+            sent = subprocess.run(notify + [line], capture_output=True, timeout=120)
+            failed = sent.returncode != 0
+        except (OSError, subprocess.TimeoutExpired):
+            failed = True
+        if failed:
+            # Not sent: the alert's own state goes back to what it was, so the next run sends it again; what was read is kept.
+            for key in ('stalled_since', 'told_at'):
+                state.pop(key, None)
+                if key in before:
+                    state[key] = before[key]
+            print('evidence-log-watch: the notification failed; it is tried again on the next run', file=sys.stderr)
+            code = 3
+    save(path, state)
+    print(json.dumps({'stalled': stalled, 'as_of': None if as_of is None else iso(as_of), 'head': detail if as_of is not None else None,
+                      'problem': None if as_of is not None else detail, 'notified': bool(line) and code != 3}))
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

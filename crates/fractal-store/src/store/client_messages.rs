@@ -2546,6 +2546,9 @@ mod tests {
     fn retired_headers_outlive_cursors_issued_late_in_publication_lag() {
         let store = Store::open_memory("node").unwrap();
         seed_backfill(&store,2);
+        // A commit folds for at most BACKFILL_WORK_BUDGET of wall time, so on a loaded host a
+        // seeded subject can still be pending here. The cut below must cover both headers.
+        while store.maintain_client_message_selectors().unwrap() {}
         let through = store.client_messages_page_cut(store.index().unwrap()).unwrap();
         let baseline = paged_backfill_rows(&store,None,None,true);
         {
@@ -2556,6 +2559,20 @@ mod tests {
                 deferred_claim(&transaction,"message/backfill-0001","custom.test.recorded",json!({"note":index}),None);
             }
             transaction.commit().unwrap();
+        }
+        // The first subject's header is retired by the fold, which the commit may have cut short
+        // before reaching it. Fold loan by loan until it is: pending work folds in subject order
+        // and one loan folds at most FOLD_CLAIMS claims, so the second subject's backlog is
+        // still pending and the retirement is not yet published.
+        let retired = |store: &Store| store.connection.write().query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 WHERE subject='message/backfill-0000' AND retired_index IS NOT NULL)",
+            [],|row|row.get::<_,bool>(0),
+        ).unwrap();
+        while !retired(&store) {
+            assert!(store.maintain_client_message_selectors().unwrap());
+        }
+        {
+            let connection = store.connection.write();
             assert!(has_pending(&connection).unwrap());
             connection.execute("UPDATE local_client_message_selectors_v1 SET retired_at_unix_ms=1 WHERE retired_index IS NOT NULL",[]).unwrap();
             connection.execute("UPDATE local_client_message_publications SET published_at_unix_ms=1",[]).unwrap();

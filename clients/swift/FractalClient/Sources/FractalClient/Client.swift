@@ -233,6 +233,7 @@ public actor FractalClient {
     public func notesList() async throws -> Envelope<DirectiveNotes> { try await get("v1/client/notes") }
     public func customSubjectsList(kind: String? = nil, version: Int? = nil, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcePage> { var query: [URLQueryItem] = []; if let kind { query.append(.init(name: "kind", value: kind)) }; if let version { query.append(.init(name: "version", value: String(version))) }; if let cursor { query.append(.init(name: "cursor", value: cursor)) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/custom-subjects", query: query) }
     public func customSubjectsGet(id: String) async throws -> Envelope<Resource> { try await resource("custom-subjects", id: id) }
+    public func privateNotesGet(uri: String) async throws -> Envelope<PrivateNotesSubject> { try await get("v1/client/private-notes/\(Self.pathSegment(uri))") }
     public func hostRepositories(id: String) async throws -> Envelope<HostRepositories> { try await get("v1/client/hosts/\(id)/repositories") }
     public func setsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("sets", cursor: cursor, limit: limit, history: history) }
     public func setsGet(id: String) async throws -> Envelope<Resource> { try await resource("sets", id: id) }
@@ -332,6 +333,7 @@ public actor FractalClient {
     public func missionRevise(id: String, idempotencyKey: String, fence: Fence, parameters: MissionReviseParameters) async throws -> Envelope<ActionResult> { try await submit(try .missionRevise(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func missionStart(id: String, idempotencyKey: String, fence: Fence, parameters: MissionStartParameters) async throws -> Envelope<ActionResult> { try await submit(try .missionStart(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func pairingRevoke(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .pairingRevoke(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func privateNotesWrite(id: String, idempotencyKey: String, fence: Fence, parameters: PrivateNotesWriteParameters) async throws -> Envelope<ActionResult> { try await submit(try .privateNotesWrite(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func promptRespond(id: String, idempotencyKey: String, fence: Fence, parameters: PromptRespondParameters) async throws -> Envelope<ActionResult> { try await submit(try .promptRespond(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewApprove(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewApprove(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func reviewReject(id: String, idempotencyKey: String, fence: Fence, parameters: TargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .reviewReject(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
@@ -478,6 +480,10 @@ public actor FractalClient {
         }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }
         return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    static func pathSegment(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~"))!
     }
 
     static func routedSessionID(_ value: String) -> String {

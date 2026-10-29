@@ -159,5 +159,16 @@ with tempfile.TemporaryDirectory() as tmp:
         changed_stamp, changed_revision = command(str(binary), cwd=base)[0].split('|')
         assert json.loads(changed_stamp)['dirty'] is False and changed_revision == new_head
         assert 'cache-hit=true' in output.read_text() and 'cache HIT' in summary.read_text()
+        # A local build (no supplied revision) watches the index. A file touched but not changed leaves the index's stat data
+        # stale; the stamp's own status must not write the refreshed index back, or every later build reruns the stamp
+        # and rebuilds everything that depends on it.
+        local = {key: value for key, value in os.environ.items() if key != 'AGENT_SPEC_REVISION'}
+        command('cargo', 'build', '--locked', cwd=work, env=local)
+        os.utime(library / 'src/lib.rs', None)
+        os.utime(index, None)
+        _, touched = command('cargo', 'build', '--locked', '-vv', cwd=work, env=local)
+        assert 'Compiling fractal-build-stamp' in touched, touched
+        _, again = command('cargo', 'build', '--locked', '-vv', cwd=work, env=local)
+        assert 'Fresh fractal-build-stamp' in again and 'Compiling ' not in again, again
 
 print('Build snapshot tests passed: real Cargo cold/warm/dirty/new-SHA builds, provenance, flags/compiler/pipeline isolation, PAX restoration')

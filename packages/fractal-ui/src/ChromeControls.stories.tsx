@@ -57,6 +57,7 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Chrome controls',
   component: ChromeControlsStory,
   parameters: { scenario: { _tag: 'primitive', reason: "Exercises icon-button chrome, disabled reasons and menus independently of domain state." }, layout: 'fullscreen' },
@@ -64,6 +65,20 @@ const meta = {
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } },
 } satisfies Meta<typeof ChromeControlsStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'DisabledMenu:primitive',
+  'DisabledMenuLight:primitive',
+  'DisabledReason:primitive',
+  'DisabledReasonLight:primitive',
+  'PhoneTapQuiet:primitive',
+  'ProgrammaticFocusQuiet:primitive',
+  'QuietIcons:primitive',
+  'QuietIconsFlow:primitive',
+  'QuietIconsLight:primitive',
+  'WindowBlurQuiet:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 const header = (canvasElement: HTMLElement) => within(canvasElement).getByTestId('thread-header')

@@ -27,7 +27,9 @@ mod tests {
         store
     }
 
-    fn fault_capture_stall(phase: &str) {
+    /// `request` encloses the read in a request budget; without one it runs as the roster
+    /// refresher does, on a pinned snapshot that only the capture's own bounds limit.
+    fn fault_capture_stall(phase: &str, request: bool) {
         let store = fixture();
         let subjects = vec![String::from("agent/eval.worker")];
         store.append_claim(&ClaimInput {
@@ -58,10 +60,11 @@ mod tests {
             "after" => AFTER_FAULT_ACQUISITION.with(|hook| *hook.borrow_mut() = Some(Box::new(pause))),
             _ => unreachable!(),
         }
-        let parent = smallclaims::read_budget::ReadBudget::new("/fault-stall", std::time::Duration::from_secs(15));
-        let actual = smallclaims::read_budget::with(Some(parent), ||
+        let parent = request.then(||
+            smallclaims::read_budget::ReadBudget::new("/fault-stall", std::time::Duration::from_secs(15)));
+        let actual = smallclaims::read_budget::with(parent, ||
             store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)));
-        println!("fault stall phase={phase} injected={}", reached.load(std::sync::atomic::Ordering::SeqCst));
+        println!("fault stall phase={phase} request={request} injected={}", reached.load(std::sync::atomic::Ordering::SeqCst));
         assert!(reached.load(std::sync::atomic::Ordering::SeqCst), "the control must inject its stall");
         assert_eq!(actual.unwrap(), expected, "a {phase}-work wait is not reader CPU work");
         assert_eq!(store.index().unwrap(), cut, "a stalled read cannot write or repair its cut");
@@ -69,17 +72,56 @@ mod tests {
 
     #[test]
     fn fault_capture_wait_before_reader_does_not_spend_cpu_budget() {
-        fault_capture_stall("before");
+        fault_capture_stall("before", true);
     }
 
     #[test]
     fn fault_capture_wait_during_reader_does_not_spend_cpu_budget() {
-        fault_capture_stall("during");
+        fault_capture_stall("during", true);
     }
 
     #[test]
     fn fault_capture_wait_after_reader_does_not_spend_cpu_budget() {
-        fault_capture_stall("after");
+        fault_capture_stall("after", true);
+    }
+
+    #[test]
+    fn fault_capture_on_a_pinned_snapshot_without_request_waits_through_scheduling_pauses() {
+        // A loaded host deschedules the roster refresher longer than the 25 ms work allowance;
+        // that wait is not query work and must not degrade the published cards.
+        for phase in ["before", "during", "after"] {
+            fault_capture_stall(phase, false);
+        }
+    }
+
+    #[test]
+    fn fault_capture_on_a_pinned_snapshot_without_request_meets_its_wall_backstop() {
+        let store = fixture();
+        let subjects = vec!["agent/eval.worker".into()];
+        let cut = store.index().unwrap();
+        // A stalled page read spends no CPU, so only the wall backstop can end it.
+        Store::stall_next_card_fault_read_for_test(
+            CARD_FAULT_PINNED_WALL_BACKSTOP + std::time::Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        let error = store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)).unwrap_err();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert!(started.elapsed() >= CARD_FAULT_PINNED_WALL_BACKSTOP, "the stall must reach the backstop");
+        assert_eq!(store.index().unwrap(), cut);
+    }
+
+    #[test]
+    fn fault_capture_on_a_pinned_snapshot_without_request_still_meets_a_forced_deadline() {
+        let store = fixture();
+        let subjects = vec!["agent/eval.worker".into()];
+        let cut = store.index().unwrap();
+        // The roster tests force degradation with this hook; on a pinned snapshot it must
+        // expire the work clock, since the wall bound there is the backstop.
+        Store::expire_next_card_fault_read_for_test();
+        let started = std::time::Instant::now();
+        let error = store.read_snapshot(|index| store.mailbox_faults_for(&subjects, index)).unwrap_err();
+        assert_eq!(error.downcast_ref::<St3Error>().unwrap().code, "read-deadline");
+        assert!(started.elapsed() < CARD_FAULT_PINNED_WALL_BACKSTOP, "the forced deadline must not wait for the backstop");
+        assert_eq!(store.index().unwrap(), cut);
     }
 
     #[test]
