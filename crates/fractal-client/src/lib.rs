@@ -5139,7 +5139,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(envelope.code, ErrorCode::Unknown);
-        let error = ClientError::Api(envelope.code.clone(), envelope.message.clone(), Box::new(envelope));
+        let error = ClientError::Api(
+            envelope.code.clone(),
+            envelope.message.clone(),
+            Box::new(envelope),
+        );
         assert!(error.is_transient());
     }
 
