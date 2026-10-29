@@ -39,7 +39,7 @@ pub use priority::{
 };
 pub use peer_process::PeerProcessIdentity;
 pub use process::{
-    ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token,
+    ExecGeneration, ExecObservation, ExecRuntime, StartRejected, process_start_token, process_generation_alive,
 };
 pub use procfs::ProcessNamespaceMismatch;
 pub use pty::{
