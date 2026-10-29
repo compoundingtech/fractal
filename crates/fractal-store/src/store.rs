@@ -8798,14 +8798,65 @@ fn latest_harness_of_incarnation_tx(
         .map_err(internal)
 }
 
+/// Whether readers fold the seat's harness to `latest` itself: no other observation of the
+/// seat is newer, and this incarnation has claimed or reported no work canonically after it,
+/// which the harness fold reads as working until a newer observation replicates. Both use the
+/// fold's canonical order, not arrival order: a replicated work claim can arrive before an
+/// observation it canonically follows.
+fn harness_view_rests_on_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+    incarnation: &str,
+    latest: &ClaimRecord,
+) -> Result<bool, St3Error> {
+    if latest_claim_of_kind_tx(transaction, subject, "harness.observed")?
+        .is_none_or(|claim| claim.id != latest.id)
+    {
+        return Ok(false);
+    }
+    // A canonical key leads with the accepted time, so only work accepted no earlier than the
+    // observation can follow it.
+    let accepted = latest.accepted_at_unix_ms.to_string();
+    let candidates = transaction
+        .prepare(
+            "SELECT id FROM claims INDEXED BY claims_actor_work_activity_index
+             WHERE actor=?1 AND json_extract(body, '$.fields.claim_incarnation')=?2
+               AND kind IN ('work.claimed','work.progress')
+               AND (length(accepted_at_unix_ms)>length(?3)
+                    OR (length(accepted_at_unix_ms)=length(?3) AND accepted_at_unix_ms>=?3))",
+        )
+        .map_err(internal)?
+        .query_map(params![subject, incarnation, accepted], |row| row.get::<_, String>(0))
+        .map_err(internal)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(internal)?;
+    if candidates.is_empty() {
+        return Ok(true);
+    }
+    let latest_key = canonical::claim_key(transaction, &latest.id).map_err(internal)?;
+    for work in candidates {
+        if canonical::claim_key(transaction, &work).map_err(internal)? > latest_key {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Publish a harness observation when any field other than its observation time differs
 /// from the subject's latest replicated observation. When the harness stops working, its
 /// usage that is still only local replicates too.
+///
+/// An unchanged observation refreshes the replicated one at most once a minute, but only while
+/// the harness works or when `heartbeat` is set. A resting native driver re-stamps its state
+/// every five minutes; its event was admitted against the seat's running runtime row, so no
+/// reader needs that re-stamp replicated (a stuck runtime row is what makes the card overlay
+/// read a report's age). Those re-stamps were most of the fleet's `harness.observed` claims.
 fn publish_changed_harness_state_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     input: &ClaimInput,
     now: u128,
+    heartbeat: bool,
 ) -> Result<Option<ClaimRecord>, St3Error> {
     let latest = latest_harness_of_incarnation_tx(
         transaction,
@@ -8852,8 +8903,21 @@ fn publish_changed_harness_state_tx(
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
     let due_usage = now.saturating_sub(USAGE_PUBLISH_INTERVAL_MS);
-    // Refresh remote freshness at most once a minute, without manufacturing transitions.
-    if unchanged && latest.as_ref().is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000) {
+    // Refresh remote freshness at most once a minute, without manufacturing transitions. A
+    // working harness keeps refreshing: a wake counts as taken up by a working report accepted
+    // after it was sent. A resting one replicates its unchanged state only when readers would
+    // otherwise fold the seat to something newer than it.
+    let refreshed = latest
+        .as_ref()
+        .is_some_and(|claim| now.saturating_sub(claim.accepted_at_unix_ms) < 60_000);
+    if unchanged
+        && (refreshed
+            || (resting && !heartbeat
+                && match &latest {
+                    Some(claim) => harness_view_rests_on_tx(transaction, &input.subject, &incarnation, claim)?,
+                    None => false,
+                }))
+    {
         if resting {
             publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage))?;
         }
@@ -8995,6 +9059,11 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
 /// stopped working (a turn's last response can arrive after its idle report). Otherwise it
 /// stays local and pending until one of those holds or the harness stops working.
 ///
+/// A reading equal to the slot's last replicated one never replicates again: it stays local and
+/// leaves nothing pending, since the replicated claim already says the same. Seats at rest
+/// re-sent an unchanged context occupancy, and its five-minute interval replicated each copy.
+/// A `response` reading is never a repeat: the fold sums responses, so two equal ones are two.
+///
 /// Responses keep arriving while a harness reports idle: its subagents and background tasks
 /// answer while the main loop waits. Replicating each of them at once wrote one claim every
 /// few seconds per busy seat, so after the turn's tally they wait for the interval too.
@@ -9028,27 +9097,37 @@ fn publish_due_usage_tx(
                 .map_or(claim.accepted_at_unix_ms, u128::from),
         ),
     };
-    let due = match &last {
-        None => true,
+    let (due, repeat) = match &last {
+        None => (true, false),
         Some((published_at, published_fields)) => {
-            let published: BTreeMap<String, Value> =
+            let mut published: BTreeMap<String, Value> =
                 serde_json::from_str(published_fields).unwrap_or_default();
+            // The publication may have added the native binding the reading lacks.
+            if !input.fields.contains_key("native_session_id") {
+                published.remove("native_session_id");
+            }
             let published_at = (*published_at).max(0) as u128;
-            resting_since.is_some_and(|since| published_at < since)
+            // Each response reading adds to the fold's sum, so an equal one is a new event, not a repeat.
+            let repeat = input.fields.get("semantics").and_then(Value::as_str) != Some("response")
+                && published == input.fields;
+            let due = resting_since.is_some_and(|since| published_at < since)
                 || now.saturating_sub(published_at) >= USAGE_PUBLISH_INTERVAL_MS
                 || ["compactions", "model"]
                     .iter()
-                    .any(|name| published.get(*name) != input.fields.get(*name))
+                    .any(|name| published.get(*name) != input.fields.get(*name));
+            (due && !repeat, repeat)
         }
     };
     if !due {
         let local_id = local_observation_position(local)
             .ok_or_else(|| St3Error::new("internal", "a local observation has no position"))?;
+        // A repeat supersedes an older pending reading: the replicated claim is current again.
+        let pending = (!repeat).then_some(local_id as i64);
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h14dfeb90e40a owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=?3
                  WHERE subject=?1 AND kind='harness.usage' AND slot=?2",
-                params![input.subject, slot, local_id as i64],
+                params![input.subject, slot, pending],
             )
             .map_err(internal)?;
         return Ok(None);
@@ -21283,7 +21362,9 @@ pub fn append_latest_observation_publication(
             }
             let published = match input.kind.as_str() {
                 "harness.observed" => {
-                    publish_changed_harness_state_tx(transaction, &graph.origin, input, now)?
+                    publish_changed_harness_state_tx(
+                        transaction, &graph.origin, input, now, event_runtime.is_none(),
+                    )?
                 }
                 "harness.usage" => {
                     publish_due_usage_tx(transaction, &graph.origin, input, &local, now)?

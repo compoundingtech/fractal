@@ -3700,7 +3700,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 crate::incremental::thread_cpu().saturating_sub(cpu_started),
             );
             if !needed {
-                let wrote = smallclaims::touched::wrote_since(wrote_mark);
+                let wrote = self.missed_by_skipping(&item, wrote_mark, due);
                 if !wrote.is_empty() {
                     self.incremental_correction("member", &item, &reads, &wrote);
                 }
@@ -5693,7 +5693,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction(section, item, &reads, &wrote);
             }
@@ -6248,7 +6248,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
@@ -10053,7 +10053,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(&subject, wrote_mark, due);
             // Rows that are not claims or observations (caches, capabilities) change no
             // graph state a later pass would have to catch up with.
             if !wrote.is_empty() {
@@ -10135,8 +10135,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// An evaluation of `subject` wrote although nothing it read had changed and nothing was due:
-    /// an incremental pass would have missed this write. Counted, and in tests a failure.
+    /// What an evaluation of `item` that nothing marked and nothing made due did, which an
+    /// incremental pass would have missed: the claims it wrote since `wrote_mark`, and a due time
+    /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
+    /// limit it found, which no skipping pass would have woken for.
+    fn missed_by_skipping(&self, item: &str, wrote_mark: usize, due: Option<u128>) -> Vec<String> {
+        let mut missed = smallclaims::touched::wrote_since(wrote_mark);
+        if let Some(due) = due
+            && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
+        {
+            missed.push(format!("due {item} at {due}"));
+        }
+        missed
+    }
+
+    /// An evaluation of `subject` wrote or found an earlier due time although nothing it read
+    /// had changed and nothing was due: an incremental pass would have missed it. Counted by
+    /// cause (`write` or `due`), and in tests a failure.
     fn incremental_correction(
         &self,
         item: &str,
@@ -10144,15 +10159,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         reads: &BTreeSet<String>,
         wrote: &[String],
     ) {
-        crate::performance::record_correction(item);
+        let causes = wrote
+            .iter()
+            .map(|entry| if entry.starts_with("due ") { "due" } else { "write" })
+            .collect::<BTreeSet<_>>();
+        for cause in causes {
+            crate::performance::record_correction(&format!("{item} · {cause}"));
+        }
         smallclaims::profile::note("reconcile incremental correction");
         eprintln!(
-            "st3: incremental correction: {subject} wrote {wrote:?} with no change among {} reads",
+            "st3: incremental correction: {subject} missed {wrote:?} with no change among {} reads",
             reads.len()
         );
         assert!(
             !self.strict_incremental,
-            "an incremental pass would have missed a write by {subject}: it wrote {wrote:?}; its reads: {reads:?}"
+            "an incremental pass would have missed a write or due time by {subject}: {wrote:?}; its reads: {reads:?}"
         );
     }
 
@@ -40344,6 +40365,9 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
 
         // Member A: the first poll records the baseline, which wakes nobody.
         let (issues, comments) = since("2026-09-09T23:59:59Z");
+        // Resuming from the claim's bare position, a poll also reads the open listing once.
+        github.route("/repos/acme/garden/issues?state=open&per_page=100",
+            serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&issues, serde_json::json!([issue("open", "2026-09-10T00:00:00Z", 0)]));
         github.route(&comments, serde_json::json!([]));
         let member_a = Arc::new(github_plugin_store::GithubPluginStore::memory());
@@ -40357,8 +40381,8 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
         let before = vec![delivery("comments", "open", 91), delivery("issues", "open", 91)];
         assert_eq!(delivered(), before);
 
-        // In the gap the issue closes and a second comment lands. Nothing reads the open listing
-        // any more, so it would not show the closure.
+        // In the gap the issue closes and a second comment lands. The open listing no longer
+        // names it, so only reading on from the claim's position shows the closure.
         let (issues, comments) = since("2026-09-10T23:59:59Z");
         github.route("/repos/acme/garden/issues?state=open&per_page=100", serde_json::json!([]));
         github.route(&issues, serde_json::json!([issue("closed", "2026-09-12T00:00:00Z", 2)]));
