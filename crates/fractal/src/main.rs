@@ -14798,6 +14798,11 @@ struct NativeLoopState {
     /// image polls once at once.
     #[serde(skip)]
     claude_attachment_polled: Option<((String, u64, String), u64)>,
+    /// Since when the daemon has answered every attachment check, so the attach window counts
+    /// from the current daemon's first answer. A failed check clears it. Not carried: a
+    /// replacement image counts from its own first answer.
+    #[serde(skip)]
+    claude_attachment_answered: Option<Instant>,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -17590,16 +17595,34 @@ async fn check_claude_attachment(
         };
         report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
     }
-    let attached = checked.as_ref().is_ok_and(|attachment| attachment.attached);
-    let phase = if attached {
-        "attached"
-    } else if started.elapsed() >= claude_attachment_window()
-        || state.claude_attachment_phase == "blocked"
-    {
-        "blocked"
+    // A check that failed, such as a starting daemon's "API is not ready" or no answer within two
+    // seconds, is evidence about the daemon, not the channel. It moves no phase, and the attach
+    // window counts again from the daemon's next answer, so a slow daemon start never reads as a
+    // lost channel.
+    if checked.is_ok() {
+        state.claude_attachment_answered.get_or_insert_with(Instant::now);
     } else {
-        "starting"
+        state.claude_attachment_answered = None;
+    }
+    let phase = match &checked {
+        Ok(attachment) if attachment.attached => "attached",
+        Ok(_)
+            if state.claude_attachment_phase == "blocked"
+                || state.claude_attachment_answered.is_some_and(|answered| {
+                    started.max(answered).elapsed() >= claude_attachment_window()
+                }) =>
+        {
+            "blocked"
+        }
+        Ok(_) => "starting",
+        Err(_) if state.claude_attachment_phase == "attached" => "attached",
+        Err(_) if state.claude_attachment_phase == "blocked" => "blocked",
+        Err(_) => "starting",
     };
+    // Its reason would describe the daemon, so a failed check never republishes a settled phase.
+    if checked.is_err() && phase != "starting" {
+        return Ok(());
+    }
     if state.claude_attachment_reconciled && state.claude_attachment_phase == phase {
         return Ok(());
     }
@@ -17654,7 +17677,8 @@ fn finish_claude_attachment_publication(
     published
 }
 
-/// How long a Claude seat may start before an unattached channel is reported as blocked.
+/// How long a Claude seat may start before an unattached channel is reported as blocked, counted
+/// from the later of the driver's settle and the daemon's first answer to its checks.
 /// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
 /// the boot canaries need not wait out the production window.
 fn claude_attachment_window() -> Duration {
