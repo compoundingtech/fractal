@@ -1628,6 +1628,11 @@ including transport configuration supplied through `GIT_CONFIG_*`. `EVIDENCE_PUS
 that configuration. The child `evidence-wrap` argv is echoed before each signed check (never the token).
 Only the selected checks' covering records are sent, not the checkout's cached evidence namespace; per-crate publication batches at most
 40 explicit refs per push. Repeating `scripts/fractal-test --check CHECK --push origin` publishes already-covered evidence without rerunning that check.
+Once every check is done, one `ls-remote` asks REMOTE for every ref of what the summary calls covered: each covering record's
+tag, note and input-key index refs, the crates' records rust-tests pushed, and records pushed as they were. Its `on-remote` row
+says `confirmed`, or `pushed again` when some were gone and are back. If one is still missing it says `FAILED` and the run exits 1.
+A push git reported as done can be undone before the run ends: on 2026-10-29 the nightly GC deleted the first two records of a
+run whose branch was not pushed yet, and the run said covered (#4186).
 
 **Break-glass for a broken `fractal-test` on main:** `ST_TEST_REEXEC` set to any value skips fractal-test's re-execution of the base's copy, so the
 branch's own copy runs. It is only for signing and pushing a fix to `fractal-test` itself, only on the coordinating lead's word for that one run, and

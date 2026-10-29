@@ -1524,6 +1524,28 @@ class StTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertRegex(out, r'demo +push failed')
 
+    def test_a_covering_record_gone_from_the_remote_after_its_push_is_pushed_again_and_one_that_stays_gone_fails(self):
+        self.commit('b.txt', 'two')
+        origin = Path(self.tmp.name) / 'origin.git'
+        marker = Path(self.tmp.name) / 'dropped'
+        hook = origin / 'hooks/post-receive'
+        hook.write_text(f'#!/usr/bin/env bash\n[ -e {marker} ] && exit 0\nwhile read -r old new ref; do case $ref in refs/tags/evidence/*) '
+                        f'git update-ref -d "$ref"; touch {marker};; esac; done\n')
+        hook.chmod(0o755)
+        code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(marker.exists())
+        self.assertRegex(out, r'on-remote +pushed again .*1 of 2 refs this run pushed were not on origin')
+        tags = git(origin, 'for-each-ref', '--format=%(refname)', 'refs/tags/evidence/').split()
+        self.assertEqual(len(tags), 1, tags)
+        # A remote that drops the tag every time: the summary must not call it covered and pushed.
+        hook.write_text('#!/usr/bin/env bash\nwhile read -r old new ref; do case $ref in refs/tags/evidence/*) git update-ref -d "$ref";; esac; done\n')
+        git(origin, 'update-ref', '-d', tags[0])
+        with mock.patch.object(st_test.time, 'sleep'):
+            code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+        self.assertEqual(code, 1, out + err)
+        self.assertRegex(out, r'on-remote +FAILED .*1 of 2 refs this run pushed were not on origin.*1 still missing')
+
     def test_nothing_is_fetched_or_materialized_when_every_check_is_already_signed(self):
         self.commit('.gitignore', '/repos/\n')
         self.commit('megarepo.lock', '{"version":1,"members":{}}\n')
@@ -2559,6 +2581,7 @@ class PerCrate(StTest):
         self.assertEqual(len(refs) - before, 8, 'four refs for each of the two records: tag, note and both input index refs')
         self.assertEqual(sum('evidence/input/rust-tests/' in ref for ref in refs), 2)
         self.assertEqual(sum('evidence-input/rust-tests/' in ref for ref in refs), 2)
+        self.assertRegex(out, r'on-remote +confirmed .*all 8 refs this run pushed are on origin')
 
     def test_a_push_that_fails_is_a_failed_row_not_a_silent_success(self):
         git(self.work, 'remote', 'set-url', '--push', 'origin', '/nonexistent/origin.git')
@@ -2789,6 +2812,58 @@ class PerCrate(StTest):
         self.assertIn('refs/notes/pushtest/r0', error)
         self.assertEqual(slept.call_count, 2)
         self.assertEqual(self.remote_refs(), [])
+
+    def update_hook(self, body):
+        """A per-ref hook on origin: it gets each ref's name as $1, and a ref it refuses fails alone."""
+        path = Path(self.tmp.name) / 'origin.git/hooks/update'
+        path.write_text('#!/usr/bin/env bash\n' + body)
+        path.chmod(0o755)
+
+    def test_a_push_where_one_ref_fails_names_that_ref_and_lands_the_others(self):
+        refs = self.push_refs(5)
+        self.update_hook('[ "$1" != refs/notes/pushtest/r2 ] || { echo "refused r2" >&2; exit 1; }\n')
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
+            error = st_test.push_records(self.work, 'origin', refs)
+        self.assertIn('push of 1 of 5 refs failed after 3 tries', error)
+        self.assertIn('refs/notes/pushtest/r2', error)
+        self.assertEqual(sorted(self.remote_refs()), sorted(set(refs) - {'refs/notes/pushtest/r2'}))
+
+    def test_a_pushed_ref_gone_from_the_remote_is_pushed_again_and_one_that_cannot_be_is_a_failure(self):
+        # #4186: git said the push was done, and it was; then the remote's GC deleted the records before the summary said covered.
+        origin = Path(self.tmp.name) / 'origin.git'
+        refs = self.push_refs(3)
+        with mock.patch.dict(os.environ, GIT_ENV, clear=True), mock.patch.object(st_test.time, 'sleep'), contextlib.chdir(self.work):
+            self.assertIsNone(st_test.push_records(self.work, 'origin', refs))
+            self.assertEqual(st_test.confirm_pushed(self.work, 'origin', refs)[0], 'confirmed')
+            git(origin, 'update-ref', '-d', 'refs/notes/pushtest/r1')
+            result, why = st_test.confirm_pushed(self.work, 'origin', refs)
+            self.assertEqual(result, 'pushed again', why)
+            self.assertIn('1 of 3 refs this run pushed were not on origin (r1)', why)
+            self.assertEqual(sorted(self.remote_refs()), sorted(refs))
+            git(origin, 'update-ref', '-d', 'refs/notes/pushtest/r0')
+            self.update_hook('[ "$1" != refs/notes/pushtest/r0 ] || exit 1\n')
+            result, why = st_test.confirm_pushed(self.work, 'origin', refs)
+        self.assertEqual(result, 'FAILED', why)
+        self.assertIn('1 of 3 refs this run pushed were not on origin (r0)', why)
+        self.assertIn('refs/notes/pushtest/r0', why)
+
+    def test_a_run_whose_records_vanish_from_the_remote_after_their_push_pushes_them_again_before_its_summary(self):
+        origin = Path(self.tmp.name) / 'origin.git'
+        marker = Path(self.tmp.name) / 'dropped'
+        # The first push of this tree's notes lands, and then they are gone, as the nightly GC deleted a running run's first records.
+        hook = origin / 'hooks/post-receive'
+        hook.write_text(f'#!/usr/bin/env bash\n[ -e {marker} ] && exit 0\nwhile read -r old new ref; do case $ref in refs/notes/evidence/*) '
+                        f'git update-ref -d "$ref"; touch {marker};; esac; done\n')
+        hook.chmod(0o755)
+        code, out, err = self.run_crates('--push', 'origin')
+        self.assertEqual(code, 0, out + err)
+        self.assertTrue(marker.exists())
+        self.assertRegex(out, r'on-remote +pushed again .*2 of 8 refs this run pushed were not on origin')
+        notes = subprocess.run(['git', '-C', str(origin), 'for-each-ref', '--format=%(refname)', 'refs/notes/evidence/'],
+                               capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(len(notes), 2, notes)
+        code, out, err = self.run_crates('--push', 'origin')  # nothing new pushed, nothing to confirm
+        self.assertEqual(code, 0, out + err)
 
     def test_coverage_is_asked_of_the_verifier_once_for_all_the_crates(self):
         self.run_crates()

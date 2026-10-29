@@ -1229,6 +1229,7 @@ def push_record(directory, remote, tree, record):
         extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
                  f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
     pushed = git('push', '--quiet', remote, *[f'{ref}:{ref}' for ref in refs], cwd=directory, env=extra, check=False)
+    CLAIMED.extend(refs)
     if pushed.returncode != 0:
         message = pushed.stderr.decode(errors='replace')
         return message.replace(token, '***').strip()[-400:] if token else message.strip()[-400:]
@@ -1422,6 +1423,54 @@ def push_records(directory, remote, refs):
     return f'push of {len(pending)} of {len(refs)} refs failed after {PUSH_TRIES} tries: {shown}' + (' ...' if len(pending) > 3 else '')
 
 
+EVIDENCE_NAMESPACES = ('refs/tags/evidence/', 'refs/notes/evidence/', 'refs/notes/evidence-input/')
+# The refs of every record this run's summary calls covered and pushed: a check's covering record (tag, note and input-key index refs), the
+# crates' records rust-tests pushed, and records already signed that were pushed as they are. confirm_pushed asks the remote for them.
+CLAIMED = []
+
+
+def record_refs(directory, record):
+    """Every local ref naming RECORD: its tag and note under its tree, and the input-key index refs."""
+    names = text(git('for-each-ref', '--format=%(refname)', *EVIDENCE_NAMESPACES, cwd=directory, check=False)).split()
+    return [name for name in names if name.endswith(f'/{record}')]
+
+
+def missing_on_remote(directory, remote, refs):
+    """The refs of REFS that REMOTE does not have (ls-remote, a chunk of names at a time), or None when the remote cannot be listed."""
+    token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
+    extra = {}
+    if token:  # the same header the pushes send
+        header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
+        count = int(os.environ.get('GIT_CONFIG_COUNT', '0'))
+        extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                 f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
+    have = set()
+    for start in range(0, len(refs), 200):
+        done = git('ls-remote', remote, *refs[start:start + 200], cwd=directory, env=extra, check=False)
+        if done.returncode != 0:
+            return None
+        have |= {line.split('\t', 1)[1] for line in text(done).splitlines() if '\t' in line}
+    return [ref for ref in refs if ref not in have]
+
+
+def confirm_pushed(directory, remote, refs):
+    """(result, detail) of asking REMOTE, once every check is done, for every ref of what this run calls covered. A push git reported done
+    can still be gone by now: on 2026-10-29 the nightly GC deleted the first two records of a run whose branch was not pushed yet, and
+    the run's summary said covered (#4186). A missing ref is pushed again and asked for again; one still missing is a failure."""
+    missing = missing_on_remote(directory, remote, refs)
+    if missing is None:
+        return 'FAILED', f'could not list {remote} to confirm the {len(refs)} refs this run pushed'
+    if not missing:
+        return 'confirmed', f'all {len(refs)} refs this run pushed are on {remote}'
+    shown = ', '.join(ref.rsplit('/', 1)[1][:12] for ref in missing[:4]) + (' ...' if len(missing) > 4 else '')
+    error = push_records(directory, remote, missing)
+    still = None if error else missing_on_remote(directory, remote, missing)
+    if error or still is None or still:
+        why = error or (f'{len(still)} still missing' if still else f'could not list {remote} again')
+        return 'FAILED', f'{len(missing)} of {len(refs)} refs this run pushed were not on {remote} ({shown}); pushing them again failed: {why}'[:400]
+    return 'pushed again', f'{len(missing)} of {len(refs)} refs this run pushed were not on {remote} ({shown}); pushed again and confirmed'
+
+
 def sign_jobs():
     """How many crate signatures run at once (ST_TEST_SIGN_JOBS; default 8)."""
     try:
@@ -1613,6 +1662,7 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
     pushing_from = time.monotonic()
     if args.push and pushable:
         pushed = push_records(directory, args.push, pushable)
+        CLAIMED.extend(pushable)
         if pushed:
             rows.append(('rust-tests:push', 'FAILED', 0, pushed))
             failed = True
@@ -1950,6 +2000,7 @@ def utc(seconds):
 
 def main(argv):
     main_started = time.monotonic()
+    CLAIMED.clear()
     POOL_SETTINGS.clear()
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     scrub_git_environment()
@@ -2219,7 +2270,9 @@ def main(argv):
                 if args.out:
                     why = 'packs exported, not imported or verified' if ok else 'export failed'
                 else:
-                    is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                    is_covered, why, record = ask_verifier(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
+                    if args.push and is_covered and record:
+                        CLAIMED.extend(record_refs(directory, record))
                 return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
 
             # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
@@ -2259,6 +2312,13 @@ def main(argv):
                 rows += row if isinstance(row, list) else [row]
                 failed = failed or check_failed
                 unsigned = unsigned or check_unsigned
+            confirm = sorted(set(CLAIMED)) if args.push and not args.out else []
+            if confirm:
+                # "pushed" meant git said so at the time; this asks the remote now, once, before the summary says what is covered.
+                confirming = time.monotonic()
+                result, why = confirm_pushed(directory, args.push, confirm)
+                rows.append(('on-remote', result, round(time.monotonic() - confirming), why))
+                failed = failed or result == 'FAILED'
             print(f'\nfractal-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
             for name, result, seconds, why in rows:
