@@ -389,12 +389,17 @@ fn admit_report_with(
         return Err(refused("the admitted process generation disappeared"));
     }
     let agent_dir = source_agent_dir(state, fence);
+    // The existing canonical lease roots this process-only capture. Never repeat PTY
+    // inventory/stats or durable fence reads on an ordinary established report.
+    let process_role = fractal_api_core::api::native_role::capture_admitted_process_role(
+        state, fence, peer, &owner,
+    );
     let result = fractal_drivers::harness_state::with_current_ownership(
         &agent_dir,
         &owner.session,
         owner.sequence,
         || {
-            peer.require_kernel()?;
+            process_role.as_ref().map_err(|error| refused(error.to_string()))?.validate()?;
             // check_mailbox includes incarnation and declaration checks; do not
             // repeat mailbox_session_active's store reads on the report path.
             current_provider_record(fence, &agent_dir, &owner)?;

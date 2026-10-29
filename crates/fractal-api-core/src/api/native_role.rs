@@ -10,6 +10,20 @@ fn refused(reason: impl Into<String>) -> St3Error {
     St3Error::new("native-role-refused", reason)
 }
 
+fn provider_source(dir: &std::path::Path) -> Result<Option<(String, Vec<u8>)>, St3Error> {
+    fractal_drivers::harness_events::read_bound_provider_state(dir).map_err(|error| {
+        let absent = error.chain().any(|cause| {
+            cause.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        });
+        if absent {
+            St3Error::new("native-role-unavailable", "canonical native provider evidence is absent")
+        } else {
+            refused(format!("canonical native provider evidence cannot prove custody: {error:#}"))
+        }
+    })
+}
+
 pub fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
     crate::hooks::claude_agent_dir(&state.state_dir.join("drivers"), &fence.subject, &state.node)
 }
@@ -76,6 +90,70 @@ struct PhysicalProof {
     bound: bool,
 }
 
+enum ProcessWitness {
+    Native(native_connector::Witness),
+    Claude(claude_process::Witness),
+}
+
+/// Process-only continuation of an already canonical lease, with no runtime inventory reads.
+pub struct ProcessRoleProof<'a> {
+    peer: &'a NativeDeliveryPeer,
+    provider: &'a str,
+    dir: PathBuf,
+    witness: Option<ProcessWitness>,
+}
+
+impl ProcessRoleProof<'_> {
+    /// Safe to call while the canonical harness ownership lock is already held.
+    pub fn validate(&self) -> Result<(), St3Error> {
+        self.peer.require_kernel()?;
+        match &self.witness {
+            Some(ProcessWitness::Native(witness)) => witness.revalidate().map_err(internal),
+            Some(ProcessWitness::Claude(witness)) => witness.revalidate().map_err(internal),
+            None => require_absent_witness(&self.dir, self.provider),
+        }
+    }
+}
+
+fn require_absent_witness(dir: &std::path::Path, provider: &str) -> Result<(), St3Error> {
+    let present = if provider == "claude" {
+        claude_process::recorded(dir)
+    } else { native_connector::recorded(dir) }.map_err(internal)?;
+    if present { return Err(refused("retained unwitnessed generation gained a launch record")); }
+    Ok(())
+}
+
+/// The caller supplies the exact canonical owner and retains its existing durable fence check.
+/// A recorded launch is authoritative; malformed or departed generations cannot use legacy.
+pub fn capture_admitted_process_role<'a>(
+    state: &AppState, fence: &Fence, peer: &'a NativeDeliveryPeer, owner: &'a Authority,
+) -> Result<ProcessRoleProof<'a>, St3Error> {
+    peer.require_kernel()?;
+    if owner.pid != peer.pid || process(peer.pid)?.birth != owner.process_token {
+        return Err(refused("admitted connector generation changed"));
+    }
+    let dir = source_agent_dir(state, fence);
+    let recorded = if owner.provider == "claude" {
+        claude_process::recorded(&dir)
+    } else { native_connector::recorded(&dir) }.map_err(internal)?;
+    let witness = if !recorded { None } else if owner.provider == "claude" {
+        let wrapper = claude_process::wrapper(&dir).map_err(internal)?;
+        Some(ProcessWitness::Claude(claude_process::capture(
+            &dir, &owner.session, owner.sequence, peer.pid, wrapper,
+            if peer.archives_inbox { claude_process::Caller::Wrapper } else { claude_process::Caller::Channel },
+        ).map_err(internal)?))
+    } else {
+        let wrapper = native_connector::wrapper(&dir).map_err(internal)?;
+        Some(ProcessWitness::Native(native_connector::capture(
+            &dir, wrapper, peer.pid, &owner.provider, connector_role(wrapper, peer, &fence.component),
+            &owner.session, owner.sequence,
+        ).map_err(internal)?))
+    };
+    let proof = ProcessRoleProof { peer, provider: &owner.provider, dir, witness };
+    proof.validate()?;
+    Ok(proof)
+}
+
 fn process(pid: u32) -> Result<Process, St3Error> {
     claude_process::process(pid).map_err(|error| refused(format!("physical process unavailable: {error:#}")))
 }
@@ -107,6 +185,17 @@ fn ownership_state_supported(record: &serde_json::Value, state: fractal_drivers:
     placeholder || state != Activity::Unknown && (state != Activity::Ended || events)
 }
 impl Proof {
+    /// Recheck immutable kernel/launch custody without physical, provider-source or store reads.
+    pub fn validate_process_role(&self) -> Result<(), St3Error> {
+        self.peer.require_kernel()?;
+        match &self.custody {
+            Custody::Native(witness) => witness.revalidate().map_err(internal),
+            Custody::Claude(witness) => witness.revalidate().map_err(internal),
+            Custody::Retained { owner, .. } => require_absent_witness(
+                &source_agent_dir(&self.state, &self.fence), &owner.provider,
+            ),
+        }
+    }
     pub fn wrapper(&self) -> Option<Process> {
         self.physical.as_ref().map(|physical| physical.wrapper)
     }
@@ -117,7 +206,7 @@ impl Proof {
             return Err(refused("publication belongs to another runtime"));
         }
         let (_, raw) = self.source.as_ref().ok_or_else(|| refused("publication has no canonical provider state"))?;
-        let record: serde_json::Value = serde_json::from_slice(raw).map_err(internal)?;
+        let record: serde_json::Value = serde_json::from_slice(raw).map_err(|_| refused("malformed canonical provider authority"))?;
         let stamp = record["writtenAtMs"].as_u64().ok_or_else(|| refused("provider stamp absent"))?;
         let current = fractal_drivers::harness_state::read_raw_at(raw, None, stamp);
         let fields = &publication.claim.fields;
@@ -129,7 +218,7 @@ impl Proof {
         Ok(())
     }
     pub fn validate(&self) -> Result<(), St3Error> {
-        self.peer.require_kernel()?;
+        self.validate_process_role()?;
         if let Some(physical) = &self.physical {
             let current = observe(&self.state, &physical.observation.name)?;
             if current != physical.observation { return Err(refused("the physical runtime generation changed")); }
@@ -142,17 +231,12 @@ impl Proof {
             }
         }
         let dir = source_agent_dir(&self.state, &self.fence);
-        if fractal_drivers::harness_events::read_bound_provider_state(&dir).map_err(internal)? != self.source {
+        if provider_source(&dir)? != self.source {
             return Err(refused("provider ownership changed during admission"));
         }
         match &self.custody {
-            Custody::Native(witness) => witness.revalidate().map_err(internal),
-            Custody::Claude(witness) => witness.revalidate().map_err(internal),
+            Custody::Native(_) | Custody::Claude(_) => Ok(()),
             Custody::Retained { owner, fence } => {
-                let present = if owner.provider == "claude" {
-                    claude_process::recorded(&dir)
-                } else { native_connector::recorded(&dir) }.map_err(internal)?;
-                if present { return Err(refused("retained unwitnessed generation gained a launch record")); }
                 if self.state.store.mailbox_lease_authority(fence)?.as_ref() != Some(owner) {
                     return Err(refused("retained mailbox capability changed"));
                 }
@@ -237,7 +321,7 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
         let (observation, daemon, terminal, wrapper, bound) = physical_selection(state, fence, provider)?;
         Some(PhysicalProof { observation, daemon, terminal, wrapper, bound })
     } else { None };
-    let source = fractal_drivers::harness_events::read_bound_provider_state(&dir).map_err(internal)?;
+    let source = provider_source(&dir)?;
     let custody = if !recorded {
         let candidates = if fence.component == "events" {
             [
@@ -258,7 +342,7 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
             "native-role-unavailable", "native launch witness is absent and no exact admitted lease exists",
         ))?;
         let (runtime, raw) = source.as_ref().ok_or_else(|| refused("retained provider source absent"))?;
-        let value: serde_json::Value = serde_json::from_slice(raw).map_err(internal)?;
+        let value: serde_json::Value = serde_json::from_slice(raw).map_err(|_| refused("malformed canonical provider authority"))?;
         let stamp = value["writtenAtMs"].as_u64().ok_or_else(|| refused("retained provider stamp absent"))?;
         let observed = fractal_drivers::harness_state::read_raw_at(raw, None, stamp);
         if runtime != &fence.incarnation || observed.harness.as_deref() != Some(provider)
@@ -271,7 +355,7 @@ pub fn capture(state: &AppState, fence: &Fence, peer: &NativeDeliveryPeer) -> Re
     } else {
         let wrapper = physical.as_ref().ok_or_else(|| refused("physical wrapper unavailable"))?.wrapper;
         let identity = source.as_ref().filter(|(runtime, _)| runtime == &fence.incarnation).map(|(_, raw)| {
-            let value: serde_json::Value = serde_json::from_slice(raw).map_err(internal)?;
+            let value: serde_json::Value = serde_json::from_slice(raw).map_err(|_| refused("malformed canonical provider authority"))?;
             let stamp = value["writtenAtMs"].as_u64().ok_or_else(|| refused("provider stamp absent"))?;
             let observed = fractal_drivers::harness_state::read_raw_at(raw, None, stamp);
             if observed.harness.as_deref() != Some(provider)

@@ -278,6 +278,8 @@ pub(super) mod tests {
         let mut usage = event(1, "working");
         usage.claim.kind = "harness.usage".into();
         usage.claim.fields.remove("state");
+        usage.claim.fields.remove("evidence_incarnation");
+        usage.claim.fields.remove("ownership_sequence");
         usage
             .claim
             .fields

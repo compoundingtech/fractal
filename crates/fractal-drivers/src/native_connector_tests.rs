@@ -1,6 +1,24 @@
 use super::*;
 use std::collections::BTreeMap;
 
+#[test]
+fn established_channel_reports_lose_process_custody_when_provider_or_wrapper_exits() {
+    for harness in ["omp", "pi"] {
+        let (launch, table) = fixture(harness);
+        let witness = Witness {
+            dir: PathBuf::new(), launch: launch.clone(), peer: table[&30], role: Role::Delivery,
+        };
+        assert!(witness.validate_processes(|pid| read_table(&table, pid)).is_ok());
+        for departed in [10, 20] {
+            let mut after_exit = table.clone();
+            after_exit.remove(&departed);
+            // Neither the accepted channel generation nor persisted ownership labels changed.
+            assert_eq!(after_exit[&30], witness.peer);
+            assert!(witness.validate_launch(&launch, |pid| read_table(&after_exit, pid)).is_err());
+        }
+    }
+}
+
 fn generation(pid: u32, parent: u32) -> Process {
     Process { pid, parent, birth: u64::from(pid) * 100 }
 }
