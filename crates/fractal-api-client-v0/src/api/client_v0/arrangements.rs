@@ -1224,7 +1224,12 @@ mod tests {
         let stop = crate::graph::parse_internal_intent(
             "version 2\nstop \"agent/ada/outside\"\n", "membership-upstream-signal",
         ).unwrap();
-        state.store.apply_internal(&stop, "retire-outside-seat").unwrap();
+        state.store.apply_internal(&stop, "stop-outside-seat").unwrap();
+        assert_eq!(state.store.ordered_membership_state(SUBJECT).unwrap().live_count, 3,
+            "ordinary stop must keep the out-of-window member visible");
+        let token = state.store.selected_desired_token("agent/ada/outside").unwrap().unwrap();
+        state.store.retire_agent("agent/ada/outside", "person/ada", "Work finished",
+            &token, None, "retire-outside-seat", &[]).unwrap();
         state.event_notify.send_replace(state.store.index().unwrap());
         let retired = membership_frame(&mut socket).await;
         assert_eq!(retired["kind"], "changes");
@@ -1336,7 +1341,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn membership_held_window_retires_refills_and_restores_agent_without_layout_edits() {
+    async fn membership_held_window_keeps_stopped_agent_and_refills_on_terminal_retirement() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "membership-agent-lifecycle");
         let session = ClientSession::local(Some("person/ada")).unwrap();
@@ -1367,7 +1372,15 @@ mod tests {
         let stop = crate::graph::parse_internal_intent(
             "version 2\nstop \"agent/ada/seat\"\n", "membership-agent-lifecycle",
         ).unwrap();
-        state.store.apply_internal(&stop, "retire-seat").unwrap();
+        state.store.apply_internal(&stop, "stop-seat").unwrap();
+        let (_, stopped, has_more, stopped_state) = collection_items_with_windows(&state, &session, &subscription,
+            slots.clone().acquire_owned().await.unwrap(), Some(windows.clone())).await.unwrap();
+        assert_eq!(stopped, first, "ordinary stop must not remove or reposition a membership");
+        assert!(has_more);
+        assert_eq!(membership_of(stopped_state).unwrap().live_count, 2);
+        let token = state.store.selected_desired_token("agent/ada/seat").unwrap().unwrap();
+        state.store.retire_agent("agent/ada/seat", "person/ada", "Work finished",
+            &token, None, "retire-seat", &[]).unwrap();
         let after = windows.changes(&state.store).unwrap();
         assert!(collection_windows::Windows::changed("ordered-memberships", &before, &after));
         let (_, second, has_more, second_state) = collection_items_with_windows(&state, &session, &subscription,
@@ -1377,15 +1390,13 @@ mod tests {
         assert!(!has_more);
         assert_eq!(second_state.unwrap().live_count, 1);
         assert!(second_state.unwrap().changed_index > first_state.unwrap().changed_index);
-        state.store.apply_internal(&declare, "restore-seat").unwrap();
-        let (_, restored, has_more, restored_state) = collection_items_with_windows(&state, &session, &subscription,
+        assert_eq!(state.store.apply_internal(&declare, "restore-seat").unwrap_err().code,
+            "recipient-retired");
+        let (_, still_retired, has_more, still_retired_state) = collection_items_with_windows(&state, &session, &subscription,
             slots.clone().acquire_owned().await.unwrap(), Some(windows)).await.unwrap();
-        let restored_state = membership_of(restored_state);
-        assert_eq!(restored[0]["member"], "agent/ada/seat");
-        assert_eq!(restored[0]["position"], first[0]["position"]);
-        assert_eq!(restored_state.unwrap().live_count, 2);
-        assert!(restored_state.unwrap().changed_index > second_state.unwrap().changed_index);
-        assert!(has_more);
+        assert_eq!(still_retired, second, "terminal retirement must not revive the held member");
+        assert_eq!(membership_of(still_retired_state).unwrap().live_count, 1);
+        assert!(!has_more);
         assert_eq!(state.store.claims_for(SUBJECT, Some("ordered-membership.edited")).unwrap().len(), 1);
     }
 
