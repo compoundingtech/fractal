@@ -1240,6 +1240,27 @@ class StTest(unittest.TestCase):
         self.assertNotIn('merged origin/main', out)
         self.assertEqual(git(self.work, 'ls-remote', 'origin', 'refs/heads/feature'), '')  # st-test pushes a branch only when it merged
 
+    def test_main_moving_a_protected_file_outside_the_check_s_ci_inputs_does_not_merge_main_in(self):
+        def lanes(ci_inputs):
+            return json.dumps({'version': 1, 'lanes': {'demo': {'argv': ['sh', '-c', 'echo ran'], 'definition_paths': ['a.txt'],
+                                                                'ci_inputs': ci_inputs}}})
+        for ci_inputs, merges in ((['a.txt'], False), (['a.txt', '.st/evidence-skip-policy.json::checks.demo'], True)):
+            with self.subTest(ci_inputs):
+                self.setUp()
+                git(self.work, 'checkout', '-q', 'main')
+                (self.work / '.st/required-lanes.json').write_text(lanes(ci_inputs))
+                git(self.work, 'add', '.')
+                git(self.work, 'commit', '-q', '-m', 'main: the lanes')
+                git(self.work, 'push', '-q', 'origin', 'main')
+                head = self.branch_behind(0)
+                policy = json.loads(json.dumps(POLICY))
+                policy['checks']['demo']['max_age_s'] = 86400  # a protected file moves on main, in demo's own policy entry
+                self.main_commits('.st/evidence-skip-policy.json', json.dumps(policy, indent=1))
+                code, out, err = self.run_st_test('--check', 'demo', '--push', 'origin')
+                self.assertEqual(code, 0, out + err)
+                self.assertEqual(git(self.work, 'rev-parse', 'HEAD') != head, merges, out + err)
+                self.assertEqual('merged origin/main' in out, merges, out)
+
     def test_a_merge_that_conflicts_stops_the_run_with_the_branch_as_it_was(self):
         head = self.branch_behind(0)
         self.main_commits('b.txt', 'main wrote it too')

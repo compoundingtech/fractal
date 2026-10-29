@@ -1413,7 +1413,9 @@ protected file differs between the branch point and the base, or the current tip
 branch: that is about which tree, so it still falls back), except the three the gate and verifier only ever read at the base when they judge
 a note (`BASE_READ` in the gate: `.st/evidence-keys`, `.st/evidence-authors.json` and `.st/evidence-log-key`). The head tree's copy of
 those decides nothing, so a key rotation or an author-list change on main no longer voids head signatures made before it. A note the
-change distrusts (a dropped key, say) is still refused, by the lists as they are at the base. The protected files the branch ITSELF changes no longer make it fall back: they are
+change distrusts (a dropped key, say) is still refused, by the lists as they are at the base. Nor does main moving a protected file that the
+run's check does not use, when the base declares that check's CI inputs (see "A check's CI inputs" below): a change to the gate or the
+verifier on main keeps the head tree for linux-gate, say, and the decision line says `ci_inputs=kept`. The protected files the branch ITSELF changes no longer make it fall back: they are
 the run's protected changes, and a protected change skips only on a `pull_request` run whose note is a host level's (`OWN_LEVELS` in the gate),
 since 2026-10-26 (Nathan: our pull requests skip CI entirely). That is safe because the run is judged by the gate and verifier the workflow
 fetches from `BASE_SHA`, never the pull request's copies, and the merge queue runs every check in full, so a change to the machinery is tested
@@ -1440,6 +1442,37 @@ percentile 11 and the 99th 22, so the bound refuses only outliers. The merge que
 limits how much a green pull request can differ from what lands, not what lands. The number lives in the gate (read from the accepted base,
 a protected path), so changing it is a reviewed change like any other.
 
+### A check's CI inputs
+
+A lane entry in `.st/required-lanes.json` may declare `ci_inputs`: the protected CI files the check uses, in the forms a skip policy's
+`inputs` take plus three more:
+
+- `PATH` and `!PATH`: a file or directory, and one left out of a directory declared beside it;
+- `PATH::jobs.ID`: one job of a generated workflow. That is the job's block, the block of every job it `needs`, transitively, and the
+  workflow's top-level blocks (`on`, `env`, `permissions`, `concurrency`, ...), so a top-level `env` change moves every job's key;
+- `PATH::KEY.KEY`: one entry of a JSON file, such as `.st/required-lanes.json::lanes.linux-gate` or
+  `.st/evidence-skip-policy.json::checks.linux-gate`.
+
+When main moved protected files since a pull request's branch point, the gate (`branch_point_verdict`, with the run's check) projects the
+check's `ci_inputs` (as the base declares them, read with the base's verifier) at the branch point, the base and the current tip. If all
+three keys are equal, main moved nothing this check uses, and the head tree is still asked about (`ci_inputs=kept`). Otherwise it falls
+back as before (`ci_inputs=changed`). Every entry must also name something at all three revisions: an entry that names nothing (a
+job main renamed, a typo) would project to nothing everywhere and look unchanged however the job it meant changes, so it counts as changed. A lane with no `ci_inputs`, or a base that cannot say, keeps the earlier rule: any protected change on
+main falls back. `scripts/fractal-test` asks the same question for each check it signs before it decides to merge main in.
+
+ci-script-tests and genie-freshness declare none, because their own tests read the gate, the verifier, the policy and the lanes. A change
+to those therefore voids their signatures and no others: linux-gate, typescript-client, fractal-web and rust-tests keep theirs. fractal-web's
+scripts read all of `fleet.yml` and `workspace-ci.ts`, so it declares both whole.
+
+**Keeping the declarations honest.** `scripts/lane-definition-closure --check`, which genie-freshness runs on the whole tree, fails a lane
+that declares `ci_inputs` and executes or reads a protected file they leave out. A selector covers only its part, so a lane that reads the
+whole file must declare it whole; an excluded path is left out. It also fails an entry that names nothing in the tree (a file, job or JSON entry that isn't there),
+read with the verifier's own selector. Files only ever read at the base (`BASE_READ`) don't count. Notes carry
+nothing new: a head-tree note is about the head tree whichever way the gate decides, so older notes need no special case.
+
+`.st/rust-test-inputs.json` is not protected. It is data that changes with ordinary code, and the verifier reads it only at the base when it
+computes the per-crate keys.
+
 ### Which lane definition a pull request is held to
 
 A lane's definition paths are wide (all of `scripts/`, `.st/`, `flake.nix`, `flake.lock` and the nextest and clippy settings for the Rust
@@ -1452,16 +1485,16 @@ the branch point (`definition_changed` otherwise: the pull request edits its lan
 `lane_definition_sha256` (`wrong_definition` otherwise). A level whose by_level rule says `"lane": "tree"` (the host level, since 2026-10-26)
 may edit its lane: its note must then carry the digest of the lane as the SIGNED tree defines it (the base's argv and paths, the tree's bytes;
 `tree_sha256` beside `sha256` in `lane_definition`), so it covers that edited definition and no other. `evidence-wrap` records that digest.
-The verifier refuses a lane base that is not an ancestor of the base, and one whose
-`.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's either way; the gate never
-uses a head tree whose branch point has another lane file anyway (it is a protected path). What this admits, stated plainly: a note made
+The verifier refuses a lane base that is not an ancestor of the base, and one
+whose entry for this lane in `.st/required-lanes.json` differs from the base's (`definition_changed`), so the argv and paths are the base's
+either way. Another lane's entry changing on main is not this lane's, and with "A check's CI inputs" the gate keeps the head tree then. What this admits, stated plainly: a note made
 with an older lane definition that main had accepted, for a pull request that changed none of it; the merge queue still tests the
 integrated tree with today's definition, `pull_request` only, sampling unchanged. A merge-tree run (a fallback, or a branch that holds the
 base) is held to the base as before. To keep the head tree the gate does not fetch the base again at depth 1 in head mode (that would cut the
 history the ancestry check reads).
 
 `scripts/fractal-test` signs and reports the same way: it takes the branch point of the commit it signs (the base itself when the branch holds the
-base's tip, or when the lane file changed on main since the branch left it), judges a lane edit against it, passes it to `evidence-wrap
+base's tip, or when main changed the lane entry of a check it signs since the branch left it), judges a lane edit against it, passes it to `evidence-wrap
 --lanes-from` (so the note carries its digest) and asks the verifier with `--lane-base`, in a run and under `--status`.
 
 ### Host keys
@@ -1933,7 +1966,7 @@ values and `-` for none:
 ```
 evidence-decision v1 check=… decision=skip|run outcome=satisfied|degraded|no_note|rejected|unavailable
 reason=… record=… signer=… trust_level=… kind=… tier=… observed_at=… age_s=… max_age_s=… attempts=… enforce=true|false match=tree|inputs source_inputs=…
-tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… notes_fetch=ok|none|failed
+tree=… tree_of=head|merge pr_head=… merge_tree=… head_tree=used|fallback:…|not-a-pull-request behind=… ci_inputs=kept|changed|- notes_fetch=ok|none|failed
 policy_sha256=… keys_sha256=… head=… base=… event=… pr=… repo=… run=… attempt=… fork=true|false verifier_sha256=… gate_sha256=…
 ```
 
