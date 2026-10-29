@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The catch-up writer test counts the page each writer hold covers (batches sealed, envelopes received and admitted, claims projected, repairs applied) instead of timing the holds; smallclaims' paged paths report what each hold covered to a test's holds_during scope",
+  "replay": {"status": "none", "detail": "No claim or projection replay."},
+  "schema": {"status": "none", "detail": "No table, file or schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},
+  "compatibility": {"status": "none", "detail": "No client, wire or CLI change. smallclaims::windows::holds gains holds_during, Holds and covered; longest_during returns what it did. Outside a holds_during scope, which only tests open, covered is one thread-local read."},
+  "downtime": {"status": "none", "detail": "Nothing runs at upgrade."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert the change."}
+}

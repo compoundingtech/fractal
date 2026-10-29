@@ -123,6 +123,21 @@ const CODEX_CRASH_LOOP_INTERVAL_MS: u128 = 5 * 60_000;
 const CLAUDE_TRUST_SCREEN_RECHECK_MS: u128 = 2_000;
 const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
+
+/// While a seat has reached Claude's trust prompt more than [`CLAUDE_TRUST_RECOVERY_ATTEMPTS`]
+/// times within [`CLAUDE_TRUST_RECOVERY_WINDOW_MS`], recovery holds back; this is when enough of
+/// those prompts leave the window for it to resume. `None` while recovery may run.
+fn claude_trust_recovery_resumes_at(prompts: &[crate::model::ClaimRecord], now: u128) -> Option<u128> {
+    let mut recent = prompts
+        .iter()
+        .map(|claim| claim.accepted_at_unix_ms)
+        .filter(|at| now.saturating_sub(*at) < CLAUDE_TRUST_RECOVERY_WINDOW_MS)
+        .collect::<Vec<_>>();
+    recent.sort_unstable_by(|a, b| b.cmp(a));
+    recent
+        .get(CLAUDE_TRUST_RECOVERY_ATTEMPTS)
+        .map(|at| at.saturating_add(CLAUDE_TRUST_RECOVERY_WINDOW_MS))
+}
 // A failed checkout fetch or worktree command waits this long before Git runs again.
 const CHECKOUT_RETRY_MS: u128 = 30_000;
 /// How long a member's launch evidence, read once, is trusted before it is read again.
@@ -4632,15 +4647,12 @@ impl<R: RuntimeControl> Reconciler<R> {
             .filter(|prompt| prompt.kind != "plan");
         let shown = match shown {
             Some(prompt) if driver == "claude" && prompt.kind == "trust" => {
-                let recent = self
-                    .claude_trust_prompts(&subject.subject)?
-                    .iter()
-                    .filter(|claim| {
-                        now.saturating_sub(claim.accepted_at_unix_ms)
-                            < CLAUDE_TRUST_RECOVERY_WINDOW_MS
-                    })
-                    .count();
-                (recent > CLAUDE_TRUST_RECOVERY_ATTEMPTS).then_some(prompt)
+                let resumes_at =
+                    claude_trust_recovery_resumes_at(&self.claude_trust_prompts(&subject.subject)?, now);
+                if let Some(at) = resumes_at {
+                    smallclaims::touched::note_due(at);
+                }
+                resumes_at.map(|_| prompt)
             }
             shown => shown,
         };
@@ -5371,7 +5383,10 @@ impl<R: RuntimeControl> Reconciler<R> {
                 now.saturating_sub(claim.accepted_at_unix_ms) < CLAUDE_TRUST_RECOVERY_WINDOW_MS
             })
             .count();
-        if recent > CLAUDE_TRUST_RECOVERY_ATTEMPTS {
+        if let Some(resumes_at) = claude_trust_recovery_resumes_at(&prompts, now) {
+            // A seat left at the dialog changes nothing a pass would notice, so the member is
+            // due again when recovery may resume.
+            smallclaims::touched::note_due(resumes_at);
             let key = format!(
                 "claude-trust-prompt-repeated:{}:{incarnation}",
                 subject.subject
@@ -43753,6 +43768,19 @@ agent "plain" {{ workspace {:?}; harness "claude" {{}} }}
             "Claude keeps stopping at its workspace trust prompt"
         );
         assert_eq!(attention[0].targets, ["agent/node.seat"]);
+        // Nothing changes while the seat sits at the dialog, so the member is due again when
+        // the oldest prompt that holds recovery back leaves the window.
+        let mut prompts = reconciler
+            .claude_trust_prompts("agent/node.seat")
+            .unwrap()
+            .iter()
+            .map(|claim| claim.accepted_at_unix_ms)
+            .collect::<Vec<_>>();
+        prompts.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(
+            reconciler.incremental.next_due("member:agent/node.seat"),
+            Some(prompts[CLAUDE_TRUST_RECOVERY_ATTEMPTS] + CLAUDE_TRUST_RECOVERY_WINDOW_MS)
+        );
     }
 
     fn harness_claim(subject: &str, state: &str, incarnation: &str) -> ClaimInput {
