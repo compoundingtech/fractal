@@ -28,7 +28,7 @@ pub fn quiet_since_at(
 ) -> rusqlite::Result<Option<u128>> {
     let snapshot = snapshot_unix_ms.to_string();
     Ok(connection
-        .prepare_cached(&canonical_sql(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h880386559c79 owner=fractal_store::store::quiet_claims TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT accepted_at_unix_ms FROM claims
              WHERE subject=?1
                AND kind IN ('work.claimed','work.progress','work.extended','work.wait-ended','step-run.carried')
@@ -36,7 +36,7 @@ pub fn quiet_since_at(
                AND (length(accepted_at_unix_ms), accepted_at_unix_ms) <= (length(?3), ?3)
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         ))?
-        .query_row(params![subject, attempt, snapshot], |row| row.get::<_, String>(0))
+        .query_row(/* sqlite-large-value: allow-for-now lv-h0843c6ae4c5c owner=fractal_store::store::quiet_claims TODO=trace-statement-and-value-representation */ params![subject, attempt, snapshot], |row| row.get::<_, String>(0))
         .optional()?
         .and_then(|at| at.parse().ok()))
 }
@@ -84,7 +84,7 @@ pub(super) fn enrich_stalled_at(
     }
     let snapshot = snapshot_unix_ms.to_string();
     let Some((episode, at)) = connection
-        .prepare_cached(&canonical_sql(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h3277c3220609 owner=fractal_store::store::quiet_claims TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT json_extract(body, '$.fields.episode'), accepted_at_unix_ms FROM claims
              WHERE subject=?1 AND kind='operational.failure'
                AND json_extract(body, '$.fields.condition')=?2
@@ -92,7 +92,7 @@ pub(super) fn enrich_stalled_at(
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
         ))?
         .query_row(
-            params![view.subject, STEP_STALLED_CONDITION, snapshot],
+            /* sqlite-large-value: allow-for-now lv-h45ca3055ada6 owner=fractal_store::store::quiet_claims TODO=trace-statement-and-value-representation */ params![view.subject, STEP_STALLED_CONDITION, snapshot],
             |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
         )
         .optional()?
@@ -135,7 +135,7 @@ impl Store {
     pub fn stalled_runs(&self, as_of: u128) -> Result<BTreeSet<String>> {
         let connection = self.readers.get();
         let faults = connection
-            .prepare_cached(&canonical_sql(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-hae9b17afdb8c owner=fractal_store::store::quiet_claims TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT subject, json_extract(body, '$.fields.episode') FROM claims
                  WHERE kind='operational.failure'
                    AND json_extract(body, '$.fields.condition')=?1
