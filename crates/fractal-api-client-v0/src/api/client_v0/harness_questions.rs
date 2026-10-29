@@ -672,13 +672,14 @@ mod tests {
     async fn resolved_metadata_wire_shape_excludes_retained_receipt() {
         let (_root, mut state, session, question, request) = fixture();
         state.harness_question_sink = Some(Arc::new(Sink { calls:AtomicUsize::new(0), timed_out:true }));
-        invoke(&state, &session, &request).await.unwrap();
+        assert_eq!(invoke(&state, &session, &request).await.unwrap().0["harness_answer"]["status"], "accepted");
         let resolved = held(&state, &question.id).unwrap();
         let resolution = resolved.resolution.as_ref().unwrap();
         assert!(resolution.receipt.is_some());
         let expected = json!({
             "kind":"harness-question", "id":question.id, "revision":question.revision,
-            "agent":"agent/ada", "session":"q0", "native_id":"q0", "runtime_incarnation":"q0",
+            "agent":"agent/ada", "session":"q0",
+            "native_id":fractal_schema::harness_questions::native_id_digest("q0"), "runtime_incarnation":"q0",
             "questions":[{"id":"q0","options":2,"multi":false,"required":true}],
             "updated_at":client_timestamp(resolution.resolved_at_unix_ms),
             "observed_at":question.observed_at_unix_ms,

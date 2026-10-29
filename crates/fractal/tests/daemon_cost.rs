@@ -2917,12 +2917,13 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     }
     let mut samples = Vec::new();
     for attempt in 0..4 {
-        let capabilities: Value = person.get("/v1/client/capabilities").await.unwrap();
+        let capabilities = fractal_client::Client::unix_as(&socket, "person/bench-operator")
+            .capabilities().await.unwrap();
         let request = json!({
             "api_version": "st3.client.v0", "type": "message.send",
             "id": format!("action/resolved-history-send-{attempt}"),
             "idempotency_key": format!("resolved-history-send-key-{attempt}"),
-            "fence": {"snapshot_id": capabilities["snapshot"]["id"], "subject_revisions": {}},
+            "fence": {"snapshot_id": capabilities.snapshot.id, "subject_revisions": {}},
             "parameters": {"to": fixture.subjects.seats[0], "content": "Invented cost probe"},
         });
         let cost = counted(|| async {
