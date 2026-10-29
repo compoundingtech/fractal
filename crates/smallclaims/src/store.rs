@@ -2582,12 +2582,12 @@ impl Store {
     }
 
     /// Signatures this node asks its peers for: first those of envelopes it holds until their
-    /// writer's signature arrives, then those missing on envelopes it admitted before their
-    /// writer's window was keyed. See `signature_backfill`.
+    /// writer's signature arrives, then those the backfill scan found missing on envelopes it
+    /// admitted before their writer's window was keyed. See `signature_backfill`.
     pub fn replication_signature_requests(&self) -> Result<Vec<ReplicaEnvelopeId>> {
         let mut requests = self.held_signature_requests()?;
         requests.extend(
-            self.signature_backfill_requests(REPLICATION_SIGNATURE_LIMIT - requests.len())?,
+            self.signature_backfill_requests(REPLICATION_SIGNATURE_LIMIT - requests.len()),
         );
         Ok(requests)
     }
@@ -6715,7 +6715,7 @@ impl Store {
         let snapshot = self.replication_snapshot()?;
         let digests = self.exported_digests(&snapshot)?;
         let _timing = time_stage(&self.replication_timers.export);
-        // A guard summary stays on this node, so it asks no peer and advances no scan.
+        // A guard summary stays on this node, so it asks no peer and takes no backfill request.
         let signature_requests = if include_buckets {
             self.replication_signature_requests()?
         } else {
