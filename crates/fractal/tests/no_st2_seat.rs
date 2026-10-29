@@ -38,7 +38,7 @@ fn a_claude_seat_runs_with_no_st2_on_the_machine() {
             "python3",
         ])
         .arg(repo.join("scripts/fractal-no-st2-eval/run"))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .output()
         .expect("run the no-st2 seat eval");

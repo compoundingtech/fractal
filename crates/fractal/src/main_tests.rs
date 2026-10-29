@@ -2056,6 +2056,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 refilled_at_ms: 1_234,
             },
             claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
+            claude_attachment_answered: Some(Instant::now()),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -2082,6 +2083,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // Nor the daemon's first answer: the replacement's attach window counts from its own.
+    assert!(back.loop_state.claude_attachment_answered.is_none());
     // An unpushed attachment poll is not carried: the replacement image polls once at once.
     assert!(back.loop_state.claude_attachment_polled.is_none());
 }
@@ -2760,7 +2763,7 @@ fn every_cli_command_has_a_valid_help_surface() {
             // These describe real executable filenames, not the product identity.
             if line.contains("Install Fractal (st3 and the st link) and pty")
                 || line.contains(
-                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty)",
+                    "Keep the installed Fractal executables (fractal, st3, st, fractal-migrate, and pty)",
                 )
             {
                 continue;

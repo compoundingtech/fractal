@@ -32,21 +32,19 @@ const SETTLE_MS: u64 = 2_000;
 /// A run whose rollout cannot be found by then ends without tokens.
 const ROLLOUT_WAIT_MS: u64 = 60_000;
 
-/// A running subagent's lease. `ST3_SUBAGENT_LEASE_MS` can only shorten it, so tests of an
+/// A running subagent's lease. `FRACTAL_SUBAGENT_LEASE_MS` can only shorten it, so tests of an
 /// unrenewed lease need not wait out the default.
 fn lease_ms() -> u64 {
-    std::env::var("ST3_SUBAGENT_LEASE_MS")
-        .ok()
+    fractal_drivers::contracts::env("ST3_SUBAGENT_LEASE_MS")
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|cap| *cap > 0)
         .map_or(SUBAGENT_LEASE_MS, |cap| cap.min(SUBAGENT_LEASE_MS))
 }
 
 /// How long a subagent its harness reports while it runs may go unreported.
-/// `ST3_SUBAGENT_SILENCE_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does the lease.
+/// `FRACTAL_SUBAGENT_SILENCE_MS` can only shorten it, as `FRACTAL_SUBAGENT_LEASE_MS` does the lease.
 fn silence_ms() -> u64 {
-    std::env::var("ST3_SUBAGENT_SILENCE_MS")
-        .ok()
+    fractal_drivers::contracts::env("ST3_SUBAGENT_SILENCE_MS")
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|cap| *cap > 0)
         .map_or(ledger::SILENT_GRACE_MS, |cap| {
