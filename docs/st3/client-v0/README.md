@@ -6,8 +6,6 @@ in [`schemas`](schemas) and [`fixtures`](fixtures) are the normative wire exampl
 clients consume the same JSON; no client parses CLI output, Markdown, KDL, claim envelopes, or
 harness transcript files.
 
-Proposed changes extensions (not implemented): [per-turn files, patches, and branch Changes scope](turn-diff-design.md).
-
 The reusable Rust package is [`crates/fractal-client`](../../../crates/fractal-client) and supports both the
 local Unix socket and authenticated paired HTTP over Tailscale or optional Fabric. The Swift package is
 [`clients/swift/FractalClient`](../../../clients/swift/FractalClient). The Expo TypeScript client is
