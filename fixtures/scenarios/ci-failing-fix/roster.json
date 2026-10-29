@@ -92,6 +92,7 @@
         "workspace": "~/src/atlas/.worktrees/builder"
       }
     ],
+    "devices": [],
     "machines": [
       {
         "capacity": {
@@ -146,7 +147,8 @@
         "state": "running",
         "updated_at": "2030-01-01T11:50:00.000Z"
       }
-    ]
+    ],
+    "sessions": []
   },
   "timeline": [
     {

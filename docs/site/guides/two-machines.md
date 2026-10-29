@@ -54,4 +54,28 @@ Prefer the private prompt (`fractal fleet join`) rather than putting the credent
 
 Terminal access requires an explicit static operator grant for `st3/pty/FLEET_ID`, which the adapter never edits. Unconfirmed attempts expire after a Fabric restart; issue a fresh invitation rather than manually granting trust. Preserve adapter journals across restarts so uncertain confirmation can be recovered with the original code, name and local member key. Static or other-owner grants are not revoked by pairing or membership reconciliation.
 
+### Connect a client over Fabric
+
+Use the remote host's Fabric NodeID or its unique trusted Fabric peer name:
+
+```sh
+fractal --endpoint fabric://studio/st3-client-v0 agents ls
+```
+
+The client asks the local Fabric daemon to dial `st3-client-v0`; no TCP listener,
+manual tunnel, or HTTP proxy is needed. Peer names match without regard to case.
+Use a NodeID when names are ambiguous. Fabric must already trust the remote
+machine and grant this protocol; the membership adapter manages the grant
+for current fleet members.
+
+For paired client reads and actions, supply the remote gateway's bearer credential
+through `FRACTAL_CLIENT_CREDENTIAL`, preferably injected by your credential manager.
+Do not put it in the endpoint URI or command arguments. The CLI does not silently
+reuse an HTTP gateway's saved pairing profile for a different Fabric endpoint.
+
+This transport exposes only `/v1/client/` routes and `/v1/health`. Native harness,
+mailbox, internal, and administration routes still require their appropriate local
+transport. Fabric routing does not bypass client API pairing, bearer credentials,
+or device signing: the remote daemon applies the same client authorization rules.
+
 See [Fleet membership](fleet-join.md) for trust and invitation behavior and [replication](https://github.com/compoundingtech/fractal/blob/main/docs/st3/replication.md) for digests and recovery. Keep raw state and keys when investigating inconsistent history; do not reset a replica merely to make its status look healthy.

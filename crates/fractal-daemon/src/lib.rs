@@ -40,6 +40,8 @@ pub mod driver_hook;
 pub use fractal_store::environment;
 pub use fractal_kernel::evidence;
 pub use fractal_api_mailbox::subagent_sessions;
+/// Pairing grants a device the client gateway over Fabric; revoking it removes the grant.
+pub use fractal_kernel::fabric_gateway;
 pub use fractal_kernel::fleet;
 /// Silent messages are stored and readable without waking the recipient.
 pub use fractal_store::silent;
@@ -81,6 +83,7 @@ pub use fractal_peer::peer;
 pub use fractal_reconcile::placement;
 pub use fractal_store::person_request;
 pub use fractal_kernel::pricing;
+pub use fractal_store::private_notes;
 pub use smallclaims::{performance, profile};
 pub use fractal_kernel::projection;
 pub use fractal_store::provenance;
@@ -112,6 +115,7 @@ pub use fractal_telemetry::startup_telemetry;
 pub use fractal_evidence::store;
 pub mod subagents;
 pub use fractal_seats::suspension;
+pub use fractal_seats::external_sessions::omp_process_transcript;
 pub use fractal_reconcile::seat_snapshot;
 pub use fractal_telemetry::telemetry;
 pub use smallclaims::task_cpu;
@@ -130,6 +134,7 @@ mod telemetry_tests;
 /// Attaches a local terminal to another fleet host's PTY session over Fabric, without st daemons.
 pub mod terminal_fabric;
 pub use fractal_kernel::terminal_binding;
+pub use fractal_kernel::waiting_on;
 /// Runs each agent as its own Unix user, in its own namespaces and root-owned cgroup.
 pub use fractal_store::tile_registry;
 pub mod tiles;

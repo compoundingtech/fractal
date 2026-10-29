@@ -22,7 +22,7 @@ export type SidebarFoldersBinding = Pick<AgentFoldersProps, 'tree' | 'canDrop' |
 
 /**
  * Subscription owns the existing sidebarFolders atom's editor, inventory follow and abort finalizer.
- * No second reader/editor or persistence of st domain data. Source injection exercises this without the kit.
+ * No second reader/editor or persistence of Fractal domain data. Source injection exercises this without the kit.
  */
 export const useSidebarFolders = ({ roster, source = folders, query = '', collapsedSource }: SidebarFoldersOptions): SidebarFoldersBinding => {
   const registry = React.useContext(RegistryContext)

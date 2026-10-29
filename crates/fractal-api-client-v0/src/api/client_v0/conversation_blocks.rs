@@ -45,7 +45,7 @@ pub async fn chunk(
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let (session_id, resolved) = resolve_conversation(&state, &id)?;
-    if let Some(owner) = conversation_owner_host(&state, &session, resolved.managed.as_ref())? {
+    if let Some(owner) = conversation_owner_host(&state, &session, resolved.routing_owner.as_ref())? {
         let value = state
             .client_relay
             .as_ref()
@@ -708,6 +708,7 @@ mod tests {
             crate::external_sessions::TimelineOrder::Sequence,
             None,
             10,
+            true,
         )
         .unwrap();
         let item = page
@@ -2217,6 +2218,7 @@ mod tests {
                     crate::external_sessions::TimelineOrder::Sequence,
                     None,
                     10,
+                    true,
                 )
             })
         };
@@ -2389,21 +2391,40 @@ mod tests {
         })];
         let mut session = ClientSession::local(Some("person/example")).unwrap();
         session.conversation_blocks = true;
-        let prepared = prepare(&parent, &session, &parent.id, items).unwrap();
+        let routing_parent = managed_session_id("agent/child-owner", "runtime:i1");
+        let prepared = prepare(&parent, &session, &routing_parent, items.clone()).unwrap();
         let agents = prepared[0]["body"]["blocks"][0]["view"]["agents"]
             .as_array()
             .unwrap();
         let linked = agents[0]["conversation"]["session_id"].as_str().unwrap();
         assert_eq!(
             linked,
-            crate::subagent_sessions::child_session_id(&parent, "sub-lived")
+            crate::subagent_sessions::child_session_id(&parent, "sub-lived", &routing_parent)
         );
         assert!(linked.starts_with("session/external-child-"));
         assert!(agents[1].get("conversation").is_none());
+        let parts = crate::subagent_sessions::child_parts(linked).unwrap();
+        assert_eq!(parts.external_parent_id, parent.id);
+        assert_eq!(parts.routing_parent_session_id, routing_parent);
+
+        let child = crate::subagent_sessions::resolve_child_of(&parent, linked, "sub-lived")
+            .unwrap()
+            .unwrap();
+        let descendants = child.transcript.with_extension("");
+        std::fs::create_dir_all(&descendants).unwrap();
+        std::fs::copy(&child.transcript, descendants.join("sub-lived.jsonl")).unwrap();
+        let prepared = prepare(&child, &session, linked, items).unwrap();
+        let descendant = prepared[0]["body"]["blocks"][0]["view"]["agents"][0]
+            ["conversation"]["session_id"]
+            .as_str()
+            .unwrap();
+        let parts = crate::subagent_sessions::child_parts(descendant).unwrap();
+        assert_eq!(parts.external_parent_id, child.id);
+        assert_eq!(parts.routing_parent_session_id, routing_parent);
     }
 
     #[tokio::test]
-    async fn child_session_ids_open_their_own_timeline_and_header_follows_negotiation() {
+    async fn managed_child_session_ids_open_their_own_timeline_and_header_follows_negotiation() {
         use axum::body::{Body, to_bytes};
         use axum::http::Request;
         use tower::ServiceExt as _;
@@ -2425,7 +2446,27 @@ mod tests {
         );
         std::fs::write(child_directory.join("sub-1.jsonl"), child).unwrap();
         let mut state = super::super::tests::test_state_named(root.path(), "child-owner-test");
-        state.native_session_home = Some(root.path().to_path_buf());
+        let owner = "agent/child-owner";
+        let incarnation = "child-runtime:i1";
+        let routing_parent = managed_session_id(owner, incarnation);
+        // Only the durable managed binding can find this parent: no native inventory home.
+        state.native_session_home = None;
+        for (kind, fields) in [
+            ("runtime.observed", json!({"status":"running", "runtime_id":"child-runtime", "incarnation_id":incarnation})),
+            ("harness.observed", json!({"state":"idle", "driver":"omp", "incarnation_id":incarnation})),
+            ("harness.session-file", json!({"harness":"omp", "agent":owner, "incarnation_id":incarnation,
+                "session_id":parent.native_id, "path":parent.transcript})),
+        ] {
+            state.store.append_claim(&ClaimInput {
+                subject: owner.into(),
+                kind: kind.into(),
+                actor: Some(owner.into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+        }
         let app = super::super::super::router(state.clone());
         let request = |uri: String, blocks: bool| {
             let app = app.clone();
@@ -2445,12 +2486,13 @@ mod tests {
                 (status, serde_json::from_slice::<Value>(&bytes).unwrap())
             }
         };
-        let child_id = crate::subagent_sessions::child_session_id(&parent, "sub-1");
+        let child_id = crate::subagent_sessions::child_session_id(&parent, "sub-1", &routing_parent);
         let leaf = child_id.trim_start_matches("session/");
         // Negotiated: the child's own window, with a header describing it.
         let (status, page) =
             request(format!("/v1/client/sessions/{leaf}/timeline?limit=5"), true).await;
         assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["value"]["session_id"], child_id);
         let items = page["value"]["items"].as_array().unwrap();
         assert!(items.iter().any(|item| {
             item["body"]["text"]
@@ -2477,6 +2519,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{older}");
         assert_eq!(older["value"]["header"], header);
+        assert_eq!(older["value"]["session_id"], child_id);
+        assert!(older["value"]["items"].as_array().unwrap().iter().all(|item| {
+            item["body"]["text"] != "parent only"
+        }));
         // Without negotiation: the same conversation, but no header and no blocks.
         let (status, legacy) = request(
             format!("/v1/client/sessions/{leaf}/timeline?limit=5"),
@@ -2484,6 +2530,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert_eq!(legacy["value"]["session_id"], child_id);
         assert!(legacy["value"].get("header").is_none());
         assert!(
             legacy["value"]["items"]
@@ -2493,7 +2540,7 @@ mod tests {
                 .all(|item| item["body"].get("blocks").is_none())
         );
         // A child id whose transcript never existed names no conversation.
-        let missing = crate::subagent_sessions::child_session_id(&parent, "never-ran");
+        let missing = crate::subagent_sessions::child_session_id(&parent, "never-ran", &routing_parent);
         let (status, absent) = request(
             format!(
                 "/v1/client/sessions/{}/timeline",
@@ -2503,5 +2550,17 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{absent}");
+
+        // A valid managed routing key does not authorize a different native parent.
+        let mut different_parent = parent.clone();
+        different_parent.id = "session/external-0123456789abcdef01234567".into();
+        let mismatched = crate::subagent_sessions::child_session_id(
+            &different_parent, "sub-1", &routing_parent,
+        );
+        let (status, refused) = request(
+            format!("/v1/client/sessions/{}/timeline", mismatched.trim_start_matches("session/")),
+            true,
+        ).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
     }
 }

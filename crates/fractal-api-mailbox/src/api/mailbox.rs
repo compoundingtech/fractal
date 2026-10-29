@@ -84,6 +84,23 @@ fn storage_fence(state: &AppState, mut fence: Fence) -> Result<Fence, ApiError> 
 #[cfg(all(test, target_os = "linux"))]
 mod ownership_process_tests;
 
+// Ownership waits must not retain a Store read/write worker permit. The async path gate
+// limits each record to one blocking waiter; authority keeps its existing flock scope.
+async fn authority_action<T: Send + 'static>(
+    operation: impl FnOnce() -> Result<T, St3Error> + Send + 'static,
+) -> Result<T, ApiError> {
+    let profile = crate::profile::current();
+    let cpu_kind = crate::performance::current();
+    let trace = crate::otel::export_enabled().then(tracing::Span::current);
+    let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    tokio::task::spawn_blocking(move || {
+        let _trace = trace.as_ref().map(tracing::Span::enter);
+        let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
+        let _entered = crate::profile::enter(profile.as_ref());
+        crate::performance::with_charged(cpu_kind, operation)
+    }).await.map_err(ApiError::internal)?.map_err(ApiError::bad)
+}
+
 pub async fn subscribe(
     State(state): State<AppState>,
     Query(fence): Query<Fence>,
@@ -96,7 +113,12 @@ pub async fn subscribe(
     let binding = fence.clone();
     let peer = peer.expect("authorize checked the native peer").0;
     let checked_peer = peer.clone();
-    let (native, primary_wrapper) = blocking_action(move || authority::with_claude_primary(&checked_state, &binding, &checked_peer, None, || {
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &fence),
+    ).await.map_err(ApiError::internal)?;
+    let (native, primary_wrapper) = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&checked_state, &binding, &checked_peer, None, || {
         if !cfg!(target_os = "linux") { return checked_state.store.check_mailbox(&binding).map(|_| false); }
         if authority::with_argv_channel(&checked_state, &binding, &checked_peer, |member, validate| {
             if binding.epoch == 0 {
@@ -112,7 +134,7 @@ pub async fn subscribe(
             checked_state.store.repair_mailbox_checked(&binding, owner, validate).map(|_| ())
         }
         }).map(|_| true)
-    })).await?;
+    }) }).await?;
     // Wake the predecessor immediately, even when no graph content changed.
     signal_local_change(&state);
     Ok(websocket.on_upgrade(move |socket| stream(state, fence, socket, peer, native, primary_wrapper)))
@@ -127,7 +149,12 @@ pub async fn bind(
     authorize(&request, peer.as_ref().map(|p| &p.0))?;
     let bind_state = state.clone();
     let peer = peer.expect("authorize checked the native peer").0;
-    let bound = blocking_action(move || authority::with_claude_primary(&bind_state, &request, &peer, None, || {
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &request),
+    ).await.map_err(ApiError::internal)?;
+    let bound = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&bind_state, &request, &peer, None, || {
         if !cfg!(target_os = "linux") { return bind_state.store.bind_mailbox(&request); }
         if let Some(bound) = authority::with_argv_channel(&bind_state, &request, &peer, |member, validate| {
             bind_state.store.bind_argv_mailbox_checked(&request, member, validate)
@@ -135,7 +162,7 @@ pub async fn bind(
         authority::with_authority(&bind_state, &request, &peer, |owner, validate| {
             bind_state.store.bind_mailbox_with_lease_checked(&request, Some(owner), validate)
         })
-    })).await?;
+    }) }).await?;
     signal_local_change(&state);
     Ok(Json(bound.0))
 }
@@ -178,7 +205,12 @@ pub async fn attachment(
     let store = state.store.clone();
     let checked_state = state.clone();
     let peer = peer.expect("authorize checked the native peer").0;
-    let attached = blocking_action(move || authority::with_claude_primary(&checked_state, &fence, &peer, None, || {
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &fence),
+    ).await.map_err(ApiError::internal)?;
+    let attached = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&checked_state, &fence, &peer, None, || {
         // Classified from this daemon's own state, never from the request. A push-capable
         // binding's GET is not thereby proven to be an admission.
         crate::profile::note(if delivery_presence::push_capable(&fence) {
@@ -201,7 +233,7 @@ pub async fn attachment(
             &fence.subject,
             &fence.incarnation,
         ))
-    }))
+    }) })
     .await?;
     Ok(Json(crate::mailbox::Attachment { attached: attached.0 }))
 }
@@ -273,7 +305,12 @@ pub async fn receipt(
     let checked_state = state.clone();
     let checked_peer = peer.expect("authorize checked the native peer").0;
     let kind = input.kind.clone();
-    let ((record, appended, work_wake), _) = blocking_action(move || authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
+    let admission = fractal_drivers::harness_state::record_lock_admission(
+        &authority::source_agent_dir(&state, &request.fence),
+    ).await.map_err(ApiError::internal)?;
+    let ((record, appended, work_wake), _) = authority_action(move || {
+        let _admission = admission;
+        authority::with_claude_primary(&checked_state, &request.fence, &checked_peer, None, || {
         let (record, appended) = if store.has_mailbox_lease(&request.fence)? {
             authority::with_authority(&checked_state, &request.fence, &checked_peer, |owner, validate| {
                 validate()?;
@@ -291,7 +328,7 @@ pub async fn receipt(
             .flatten()
             .is_none_or(|message| super::is_work_wake(&message.tags));
         Ok((record, appended, work_wake))
-    }))
+    }) })
     .await?;
     // A repeated or already-settled receipt changes nothing; only a new claim wakes readers.
     if appended {
@@ -677,7 +714,11 @@ async fn stream(state: AppState, fence: Fence, socket: WebSocket, peer: NativeDe
         } => {},
     }
     if native {
-        let _ = state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+        let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
+            &authority::source_agent_dir(&state, &fence),
+        ).await else { return; };
+        let _ = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+            let _admission = admission;
             authority::loss_if_current(&state, &fence, &peer)
         })).await;
     }
@@ -757,11 +798,20 @@ struct StreamControl {
     primary_peer: Option<(NativeDeliveryPeer, Option<fractal_drivers::claude_process::Process>)>,
     #[cfg(any(test, feature = "test-support"))]
     dirty_gate: Option<Arc<FixtureDirtyGate>>,
+    #[cfg(test)]
+    report_started: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    #[cfg(test)]
+    report_blocking_started: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    #[cfg(test)]
+    legacy_report_dispatch: bool,
 }
 
 impl StreamControl {
     fn new(peer: Option<NativeDeliveryPeer>) -> Self {
-        Self { peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None }
+        Self { peer, primary_peer: None, #[cfg(any(test, feature = "test-support"))] dirty_gate: None,
+            #[cfg(test)] report_started: None,
+            #[cfg(test)] report_blocking_started: None,
+            #[cfg(test)] legacy_report_dispatch: false }
     }
 }
 
@@ -851,7 +901,11 @@ async fn stream_with_timers_inner<F, S, H>(
                 let repair_state = state.clone();
                 let repair_fence = fence.clone();
                 let caller = pending_caller;
-                match state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
+                    &authority::source_agent_dir(&state, &fence),
+                ).await else { return; };
+                match tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                    let _admission = admission;
                     let started = std::time::Instant::now();
                     let admitted = repair_state.store.check_mailbox(&repair_fence).is_ok();
                     crate::otel::record_mailbox_fence_check(caller, started.elapsed());
@@ -1099,9 +1153,32 @@ async fn stream_with_timers_inner<F, S, H>(
                         let checked_state = state.clone();
                         let binding = fence.clone();
                         let raw = report.to_string();
-                        matches!(state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                        #[cfg(test)]
+                        if let Some(started) = &control.report_started { let _ = started.send(()); }
+                        #[cfg(test)]
+                        let legacy = control.legacy_report_dispatch;
+                        #[cfg(not(test))]
+                        let legacy = false;
+                        #[cfg(test)]
+                        let blocking_started = control.report_blocking_started.clone();
+                        let action = move || crate::task_cpu::blocking("mailbox.write", || {
+                            #[cfg(test)]
+                            if let Some(started) = blocking_started { let _ = started.send(()); }
                             authority::admit_report(&checked_state, &binding, &peer, &raw)
-                        })).await, Ok(Ok(())))
+                        });
+                        if legacy {
+                            // Test-only baseline: retain the original dispatch so the same
+                            // physical stream fixture can demonstrate pool exhaustion.
+                            matches!(state.store.connection.write_workers().spawn_blocking(action).await, Ok(Ok(())))
+                        } else {
+                            let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
+                                &authority::source_agent_dir(&state, &fence),
+                            ).await else { return; };
+                            matches!(tokio::task::spawn_blocking(move || {
+                                let _admission = admission;
+                                action()
+                            }).await, Ok(Ok(())))
+                        }
                     } else {
                         let started = std::time::Instant::now();
                         let admitted = state.store.check_mailbox(&fence).is_ok();
@@ -1149,7 +1226,11 @@ async fn stream_with_timers_inner<F, S, H>(
                             let repair_state = state.clone();
                             let binding = fence.clone();
                             let raw = report.to_string();
-                            replay_proven = state.store.connection.write_workers().spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                            let Ok(admission) = fractal_drivers::harness_state::record_lock_admission(
+                                &authority::source_agent_dir(&state, &fence),
+                            ).await else { return; };
+                            replay_proven = tokio::task::spawn_blocking(move || crate::task_cpu::blocking("mailbox.write", || {
+                                let _admission = admission;
                                 authority::repair_proven(&repair_state, &binding, &peer, &raw)
                             })).await.ok().and_then(Result::ok);
                         }
@@ -3235,7 +3316,8 @@ mod tests {
                                             receiver.recv().await.map(|()| ((), receiver))
                                         },
                                     ),
-                                    StreamControl { peer, primary_peer: None, dirty_gate: Some(fixture_gate) },
+                                    StreamControl { peer, primary_peer: None, dirty_gate: Some(fixture_gate),
+                                        report_started: None, report_blocking_started: None, legacy_report_dispatch: false },
                                 )
                             })
                         }
@@ -3273,6 +3355,139 @@ mod tests {
             heartbeat,
             reads,
             server,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn contended_reports_leave_api_accept_and_unrelated_write_responsive() {
+        // Two blocking threads make repeated same-record flock waits exhaust the old
+        // dispatch path. This is a pool-exhaustion control, not evidence of a default-
+        // configuration outage with fewer requests.
+        for legacy in [true, false] {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all().max_blocking_threads(2).build().unwrap();
+        runtime.block_on(async {
+            use fractal_drivers::{harness_events, harness_state};
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            const REQUESTS: usize = 40;
+            let limit = Duration::from_secs(5);
+            let root = tempfile::tempdir().unwrap();
+            let state = crate::api::tests_shared::state(root.path());
+            state.store.apply_internal(
+                &crate::graph::parse_test_intent(
+                    "version 2\nagent \"eval.worker\" { host \"node\"; workspace \"/tmp\"; harness \"omp\" {} }\n",
+                    "node",
+                ).unwrap(),
+                "declare-contended-report-seat",
+            ).unwrap();
+            crate::store::mailbox_tests::ready(&state.store, "current");
+            let request = Fence::new("agent/eval.worker", "current", "delivery");
+            let dir = authority::source_agent_dir(&state, &request);
+            harness_events::enable(&dir, "current").unwrap();
+            let sequence = harness_state::claim(&dir, "eval.worker", "omp", "report-lock").unwrap();
+            let peer = NativeDeliveryPeer { agent: request.subject.clone(), transport: "omp-channel",
+                pid: std::process::id(), archives_inbox: true };
+            let owner = crate::mailbox::Authority { provider: "omp".into(), session: "report-lock".into(),
+                sequence, pid: peer.pid, process_token: fractal_runtime::process_start_token(peer.pid).unwrap() };
+            let fence = state.store.bind_mailbox_with_lease(&request, Some(&owner)).unwrap();
+            let (started, mut entries) = tokio::sync::mpsc::unbounded_channel();
+            let (blocking_started, mut blocking_entries) = tokio::sync::mpsc::unbounded_channel();
+            let stream_state = state.clone();
+            let stream_fence = fence.clone();
+            let write_state = state.clone();
+            let app = Router::new()
+                .route("/stream", get(move |websocket: WebSocketUpgrade| {
+                    let state = stream_state.clone();
+                    let fence = stream_fence.clone();
+                    let mut control = StreamControl::new(Some(peer.clone()));
+                    control.report_started = Some(started.clone());
+                    control.report_blocking_started = Some(blocking_started.clone());
+                    control.legacy_report_dispatch = legacy;
+                    async move { websocket.on_upgrade(move |socket| stream_with_timers_inner(
+                        state, fence, socket, raw_snapshot,
+                        futures_util::stream::pending::<()>(), futures_util::stream::pending::<()>(), control,
+                    )) }
+                }))
+                .route("/accept", get(|| async { "accepted" }))
+                .route("/write", get(move || {
+                    let state = write_state.clone();
+                    async move {
+                        let store = state.store.clone();
+                        state.store.connection.write_workers().spawn_blocking(move ||
+                            store.bind_mailbox(&Fence::new("agent/eval.worker", "current", "title"))
+                        ).await.unwrap().unwrap();
+                        "written"
+                    }
+                }));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let mut sockets = Vec::new();
+            for _ in 0..REQUESTS {
+                let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{address}/stream")).await.unwrap();
+                // Drain the initial snapshot before contention, proving the real stream
+                // actor completed its dirty admission pass.
+                loop {
+                    let message = tokio::time::timeout(limit, socket.next()).await.unwrap().unwrap().unwrap();
+                    if let Message::Text(raw) = message
+                        && matches!(serde_json::from_str::<Frame>(&raw).unwrap(), Frame::Mailbox { .. }) { break; }
+                }
+                sockets.push(socket);
+            }
+            // An independently opened file description models an external holder; no
+            // production lock registry entry is used to acquire this flock.
+            let holder = fs::OpenOptions::new().read(true).write(true)
+                .open(dir.join(".harness-state.lock")).unwrap();
+            holder.lock().unwrap();
+            let report = json!({"transport":"omp-channel","pid":std::process::id(),"ready":true}).to_string();
+            for socket in &mut sockets {
+                socket.send(Message::Text(report.clone().into())).await.unwrap();
+                socket.send(Message::Ping(vec![9].into())).await.unwrap();
+            }
+            tokio::time::timeout(limit, async {
+                for _ in 0..REQUESTS { entries.recv().await.unwrap(); }
+            }).await.expect("every real report reached ownership admission");
+            tokio::time::timeout(limit, async {
+                for _ in 0..if legacy { 2 } else { 1 } {
+                    blocking_entries.recv().await.unwrap();
+                }
+            }).await.expect("ownership callbacks entered the bounded blocking pool");
+            async fn probe(address: std::net::SocketAddr, path: &str) -> String {
+                let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+                socket.write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+                let mut response = String::new();
+                socket.read_to_string(&mut response).await.unwrap();
+                response
+            }
+            let accepted = tokio::time::timeout(limit, probe(address, "/accept")).await;
+            let written = tokio::time::timeout(
+                if legacy { Duration::from_millis(250) } else { limit },
+                probe(address, "/write"),
+            ).await;
+            drop(holder);
+            // Release before assertions: even a failed control must drain flock waiters.
+            let accepted = accepted.expect("accept remains responsive even in the baseline");
+            assert!(accepted.contains("accepted"), "{accepted}");
+            if legacy {
+                assert!(written.is_err(), "the original two-waiter path must exhaust this pool");
+            } else {
+                let written = written.expect("unrelated Store write retains pool and writer capacity");
+                assert!(written.contains("written"), "{written}");
+            }
+            for socket in &mut sockets {
+                tokio::time::timeout(limit, async {
+                    loop {
+                        match socket.next().await.expect("report stream closed").unwrap() {
+                            Message::Pong(payload) if payload.as_ref() == [9] => break,
+                            Message::Close(_) => panic!("report stream closed before pong"),
+                            _ => {},
+                        }
+                    }
+                }).await.expect("all contended reports drain after releasing the flock");
+            }
+            server.abort();
+        });
         }
     }
 

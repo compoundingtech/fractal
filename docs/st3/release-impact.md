@@ -112,7 +112,7 @@ the relevant source and tags. `--output FILE --manifest FILE` writes the same no
 classified, and schema/rules changes must have matching metadata; otherwise the command
 fails with the missing sources. Explicit unknowns remain reviewable in the report.
 
-`scripts/release-smalltalk-daily --dry-run` also verifies the existing archives and prints
+`scripts/release-fractal-daily --dry-run` also verifies the existing archives and prints
 the same notes. Manual dispatch uses that same script. Tag publication invokes the same
 renderer before creating a GitHub draft. Both paths publish the impact report alongside
 the existing exact-source manifest/checksums and refuse publication when classifications

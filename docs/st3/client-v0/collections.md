@@ -22,6 +22,31 @@ Send one JSON command per subscription:
 {"kind":"subscribe","id":"missions-tab","collection":"missions","limit":50}
 ```
 
+**Proposed trace context, pending [#1910](https://github.com/compoundingtech/fractal/pull/1910)
+and Nathan's decision:** subscribe frames may add
+`"trace": {"traceparent": "W3C value", "tracestate": "optional W3C value"}`.
+The lowercase `trace` wire key belongs to the repository-local client_v0 namespace;
+its members use W3C Trace Context, not a separate identifier format. Every
+collection-socket subscribe variant accepts the field, but it affects only `missions`,
+`attention`, `agents`, `work`, `glasses`, `arrangements`, `conversation`, and `terminal`,
+the collections that emit `st.subscription.first_frame`.
+It grants no authority and changes no subscription fields.
+
+The daemon accepts absent, null, and malformed `trace` values without rejecting the
+frame. It uses the W3C propagator to validate the parent; an invalid or non-string
+`traceparent`, or a non-object field, is ignored entirely. A valid context parents the
+bounded `st.subscription.first_frame` SERVER span, which also links to the upgrade.
+It records `st.parent.sampled` using the same policy as HTTP SERVER spans. Without a
+valid context the first-frame span remains an INTERNAL root linked to the upgrade.
+Later changes, rereads, and resyncs emit no spans. Existing older collection decoders
+ignore the unknown field; frames without it remain unchanged.
+
+Dedicated conversation and terminal streams have no subscribe frame, so their
+upgrade-linked behavior is unchanged. Unsubscribe, command frames, and strict HTTP
+bodies do not acquire this field. The generated TypeScript client exposes `trace`
+as an opaque `SubscribeTraceContext`. Typed SDK helpers and Swift client support
+are follow-up work after the #1910 decision.
+
 Collections are `missions`, `attention` (also subscribable as `alerts`, the name a person reads; frames name it `attention`), `agents`, `work`, `glasses`, and `arrangements`,
 plus `terminal` and `conversation` (below). The optional `actor` filter applies to work,
 `person` to attention, and `status` plus exact `agent` to agents. For `arrangements`, `person: "person/NAME"`
@@ -134,7 +159,7 @@ new `order`, `has_more`, and a new snapshot fence. Apply removals and upserts
 before displaying the new order. Rows leaving a bounded window appear in
 `removes`, even if they still exist beyond that window.
 
-Rows are joined in st so a client never joins collections itself. A mission's
+Rows are joined in Fractal so a client never joins collections itself. A mission's
 `run_details` carry `steps` for each open run and for its latest run, and every
 run's steps in a mission detail read. An agent names its queue in
 `current_work`, `next_work`, and `upcoming_work`: each step's mission, run,
@@ -297,16 +322,42 @@ retain their prior row timestamp so an unchanged count emits no delta.
 
 ## Presentations
 
-Optional capability `presentation` version 1 says agent rows carry `presentation`: st's state
+Optional capability `presentation` version 1 says agent rows carry `presentation`: Fractal's state
 word, list group, why the agent needs someone, and what it holds and has queued (see
 [the UI contract](../../clients/ui-contract.md#agent)). Older daemons omit both. A row that
-lacks it shows the state st reports, marked as coming from an older st; clients derive nothing.
+lacks it shows the state Fractal reports, marked as coming from an older Fractal; clients derive nothing.
 
 The same capability says attention rows carry `presentation`: the Now group and card, who
 **Chat about this** reaches, who raised it, and the step it holds (see
 [the UI contract](../../clients/ui-contract.md#attention-row)). The attention refresher computes
 it; every attention route copies it from the published list, and a row the list has not
 published yet has none until it does.
+
+## Sync on the stream
+
+A window frame of the `attention` collection may carry `sync` (`StreamSync`): this host's
+replication, taken when the frame was built. It is `{state: "level"}` while this host is current,
+or `{state: "catching-up" | "diverged", peers}` naming the peers it lacks envelopes from or
+projects a different graph than, with the same `SyncPeer` a page's `sync` carries. Unlike a page's
+`SyncNotice`, which is absent while level, it says `level` explicitly: on the stream an absent
+`sync` means unknown, as from a daemon that does not send it, never level.
+
+A daemon that sends it puts it on every `snapshot` frame of the collection, and on a `changes`
+frame only when it changed since the subscription's previous frame: its state, or which peers
+(by `host_id`) are named, including the change back to `level`. A peer's counts moving is not a
+change. A client that missed a changes frame learns the current value from the next snapshot,
+which every resubscribe gets. A client on a daemon that sends none keeps reading a page's `sync`
+(`GET /v1/client/attention?limit=1`).
+
+A state this client does not know, or a shape the schema forbids (`level` with peers, or another
+state without them), reads as unknown, never level, and the frame is kept: the Rust client reads
+such a `sync` as none, and the TypeScript transport parses frames without validating them, so a
+reader there must apply the same rule (only `level` without peers is level; only `catching-up` or
+`diverged` with peers is behind; anything else is unknown). Decoding a frame with the generated
+TypeScript schema is stricter: it rejects a forbidden shape as it rejects any malformed field,
+and a state it does not know decodes as unknown. A daemon sends neither. Older clients ignore the
+field: the generated Rust and Swift decoders read frames by named field (fixtures:
+`fixtures/clients/stream-sync/frames.json`).
 
 ## Screen inventories
 

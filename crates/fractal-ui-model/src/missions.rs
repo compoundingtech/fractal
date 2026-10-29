@@ -69,17 +69,17 @@ impl Word {
             Word::Decision => "a step is waiting for your answer",
             Word::Stalled => "a step has an owner who is not moving",
             Word::Unstaffed => "a step is ready but its agent is stopped or broken",
-            Word::Unclaimed => "a step is ready; st has not said which agent takes it",
+            Word::Unclaimed => "a step is ready; Fractal has not said which agent takes it",
             Word::Queued => "a step is waiting its turn on a busy agent; nothing to do",
             Word::Working => "an agent is doing a step now",
-            Word::Watching => "st keeps this open and starts other missions when something happens",
+            Word::Watching => "Fractal keeps this open and starts other missions when something happens",
             Word::Held => "waiting on something outside the fleet",
             Word::Idle => "running, with nothing ready",
             Word::Done => "every step finished",
             Word::Failed => "a step failed and nothing retried it",
             Word::Cancelled => "it was stopped before it finished",
             Word::NotStarted => "published, and never started",
-            Word::Unknown => "st does not say: an older st, or one that has not read its agents yet",
+            Word::Unknown => "Fractal does not say: an older Fractal, or one that has not read its agents yet",
         }
     }
 }
@@ -107,15 +107,37 @@ pub struct Step {
     pub seat: Option<String>,
     pub name: String,
     pub state: StepState,
+    /// The owner's name, or the stable "st" system value; human_owner supplies product wording.
     pub owner: Option<String>,
+    /// The agent id beside an agent owner's name; a pane too narrow for it shows the name alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
+    /// Rendering-only ownership identity; excluded from the serialized view.
+    #[serde(skip)]
+    pub owner_is_system: bool,
     pub note: Option<String>,
     pub after: Vec<String>,
     pub age: String,
     pub goals: Vec<String>,
     pub constraints: Vec<String>,
     pub gates: Vec<String>,
-    pub attempt: u32,
+    pub attempt: u64,
     pub blockers: Vec<String>,
+}
+
+impl Step {
+    /// The rendered owner with its agent id beside it, when the owner is an agent.
+    pub fn owner_identity(&self) -> Option<String> {
+        self.human_owner().map(|name| match &self.owner_id {
+            Some(id) if name != id => format!("{name} · {id}"),
+            _ => name.to_owned(),
+        })
+    }
+
+    /// Human-only ownership text; the serialized `owner` remains unchanged.
+    pub fn human_owner(&self) -> Option<&str> {
+        if self.owner_is_system { Some("Fractal") } else { self.owner.as_deref() }
+    }
 }
 
 /// Raw step facts, independent of state-specific blocker presentation and queue notes.
@@ -164,7 +186,7 @@ impl Mission {
     /// that has not read its agents yet), its raw state and that st does not say.
     pub fn label(&self) -> String {
         match self.word {
-            Word::Unknown if !self.state.is_empty() => format!("{} · st does not say", self.state),
+            Word::Unknown if !self.state.is_empty() => format!("{} · Fractal does not say", self.state),
             word => word.name().into(),
         }
     }
@@ -314,13 +336,14 @@ pub(crate) fn in_hand(state: &str) -> bool {
     matches!(state, "claimed" | "working" | "running" | "verifying")
 }
 
-/// How a client names who holds a step: "you" for its reader, else the name st serves.
-fn owner_text(owner: &Actor, reader: &str) -> Option<String> {
+/// How a client names who holds a step: "you" for its reader, else the name st serves, and an
+/// agent's id beside its name.
+fn owner_text(owner: &Actor, reader: &str) -> Option<(String, Option<String>)> {
     match owner {
-        Actor::Person { person, .. } if person == reader => Some("you".into()),
-        Actor::Person { label, .. } => Some(label.clone()),
-        Actor::Agent { agent, label } => Some(format!("{label} · {agent}")),
-        Actor::St => Some("st".into()),
+        Actor::Person { person, .. } if person == reader => Some(("you".into(), None)),
+        Actor::Person { label, .. } => Some((label.clone(), None)),
+        Actor::Agent { agent, label } => Some((label.clone(), Some(agent.clone()))),
+        Actor::St => Some(("st".into(), None)),
         Actor::Nobody => None,
     }
 }
@@ -372,6 +395,9 @@ pub fn adapt<'a>(
                     let shown = presented.as_ref().and_then(|presented| {
                         presented.steps.iter().find(|shown| shown.id == step.id)
                     });
+                    let (owner, owner_id) = shown
+                        .and_then(|shown| owner_text(&shown.owner, reader))
+                        .map_or((None, None), |(name, id)| (Some(name), id));
                     Step {
                         id: step.id.clone(),
                         seat: (!step.agentless)
@@ -379,7 +405,9 @@ pub fn adapt<'a>(
                             .flatten(),
                         name: step.path.clone(),
                         state: shown.map_or(StepState::Unknown, |shown| shown.word),
-                        owner: shown.and_then(|shown| owner_text(&shown.owner, reader)),
+                        owner,
+                        owner_id,
+                        owner_is_system: shown.is_some_and(|shown| matches!(shown.owner, Actor::St)),
                         note: shown.and_then(|shown| shown.note.clone()),
                         after: vec![],
                         age: display.age(&step.since, now),

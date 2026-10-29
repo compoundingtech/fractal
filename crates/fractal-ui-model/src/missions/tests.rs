@@ -133,7 +133,7 @@ fn a_row_without_a_presentation_reads_unknown_and_derives_nothing() {
     // An older st serves no presentation.
     let missions = read(&model, &model.missions);
     assert_eq!(missions[0].word, Word::Unknown);
-    assert_eq!(missions[0].label(), "running · st does not say");
+    assert_eq!(missions[0].label(), "running · Fractal does not say");
     assert_eq!(
         (missions[0].steps[0].state, &missions[0].steps[0].owner),
         (StepState::Unknown, &None)
@@ -394,6 +394,25 @@ fn input(runs: Vec<Value>) -> Inputs {
     }
 }
 
+#[test]
+fn human_system_owner_is_distinct_from_a_person_named_st() {
+    let model = input(vec![run("mission-run/audit", "running", vec![step("scan", "working", true)])]);
+    for (owner, system) in [
+        (json!({"kind": "st"}), true),
+        (json!({"kind": "person", "person": "person/other", "label": "st"}), false),
+    ] {
+        let mut served = serve(&model);
+        served[0].presentation.as_mut().unwrap()["steps"][0]["owner"] = owner;
+        let rows = read(&model, &served);
+        let shown = &rows[0].steps[0];
+        assert_eq!(shown.owner.as_deref(), Some("st"));
+        assert_eq!(shown.human_owner(), Some(if system { "Fractal" } else { "st" }));
+        let serialized = serde_json::to_value(shown).unwrap();
+        assert_eq!(serialized["owner"], "st");
+        assert!(serialized.get("owner_is_system").is_none());
+    }
+}
+
 fn metadata_case(
     state: &str,
     reason: Option<&str>,
@@ -642,6 +661,25 @@ fn duplicate_paths_keep_run_identity_and_the_actual_seat_after_pipeline_sort() {
                 StepState::Waiting
             ),
         ]
+    );
+    // An agent owner reads as its name with its id beside it; agentless work is Fractal's.
+    let owners = missions[0]
+        .steps
+        .iter()
+        .map(|step| (step.owner.as_deref(), step.owner_id.as_deref()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        [
+            (Some("st"), None),
+            (Some("claimant"), Some("agent/claimant")),
+            (Some("assigned"), Some("agent/assigned")),
+        ]
+    );
+    assert_eq!(missions[0].steps[0].human_owner(), Some("Fractal"));
+    assert_eq!(
+        missions[0].steps[1].owner_identity().as_deref(),
+        Some("claimant · agent/claimant")
     );
     for id in ["a", "b", "c"] {
         let metadata = &missions[0].step_metadata[&format!("step-run/{id}/build")];

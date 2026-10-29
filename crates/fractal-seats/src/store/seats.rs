@@ -12,6 +12,10 @@ pub use fractal_missions::store::seats::{EndedDeclaration};
 #[path = "identity_boundary_tests.rs"]
 mod identity_boundary_tests;
 
+#[cfg(test)]
+#[path = "harness_ready_tests.rs"]
+mod harness_ready_tests;
+
 /// How long a roster refresh request may go unanswered before the daemon warns about it.
 const AGENT_ROSTER_OVERDUE_MS: u64 = 30_000;
 
@@ -772,13 +776,10 @@ impl SeatsStore for Store {
     }
 
     fn request_agent_roster_refresh(&self) {
-        if let Some(wake) = self.fractal.agent_roster_refresh.get() {
-            let _ = self.fractal.agent_roster_requested_at.compare_exchange(
-                0, now_ms() as u64, std::sync::atomic::Ordering::AcqRel,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            wake.notify_one();
-        }
+        // A summary or assistant read requests freshness without necessarily reading the
+        // ordinary agents list. Register demand here so no requesting caller can omit it.
+        self.note_agent_roster_read();
+        self.fractal.wake_read_roster();
     }
 
     fn request_agent_roster_history(&self) {
@@ -1721,8 +1722,8 @@ impl SeatsStore for Store {
             "only eval runs can retire their desired graph"
         );
         transaction.execute(
-            /* sqlite-large-value: allow-for-now lv-h67815d20ea1f owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
-             WHERE owner_run IN (
+            /* sqlite-large-value: allow-for-now lv-h738ce7626839 owner=fractal_seats::store::seats TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM desired
+             WHERE subject NOT LIKE 'resource/uri/%' AND owner_run IN (
                SELECT 'mission-run/' || id FROM mission_runs WHERE root_run_id=?1
              )",
             [run_id],
@@ -1733,7 +1734,7 @@ impl SeatsStore for Store {
                  FROM desired
                  JOIN mission_runs
                    ON desired.owner_run='mission-run/' || mission_runs.id
-                 WHERE mission_runs.root_run_id=?1
+                 WHERE mission_runs.root_run_id=?1 AND desired.subject NOT LIKE 'resource/uri/%'
                  ORDER BY desired.subject",
             )?;
             statement
@@ -2183,12 +2184,17 @@ impl SeatsStore for Store {
         let connection = self.readers.get();
         let subject = fractal_store::store::identities::resolve_reference_conn(&connection, subject)?;
         let subject = subject.as_str();
+        // Seek to this incarnation's observations rather than read every earlier incarnation's.
+        // A body without fields has no state, so the wider incarnation expression adds no match.
         let found: i64 = connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims
-             WHERE subject=?1 AND kind='harness.observed'
-               AND json_extract(body, '$.fields.incarnation_id')=?2
-               AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
-               AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')",
+            format!(
+                "SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_harness_incarnation_accepted_index
+                 WHERE subject=?1 AND kind='harness.observed'
+                   AND {INCARNATION_OF_CLAIM}=?2
+                   AND json_extract(body, '$.fields.state') IN ('ready','working','idle')
+                   AND coalesce(json_extract(body, '$.fields.reason'),'')!='providerAuth')"
+            )
+            .as_str(),
             params![subject, incarnation],
             |row| row.get(0),
         )?;

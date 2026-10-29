@@ -18,6 +18,8 @@ import textwrap
 import time
 import unittest
 
+from release_delivery import ios_env
+
 
 SCRIPT = Path(__file__).with_name("release_delivery.py")
 BUNDLE_ID = "com.compoundingtech.fractal"
@@ -40,7 +42,9 @@ with (root / "commands.jsonl").open("a") as log:
                           "developer_dir": os.environ.get("DEVELOPER_DIR"),
                           "deploy_approval": os.environ.get("AGENT_ACTION_APPROVAL"),
                           "native_env": {key: os.environ.get(key) for key in (
-                              "APP_VARIANT", "ST3_FABRIC_PROOF", "ST3_FABRIC_OFFLINE_DEBUG")}}) + "\n")
+                              "APP_VARIANT", "FRACTAL_FABRIC", "ST3_FABRIC",
+                              "FRACTAL_FABRIC_PROOF", "ST3_FABRIC_PROOF",
+                              "FRACTAL_FABRIC_OFFLINE_DEBUG", "ST3_FABRIC_OFFLINE_DEBUG")}}) + "\n")
 
 if name == "gate-slot":
     command = args[args.index("--") + 1:]
@@ -161,6 +165,29 @@ raise AssertionError((name, args))
 '''
 
 
+class IosEnvironmentTests(unittest.TestCase):
+    def test_fractal_values_win_and_empty_values_mask_legacy(self):
+        for suffix in ("REF", "EXPECTED_ORIGIN", "TRUSTED_COMMIT", "DEVICE", "TEAM",
+                       "NOTIFY_FROM", "NOTIFY_TO", "MAX_DEFERRAL", "BUILD_BACKOFF", "BUILD_ONLY"):
+            for legacy, fractal, expected in (
+                (None, None, "default"),
+                ("legacy", None, "legacy"),
+                (None, "fractal", "fractal"),
+                ("same", "same", "same"),
+                ("legacy", "fractal", "fractal"),
+                ("legacy", "", ""),
+                ("", None, ""),
+                (None, "", ""),
+            ):
+                with self.subTest(suffix=suffix, legacy=legacy, fractal=fractal):
+                    environment = {}
+                    if legacy is not None:
+                        environment["ST_IOS_" + suffix] = legacy
+                    if fractal is not None:
+                        environment["FRACTAL_IOS_" + suffix] = fractal
+                    self.assertEqual(ios_env(suffix, "default", environment), expected)
+
+
 class ReleaseDeliveryTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="release-delivery-tests-")
@@ -181,7 +208,8 @@ class ReleaseDeliveryTests(unittest.TestCase):
         git = shutil.which("git")
         self.assertIsNotNone(git, "Git is required for the delivery fixtures")
         git_bin = Path(git).parent
-        self.env = dict(os.environ)
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("FRACTAL_IOS_", "ST_IOS_"))}
         self.env.update({
             "PATH": os.pathsep.join((str(self.tools), str(git_bin), "/usr/bin", "/bin")),
             "DELIVERY_FIXTURE_ROOT": str(self.root),
@@ -212,7 +240,7 @@ class ReleaseDeliveryTests(unittest.TestCase):
             }))
             self.write_source(f"{relative}/index.ts", "export const fixture = 1;\n")
         self.write_source("package.json", json.dumps({
-            "private": True, "packageManager": "pnpm@12.7.0", "workspaces": list(packages),
+            "private": True, "packageManager": "pnpm@12.15.0", "workspaces": list(packages),
         }))
         self.write_source("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n")
         self.write_source("pnpm-lock.yaml", "lockfileVersion: '9.0'\n")
@@ -302,6 +330,31 @@ class ReleaseDeliveryTests(unittest.TestCase):
     def assert_installed(self, commit):
         self.assertEqual(self.saved_state().get("installed"), commit)
         self.assertFalse(self.saved_state().get("pending"))
+
+    def test_fractal_environment_configures_delivery_without_legacy_values_winning(self):
+        preferred = {
+            "REF": "origin/main",
+            "EXPECTED_ORIGIN": str(self.origin),
+            "TRUSTED_COMMIT": self.initial_commit,
+            "DEVICE": "TEST-DEVICE",
+            "TEAM": "TESTTEAM",
+            "NOTIFY_FROM": "",
+            "NOTIFY_TO": "",
+            "MAX_DEFERRAL": "0",
+            "BUILD_BACKOFF": "0",
+            "BUILD_ONLY": "1",
+        }
+        for suffix, value in preferred.items():
+            self.env["ST_IOS_" + suffix] = "invalid-legacy"
+            self.env["FRACTAL_IOS_" + suffix] = value
+        self.env["DEVELOPER_DIR"] = str(self.root / "Xcode.app" / "Contents" / "Developer")
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), "--repo", str(self.source), "--state", str(self.state),
+        ], cwd=self.root, env=self.env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("built", self.outcomes())
+        self.assertFalse(self.device_commands("install"))
+        self.assertFalse(self.notifications())
 
     def test_app_and_recursive_local_packages_trigger_delivery(self):
         self.reconcile()
@@ -933,17 +986,22 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(len(self.commands("xcodebuild")), 3)
 
     def test_inherited_native_environment_is_pinned_to_daily_release_values(self):
-        self.env.update(ST3_FABRIC_PROOF="1", ST3_FABRIC_OFFLINE_DEBUG="1", APP_VARIANT="dev")
+        self.env.update(FRACTAL_FABRIC="1", ST3_FABRIC="1",
+                        FRACTAL_FABRIC_PROOF="1", ST3_FABRIC_PROOF="1",
+                        FRACTAL_FABRIC_OFFLINE_DEBUG="1", ST3_FABRIC_OFFLINE_DEBUG="1",
+                        APP_VARIANT="dev")
         self.reconcile()
         native = [entry["native_env"] for entry in self.commands()
                   if entry["command"] in ("pnpm", "pod", "xcodebuild")]
         self.assertTrue(native)
         for observed in native:
-            self.assertEqual(observed, {"APP_VARIANT": "daily", "ST3_FABRIC_PROOF": "0",
-                                        "ST3_FABRIC_OFFLINE_DEBUG": "0"})
+            self.assertEqual(observed, {"APP_VARIANT": "daily", "FRACTAL_FABRIC": "0", "ST3_FABRIC": "0",
+                                        "FRACTAL_FABRIC_PROOF": "0", "ST3_FABRIC_PROOF": "0",
+                                        "FRACTAL_FABRIC_OFFLINE_DEBUG": "0", "ST3_FABRIC_OFFLINE_DEBUG": "0"})
         # The inherited values are not build inputs, so dropping them neither
         # rebuilds nor reinstalls.
-        for key in ("ST3_FABRIC_PROOF", "ST3_FABRIC_OFFLINE_DEBUG", "APP_VARIANT"):
+        for key in ("FRACTAL_FABRIC", "ST3_FABRIC", "FRACTAL_FABRIC_PROOF", "ST3_FABRIC_PROOF",
+                    "FRACTAL_FABRIC_OFFLINE_DEBUG", "ST3_FABRIC_OFFLINE_DEBUG", "APP_VARIANT"):
             del self.env[key]
         self.reconcile()
         self.assertEqual(self.outcomes()[-1], "unchanged")
@@ -1285,7 +1343,7 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
              json.dumps({"name": "@fractal/client", "version": "2.0.0", "dependencies": {}})),
             ("pnpm-lock.yaml", "lockfileVersion: '9.0'\n# updated\n"),
             ("pnpm-workspace.yaml", "packages:\n  - apps/ios\n  - clients/typescript/*\n# updated\n"),
-            ("package.json", (self.source / "package.json").read_text().replace("12.7.0", "12.7.1")),
+            ("package.json", (self.source / "package.json").read_text().replace("12.15.0", "12.15.1")),
             (".pnpmfile.cjs", "module.exports = { hooks: {} };\n"),
         )
         for count, (relative, contents) in enumerate(changes, start=1):

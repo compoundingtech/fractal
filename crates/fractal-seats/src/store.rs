@@ -151,6 +151,8 @@ pub mod step_labels;
 pub mod stop_deferral;
 pub mod subagents;
 pub mod trace_principal;
+pub mod usage_accounts;
+pub use usage_accounts::AttributedUsage;
 pub mod usage_period;
 pub mod work_summaries_ivm;
 #[cfg(test)]
@@ -287,6 +289,12 @@ pub trait SeatsStoreCore {
         ) -> Result<BTreeSet<String>>;
     /// The desired subjects named in `subjects`, by their primary keys.
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>>;
+    /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
+    /// only typed edges; this resolves them through the ordinary desired resource subjects.
+    fn declared_resource_uris<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a crate::model::DeclaredResourceReference>,
+    ) -> Result<BTreeMap<String, String>>;
 }
 
 impl SeatsStoreCore for Store {
@@ -394,6 +402,29 @@ impl SeatsStoreCore for Store {
             }
         }
         Ok(stopped)
+    }
+
+    /// The URI each named `uri.reference` resource subject declares. An agent or mission keeps
+    /// only typed edges; this resolves them through the ordinary desired resource subjects.
+    fn declared_resource_uris<'a>(
+        &self,
+        references: impl IntoIterator<Item = &'a crate::model::DeclaredResourceReference>,
+    ) -> Result<BTreeMap<String, String>> {
+        let subjects = references
+            .into_iter()
+            .map(|reference| reference.subject.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        Ok(self
+            .desired_subjects_named(&subjects)?
+            .into_iter()
+            .filter(|desired| desired.kind == "resource")
+            .filter_map(|desired| {
+                let uri = fractal_store::graph::declared_uri(&desired.desired)?.to_owned();
+                Some((desired.subject, uri))
+            })
+            .collect())
     }
 
     fn desired_subjects_named(&self, subjects: &[String]) -> Result<Vec<DesiredSubject>> {

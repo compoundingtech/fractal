@@ -72,7 +72,7 @@ const keys = (alert: Native.Attention) => alertChoices(alert)?.map((choice) => c
 const choice = (alert: Native.Attention, key: string) => alertChoices(alert)!.find((each) => each.key === key)!
 
 describe('alertChoices', () => {
-  it('answers a free-text yes-or-no question with Yes, No, words or Nothing to do, as stui does', () => {
+  it('answers a free-text yes-or-no question with Yes, No, words or Nothing to do, as the Fractal terminal UI does', () => {
     const ask = item({})
     expect(keys(ask)).toEqual(['yes', 'no', 'words', 'nothing'])
     expect(choice(ask, 'yes').action('')).toEqual({ type: 'work.done', summary: 'Yes' })
@@ -103,7 +103,7 @@ describe('alertChoices', () => {
     expect(keys(custom)).toEqual(['merge', 'hold', 'change', 'words', 'dismiss'])
   })
 
-  it('offers only the review answers st lists on a gate, words required to send one back', () => {
+  it('offers only the review answers Fractal lists on a gate, words required to send one back', () => {
     const gate = item({ attention_kind: 'human-gate', source_id: 'gate/example/review', actions: ['review.approve', 'review.request-changes'] })
     expect(keys(gate)).toEqual(['approve', 'changes'])
     expect(choice(gate, 'approve')).toMatchObject({ words: 'optional' })
@@ -123,7 +123,7 @@ describe('alertChoices', () => {
     expect(keys(item({ attention_kind: 'launch-approval', actions: ['launch.approve', 'launch.cancel'], preview: Option.none() }))).toEqual(['revise', 'cancel'])
   })
 
-  it('answers nothing st does not offer here', () => {
+  it('answers nothing Fractal does not offer here', () => {
     expect(alertChoices(item({ actions: [] }))).toBeNull()
     expect(alertChoices(item({ attention_kind: 'launch-approval', actions: [], preview: Option.some(preview) }))).toBeNull()
     expect(alertChoices(item({ attention_kind: 'revision-approval', actions: ['mission.approve-revision'] }))).toBeNull()
@@ -131,7 +131,7 @@ describe('alertChoices', () => {
 })
 
 describe('conversationAlerts', () => {
-  it('chooses this conversation\'s open alerts of every kind, as stui and the phone do', () => {
+  it('chooses this conversation\'s open alerts of every kind, as the Fractal terminal UI and the phone do', () => {
     const rows = [
       item({ id: 'attention/ask' }),
       item({ id: 'attention/gate', attention_kind: 'human-gate', actions: ['review.approve'] }),
@@ -198,7 +198,7 @@ describe('AnswerAlert', () => {
     expect(none).toContain('There is no valid preview of this launch yet, so it cannot be approved. The mission file does not parse.')
     expect(none).not.toContain('>Approve launch<')
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'revision-approval', detail: 'Add a deploy step', actions: ['mission.approve-revision'] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
-      .toContain('st work revision approve or cancel')
+      .toContain('fractal work revision approve or cancel')
   })
 
   it('shows a JSON report as its telling fields', () => {
@@ -212,7 +212,7 @@ describe('AnswerAlert', () => {
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'harness-login', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
       .toContain('Sign in from the seat&#x27;s terminal.')
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
-      .toContain('Answer this one in st for now.')
+      .toContain('Answer this one in Fractal for now.')
   })
 
   it('opens the first of several alerts and folds the rest under their titles', () => {
@@ -258,7 +258,7 @@ describe('gatewayAlertActions', () => {
     const action = { type: 'work.done', summary: 'Yes' } as const
     expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'This was already answered or closed.' })
     expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'This changed since you read it. Read it again before answering.' })
-    expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'st no longer offers this answer here.' })
+    expect(await port.act({ alert: answered, action })).toEqual({ _tag: 'Refused', detail: 'Fractal no longer offers this answer here.' })
     expect(workDone).not.toHaveBeenCalled()
   })
 
@@ -268,7 +268,7 @@ describe('gatewayAlertActions', () => {
     const launchCancel = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const token = (digit: string) => `lpv0:${digit.repeat(64)}`
     const client = {
-      // As st raises it: the alert names its variant, and its episode is the preview's hash.
+      // As Fractal raises it: the alert names its variant, and its episode is the preview's hash.
       attentionGet: vi.fn(async () => envelope({ ...open, actions: ['launch.approve', 'launch.cancel'], source_id: 'planning-session/launch/nightly', variant_id: 'variant/two', episode: token('b') })),
       launchesGet: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { kind: 'launch', id: 'launch/nightly', revision: 'l3' } })),
       launchVariantsList: vi.fn(async () => ({ snapshot: { id: 'snapshot/launch' }, value: { items: [
@@ -314,11 +314,11 @@ describe('gatewayAlertActions', () => {
     expect(await approve({ variant_id: 'variant/one', preview_token: token('a') }, [two])).toEqual(changed)
     // No variant or preview named.
     expect(await approve({ episode: token('b') }, [two])).toEqual({
-      _tag: 'Refused', detail: 'This alert does not say which preview it shows, so it cannot be approved here. Review it in st.',
+      _tag: 'Refused', detail: 'This alert does not say which preview it shows, so it cannot be approved here. Review it in Fractal.',
     })
   })
 
-  it('says why st refused, and never sends an unconfirmed answer again', async () => {
+  it('says why Fractal refused, and never sends an unconfirmed answer again', async () => {
     const refusal = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'invalid', message: 'the step already has an answer', retryable: false, details: {} }, 422)
     const workDone = vi.fn(async () => { throw refusal })
     const port = gatewayAlertActions({ attentionGet: vi.fn(async () => envelope(open)), workDone } as unknown as FractalClient)

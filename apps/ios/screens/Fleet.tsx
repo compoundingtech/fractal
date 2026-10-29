@@ -32,7 +32,7 @@ function useClients() {
     try { setClients((await client.clientsList()).value.items); setIssue(''); }
     catch (error) {
       const text = plainError(error);
-      setIssue(/404|not-found|it is gone/i.test(text) ? 'This st does not list its clients yet: its daemon needs an update.' : `Could not read connected clients: ${text}`);
+      setIssue(/404|not-found|it is gone/i.test(text) ? 'This Fractal version does not list its clients yet; it needs an update.' : `Could not read connected clients: ${text}`);
     }
   }, [client, inventoryGranted]);
   useFocusEffect(useCallback(() => {
@@ -55,7 +55,7 @@ export function FleetScreen() {
   const gatewayListed = data.machines.some(machine => machine.id === gatewayMachineId);
   const found = <>
     {undeclared.map(session => <T key={session.id} dim style={{ paddingLeft: 34 }}>? {isUnresolved(session) ? 'unresolved process' : 'native session'} · {session.driver ?? 'harness'}{session.process ? ` · pid ${session.process.pid}` : ''}</T>)}
-    {!undeclared.length ? <T dim style={{ paddingLeft: 34 }}>no sessions found running outside st</T> : null}
+    {!undeclared.length ? <T dim style={{ paddingLeft: 34 }}>no sessions found running outside Fractal</T> : null}
   </>;
   return <Screen>
     <Banners />
@@ -259,7 +259,7 @@ export function PairScreen() {
   return <Screen>
     <Banners />
     <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, paddingBottom: 48 }} keyboardShouldPersistTaps="handled" keyboardDismissMode="interactive">
-      <T soft>Begin pairing on a trusted st machine, then enter its short-lived ID, code, and the person-root fingerprint copied separately. Use HTTPS or an already encrypted path such as Tailscale for the paired-only gateway.</T>
+      <T soft>Begin pairing on a trusted Fractal machine, then enter its short-lived ID, code, and the person-root fingerprint copied separately. Use HTTPS or an already encrypted path such as Tailscale for the paired-only gateway.</T>
       {pairDraft ? <T soft>Pairing with {pairDraft.gateway}</T> : overFabric && !url ? <>
         <T soft>Pairing over Fabric with {carrierInfo.target ? fabricTargetLabel(carrierInfo.target) : ''}. {carrierInfo.fabric.phase === 'ready' ? 'Fabric is connected.' : carrierInfo.fabric.phase === 'failed' || carrierInfo.fabric.phase === 'refused' ? carrierInfo.fabric.reason : 'Connecting to Fabric…'}</T>
         {carrierInfo.node ? <><T dim>This phone's fabric node ID, for the member's grant (public):</T><T selectable>{carrierInfo.node}</T></> : null}

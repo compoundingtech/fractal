@@ -8,7 +8,8 @@ For every check in `.st/evidence-skip-policy.json` at origin/main it reads the `
 whether the flip trigger holds (docs/st3/gate-evidence.md, "When a check is ready to flip"):
   - 24 h of fresh published log: no line in the window says log=stale, absent, unsigned or `-` (the base did not pin
     .st/evidence-log-key yet), and the first line with a log value after the last `-` is at least 24 h old;
-  - at least 30 lines with outcome=satisfied and log=ok;
+  - at least 30 lines with outcome=satisfied and log=ok (rust-tests, LOWERED: at least 5 agreeing host-signed lines, satisfied,
+    log=ok and real result success, and none whose real result was failure);
   - no line with log=missing;
   - no unexplained log=unlogged_pass: one is explained when the record was observed at most 240 s before the run was
     created (log latency: two 2-minute pulls), or after it;
@@ -50,6 +51,13 @@ TEST_LISTS = (('scripts/ci-evidence-gate-test', 'enforced'), ('scripts/evidence-
 WINDOW_S = 24 * 3600
 LOOKBACK_S = 2 * 3600  # also read a little before the window, to see whether the log was already live when it began
 MIN_SATISFIED_LOG_OK = 30
+# Lowered triggers (Nathan via Factory, 2026-10-26, mission fleet/factory/no-whole-tree; Factory message/cfdc0d97e583d19c (a)): the check flips
+# at `agreeing` satisfied log=ok lines whose real result was success, none whose real result was failure and no hidden red, counting only
+# notes signed at `levels` (rust-tests: HOST-signed per-crate notes; CI fleet notes stay observe-only until the trusted-report hardening).
+# Its flip trusts `trust` (the wrapper kind's trust_levels after the flip): host and agent notes on pull_request runs, so another
+# owner's agents skip on their own signed notes exactly as ours do (Factory message/c23b235a30358f7f), and queue notes, which cover
+# merge_group runs only, which are never skipped. No fleet (CI) note is trusted.
+LOWERED = {'rust-tests': {'agreeing': 5, 'levels': ('host',), 'trust': ('host', 'agent', 'queue')}}
 LATENCY_S = 240  # two pulls of the log timer (every 2 minutes)
 NOT_FRESH = ('stale', 'absent', 'unsigned', '-')  # '-': the base did not pin the log key, so the window has not started
 WORKFLOW = '.github/workflows/fleet.yml'
@@ -283,8 +291,8 @@ def predates(root, base, reason, check, runner):
         return False
 
 
-def evaluate(rows, enforce, now):
-    """The trigger for one check, from its rows (window and lookback)."""
+def evaluate(rows, enforce, now, lowered=None):
+    """The trigger for one check, from its rows (window and lookback); `lowered` is its LOWERED entry, if any."""
     start = now - datetime.timedelta(seconds=WINDOW_S)
     rows = sorted((row for row in rows if row['created_at']), key=lambda row: row['created_at'])
     window = [row for row in rows if start <= row['created_at'] <= now]
@@ -292,7 +300,9 @@ def evaluate(rows, enforce, now):
     unexplained = 0
     for row, value in zip(window, log):
         if value == 'unlogged_pass':
-            observed = parse_time(row['fields'].get('observed_at'))
+            # An aggregate's line names the oldest observed_at of its unlogged members; its own observed_at is its oldest member's.
+            unlogged_at = row['fields'].get('log_unlogged_observed_at')
+            observed = parse_time(unlogged_at if unlogged_at not in (None, '-') else row['fields'].get('observed_at'))
             if observed is None or (row['created_at'] - observed).total_seconds() > LATENCY_S:
                 unexplained += 1
     red = [row for row in window if row['fields'].get('outcome') == 'satisfied' and row['real'] == 'failure']
@@ -318,13 +328,24 @@ def evaluate(rows, enforce, now):
         'visible_red': visible, 'log_window_start': iso(window_start), 'old_base_lines': ignored,
         'superseded_red': replaced,
     }
+    if lowered:
+        mine = [(row, value) for row, value in zip(window, log)
+                if row['fields'].get('outcome') == 'satisfied' and row['fields'].get('trust_level') in lowered['levels']]
+        result['agreeing'] = sum(1 for row, value in mine if value == 'ok' and row['real'] == 'success')
+        result['disagreeing'] = sorted({row['run'] for row, _ in mine if row['real'] == 'failure'})
     verified = [value for row, value in zip(window, log) if not row.get('old_base')]
     why = [f'{verified.count(value)} lines with log={value}' for value in NOT_FRESH if value in verified]
     if window_start is None:
         why.append('no line with a log value')
     elif window_start > start:
         why.append(f'log window started {iso(window_start)}, less than 24 h ago')
-    if result['satisfied_log_ok'] < MIN_SATISFIED_LOG_OK:
+    if lowered:
+        levels = ' or '.join(lowered['levels'])
+        if result['agreeing'] < lowered['agreeing']:
+            why.append(f'{result["agreeing"]} agreeing {levels} lines (satisfied, log=ok, real job success), fewer than {lowered["agreeing"]}')
+        if result['disagreeing']:
+            why.append(f'{len(result["disagreeing"])} runs where a {levels} note disagreed with the real job')
+    elif result['satisfied_log_ok'] < MIN_SATISFIED_LOG_OK:
         why.append(f'{result["satisfied_log_ok"]} satisfied lines with log=ok, fewer than {MIN_SATISFIED_LOG_OK}')
     if result['log_missing']:
         why.append(f'{result["log_missing"]} lines with log=missing')
@@ -400,14 +421,22 @@ def git(root, *args, runner=default_runner):
 
 # --- The flip: exactly the change that turned typescript-client on, for one more check ---------------------------------
 
-def flipped_entry(entry):
-    """The check's policy entry with enforce true, then events and sample_one_in (only if absent), in the file's order."""
+SAMPLE_ONE_IN = 1  # a flipped check samples no run (Nathan, 2026-10-26: #3913 set every check to 1; the merge queue keeps the full run)
+
+def flipped_entry(entry, trust=None):
+    """The check's policy entry with enforce true, then events (only if absent) and sample_one_in SAMPLE_ONE_IN (replacing any other
+    value), in the file's order; with `trust` (a LOWERED check), its wrapper kind trusts only those levels."""
     out = {}
     for key, value in entry.items():
-        out[key] = True if key == 'enforce' else value
+        out[key] = True if key == 'enforce' else SAMPLE_ONE_IN if key == 'sample_one_in' else value
         if key == 'enforce':
             out.setdefault('events', entry.get('events', ['pull_request']))
-            out.setdefault('sample_one_in', entry.get('sample_one_in', 5))
+            out.setdefault('sample_one_in', SAMPLE_ONE_IN)
+    if trust:
+        wrapper = ((out.get('kinds') or {}).get('wrapper'))
+        if not isinstance(wrapper, dict) or not set(trust) <= set(wrapper.get('trust_levels') or ()):
+            raise ValueError(f'{POLICY}: the wrapper kind does not already trust {", ".join(trust)}')
+        out['kinds'] = {**out['kinds'], 'wrapper': {**wrapper, 'trust_levels': [level for level in wrapper['trust_levels'] if level in trust]}}
     return out
 
 
@@ -417,10 +446,10 @@ def flip_policy(text, check):
     if not isinstance(entry, dict) or entry.get('enforce') is not False:
         raise ValueError(f'{POLICY}: {check} has no "enforce": false')
     expected = json.loads(text)
-    expected['checks'][check] = flipped_entry(entry)
+    expected['checks'][check] = flipped_entry(entry, (LOWERED.get(check) or {}).get('trust'))
     if json.dumps(doc, indent=2) + '\n' == text:
         return json.dumps(expected, indent=2) + '\n', expected['checks'][check]
-    # The file is not in json.dumps form: edit only the enforce line of this check, and add the two keys under it.
+    # The file is not in json.dumps form: edit only the enforce line of this check (and its sample_one_in line), and add the two keys under it.
     block = re.search(r'^( *)"' + re.escape(check) + r'": \{\n', text, re.M)
     line = block and re.compile(r'^' + block.group(1) + r'  "enforce": false(,?)\n', re.M).search(text, block.end())
     if not line:
@@ -429,6 +458,9 @@ def flip_policy(text, check):
     extra = ''.join(f'{pad}"{key}": {json.dumps(expected["checks"][check][key])},\n'
                     for key in ('events', 'sample_one_in') if key not in entry)
     new = text[:line.start()] + f'{pad}"enforce": true,\n' + extra + text[line.end():] if line.group(1) else None
+    if new is not None and 'sample_one_in' in entry:
+        sample = re.compile(r'^' + re.escape(pad) + r'"sample_one_in": [0-9]+(,?)\n', re.M).search(new, block.end())
+        new = new[:sample.start()] + f'{pad}"sample_one_in": {SAMPLE_ONE_IN}{sample.group(1)}\n' + new[sample.end():] if sample else None
     if new is None or json.loads(new) != expected:
         raise ValueError(f'{POLICY}: a textual edit of {check} would not give the expected policy')
     return new, expected['checks'][check]
@@ -476,8 +508,8 @@ def flip_test_list(text, path, name, check):
 def release_note(check):
     return json.dumps({
         'version': 1,
-        'summary': f'Pull requests now skip the {check} check when a trusted signed note already covers the tree (one run in five still '
-                   'runs it to compare); the merge queue keeps running it',
+        'summary': f'Pull requests now skip the {check} check when a trusted signed note already covers the tree (no run is sampled); '
+                   'the merge queue keeps running it',
         'replay': {'status': 'none', 'detail': 'No graph, claim or storage change.'},
         'schema': {'status': 'none', 'detail': 'No schema change.'},
         'rules': {'status': 'none', 'detail': f'No checkpoint rule change. {check} is enforced in the skip policy for pull_request only.'},
@@ -536,8 +568,8 @@ def propose(report, root, github, runner, dry_run, today):
                 git(tree, 'commit', '-q', '-m', f'Enforce the {check} evidence skip on pull requests\n\n'
                     f'The flip trigger held (scripts/evidence-flip-ready, docs/st3/gate-evidence.md):\n\n{trigger}\n', runner=runner)
                 git(tree, 'push', '-q', 'origin', f'HEAD:refs/heads/{branch}', runner=runner)
-                body = (f'Turns on skipping for `{check}` on pull requests (`"enforce": true`, `"events": ["pull_request"]`, one run in '
-                        f'{entry.get("sample_one_in", 5)} still sampled); the merge queue keeps running it.\n\nOpened by '
+                body = (f'Turns on skipping for `{check}` on pull requests (`"enforce": true`, `"events": ["pull_request"]`, '
+                        f'`"sample_one_in": {SAMPLE_ONE_IN}`: no run sampled); the merge queue keeps running it.\n\nOpened by '
                         f'`scripts/evidence-flip-ready --propose` because the flip trigger held over the last 24 hours:\n\n```json\n{trigger}\n```\n')
                 created = github.gh('pr', 'create', '--repo', github.repo, '--base', 'main', '--head', branch,
                                     '--title', f'Enforce the {check} evidence skip on pull requests', '--body', body)
@@ -574,7 +606,7 @@ def main(argv, runner=default_runner, now=None, root=ROOT):
         print(f'could not read GitHub or origin/main: {error}', file=sys.stderr)
         return 2
     report = {'as_of': iso(now), 'window_s': WINDOW_S, 'checks': {
-        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now), check, entry,
+        check: preconditions(evaluate([row for row in rows if row['check'] == check], entry.get('enforce') is True, now, LOWERED.get(check)), check, entry,
                              members.get(check))
         for check, entry in policy.items()}, 'presign': presign_rates(rows, now)}
     print(json.dumps(report, indent=2))

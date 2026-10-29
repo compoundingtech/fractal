@@ -91,6 +91,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(token) = self.store.selected_desired_token(&subject.subject)? else {
             return Ok(false);
         };
+        self.reconcile_claude_channel_policy(subject, member, observation, &token)?;
         if let Some(incarnation) = observation.filter(|item| item.status == "running")
             .and_then(|item| item.incarnation_id.as_deref())
             && crate::delivery_presence::claude_channel_proof_pending(&self.store, &subject.subject, incarnation) {
@@ -312,4 +313,132 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.signal_changed();
         Ok(true)
     }
+
+    /// Claude keeps running when managed policy rejects channels: this is a banner, not an
+    /// exit status or an MCP error. Persist the refusal before stopping the exact incarnation.
+    /// Only a changed declaration or an explicit restart authorizes another attempt.
+    fn reconcile_claude_channel_policy(
+        &self,
+        subject: &DesiredSubject,
+        member: &MemberSpec,
+        observation: Option<&RuntimeObservation>,
+        token: &str,
+    ) -> Result<()> {
+        const CODE: &str = "claude-channel-policy-blocked";
+        const REASON: &str = "Claude development channels are blocked by organization policy. Have an administrator set channelsEnabled: true in Claude managed settings, then explicitly restart the agent. Inbound channel messages cannot be delivered; automatic restarts are stopped.";
+        let reset = self.store.claims_for(&subject.subject, Some("runtime.action.requested"))?
+            .into_iter()
+            .filter(|claim| claim.actor.is_some()
+                && claim.body["fields"]["action"] == "restart"
+                && !automatic_request(claim))
+            .map(|claim| claim.store_index)
+            .max().unwrap_or(0);
+        let prior = self.store.claims_for(&subject.subject, Some("runtime.action.failed"))?
+            .into_iter().rev().find(|claim| {
+                claim.store_index > reset
+                    && claim.body["fields"]["action"] == CODE
+                    && claim.body["fields"]["desired_token"] == token
+            });
+        let running = observation.filter(|item| item.status == "running");
+        let fault = if let Some(prior) = prior {
+            prior
+        } else {
+            let Some(observation) = running else { return Ok(()); };
+            let Some(incarnation) = observation.incarnation_id.as_deref() else { return Ok(()); };
+            let Some((launch_token, _)) =
+                crate::rollout::launched_member(&self.store, &subject.subject, incarnation)?
+            else {
+                return Ok(());
+            };
+            if launch_token != token {
+                // This banner describes the predecessor, not the selected replacement.
+                // Leave declaration cutover to the ordinary fenced replacement path.
+                return Ok(());
+            }
+            if self.running_runtime_claim(&subject.subject, incarnation)?
+                .is_some_and(|claim| claim.store_index < reset)
+            {
+                // Let the authorized restart replace the old refused incarnation first.
+                return Ok(());
+            }
+            if !member.terminal
+                || self.store.claude_channel_attached(&subject.subject, incarnation)?
+                || !self.store.current_harness(&subject.subject)?.is_some_and(|harness| {
+                    harness.incarnation_id == incarnation
+                        && harness.reason.as_deref() == Some("claude-channel-unattached")
+                })
+            {
+                return Ok(());
+            }
+            let Ok(screen) = self.member_screen(&member.runtime_id) else { return Ok(()); };
+            if !claude_channel_policy_blocked(&screen) { return Ok(()); }
+            self.store.owned_desired_guard(subject)?;
+            let fault = self.store.append_claim(&ClaimInput {
+                subject: subject.subject.clone(), kind: "runtime.action.failed".into(),
+                actor: Some(RECONCILER_ACTOR.into()),
+                fields: BTreeMap::from([
+                    ("action".into(), json!(CODE)),
+                    ("desired_token".into(), json!(token)),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("reason".into(), json!(REASON)),
+                ]),
+                evidence: vec![token.into()], expected_subject: None,
+                idempotency_key: Some(format!("{CODE}:{}:{token}:{incarnation}:{reset}", subject.subject)),
+            })?;
+            self.signal_changed();
+            fault
+        };
+        if let Some(observation) = running.filter(|item| item.incarnation_id.as_deref() == claim_incarnation(&fault)) {
+            self.record_member(subject, observation, true)?;
+            self.reconcile_runtime_stop(
+                &subject.subject, &member.runtime_id, member.terminal,
+                observation.incarnation_id.as_deref(), member.shutdown_timeout_ms,
+                Some(observation),
+            )?;
+        }
+        anyhow::bail!("{REASON}")
+    }
+}
+
+fn claude_channel_policy_blocked(screen: &str) -> bool {
+    let mut quoted = false;
+    let mut lines = screen.lines();
+    while let Some(line) = lines.next() {
+        let line = line.trim();
+        // The provider banner is in the startup chrome, before the first conversation
+        // turn. A matching diagnostic quoted later in a prompt/reply has no authority.
+        if line.starts_with(['❯', '>', '●', '⏺']) {
+            return false;
+        }
+        if line.starts_with("```") {
+            quoted = !quoted;
+            continue;
+        }
+        const FLAG: &str = "--dangerously-load-development-channels";
+        if quoted || !(line.starts_with(FLAG) || (line.starts_with("--") && FLAG.starts_with(line))) {
+            continue;
+        }
+        // Claude 2.1.306 renders three Text nodes in a column, without a period.
+        // The issue's 2.1.310 quotation includes a period and collapses the lines.
+        // Match the complete diagnostic, allowing physical terminal soft-wraps,
+        // but never quote prefixes or conversation markers within its text.
+        let mut rendered = std::iter::once(line).chain(lines)
+            .flat_map(str::chars).filter(|character| !character.is_whitespace()).peekable();
+        for (index, expected) in [
+            "--dangerously-load-development-channels blocked by org policy (plugin:st-channel@st)",
+            "Inbound messages will be silently dropped",
+            "Have an administrator set channelsEnabled: true in managed settings to enable",
+        ].into_iter().enumerate() {
+            for character in expected.chars().filter(|character| !character.is_whitespace()) {
+                if rendered.next() != Some(character) {
+                    return false;
+                }
+            }
+            if index == 1 && rendered.peek() == Some(&'.') {
+                rendered.next();
+            }
+        }
+        return true;
+    }
+    false
 }

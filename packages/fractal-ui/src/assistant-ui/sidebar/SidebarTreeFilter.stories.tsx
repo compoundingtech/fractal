@@ -185,6 +185,7 @@ function HighlightProbe() {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar tree',
   component: SidebarTree,
   parameters: { scenario: { _tag: 'contract-fixture', reason: "Identity-retained synthetic rows and calibrated negative controls isolate filter rendering and keystroke cost." },
@@ -193,6 +194,14 @@ const meta = {
   },
 } satisfies Meta
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AgentRowNamesSurviveReposition:contract-fixture',
+  'FilterBehavior:contract-fixture',
+  'FilterHighlightsWithoutRowRenders:contract-fixture',
+  'FilterKeystrokeToPaint:contract-fixture',
+]
 type Story = StoryObj
 
 const read = (root: HTMLElement, key: 'filterSamples' | 'referenceSamples'): readonly Sample[] => JSON.parse(root.dataset[key] ?? '[]') as Sample[]

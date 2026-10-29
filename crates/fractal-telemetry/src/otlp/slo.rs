@@ -178,13 +178,13 @@ pub fn metrics(node: &str, report: &Value, now_unix_ms: u64) -> Option<Value> {
         gauge(
             "st_slo_cpu_cores",
             "{core}",
-            "Cores the daemon process used over a rolling window",
+            "Cores the member's daemon and replication workers used over the last 1, 5 or 60 closed minutes; absent while not known",
             cpu,
         ),
         gauge(
             "st_slo_cpu_max_cores",
             "{core}",
-            "The daemon CPU target in cores",
+            "The member's CPU target over the hour, in cores",
             cpu_max,
         ),
     ]
@@ -284,9 +284,10 @@ mod tests {
             {"name": "sql-statement", "p99_ms": 10, "max_ms": 100, "windows": windows(900, 2.0, 1)},
             {"name": "transaction", "max_ms": 100, "read": windows(10, 4.0, 0),
              "write": windows(5, 9.0, 0), "writer_hold": windows(5, 8.0, 1)},
-            {"name": "cpu", "max_cores": 2.0, "windows": {
-                "1m": {"cores": 0.4, "measured_seconds": 60}, "5m": {"cores": 0.3, "measured_seconds": 300},
-                "1h": {"cores": 0.2, "measured_seconds": 3600}}},
+            {"name": "cpu", "max_cores": 1.0, "idle_max_cores": 0.5, "windows": {
+                "1m": {"cores": 0.4, "minutes": 1}, "5m": {"cores": 0.3, "minutes": 5},
+                "1h": {"cores": null, "minutes": 42}}, "minutes": 42,
+                "idle": {"minutes": 12, "cores": 0.1, "not_idle": {}}},
             {"name": "database", "max_live_gb": 5, "size": {"live_gb": 1.0}},
             {"name": "ios-connect", "p99_ms": 1500, "population": "client-observed-latencies",
              "windows": windows(20, 900.0, 0)},
@@ -318,7 +319,9 @@ mod tests {
         assert_eq!(find(target, &[("target", "sql-statement"), ("stat", "max")])["asDouble"], 100.0);
         assert_eq!(find(target, &[("target", "transaction"), ("series", "read"), ("stat", "max")])["asDouble"], 100.0);
         assert_eq!(find(points(&body, "st_slo_cpu_cores"), &[("window", "1m")])["asDouble"], 0.4);
-        assert_eq!(points(&body, "st_slo_cpu_max_cores")[0]["asDouble"], 2.0);
+        // An hour not yet known sends no point rather than a zero.
+        assert!(!points(&body, "st_slo_cpu_cores").iter().any(|point| label(point, "window") == Some("1h")));
+        assert_eq!(points(&body, "st_slo_cpu_max_cores")[0]["asDouble"], 1.0);
         // The database row is not a window and goes out through no gauge here.
         for metric in body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array().unwrap() {
             for point in metric["gauge"]["dataPoints"].as_array().unwrap() {

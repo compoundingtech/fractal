@@ -103,21 +103,19 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
     let store = Arc::new(crate::store::Store::open_memory("message-retry").unwrap());
-    let state = crate::api::AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0).0,
-        node: "message-retry".into(),
-        state_dir: directory.path().into(),
-        pty_root: directory.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = crate::api::AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(tokio::sync::Notify::new()),
+    event_notify: tokio::sync::watch::channel(0).0,
+    node: "message-retry".into(),
+    state_dir: directory.path().into(),
+    pty_root: directory.path().join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let calls = Arc::new(AtomicUsize::new(0));
     let count = calls.clone();
     let app = crate::api::router(state).layer(axum::middleware::from_fn(
@@ -191,14 +189,14 @@ async fn message_retry_after_an_accepted_but_unanswered_send_creates_one_message
 async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
     let directory = tempfile::tempdir().unwrap();
     let socket = directory.path().join("st3.sock");
-    let calls = Arc::new(AtomicUsize::new(0));
-    let count = calls.clone();
+    let (count, mut calls) = tokio::sync::watch::channel(0_usize);
+    let count = Arc::new(count);
     let app = Router::new().route(
         "/v1/messages",
         post(move || {
             let count = count.clone();
             async move {
-                count.fetch_add(1, Ordering::SeqCst);
+                count.send_modify(|calls| *calls += 1);
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 Json(test_envelope(Value::Null))
             }
@@ -225,7 +223,11 @@ async fn unanswered_message_retries_are_bounded_and_report_the_reusable_key() {
         .await
         .unwrap_err()
         .to_string();
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    // The client gives up on each attempt at its own deadline, which can pass before this
+    // runtime has polled the server's handler for that attempt: both sends are written by
+    // now, so wait for the server to have taken them rather than read the count early.
+    calls.wait_for(|calls| *calls >= 2).await.unwrap();
+    assert_eq!(*calls.borrow(), 2);
     assert!(error.contains("may have been sent"), "{error}");
     assert!(
         error.contains("--idempotency-key \"retry-this-key\""),

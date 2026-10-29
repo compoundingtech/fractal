@@ -117,7 +117,7 @@ pub(super) async fn run_attention(
                 .attention_list(cursor.as_deref(), Some(limit), all)
                 .await?;
             let history = if all { " --all" } else { "" };
-            let command = format!("st alerts ls --as {actor}{history}");
+            let command = format!("fractal alerts ls --as {actor}{history}");
             if json_output {
                 print_value(&response, true)?;
             } else {
@@ -217,12 +217,9 @@ pub(super) async fn run_attention(
                 return Ok(());
             };
             if let Err(error) = sync_message_projection(client).await {
-                eprintln!(
-                    "st: {} was sent (idempotency key {}), but the message projection was not refreshed: {}",
-                    receipt.message.subject,
-                    receipt.idempotency_key,
-                    plain_error(&error)
-                );
+                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
+                receipt.idempotency_key,
+                plain_error(&error)));
             }
             print_message_receipt(&receipt, json_output)
         }

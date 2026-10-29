@@ -56,7 +56,7 @@ pub fn clean_message_text_with_filters(raw: &str, filters: &[DisplayFilter]) -> 
         text.to_owned()
     };
     if cut {
-        format!("{text}\n\n… st kept only the start of this")
+        format!("{text}\n\n… Fractal kept only the start of this")
     } else {
         text
     }

@@ -7,6 +7,7 @@ use crate::accounts::{
     parse_account,
 };
 pub use fractal_missions::store::accounts::*;
+pub use fractal_store::store::accounts::declared_accounts_at;
 
 /// The account a seat starts on, and the directory its login lives in on this host.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,32 +17,11 @@ pub struct SeatAccount {
     pub login: String,
 }
 
-pub fn declared_accounts_at(connection: &Connection) -> Result<Vec<AccountDecl>> {
-    let mut statement = connection
-        .prepare_cached("SELECT subject, body FROM desired WHERE kind='account' ORDER BY subject")?;
-    let rows = statement.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
-    let mut accounts = Vec::new();
-    for row in rows {
-        let (subject, body) = row?;
-        if let Some(account) = serde_json::from_str(&body)
-            .ok()
-            .and_then(|desired: Value| parse_account(&subject, &desired))
-        {
-            accounts.push(account);
-        }
-    }
-    Ok(accounts)
-}
-
-/// The declared account an unbound seat's launch environment puts it on, by login directory.
+/// The declared account an unbound seat's launch environment puts it on: its login directory, the
+/// harness's default one, or the key file its harness reads.
 fn unbound_login_account(connection: &Connection, seat: &str, body: &str) -> Result<Option<String>> {
     let desired: Value = serde_json::from_str(body)?;
     let Some(driver) = crate::accounts::harness_driver(&desired) else {
-        return Ok(None);
-    };
-    let Some(variable) = crate::accounts::login_environment_name(driver) else {
         return Ok(None);
     };
     let member: Option<String> = connection
@@ -52,19 +32,22 @@ fn unbound_login_account(connection: &Connection, seat: &str, body: &str) -> Res
         return Ok(None);
     };
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let Some(directory) = member
-        .environment
-        .get(variable)
-        .cloned()
-        .or_else(|| std::env::var(variable).ok())
-        .filter(|directory| !directory.is_empty())
-        .and_then(|directory| crate::accounts::expand_login(&directory, home.as_deref()))
-    else {
-        return Ok(None);
-    };
+    let configured = crate::accounts::login_environment_name(driver).and_then(|variable| {
+        member
+            .environment
+            .get(variable)
+            .cloned()
+            .or_else(|| std::env::var(variable).ok())
+    });
     let accounts = declared_accounts_at(connection)?;
-    Ok(crate::accounts::account_by_login(&accounts, driver, &member.host, &directory, home.as_deref())
-        .map(|account| account.name.clone()))
+    Ok(crate::accounts::unbound_login_account(
+        &accounts,
+        driver,
+        &member.host,
+        configured.as_deref(),
+        home.as_deref(),
+    )
+    .map(|account| account.name.clone()))
 }
 
 /// The newest durable or local observation, within the caller's snapshot or write transaction.

@@ -4,11 +4,11 @@
 The evidence-presign-notice job runs it after the evidence gates, on pull requests only, taken from the accepted base like
 the gate. It reads the gates' decision lines (LINES, one per gate job) and lists a check only when every one of these holds:
 
-  * scripts/st-test can sign it from a checkout: it is a lane of .st/required-lanes.json at the base;
+  * scripts/fractal-test can sign it from a checkout: it is a lane of .st/required-lanes.json at the base;
   * its gate ran it for lack of a note (`decision=run outcome=no_note`), on a same-repository pull request;
   * the gate asked about the head's own tree (`tree_of=head head_tree=used`): when it fell back to the merge tree (a protected
     file changed, an author is not listed, the branch is too far behind) a pre-signed note could not have counted;
-  * the pull request does not edit the lane's definition_paths: st-test refuses to sign such a tree, so CI runs the check.
+  * the pull request does not edit the lane's definition_paths: fractal-test refuses to sign such a tree, so CI runs the check.
 
 With a check listed it writes one notice annotation and the job summary; with none it writes the summary line only. Either
 way it prints one `evidence-presign-notice v1 ...` line, so pre-signing can be counted per pull request. Nothing reads its
@@ -75,7 +75,7 @@ def assess(lines, lanes, files):
 
 
 def message(listed):
-    command = 'scripts/st-test --push origin'
+    command = 'scripts/fractal-test --push origin'
     return (f'These jobs ran in full because no pre-signed note covered this head: {", ".join(listed)}. '
             f'Run `{command}` before marking the pull request ready, and CI can skip them. How: {HOW}. '
             'This never fails a check or blocks a merge.')
