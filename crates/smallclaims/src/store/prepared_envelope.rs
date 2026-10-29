@@ -404,9 +404,10 @@ pub fn admit_prepared_envelope_tx(
         outcome.verify += started.elapsed();
         match classification {
             Ok(ReplicatedClaimAdmission::Valid) => {
-                // A checkpoint dropped this claim here, and another envelope carries it again.
-                // A node that still held it would ignore the copy as already stored.
-                let tombstoned = checkpoint::claim_tombstoned(transaction, &claim.id)
+                // A checkpoint dropped this claim here, or this member deleted it, and another
+                // envelope carries it again. A node that still held it would ignore the copy as
+                // already stored.
+                let tombstoned = super::retired::claim_refused(transaction, &claim.id)
                     .map_err(internal)?;
                 let inserted = if tombstoned {
                     0
