@@ -296,7 +296,7 @@
         "Store::cache_idempotency_response (no production caller)"
       ]
     },
-    "legacy_receipts": "retain-all-rows-present-at-upgrade; follow-up-1741-deletes-at-deployment-plus-30-days",
+    "legacy_receipts": "rows-at-or-below-meta.idempotency_legacy_rowid-are-not-removed-by-this-cleanup",
     "indexes": "no-added-dropped-or-changed-indexes",
     "cleanup": "rowid-after-legacy-watermark; at-most-64; stop-at-first-young-row; rotate-active-pins-with-update"
   }
