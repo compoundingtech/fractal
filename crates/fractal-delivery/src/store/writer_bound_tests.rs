@@ -95,7 +95,6 @@ fn a_catch_up_exchange_holds_the_writer_one_page_at_a_time() {
         assert!(covered.iter().all(|count| *count <= page), "a hold covered more than one page of {page} {unit}: {covered:?}");
         assert_eq!(covered.iter().sum::<usize>(), CLAIMS, "{unit}: {covered:?}");
     }
-    // Repairs are applied all in one hold; this catch-up carries none.
-    let repairs = pages.get("applied repairs").cloned().unwrap_or_default();
-    assert!(!repairs.is_empty() && repairs.iter().all(|count| *count == 0), "{repairs:?}");
+    // This catch-up carries no repairs, so applying them asks for no writer hold.
+    assert_eq!(pages.get("applied repairs"), None);
 }
