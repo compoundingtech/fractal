@@ -108,8 +108,10 @@ def is_ancestor(repo, ancestor, head):
     return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, head], cwd=repo).returncode == 0
 
 
-def latest_record(repo, head, previous):
-    """The most recent earlier verdict for an ancestor of head (the review record), or the one named."""
+def latest_record(repo, head, merge_base, previous):
+    """The most recent earlier verdict for an ancestor of head on its own branch (the review record), or the one named.
+    The record is shared by every worktree of the clone, and a merged change's head is an ancestor of all of main, so a
+    verdict whose head is already in the merge base belongs to another change and is not an earlier round of this one."""
     if previous:
         return json.loads(Path(previous).read_text())
     best = None
@@ -119,7 +121,8 @@ def latest_record(repo, head, previous):
             verdict = json.loads(path.read_text())
         except ValueError:
             continue
-        if verdict.get("head") != head and is_ancestor(repo, verdict.get("head", ""), head):
+        if (verdict.get("head") != head and is_ancestor(repo, verdict.get("head", ""), head)
+                and not is_ancestor(repo, verdict["head"], merge_base)):
             if best is None or is_ancestor(repo, best["head"], verdict["head"]):
                 best = verdict
     return best
@@ -522,7 +525,7 @@ def review(args, repo, tools):
     patch = patch_ids(repo, merge_base, head, paths)
     deterministic = deterministic_floor(repo, base, head, paths, tools)
     text, digest = standard(repo, base)
-    previous = latest_record(repo, head, args.previous)
+    previous = latest_record(repo, head, merge_base, args.previous)
     engine_path = base_script(repo, base, "classify-risk", tools)
     engine = load_path("classify-risk", engine_path) if engine_path else load_script("classify-risk")
     base_config = base_text(repo, base, CONFIG)
