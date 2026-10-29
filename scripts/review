@@ -570,7 +570,8 @@ def review(args, repo, tools):
         # A reviewer that could not read (a harness whose only reader it thought it lacked) answers from the prompt alone. That
         # is not a verdict on the change, so it is neither a GO nor a CHANGES that spends a round.
         raise Failed(f"the reviewer read no file of the {len(changed)} to read in full, so this is an incomplete review, not a verdict; "
-                     "nothing was written and no round was spent")
+                     "nothing was written and no round was spent. Run the review again with a harness that can read files in its "
+                     "checkout (--harness); if none can, take the change to your own human")
     reviewer = {"model": model, "family": family, "harness": name}
     verdict = assemble(answer, head=head, base=base, round_number=round_number, deterministic=deterministic, patch=patch, served=served,
                        changed=changed, structure=structure, reviewer=reviewer, digest=digest)

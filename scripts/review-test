@@ -250,6 +250,7 @@ class Review(unittest.TestCase):
                 self.assertEqual(done.returncode, 1, done.stderr)
                 self.assertIsNone(written)
                 self.assertIn("incomplete review", done.stderr)
+                self.assertIn("with a harness that can read files", done.stderr)
         self.assertFalse(any((self.repo / ".git" / "review-records").glob("*.json")))
         self.say(answer())
         done, first = self.review()
