@@ -8315,6 +8315,29 @@ fn a_usage_reading_back_at_its_replicated_value_leaves_nothing_pending() {
     assert_eq!(tokens(&store), [10], "the turn's end has nothing newer to replicate");
 }
 
+/// The fold sums `response` readings, so two equal responses are two events, not a repeat: each
+/// replicates once its interval allows, and the summary counts both.
+#[test]
+fn two_equal_response_readings_both_replicate_and_both_count() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let respond = |key: &str, at: u128| {
+        let mut reading = harness_usage(subject, "response", 0, 0);
+        reading.fields.remove("context_used_tokens");
+        reading.fields.insert("total_tokens".into(), Value::from(7_u64));
+        reading.idempotency_key = Some(key.into());
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+    respond("first", start + minute);
+    respond("second", start + 7 * minute);
+    assert_eq!(store.claims_for(subject, Some("harness.usage")).unwrap().len(), 2, "both responses replicate");
+    let summary = store.usage_summary_at(subject, Some("inc-1"), None).unwrap().unwrap();
+    assert_eq!(summary.total_tokens, 14, "the summary counts both responses");
+}
+
 #[test]
 fn a_system_runtime_action_stays_local_while_a_requested_one_replicates() {
     let store = Store::open_memory("node").unwrap();

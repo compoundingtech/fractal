@@ -8984,6 +8984,7 @@ pub fn usage_slot(fields: &BTreeMap<String, Value>) -> String {
 /// A reading equal to the slot's last replicated one never replicates again: it stays local and
 /// leaves nothing pending, since the replicated claim already says the same. Seats at rest
 /// re-sent an unchanged context occupancy, and its five-minute interval replicated each copy.
+/// A `response` reading is never a repeat: the fold sums responses, so two equal ones are two.
 ///
 /// Responses keep arriving while a harness reports idle: its subagents and background tasks
 /// answer while the main loop waits. Replicating each of them at once wrote one claim every
@@ -9028,7 +9029,9 @@ fn publish_due_usage_tx(
                 published.remove("native_session_id");
             }
             let published_at = (*published_at).max(0) as u128;
-            let repeat = published == input.fields;
+            // Each response reading adds to the fold's sum, so an equal one is a new event, not a repeat.
+            let repeat = input.fields.get("semantics").and_then(Value::as_str) != Some("response")
+                && published == input.fields;
             let due = resting_since.is_some_and(|since| published_at < since)
                 || now.saturating_sub(published_at) >= USAGE_PUBLISH_INTERVAL_MS
                 || ["compactions", "model"]

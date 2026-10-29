@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "summary": "A harness.usage reading equal to its slot's last replicated reading stays local instead of replicating again once its five-minute interval passes",
+  "summary": "A harness.usage reading equal to its slot's last replicated reading stays local instead of replicating again once its five-minute interval passes; per-response readings, which add up, always count",
   "replay": {
     "status": "changed",
-    "detail": "Fewer harness.usage claims are written: a reading whose fields equal the slot's last replicated reading (apart from a native binding the publication added) stays in the host's local observation log, and it supersedes any older pending reading of the slot, so the turn's end has nothing to flush. A reading that differs still replicates on the existing rules. Old claims are untouched."
+    "detail": "Fewer harness.usage claims are written: a reading whose fields equal the slot's last replicated reading (apart from a native binding the publication added) stays in the host's local observation log, and it supersedes any older pending reading of the slot, so the turn's end has nothing to flush. A reading that differs, and every reading with response semantics (the fold sums those, so two equal responses are two), still replicates on the existing rules. Old claims are untouched."
   },
   "schema": {
     "status": "none",
