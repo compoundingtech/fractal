@@ -83,12 +83,16 @@ seat's current state and usage, and each account's current limits. The same batc
 `st_account_limit_used_percent` on `/v1/metrics`, a gauge of the newest reading of each driver,
 account and window (`five_hour` or `weekly`); seat identities appear only in the log records.
 
-Each node also counts the claims it stores, written here or received from a peer, per kind and
-writing node: a trigger on claim insert adds to the node-local `claim_writes` totals in the same
-transaction. Deleting claims (local trim, checkpoints) never lowers them, so they stay a true write
-rate after superseded claims are gone; counting the claims that survive in the store would not. The
-exporter sends them as `st_claims_stored_total` and `st_claim_body_bytes_stored_total`, cumulative
-sums labelled `kind` and `writer` from `claim_writes_since_unix_ms` in `meta`, whenever they changed.
+Each node also counts the rows it stores into its claims table, written here or received from a
+peer, per kind and writing node: a trigger on claim insert adds to the node-local `claims_stored`
+totals in the same transaction. Deleting claims (local trim, checkpoints) never lowers them, so they
+stay a true storage rate after superseded claims are gone; counting the claims that survive in the
+store would not. An ignored `INSERT OR IGNORE` (a duplicate, or a retired claim refused on
+re-admission) stores and counts nothing; a repair that deletes a claim and inserts it again counts
+it again. The totals are node-local: they are not replicated, not part of any digest, and not in
+backups; a restore stores its claims again, counts them, and starts a new series. The exporter
+sends them as `st_claims_stored_total` and `st_claim_body_bytes_stored_total`, cumulative sums
+labelled `kind` and `writer` from `claims_stored_since_unix_ms` in `meta`, whenever they changed.
 
 Claude and Codex response token buckets are `harness.timeline` usage observations. They retain
 the turn ID, model, agent, mission run, and step on the producing node. `local_usage_responses` remembers
