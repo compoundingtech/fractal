@@ -1254,6 +1254,8 @@ fn render_launchd_program_plist(
         .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
         .collect::<String>();
     let mut environment = crate::instance::service_environment();
+    // current_exe() resolves aliases to the physical st3 image for native services.
+    environment.push(("FRACTAL_SUPPRESS_DEPRECATION".to_owned(), "1".to_owned()));
     if process_type == "Interactive"
         && let Some(kib) = spec.read_cache_kib
     {
@@ -1283,12 +1285,14 @@ fn render_launchd_program_plist(
 }
 
 fn plist_environment(variables: &[(String, String)]) -> String {
+    if variables.is_empty() {
+        return String::new();
+    }
     let entries = variables
         .iter()
         .map(|(name, value)| format!("<key>{}</key><string>{}</string>", xml_escape(name), xml_escape(value)))
         .collect::<String>();
-    // current_exe() resolves aliases to the physical st3 image for native services.
-    format!("  <key>EnvironmentVariables</key><dict><key>FRACTAL_SUPPRESS_DEPRECATION</key><string>1</string>{entries}</dict>\n")
+    format!("  <key>EnvironmentVariables</key><dict>{entries}</dict>\n")
 }
 
 fn xml_escape(value: &str) -> String {
