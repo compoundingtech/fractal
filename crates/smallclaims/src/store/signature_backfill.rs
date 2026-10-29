@@ -28,13 +28,17 @@ const STALL_MS: u128 = 60 * 60 * 1000;
 
 /// One writer's envelopes after a position, with the keys that signed each. Both tables are
 /// searched through their primary keys alone.
-pub(super) const SCAN_SQL: &str = "SELECT sequence, envelope_hash,
-        (SELECT json_group_array(member_key) FROM replica_envelope_signatures AS signatures
-         WHERE signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
-           AND signatures.envelope_hash=envelopes.envelope_hash)
-     FROM replica_envelopes AS envelopes
-     WHERE writer=?1 AND (sequence, envelope_hash)>(?2, ?3) AND sequence<=?4
-     ORDER BY sequence, envelope_hash LIMIT ?5";
+fn scan_statement(connection: &Connection) -> rusqlite::Result<rusqlite::CachedStatement<'_>> {
+    connection.prepare_cached(
+        "SELECT sequence, envelope_hash,
+                (SELECT json_group_array(member_key) FROM replica_envelope_signatures AS signatures
+                 WHERE signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
+                   AND signatures.envelope_hash=envelopes.envelope_hash)
+         FROM replica_envelopes AS envelopes
+         WHERE writer=?1 AND (sequence, envelope_hash)>(?2, ?3) AND sequence<=?4
+         ORDER BY sequence, envelope_hash LIMIT ?5",
+    )
+}
 
 #[derive(Debug, Default)]
 pub struct SignatureBackfill {
@@ -92,11 +96,7 @@ impl Store {
         // This node signs its own envelopes and never asks for them.
         windows.remove(&self.origin);
         let connection = self.readers.get();
-        let mut scan = connection.prepare_cached(SCAN_SQL)?;
-        let mut receipt = connection.prepare_cached(
-            "SELECT receipt_state FROM replica_envelopes
-             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
-        )?;
+        let mut scan = scan_statement(&connection)?;
         let mut wanted = Vec::new();
         let mut found = 0;
         let mut after = start.clone();
@@ -131,8 +131,13 @@ impl Store {
                     continue;
                 }
                 // A held envelope already asks for its signature as unsigned.
-                let state = receipt
-                    .query_row(params![writer, sequence, hash], |row| row.get::<_, String>(0))
+                let state = connection
+                    .query_row(
+                        "SELECT receipt_state FROM replica_envelopes
+                         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+                        params![writer, sequence, hash],
+                        |row| row.get::<_, String>(0),
+                    )
                     .optional()?;
                 if state.as_deref() != Some("validated") {
                     continue;
@@ -155,7 +160,6 @@ impl Store {
             after = Some((writer.clone(), i64::MAX as u64, String::new()));
         }
         drop(scan);
-        drop(receipt);
         drop(connection);
         let mut state = self
             .signature_backfill
@@ -192,10 +196,12 @@ mod tests {
     fn the_scan_reads_only_primary_key_indexes_never_envelope_rows() {
         let store = Store::open_memory("alder", Arc::new(Plain)).unwrap();
         let connection = store.readers.get();
+        // Unbound parameters expand to NULL, which the planner treats as it does a bound value.
+        let sql = scan_statement(&connection).unwrap().expanded_sql().unwrap();
         let plan: Vec<String> = connection
-            .prepare(&format!("EXPLAIN QUERY PLAN {SCAN_SQL}"))
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap()
-            .query_map(params!["writer", 0, "", i64::MAX, 16], |row| row.get(3))
+            .query_map([], |row| row.get(3))
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
