@@ -20,6 +20,7 @@ import fnmatch
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -108,8 +109,10 @@ def is_ancestor(repo, ancestor, head):
     return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, head], cwd=repo).returncode == 0
 
 
-def latest_record(repo, head, previous):
-    """The most recent earlier verdict for an ancestor of head (the review record), or the one named."""
+def latest_record(repo, head, merge_base, previous):
+    """The most recent earlier verdict for an ancestor of head on its own branch (the review record), or the one named.
+    The record is shared by every worktree of the clone, and a merged change's head is an ancestor of all of main, so a
+    verdict whose head is already in the merge base belongs to another change and is not an earlier round of this one."""
     if previous:
         return json.loads(Path(previous).read_text())
     best = None
@@ -119,7 +122,8 @@ def latest_record(repo, head, previous):
             verdict = json.loads(path.read_text())
         except ValueError:
             continue
-        if verdict.get("head") != head and is_ancestor(repo, verdict.get("head", ""), head):
+        if (verdict.get("head") != head and is_ancestor(repo, verdict.get("head", ""), head)
+                and not is_ancestor(repo, verdict["head"], merge_base)):
             if best is None or is_ancestor(repo, best["head"], verdict["head"]):
                 best = verdict
     return best
@@ -444,11 +448,14 @@ def assemble(answer, *, head, base, round_number, deterministic, patch, served, 
     return verdict
 
 
-def validate(verdict, repo, base, folder):
-    """The verdict checked by BASE's validator against BASE's schema (the checkout's own only when the base has none yet)."""
+def validate(verdict, repo, base, folder, previous=None):
+    """The verdict checked by BASE's validator against BASE's schema (the checkout's own only when the base has none yet).
+    The earlier verdict goes along when the base's validator takes one; an older one is called as it always was."""
     script = base_script(repo, base, "review-validate", folder)
     validator = load_path("review-validate", script) if script else load_script("review-validate")
     schema_text = base_text(repo, base, ".st/review-verdict.schema.json") or (ROOT / ".st/review-verdict.schema.json").read_text()
+    if previous is not None and "previous" in inspect.signature(validator.validate).parameters:
+        return validator.validate(verdict, json.loads(schema_text), previous=previous)
     return validator.validate(verdict, json.loads(schema_text))
 
 
@@ -522,7 +529,7 @@ def review(args, repo, tools):
     patch = patch_ids(repo, merge_base, head, paths)
     deterministic = deterministic_floor(repo, base, head, paths, tools)
     text, digest = standard(repo, base)
-    previous = latest_record(repo, head, args.previous)
+    previous = latest_record(repo, head, merge_base, args.previous)
     engine_path = base_script(repo, base, "classify-risk", tools)
     engine = load_path("classify-risk", engine_path) if engine_path else load_script("classify-risk")
     base_config = base_text(repo, base, CONFIG)
@@ -545,11 +552,15 @@ def review(args, repo, tools):
             remerge_text = git(repo, "show", "--remerge-diff", "--format=", head, check=False).strip()
         if not changed and not structure and not remerge_text and set(old) == set(patch):
             verdict = carry(previous, head=head, base=base, patch=patch, digest=digest, deterministic=deterministic, merge_base=merge_base)
-            return finish(args, repo, verdict, {"harness": "none", "seconds": 0, "carried_from": previous["head"], "cost_usd": 0}, base, tools)
+            return finish(args, repo, verdict, {"harness": "none", "seconds": 0, "carried_from": previous["head"], "cost_usd": 0}, base, tools,
+                          previous)
     if round_number > MAX_ROUNDS:
         raise Failed(f"this would be round {round_number}; the standard allows {MAX_ROUNDS}, then the change goes to its author's own human")
     answers_note = ""
-    if round_number > 1:
+    if round_number > 1 and previous and previous["verdict"] == "GO":
+        answers_note = ("The earlier verdict was a GO, so there is no earlier finding to answer: review what changed since it as a delta "
+                        "(for example a merge of main that resolved a conflict), and leave \"answers\" empty unless a change answers an advisory finding.")
+    elif round_number > 1:
         answers_note = "This is a round after the first: in \"answers\", say which earlier finding each change since then answers. A GO counts only after a code change that answers them."
     prompt_head = build_prompt(text, head, base, merge_base, changed, structure, served, bool(remerge_text), round_number, previous, answers_note, reads)
     diff_parts = []
@@ -571,11 +582,11 @@ def review(args, repo, tools):
                        changed=changed, structure=structure, reviewer=reviewer, digest=digest)
     metrics.update(files=len(paths), changed_lines=deterministic["changed_lines"], read_full=len(changed), served=len(served),
                    prompt_chars=len(prompt), round=round_number)
-    return finish(args, repo, verdict, metrics, base, tools)
+    return finish(args, repo, verdict, metrics, base, tools, previous)
 
 
-def finish(args, repo, verdict, metrics, base, folder):
-    problems = validate(verdict, repo, base, folder)
+def finish(args, repo, verdict, metrics, base, folder, previous=None):
+    problems = validate(verdict, repo, base, folder, previous)
     if problems:
         for problem in problems:
             print(f"review: {problem}", file=sys.stderr)
