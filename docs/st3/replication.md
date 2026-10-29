@@ -1155,7 +1155,7 @@ replication check fails `st doctor` as above.
 
 A member that trims on its own (`[trim] local`) deletes claims its peers may still hold, so two
 members stop holding the same claims and their envelope and claim digests no longer settle a
-comparison. What must still agree is what readers answer. `smallclaims::store::answers`
+comparison. What must still agree is what readers answer. `smallclaims::answers`
 summarizes that per claim kind, at a cut, so members can compare it:
 
 - A kind's answer for one key, a subject and the writer that wrote it, is the key's newest claim
