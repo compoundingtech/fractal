@@ -1201,24 +1201,24 @@ mod tests {
         );
         let taps = taps(&rows);
         for answer in ["approve-once", "approve-kind", "dismiss"] {
+            let hit = Hit::Alert("attention/one".into(), AlertTap::Answer(answer.into()));
+            assert!(taps.contains(&hit), "{answer}");
+            // Each answer from its own band: one tap sends exactly that answer, and nothing else.
+            let mut ui = with_alerts(vec![prompt(
+                "attention/one",
+                &["approve-once", "approve-kind", "dismiss"],
+            )]);
+            ui.live = true;
+            ui.click(hit);
             assert!(
-                taps.contains(&Hit::Alert(
-                    "attention/one".into(),
-                    AlertTap::Answer(answer.into())
-                )),
+                matches!(
+                    ui.effects.as_slice(),
+                    [Effect::Attention { id, action, answer: Some(sent), .. }]
+                        if id == "attention/one" && action == "prompt.respond" && sent == answer
+                ),
                 "{answer}"
             );
         }
-        ui.live = true;
-        ui.click(Hit::Alert(
-            "attention/one".into(),
-            AlertTap::Answer("approve-once".into()),
-        ));
-        assert!(matches!(
-            ui.effects.as_slice(),
-            [Effect::Attention { id, action, answer: Some(answer), .. }]
-                if id == "attention/one" && action == "prompt.respond" && answer == "approve-once"
-        ));
     }
 
     #[test]
