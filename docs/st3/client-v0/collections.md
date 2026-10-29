@@ -342,6 +342,9 @@ projects a different graph than, with the same `SyncPeer` a page's `sync` carrie
 `SyncNotice`, which is absent while level, it says `level` explicitly: on the stream an absent
 `sync` means unknown, as from a daemon that does not send it, never level.
 
+A window an incremental view source reads (the daemon admits one for no collection yet) carries
+none, since such a source's reads say nothing when no row changed.
+
 A daemon that sends it puts it on every `snapshot` frame of the collection, and on a `changes`
 frame only when it changed since the subscription's previous frame: its state, or which peers
 (by `host_id`) are named, including the change back to `level`. A peer's counts moving is not a

@@ -215,40 +215,21 @@ fn a_sync_is_compared_by_its_state_and_the_peers_it_names() {
 }
 
 #[test]
-fn a_read_that_changes_no_row_still_says_a_changed_sync() {
-    let root = tempfile::tempdir().unwrap();
-    let state = super::tests::test_state_named(root.path(), "stream-sync-silent");
-    let request: CollectionSubscribe = serde_json::from_value(
-        json!({"kind":"subscribe", "id":"a", "collection":"attention", "limit":200}),
-    )
-    .unwrap();
-    let snapshot = new_client_snapshot(&state);
-    let mut subscription = CollectionSubscription { generation: 0, reading: None, dirty: false, delivered: true, previous: Arc::new(BTreeMap::new()), ivm: None, cursor: None, order: vec!["attention/row".into()], has_more: false, roster_revision: 0, view_revision: 0, opened: None, waiting_for_view: false, owner_revision: None, sync: Some(level()), sync_flags: (false, false), snapshot: Some(snapshot.clone()), request };
-    let catching = json!({"state": "catching-up", "peers": [{"host_id": "host/edge", "peer_only_envelopes": 3}]});
-
-    // The window said level: catching up is a changes frame with no rows, naming its last
-    // snapshot, order and has_more.
-    let changes = sync_only_changes(&subscription, &catching).expect("a changed sync is sent");
-    assert_eq!(changes["kind"], "changes");
-    assert_eq!(changes["id"], "a");
-    assert_eq!(changes["upserts"], json!([]));
-    assert_eq!(changes["removes"], json!([]));
-    assert_eq!(changes["order"], json!(["attention/row"]));
-    assert_eq!(changes["has_more"], false);
-    assert_eq!(changes["snapshot"], serde_json::to_value(&snapshot).unwrap());
-    assert_eq!(changes["sync"], catching);
-
-    // What the window already said is not sent again, counts moving included.
-    subscription.sync = Some(sync_said(&catching));
-    let counts_moved = json!({"state": "catching-up", "peers": [{"host_id": "host/edge", "peer_only_envelopes": 900}]});
-    assert!(sync_only_changes(&subscription, &counts_moved).is_none());
-    // Back to level is a change.
-    assert_eq!(sync_only_changes(&subscription, &json!({"state":"level"})).unwrap()["sync"], json!({"state":"level"}));
-
-    // A window that has not had its snapshot, or never stated a sync, gets nothing here.
-    subscription.delivered = false;
-    assert!(sync_only_changes(&subscription, &json!({"state":"level"})).is_none());
-    subscription.delivered = true;
-    subscription.snapshot = None;
-    assert!(sync_only_changes(&subscription, &json!({"state":"level"})).is_none());
+fn a_window_read_from_an_incremental_source_states_no_sync() {
+    let subscription = |collection: &str, ivm: Option<Arc<collection_ivm::Adapter>>| {
+        let request = serde_json::from_value::<CollectionSubscribe>(
+            json!({"kind":"subscribe", "id":"a", "collection":collection, "limit":200}),
+        )
+        .unwrap();
+        CollectionSubscription { generation: 0, reading: None, dirty: false, delivered: true, previous: Arc::new(BTreeMap::new()), ivm, cursor: None, order: Vec::new(), has_more: false, roster_revision: 0, view_revision: 0, opened: None, waiting_for_view: false, owner_revision: None, sync: None, sync_flags: (false, false), request }
+    };
+    assert!(window_states_sync(&subscription("attention", None)));
+    assert!(!window_states_sync(&subscription("missions", None)));
+    // Its reads say nothing when no row changed, so it could not say a changed sync alone: it
+    // states none, which reads as unknown.
+    let adapter = Arc::new(collection_ivm::Adapter {
+        view: "fixture.attention",
+        rows: Arc::new(|_, _, _, _, _, _, _| Ok((Vec::new(), false))),
+    });
+    assert!(!window_states_sync(&subscription("attention", Some(adapter))));
 }

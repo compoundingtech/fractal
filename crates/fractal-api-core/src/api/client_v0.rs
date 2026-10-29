@@ -208,9 +208,6 @@ pub struct CollectionSubscription {
     /// The replication flags when that frame was built: a commit that moves them rereads the
     /// window, so a host that starts or stops catching up or diverging says so at once.
     pub sync_flags: (bool, bool),
-    /// The snapshot that frame named, kept only for a window that states its sync: a read that
-    /// finds no row changed but the sync did sends a changes frame naming it again.
-    pub snapshot: Option<ClientSnapshot>,
 }
 
 // Observer grace periods and checkpoint waits can enter attention without a new claim.
