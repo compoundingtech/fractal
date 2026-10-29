@@ -11,3 +11,5 @@ record af2d55ed847ed967ca6232b68886a8e5bc2032be rust-tests 0 host/spindle 2026-1
 record b48cf0e592764a9adfeef97e053f1043d7da025b rust-tests 0 host/spindle 2026-10-29T03:12:04Z
 record d31f9c9b6e8174abd4f432e55ca5611574ced43b rust-tests 0 host/spindle 2026-10-29T03:12:04Z
 gc 2026-10-29T03:57:31+00:00 567a284ac1b3190c84a41e8e626c0b0a68987330d76933c4d4e9e05925b563df
+record d77b589353cfd04af12a4026e66f063d9e27e887 genie-freshness 0 host/spindle 2026-10-29T02:38:50Z
+record f5248e44ff2021ed92883365fbcbc61c7c0224c2 ci-script-tests 0 host/spindle 2026-10-29T02:42:08Z
