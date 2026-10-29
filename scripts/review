@@ -204,7 +204,7 @@ Reply with ONE JSON object and nothing else (no prose before or after, no code f
 deterministic risk, final risk, patch-ids, reviewer and standard digest itself; you give the judgement:
 {schema_note}
 Rules: a GO has no blocking finding; CHANGES has at least one blocking finding. risk.level is your own score by the rubric. Name what you
-did not read in "read.structure" or in the text; never a bare GO. Every finding names the file, the line, the reason and the fix that
+did not read in "read.structure" or in the text; never a bare GO. A review whose "read.full" is empty is incomplete and is not recorded. Every finding names the file, the line, the reason and the fix that
 would be accepted. For a round after the first, "answers" lists which earlier finding each change answers.
 """
 
@@ -566,6 +566,11 @@ def review(args, repo, tools):
     finally:
         subprocess.run(["git", "worktree", "remove", "--force", checkout], cwd=repo, capture_output=True)
     answer = extract_json(reply)
+    if changed and not (answer.get("read") or {}).get("full"):
+        # A reviewer that could not read (a harness whose only reader it thought it lacked) answers from the prompt alone. That
+        # is not a verdict on the change, so it is neither a GO nor a CHANGES that spends a round.
+        raise Failed(f"the reviewer read no file of the {len(changed)} to read in full, so this is an incomplete review, not a verdict; "
+                     "nothing was written and no round was spent")
     reviewer = {"model": model, "family": family, "harness": name}
     verdict = assemble(answer, head=head, base=base, round_number=round_number, deterministic=deterministic, patch=patch, served=served,
                        changed=changed, structure=structure, reviewer=reviewer, digest=digest)

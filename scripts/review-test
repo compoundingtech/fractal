@@ -50,7 +50,7 @@ def answer(verdict="GO", level="low", findings=None, **extra):
         "risk": {"level": level, "reasons": ["only what the change says"]},
         "findings": findings or [],
         "flags": {name: flag() for name in ("public_contract", "stored_format", "trust_or_permission", "global_view")},
-        "read": {"full": [], "structure": []},
+        "read": {"full": ["src/a.txt"], "structure": []},
         "text": "Read it; it does what it says.",
     }
     base.update(extra)
@@ -133,7 +133,7 @@ class Review(unittest.TestCase):
         self.assertEqual(verdict["base"], self.git("rev-parse", "main"))
         self.assertEqual(verdict["reviewer"], {"model": "fake-1", "family": "anthropic", "harness": "fake"})
         self.assertEqual(list(verdict["patch_ids"]), ["src/a.txt"])
-        self.assertEqual(verdict["read"]["full"], [])
+        self.assertEqual(verdict["read"]["full"], ["src/a.txt"])
         self.assertTrue(verdict["standard"].startswith("sha256:"))
 
     def test_the_final_risk_is_the_higher_score_and_the_model_cannot_lower_the_floor(self):
@@ -240,6 +240,22 @@ class Review(unittest.TestCase):
         self.assertIn("+both", self.prompts()[1])
         self.assertIn("remerge.patch", (self.fake / "inputs-1.txt").read_text().split("\n"))
         self.assertIn(".review-input/remerge.patch", self.prompts()[1])
+
+    def test_a_review_that_read_no_file_is_incomplete_and_spends_no_round(self):
+        for verdict, findings in (("CHANGES", [{"severity": "blocking", "file": "src/a.txt", "line": 1, "reason": "could not read", "fix": "f"}]),
+                                  ("GO", None)):
+            with self.subTest(verdict=verdict):
+                self.say(answer(verdict=verdict, findings=findings, read={"full": [], "structure": []}))
+                done, written = self.review()
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertIsNone(written)
+                self.assertIn("incomplete review", done.stderr)
+        self.assertFalse(any((self.repo / ".git" / "review-records").glob("*.json")))
+        self.say(answer())
+        done, first = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(first["round"], 1)
+        self.assertIn("is incomplete and is not recorded", self.prompts()[0])
 
     def test_a_reviewer_of_the_authors_family_is_refused(self):
         done, verdict = self.review("--author-family", "anthropic")
