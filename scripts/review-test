@@ -207,6 +207,23 @@ class Review(unittest.TestCase):
         self.assertIsNone(verdict)
         self.assertIn("answers", done.stderr)
 
+    def test_a_merged_changes_verdict_is_not_an_earlier_round_of_the_next_change(self):
+        self.git("checkout", "-q", "-b", "other", "main")
+        self.write("src/b.txt", "two\nother\n")
+        self.commit("other change")
+        self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/b.txt", "line": 2, "reason": "r", "fix": "f"}]))
+        done, other = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "--no-edit", "other")
+        self.git("checkout", "-q", "change")
+        self.git("rebase", "-q", "main")
+        self.say(answer())
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["round"], 1)
+        self.assertNotIn(other["head"], self.prompts()[1])
+
     def test_a_clean_merge_of_main_carries_the_verdict_without_asking_the_agent(self):
         done, first = self.review()
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -240,6 +257,58 @@ class Review(unittest.TestCase):
         self.assertIn("+both", self.prompts()[1])
         self.assertIn("remerge.patch", (self.fake / "inputs-1.txt").read_text().split("\n"))
         self.assertIn(".review-input/remerge.patch", self.prompts()[1])
+
+    def go_in_round_two(self):
+        self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/a.txt", "line": 2, "reason": "r", "fix": "f"}]))
+        done, first = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.write("src/a.txt", "one\nchanged\nfixed\n")
+        self.commit("fix a")
+        self.say(answer(answers=[{"finding": "a needed a fix"}]))
+        done, second = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((second["round"], second["verdict"]), (2, "GO"))
+        return second
+
+    def test_a_merge_that_resolves_a_conflict_after_a_later_round_go_is_read_as_a_delta(self):
+        second = self.go_in_round_two()
+        self.git("checkout", "-q", "main")
+        self.write("src/a.txt", "one\nfrom main\n")
+        self.commit("main edits a")
+        self.git("checkout", "-q", "change")
+        subprocess.run(["git", "merge", "-q", "--no-edit", "main"], cwd=self.repo, capture_output=True)
+        self.write("src/a.txt", "one\nfrom main\nchanged\nfixed\n")
+        self.commit("resolve")
+        self.say(answer())
+        done, delta = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((delta["round"], delta["verdict"]), (2, "GO"))
+        self.assertNotIn("answers", delta)
+        self.assertNotEqual(delta["head"], second["head"])
+        prompt = self.prompts()[2]
+        self.assertIn(".review-input/remerge.patch", prompt)
+        self.assertIn("no earlier finding to answer", prompt)
+        self.assertNotIn("say which earlier finding each change", prompt)
+
+    def test_a_clean_merge_of_main_carries_a_later_round_go(self):
+        second = self.go_in_round_two()
+        self.git("checkout", "-q", "main")
+        self.write("src/b.txt", "two\nfrom main\n")
+        self.commit("main moves")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+        done, carried = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.prompts()), 2)
+        self.assertEqual((carried["round"], carried["verdict"]), (2, "GO"))
+        self.assertTrue(carried["text"].startswith(f"Carried from {second['head']}"))
+
+    def test_a_base_validator_that_takes_no_earlier_verdict_is_called_as_before(self):
+        self.git("checkout", "-q", "main")
+        self.write("scripts/review-validate", "def validate(verdict, schema):\n    return []\n")
+        self.commit("an older validator")
+        self.git("checkout", "-q", "change")
+        self.go_in_round_two()
 
     def test_a_reviewer_of_the_authors_family_is_refused(self):
         done, verdict = self.review("--author-family", "anthropic")
@@ -348,6 +417,31 @@ class Review(unittest.TestCase):
         for name, settings in config["harnesses"].items():
             self.assertNotIn("Bash", " ".join(settings["command"]), name)
 
+    def test_a_harness_that_reads_through_a_shell_is_not_told_it_has_none(self):
+        config = json.loads(self.config.read_text())
+        config["harnesses"]["fake"]["reads"] = "shell"
+        self.config.write_text(json.dumps(config))
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        prompt = self.prompts()[0]
+        self.assertNotIn("no shell", prompt)
+        self.assertIn("read-only shell confined to this checkout", prompt)
+        config["harnesses"]["fake"]["reads"] = "magic"
+        self.config.write_text(json.dumps(config))
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("reads must be one of", done.stderr)
+
+    def test_the_default_harnesses_say_how_their_reviewer_reads_files(self):
+        harnesses = json.loads((ROOT / ".st" / "review-harness.json").read_text())["harnesses"]
+        self.assertEqual(harnesses["codex"]["reads"], "shell")
+        self.assertNotIn("reads", harnesses["claude"])
+
+    def test_without_a_reads_setting_the_reviewer_is_told_it_has_tools_and_no_shell(self):
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("read-only tools and no shell", self.prompts()[0])
+
     def test_the_reviewer_gets_the_diffs_as_files_in_its_checkout_instead_of_git(self):
         self.write("crates/a/src/lib.rs", "pub fn a() {}\n")
         self.commit("add a")
@@ -391,6 +485,27 @@ class Review(unittest.TestCase):
         self.assertIsNone(verdict)
         self.assertIn("credential files", done.stderr)
         self.assertNotIn("zZ9yY8x", done.stderr)
+
+    def test_a_git_repository_under_the_credential_directories_is_not_a_credential_file(self):
+        head = "0b29a16db735eb501de047b4771c39d0f9e7a8ab"
+        config = self.repo.parent / "home" / ".config" / "st"
+        scratch = config / "evidence-sign-scratch.git"
+        scratch.mkdir(parents=True)
+        (scratch / "objects").mkdir()
+        (scratch / "HEAD").write_text("ref: refs/heads/main\n")
+        (scratch / "FETCH_HEAD").write_text(f"{head}\t\tbranch 'x' of https://example.com/repo\n")
+        (scratch / "config").write_text("[remote \"origin\"]\n\turl = https://x-access-token:Qq1Ww2Ee3Rr4Tt5Yy6Uu7Ii8Oo9Pp0Aa@example.com/repo.git\n")
+        (config / "evidence-sign-key.pub").write_text("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPublicKeyOnly1234567890abcdefgh\n")
+        done, verdict = self.planted(f"the head is {head}; a public key is AAAAC3NzaC1lZDI1NTE5AAAAIPublicKeyOnly1234567890abcdefgh")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIsNotNone(verdict)
+        done, verdict = self.planted("the remote carries Qq1Ww2Ee3Rr4Tt5Yy6Uu7Ii8Oo9Pp0Aa")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("credential files", done.stderr)
+        (config / "evidence-sign-key").write_text("-----BEGIN-----\nzZ9yY8xX7wW6vV5uU4tT3sS2rR1qQ0pP\n")
+        done, verdict = self.planted("the key is zZ9yY8xX7wW6vV5uU4tT3sS2rR1qQ0pP")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("credential files", done.stderr)
 
     def test_an_ordinary_review_that_names_files_hashes_and_urls_is_not_taken_for_a_secret(self):
         home = self.repo.parent / "home" / ".config" / "gh"

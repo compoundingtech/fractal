@@ -4244,6 +4244,9 @@ struct MessageSendArgs {
     /// the message already sent instead of sending it twice.
     #[arg(long)]
     idempotency_key: Option<String>,
+    /// Send even if this daemon has not yet learned the recipient through fleet replication.
+    #[arg(long)]
+    allow_undeclared_recipient: bool,
 }
 
 /// Whether a message wakes its recipient. A person's message, a handoff, a fault, a ready step
@@ -6389,7 +6392,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.bind_fleet(fleet_id)?;
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
-    store.trim_locally(config.trim.local);
+    store.trim_locally(config.trim.local)?;
+    *store
+        .extension::<fractal_store::store::answers_check::TrimSettings>()
+        .notify
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = config.trim.notify.clone();
+    // The daily answers check also covers the readers that fold claims themselves.
+    store
+        .extension::<smallclaims::answers::AnswersCache>()
+        .set_readers(Arc::new(fractal_store::store::answers_check::fold_reader_answers));
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6571,6 +6583,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
@@ -10846,7 +10859,7 @@ fn render_performance(view: &Value) -> String {
     {
         let _ = writeln!(
             out,
-            "INCREMENTAL CORRECTIONS  count · item (writes an incremental pass would have missed; each is a bug)"
+            "INCREMENTAL CORRECTIONS  count · item · cause (a write or a due time an incremental pass would have missed; each is a bug)"
         );
         for row in corrections {
             let _ = writeln!(
@@ -14055,6 +14068,27 @@ async fn for_each_message(
     }
 }
 
+async fn preflight_message_recipient(client: &Client, to: &str, allow_undeclared: bool) -> Result<()> {
+    let to = normalize_message_subject(to);
+    fractal_daemon::model::refuse_person_recipient(&to)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if !to.starts_with("agent/") || allow_undeclared {
+        return Ok(());
+    }
+    match client.get::<serde::de::IgnoredAny>(&format!(
+        "/v1/messages/recipient?to={}", urlencoding::encode(&to),
+    )).await {
+        Ok(_) => Ok(()),
+        Err(error) if fractal_daemon::client::http_status(&error) == Some(404)
+            && fractal_daemon::client::api_error_code(&error) != Some("unknown-recipient") =>
+        {
+            eprintln!("st: this daemon has no recipient preflight; sending without checking the recipient. Upgrade the daemon to reject unknown recipients.");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
 async fn send_message(
     client: &Client,
     args: MessageSendArgs,
@@ -14824,6 +14858,11 @@ struct NativeLoopState {
     /// image polls once at once.
     #[serde(skip)]
     claude_attachment_polled: Option<((String, u64, String), u64)>,
+    /// Since when the daemon has answered every attachment check, so the attach window counts
+    /// from the current daemon's first answer. A failed check clears it. Not carried: a
+    /// replacement image counts from its own first answer.
+    #[serde(skip)]
+    claude_attachment_answered: Option<Instant>,
     /// This image's own settle. A replacement image draws a new one, so it is never carried.
     #[serde(skip)]
     settle: ResumeSettle,
@@ -17617,16 +17656,34 @@ async fn check_claude_attachment(
         };
         report_claude_attachment(mailbox, &checked, state.claude_attachment_terminal.as_ref())?;
     }
-    let attached = checked.as_ref().is_ok_and(|attachment| attachment.attached);
-    let phase = if attached {
-        "attached"
-    } else if started.elapsed() >= claude_attachment_window()
-        || state.claude_attachment_phase == "blocked"
-    {
-        "blocked"
+    // A check that failed, such as a starting daemon's "API is not ready" or no answer within two
+    // seconds, is evidence about the daemon, not the channel. It moves no phase, and the attach
+    // window counts again from the daemon's next answer, so a slow daemon start never reads as a
+    // lost channel.
+    if checked.is_ok() {
+        state.claude_attachment_answered.get_or_insert_with(Instant::now);
     } else {
-        "starting"
+        state.claude_attachment_answered = None;
+    }
+    let phase = match &checked {
+        Ok(attachment) if attachment.attached => "attached",
+        Ok(_)
+            if state.claude_attachment_phase == "blocked"
+                || state.claude_attachment_answered.is_some_and(|answered| {
+                    started.max(answered).elapsed() >= claude_attachment_window()
+                }) =>
+        {
+            "blocked"
+        }
+        Ok(_) => "starting",
+        Err(_) if state.claude_attachment_phase == "attached" => "attached",
+        Err(_) if state.claude_attachment_phase == "blocked" => "blocked",
+        Err(_) => "starting",
     };
+    // Its reason would describe the daemon, so a failed check never republishes a settled phase.
+    if checked.is_err() && phase != "starting" {
+        return Ok(());
+    }
     if state.claude_attachment_reconciled && state.claude_attachment_phase == phase {
         return Ok(());
     }
@@ -17681,7 +17738,8 @@ fn finish_claude_attachment_publication(
     published
 }
 
-/// How long a Claude seat may start before an unattached channel is reported as blocked.
+/// How long a Claude seat may start before an unattached channel is reported as blocked, counted
+/// from the later of the driver's settle and the daemon's first answer to its checks.
 /// `ST3_CLAUDE_ATTACH_WINDOW_MS` can only shorten it, as `ST3_SUBAGENT_LEASE_MS` does a lease, so
 /// the boot canaries need not wait out the production window.
 fn claude_attachment_window() -> Duration {
@@ -19317,6 +19375,21 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
+    }
+}
+
+/// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request
+/// path: exchanges only take what a scan found. A stopped scan restarts after a membership change.
+async fn backfill_envelope_signatures(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            fractal_daemon::task_cpu::blocking("maintenance.signature_backfill", || worker.advance_signature_backfill())
+        }).await;
+        if !matches!(result, Ok(Ok(_))) {
+            stderr_message("st3", format_args!("signature backfill scan failed: {result:?}"));
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
