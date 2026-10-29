@@ -171,7 +171,8 @@ fractal harness-questions list --as person/alex
 fractal harness-questions list --as person/alex --limit 50 --cursor CURSOR
 fractal harness-questions show QUESTION --as person/alex
 fractal harness-questions answer QUESTION --as person/alex \
-  --answers-file answers.json --idempotency-key alex-harness-answer-0001
+  --answers-file answers.json --revision REVISION --incarnation INCARNATION \
+  --idempotency-key alex-harness-answer-0001
 ```
 
 List prints one page. Continue with its `page.next_cursor`, preserving `--limit`.
@@ -179,10 +180,17 @@ The generated Rust, Swift and TypeScript list helpers expose the same cursor and
 controls; callers must follow `next_cursor` when `has_more` is true.
 
 `answers.json` contains only a map such as `{"q0":{"positions":[1]}}`.
-The CLI reads canonical detail to populate all three fences. Its action id is
+Read `show` before answering and pass its resource `revision` as `--revision` and
+`runtime_incarnation` as `--incarnation`. Both flags are required explicitly; the CLI
+never fetches question detail to replace them with fresh values. If the question or
+runtime changed since review, submission refuses the stale fence rather than answering
+the changed question. The CLI obtains only snapshot provenance from capabilities.
+Its action id is
 `action/harness-answer-` plus SHA-256 hex over the key and canonical question id,
-each prefixed by its UTF-8 byte length as a big-endian u64. Retain the file and key
-to reproduce the same action identity. Rust, Swift and TypeScript clients are generated
+each prefixed by its UTF-8 byte length as a big-endian u64. A bare question id is
+prefixed with `harness-question/` locally. Retain the file, key and reviewed fences
+to reproduce the same action identity without silently refreshing the review.
+Rust, Swift and TypeScript clients are generated
 from the shared schema and templates with `cargo run -p fractal-client-codegen`.
 
 This is an additive client contract, not a new stored schema, receipt format or
