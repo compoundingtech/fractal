@@ -12,6 +12,12 @@ use crate::model::{LaunchSpec, MemberKind, MemberSpec};
 pub use fractal_store::store::mailbox_lease::*;
 pub use fractal_store::store::mailbox_lease::{ChannelLiveness, admit, admit_with_probe, channel_liveness, check_argv_declaration, check_lease_fence, lease, record};
 
+/// The wall bound on a card-fault capture that no request encloses, read on an already pinned
+/// snapshot (the roster refresher's). Scheduling pauses under load must not cancel it: its 25 ms
+/// CPU work clock bounds the query. Only a stalled page read, which spends no CPU, comes near
+/// this; it stops one from holding the snapshot without limit.
+pub const CARD_FAULT_PINNED_WALL_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(1);
+
 fn capture_mailbox_faults(
     connection: &Connection, subjects: &[String], index: u64,
 ) -> Result<BTreeMap<String, String>> {
@@ -395,17 +401,22 @@ impl MailboxLeaseStore for Store {
         if subjects.is_empty() { return Ok(BTreeMap::new()); }
         let _capture = smallclaims::profile::span("mailbox_faults/capture");
         // Admission and result cleanup remain within the enclosing wall deadline.
-        // Captures without a request retain their existing finite wall bound.
+        // Captures without a request retain their existing finite wall bound, except on a
+        // pinned snapshot: nothing waits for admission there, so the work clock bounds it.
         let duration = std::time::Duration::from_millis(25);
+        // A forced expiry zeroes `duration`, the work clock's allowance below, so it also ends a
+        // pinned capture whose wall bound is the backstop.
         #[cfg(any(test, feature = "test-support"))]
         let duration = CARD_FAULT_DEADLINES.with(|remaining| {
             let count = remaining.get();
             remaining.set(count.saturating_sub(1));
             if count == 0 { duration } else { std::time::Duration::ZERO }
         });
-        let budget = smallclaims::read_budget::current().unwrap_or_else(
-            || smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", duration),
-        );
+        let pinned = self.readers.has_pinned_reader();
+        let budget = smallclaims::read_budget::current().unwrap_or_else(|| {
+            let wall = if pinned { CARD_FAULT_PINNED_WALL_BACKSTOP } else { duration };
+            smallclaims::read_budget::ReadBudget::new("mailbox/card-faults", wall)
+        });
         let checked = budget.clone();
         smallclaims::read_budget::with(Some(budget), || {
             checked.check()?;
@@ -433,7 +444,6 @@ impl MailboxLeaseStore for Store {
             };
             // Keep the authoritative existing snapshot; otherwise acquire cancellable
             // admission before the fallible reader checkout.
-            let pinned = self.readers.has_pinned_reader();
             let result = if pinned { read() } else {
                 self.readers.request_read(read).and_then(|result| result)
             };

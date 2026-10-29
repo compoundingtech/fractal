@@ -123,7 +123,13 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   of every open pull request head (`--open-heads-from FILE`, one commit a line; with `--fetch` each is fetched by id, so
   a fork's head works too) whatever its age; and the trees of main's first-parent commits within `main_days` of
   `as_of`, main's tip always.
-- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs.
+- **live keys**: the input key each live tree projects to, for every check whose policy declares inputs, and every live tree's
+  per-crate `rust-tests` keys. Those keys come from main's `scripts/rust-test-keys` over main's `.st/rust-test-inputs.json`, as the gate keys a pull request
+  against its base. Until 2026-10-28 the per-crate keys were left out (the `rust-tests` policy declares no `inputs`), so a plan deleted
+  the crate keys that open pull requests' `rust-tests` decisions still chose. A live tree whose crates cannot be keyed, because a
+  manifest is unreadable, keeps every `rust-tests` key. In a partial clone (`--fetch`), the manifests the live trees lack are fetched
+  by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
+  unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
   change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (20,000).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
@@ -237,6 +243,16 @@ again after the GC line, which would turn their deletion into `missing` and let 
 being pending once the remote no longer has it, or after 24 hours if GC never deleted it, and is then logged again like
 any record. `gc --publish` pushes the new head at once, so a verifier does not count the deletions as missing until the
 next pull.
+
+A stalled pull alerts within minutes. `scripts/evidence-log-watch` (`scripts/evidence-log-watch.timer`, every 2 minutes)
+fetches only the head of `refs/evidence-log/main` from the remote, not the log host's own copy, so a pull that commits but
+does not publish counts as stalled too. It reads the `as_of` time from the head's subject. A head older than 360 s (three
+missed pulls, inside the verifier's 600 s) is a stall, and so is a head that cannot be read for that long. The watcher
+then runs `EVIDENCE_LOG_WATCH_NOTIFY`, a JSON argv with the alert line appended: once when the stall begins, hourly while
+it lasts, and once when the log moves again. A notification that fails is sent again on the next run. Not every gap is a
+stall. On 2026-10-28 a gate reported 21 per-crate passes as unlogged although the pulls ran on time: evidence-gc had
+written its GC lines (03:42Z) for keys whose deletion was still pending, and those keys belonged to open pull requests.
+GC now keeps the crate keys of live trees.
 
 The log's tree is one file per tree (`trees/<tree[:2]>/<tree>`) and per input key (`keys/<check>/<key[:2]>/<key>`):
 `record <record> <check> <exit_code> <signer> <observed_at>` lines and `gc <time> <plan sha256>` lines. A verifier reads
@@ -1219,9 +1235,14 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   key yet), and the first line with a log value after the last `-` (`log_window_start`) is at least 24 hours old;
 - at least 30 lines with `outcome=satisfied` and `log=ok`, except for a check with a lowered trigger (below);
 - no `log=missing`;
-- no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
-  created, or after it. For an aggregate, the time is `log_unlogged_observed_at`, the oldest of its unlogged members, when the line has
-  it, and its `observed_at` when it does not;
+- no unexplained `log=unlogged_pass`: one is explained when the published log (`refs/evidence-log/main`, fetched shallow into a
+  bare repository under the cache) lists the record in its newest head at most 240 s (two log pulls) after the run was created, or
+  when the record was observed after the run was created. An aggregate's records are the members `log_unlogged_crates` names.
+  The run's creation is the clock, not the record's `observed_at`. On 2026-10-28 CI pushed its records at the end of its runs, 5-7
+  minutes after it observed them (`ci-script-tests` at 08:33Z was 366 s past `observed_at`, but logged 54 s after its run). Two gates
+  read the head one pull before the record they chose was published (00:13Z). Without a readable published log, or for an aggregate
+  whose list ends in `+N_more`, the old clock applies: observed at most 240 s before the run was created. The time is then the
+  aggregate's `log_unlogged_observed_at` when the line has one, else its `observed_at`; `None`, like `-`, names no time;
 - no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
@@ -1246,7 +1267,7 @@ A check can also carry preconditions on its own policy entry at origin/main, wha
 its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`
 notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
 
-It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
+It prints JSON (`log_clock`: `published log`, or `observed_at (why)` when the published log could not be read; `checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
 and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read (it pages the pull request runs newest first back to the window start, without GitHub's `created=` filter, which answers an empty listing for about one request in four; a page that is empty or short of what the listing's total says it holds is asked again up to four times, then the run counts as unreadable, not as zero lines; so does a window of more than the listing's 1,000 runs). Enforced checks are reported too. `presign` counts, per account that started the runs, the distinct pull request heads in the window: `presigned` (some check had a host or agent note), `ci_note` (only an earlier CI run's note), `no_note`, and `presigned_share`.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
 temporary worktree of origin/main it sets `"enforce": true` and `"sample_one_in": 1` (no run sampled; it replaces any other value), adds `"events": ["pull_request"]` where absent,
@@ -1569,9 +1590,19 @@ of persistent ones per ORIGIN (`~/.cache/st-test/pools/<hash of the normalised o
 untracked and ignored files except the inputs that cost minutes to fetch again (the megarepo members under `repos/`, every `node_modules/`
 and `target/compat-baselines/`), and its tracked files must equal the commit (a tree that is still dirty is a refusal). The path is the same every run, so cargo's
 fingerprints and sccache's absolute-path keys stay valid and a second run is warm. `ST_TEST_TREES` sets the pool size (default: the
-host's heavy slots from `~/.config/cargo-heavy-slots`, plus one; `off` runs in a fresh throwaway worktree as before) and `ST_TEST_POOL`
-its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
-takes a throwaway worktree too, since what a pool tree keeps is a warm cargo target, so it never waits behind building runs for a tree. Each check that is not one of those builds runs with `BUILD_ADMISSION_CLASS=light`, so the nix wrapper starts its `nix develop` shell as a light start rather than waiting in build admission as a heavy one (as the pre-sign worker starts `.#web` and `.#genie`); a building check never gets it, even when the caller set it. **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
+host's heavy slots plus one, counted as the cargo shim counts them: `CARGO_HEAVY_SLOTS`, else `~/.config/cargo-heavy-slots`, else 1; `off`
+runs in a fresh throwaway worktree as before) and `ST_TEST_POOL` its directory. When every tree is in use, runs wait in the build host's order, not by a race to the next free tree. Each run takes a ticket in the pool's `queue/`, ranked in `~/.config/cargo-priority` (or `CARGO_PRIORITY_FILE`) by the cargo shim's caller (`ST_AGENT`, else `CARGO_PRIORITY_CALLER`), aged like the shim's tickets (one rank per 120 s, never below 5), then by arrival. Only the best live ticket tries the trees, so the CPU P0 builder at rank 3 gets the next free tree ahead of earlier rank-50 runs. The pool size is read again on every pass while a run waits, so a tree added when the host's heavy slots grow is taken at once. A ticket is dropped when its process is gone, or when its pid now names a process that started after the ticket was taken (a reused pid keeps no place). Each run also sets `ADMISSION_RUN=st-test-<pid>@<start-ns>` for its checks, so the host's finish-first admission order (`FINISH_FIRST`) can serve a run's later stages by the run's start. A run whose checks build nothing (`ci-script-tests`, `typescript-client` or `genie-freshness` on their own: none is in `BUILDS`)
+takes a throwaway worktree too, since what a pool tree keeps is a warm cargo target, so it never waits behind building runs for a tree. Each check that is not one of those builds runs with `BUILD_ADMISSION_CLASS=light`, so the nix wrapper starts its `nix develop` shell as a light start rather than waiting in build admission as a heavy one (as the pre-sign worker starts `.#web` and `.#genie`); a building check never gets it, even when the caller set it. **Slot first:** a tree held while its run waits for a build slot is a tree nobody can use (2026-10-28: on one build host the slowest run waited
+42,265 s for a tree while linux-gate in the held trees waited 1,000-2,400 s at a time for a build slot), and a tree cannot be given back while a
+check is at work in it. So the best ticket takes a free tree only when a build started now would get a heavy slot at once: more of the shim's
+heavy slots (`$XDG_RUNTIME_DIR/cargo-slots/heavyN`, probed with a non-blocking `flock` and let go at once) are free than heavy tickets wait in
+its queue, and `build-admission check heavy` would admit it. Until then it holds no tree and says why once. After `TREE_SLOT_WAIT_LIMIT` (2700 s,
+the gate's own `MAX_WAIT_SECONDS`) of a free tree left for want of a slot it takes the tree anyway, so a host whose slots never come free first
+starves no run. A host without the shim's slots, or a gate that cannot be read, waits for nothing. Each run's record (and its summary) has
+`tree_wait_s` (the wait for its tree), `tree_slot_wait_s` (the part of it with a tree free, waiting for a slot), `tree_held_s` and
+`tree_blocked_s`: the time the build lane held the tree and built nothing, `tree_pre_start_s` before `ci-local` started (admission and the dev
+shell) plus `tree_slot_blocked_s` with every running `ci-local` stage waiting for a build slot (one stage's wait while another builds is not
+counted). **Every clone of one origin shares the pool**, so a fresh or throwaway clone takes a warm slot instead of building a target of its own:
 the slot keeps its path (`tree-N` and `target-N`, so cargo's ids for the workspace crates, which contain the path, still match), and when the tree
 there was last registered by another clone it is re-registered as a worktree of the clone now running (its notes land in that clone) while the inputs
 the cleaning keeps (members, installed dependencies, compat baselines) move across by rename. The run still signs only what it built and tested in
