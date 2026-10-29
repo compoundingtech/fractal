@@ -218,6 +218,7 @@ pub mod revision_seats;
 pub mod delegation;
 pub mod limits;
 pub mod database_size;
+pub mod answers_check;
 pub mod projection_divergence;
 pub use database_size::DatabaseSize;
 pub mod person_work;
@@ -244,6 +245,8 @@ pub mod checkpoint_tests;
 pub mod checkpoint_identity_reuse_tests;
 #[cfg(test)]
 mod newest_claim_index_tests;
+#[cfg(test)]
+mod checkpoint_proof_span_tests;
 #[cfg(test)]
 pub mod provenance_tests;
 #[cfg(test)]
