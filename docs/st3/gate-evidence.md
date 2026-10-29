@@ -142,10 +142,16 @@ age, as the first version did, could remove a failure and keep the pass dated wi
 which the failure still shadowed: that tree then verified. `scripts/evidence-gc-test` checks these properties on 400
 random worlds against a model of the verifier, and end to end with the verifier on real records.
 
-**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is kept (a record written moments
-ago for a head the listing raced with) unless more than `soft_records` records remain: then dead groups go oldest
-first by their newest record. Records are counted, not refs, so a record filed as a tag and a note counts once. If the
-live set alone is over `cap_records`, nothing live is deleted, the set is printed and the exit status is 3.
+**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is always kept: a record written
+moments ago for a head the listing raced with, or the first records of a signing run, which pushes each record as its
+lane finishes and its branch only at the end. The summary's `grace_records` counts them. Records are counted, not refs,
+so a record filed as a tag and a note counts once. If the live set alone is over `cap_records`, nothing live is
+deleted, the set is printed and the exit status is 3.
+
+`soft_records` deletes nothing; it is still read and checked. Until 2026-10-29 dead groups in grace went oldest first
+while more than `soft_records` records remained. The live set alone has been over 3,000 records since about
+2026-10-23, so from then on every run deleted every dead group in grace: 20,836 refs on 2026-10-28 and 7,408 on
+2026-10-29, among them the first two records of a signing run whose branch was not pushed yet (#4186).
 
 **Measured 2026-10-21** (a dry run against the remote): 5,021 refs, 4,562 records; 960 branch tips within 30 days
 (their trees hold 434 refs) and 217 main trees within 3 days (2,593 refs); 155 dead trees and 22 dead keys are deleted
@@ -1160,9 +1166,10 @@ tree that edits its own lane never skips on one. It is inert until a check's own
 `pull_request` only, so the intersection is empty and a queue note skips nothing. That flip is made per check, on its own measured trigger,
 and `.st/evidence-keys` names the key (a `queue/NAME` line) only once it exists; deleting that line revokes it.
 
-#### Input values (`input_order`, `shard_inputs`)
+#### Input values (`input_order`, `shard_inputs`, `base_inputs`)
 
-`required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
+`required_inputs` checks only that an input is present. Three optional keys on a kind's rule check values. They apply whatever the signer
+level.
 
 **`input_order`** maps an input to its values, strongest first, for example `{"kit_inputs": ["true", "false"]}`. A note covers a run only
 when its value ranks at or above the run's own value.
@@ -1192,6 +1199,16 @@ fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifie
 - A malformed `RUN_INPUTS` is dropped, so no note covers the run.
 
 `scripts/evidence-flip-ready` does not propose fractal-web's flip until both keys are in the policy.
+
+**`base_inputs`** maps an input to a file whose content at the accepted base the verdict depends on, though the file is not in the tree,
+for example linux-clippy's `{"clippy_base_baseline_sha256": ".github/clippy-baseline.json"}` (its ratchet fails a tree whose baseline
+rose above the base's). A note covers a run only when it recorded the sha256 of that file at the run's accepted base, or `absent` when
+the base has none.
+- The verifier computes the run's value itself from `--policy-from`. A `--run-input` of the same name is ignored, so no caller can
+  supply it.
+- `evidence-verify --project` prints the values (`base_inputs`) for a signer to record. `ci-evidence-signing` records them at
+  `BASE_INPUTS_SHA`, the base the job compared against, and records none when that is empty or all zeros.
+- The base's file changes rarely, so a note stays reusable across merges until it does (docs/keyed-clippy.md).
 
 `app_test_set=related` (pull requests run the app tests reached from their own diff) has no value rule: every pull request's base is a
 main commit that passed the full set, and the merge queue runs everything. It must be revisited before the merge queue stops running what a

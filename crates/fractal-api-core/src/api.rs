@@ -1844,6 +1844,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
     match code.unwrap_or("internal") {
         "client-diagnostics-rate-limit" => "rate-limited".into(),
         "recipient-retired"
+        | "identity-cycle"
+        | "identity-occupied"
+        | "identity-retired-source"
+        | "identity-cross-kind"
+        | "identity-unknown"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
         | "invalid-custody-successor"
@@ -1852,9 +1857,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
+        | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
         | "idempotency-key-expired"
+        | "legacy-action-receipt-untrusted"
         | "issuer-required"
         | "suspend-authored-session-selection"
         | "arrangement-exists"
@@ -1911,6 +1918,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "message-send-unconfirmed"
         | "response-budget-exceeded"
         | "content-not-text"
+        | "invalid-document-reference"
+        | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
         "launch-review-not-authorized"
@@ -2903,11 +2912,21 @@ pub fn client_agent_resources_cached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    store.cached_agent_resources(snapshot_index, history, |changed| {
+    pinned_unless_enclosed(store, || store.cached_agent_resources(snapshot_index, history, |changed| {
         let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
         add_agent_todos(store, &mut items, snapshot_index)?;
         Ok(items)
-    })
+    }))
+}
+
+/// Run a roster fold that neither a request nor a snapshot encloses in a snapshot of its own,
+/// as the refresher's is. Its card-fault capture is then bounded by its CPU work clock, not by
+/// the 25 ms wall bound a scheduling pause on a loaded host can spend.
+fn pinned_unless_enclosed<T>(store: &Store, fold: impl FnOnce() -> anyhow::Result<T>) -> anyhow::Result<T> {
+    if smallclaims::read_budget::current().is_some() || store.readers.has_pinned_reader() {
+        return fold();
+    }
+    store.read_snapshot_unindexed(fold)
 }
 
 /// One agent's card for an exact agent selector, folded in its own projection rather than
@@ -2918,7 +2937,7 @@ pub fn client_exact_agent_resources(
     snapshot_index: u64,
     agent: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
+    pinned_unless_enclosed(store, || store.cached_exact_agent_resources(snapshot_index, history, agent, |changed| {
         // A selected cold card needs only its own queue metadata, never roster refs.
         let metadata = changed.filter(|(_, previous)| previous.is_empty())
             .map(|(subjects, _)| agent_queue_metadata(store, subjects)).transpose()?;
@@ -2928,7 +2947,7 @@ pub fn client_exact_agent_resources(
         let mut items = client_agent_resources_selected(store, history, snapshot_index, changed)?;
         add_agent_todos(store, &mut items, snapshot_index)?;
         Ok(items)
-    })
+    }))
 }
 
 // Freeze membership, ordering and the inexpensive declaration/queue metadata. The expensive
@@ -3387,13 +3406,15 @@ pub fn client_agent_resources_uncached(
     history: bool,
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
-    let status = store.status_for_subject_prefix_at(
-        "agent/",
-        Some(snapshot_index),
-        history,
-        crate::store::ClaimsReduction::Summary,
-    )?;
-    client_agent_resources_from_status(store, history, snapshot_index, None, status)
+    pinned_unless_enclosed(store, || {
+        let status = store.status_for_subject_prefix_at(
+            "agent/",
+            Some(snapshot_index),
+            history,
+            crate::store::ClaimsReduction::Summary,
+        )?;
+        client_agent_resources_from_status(store, history, snapshot_index, None, status)
+    })
 }
 
 fn client_agent_resources_selected(
