@@ -8795,7 +8795,7 @@ fn the_control_pump_keeps_a_retryable_disconnect_alive_for_the_next_turn() {
 }
 
 /// Codex 0.160.1 retries a sampling request a few times within seconds, then fails the turn with
-/// "exceeded retry limit, last status: 429 Too Many Requests" (on hetz, 2026-10-26 07:53Z). The
+/// "exceeded retry limit, last status: 429 Too Many Requests" (seen on 2026-10-26). The
 /// frames below are in the order that night's app-server log shows: the thread's `systemError`,
 /// the typed `error` with `willRetry: false`, then the failed `turn/completed`. The seat must stay
 /// up, read `rateLimited`, and take the turn st sends when its backoff resumes the session.
