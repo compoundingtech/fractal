@@ -8787,7 +8787,7 @@ async fn harness_answer_cli_uses_supplied_fences_without_fetching_detail() {
             stream.read_exact(&mut body).await.unwrap();
             requests.push((headers, body));
             let (status, response) = if index == 0 {
-                let mut capabilities: Value = serde_json::from_str(include_str!(
+                let mut capabilities: Value = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hc58fa3f9b3bb owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
                     "../../../docs/st3/client-v0/fixtures/capabilities.json"
                 )).unwrap();
                 capabilities["snapshot"]["id"] = json!("snapshot/fixture/42");
