@@ -297,7 +297,7 @@ pub fn answer_label(harness: Harness, kind: Kind, tool: Option<&str>, answer: &s
 }
 
 /// The form for a prompt: `answers` as the daemon lists them, `prompt` its alert's detail, and
-/// `calls` the calls it may be about (the one it names, or every unanswered one).
+/// `calls` the call it asks about: the one st names, when the conversation has it, else none.
 pub fn prompt_form(harness: Harness, answers: &[String], prompt: &str, calls: &[Call<'_>]) -> Form {
     let kind = Kind::of(answers);
     let call = match calls {

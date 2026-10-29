@@ -96,6 +96,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case attentionMigrated
     case issuerRequired
     case suspendAuthoredSessionSelection
+    case legacyActionReceiptUntrusted
     case arrangementExists
     case arrangementFolderExists
     case arrangementRetired
@@ -115,6 +116,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case cursorGap
     case pageCursorExpired
     case rateLimited
+    case agentRosterNotReady
     case agentRosterCutNotReady
     case messageSelectorsNotReady
     case projectionDetailTooLarge
@@ -170,6 +172,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
+        case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
         case "arrangement-exists": .arrangementExists
         case "arrangement-folder-exists": .arrangementFolderExists
         case "arrangement-retired": .arrangementRetired
@@ -190,6 +193,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "projection-detail-too-large": .projectionDetailTooLarge
         case "projection-detail-invalid-source": .projectionDetailInvalidSource
         case "rate-limited": .rateLimited
+        case "agent-roster-not-ready": .agentRosterNotReady
         case "agent-roster-cut-not-ready": .agentRosterCutNotReady
         case "message-selectors-not-ready": .messageSelectorsNotReady
         case "runtime-not-local": .runtimeNotLocal
@@ -245,6 +249,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
+        case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"
         case .arrangementExists: "arrangement-exists"
         case .arrangementFolderExists: "arrangement-folder-exists"
         case .arrangementRetired: "arrangement-retired"
@@ -265,6 +270,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .projectionDetailTooLarge: "projection-detail-too-large"
         case .projectionDetailInvalidSource: "projection-detail-invalid-source"
         case .rateLimited: "rate-limited"
+        case .agentRosterNotReady: "agent-roster-not-ready"
         case .agentRosterCutNotReady: "agent-roster-cut-not-ready"
         case .messageSelectorsNotReady: "message-selectors-not-ready"
         case .runtimeNotLocal: "runtime-not-local"
