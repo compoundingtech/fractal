@@ -1054,12 +1054,24 @@ own outcome, such as `decline`); without one there is no answer object. No new o
 so a client that does not know `resolved_by` still decodes the answer; `work show` prints the
 entry as `timed_out`. A retry with the same idempotency key must name the same deadline
 (recorded as `deadline_ms` when the asker named one) and default, or it is refused with
-`idempotency-conflict`. A person's answer after that is refused with `stale-fence`. The reconciler arms
-one wake for the earliest deadline among the asks it resolves, so nothing polls for them.
+`idempotency-conflict`. The reconciler arms one wake for the earliest deadline among the asks it
+resolves, so nothing polls for them.
+
+Only the ask's own member applies the default, but the person may answer on any member. With
+deadlines on, every member refuses a person's answer at or after the ask's `deadline_unix_ms` with
+`stale-fence`. An answer made before it can still reach the ask's member after the default was
+applied there. Then the person's answer stands and the default does not: every member keeps, of an
+ask's responses, a person's answer accepted before the deadline (or, for an ask made without one,
+before the default was applied) over the default, and drops a person's answer accepted after it.
+Members hold the same claims with the same accept times, so they agree. The asking step's
+`person_answers` then lists only the person's answer, its constraints say the answer replaces the
+default, and when the answer reaches the ask's member, it sends the asker one "Answered before its
+deadline" message, because the step may already have resumed on the default.
 
 An ask made by a build without deadlines, or while they were off, carries none. Its deadline is
 the fleet default counted from the first reconcile pass on this member that saw deadlines on (the
-`person_ask_deadlines_since_unix_ms` key in its `meta` table, written once), or from when it was
+`person_ask_deadlines_since_unix_ms` key in its `meta` table; a pass that sees deadlines off
+removes it, so turning them on again counts afresh), or from when it was
 asked, whichever is later. Old asks therefore do not all resolve at once when deadlines are
 turned on. An update waits for nobody and has no deadline.
 

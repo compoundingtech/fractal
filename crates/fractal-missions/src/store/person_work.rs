@@ -227,6 +227,28 @@ fn send_answer_tx(
     answer: Option<&Value>,
     authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
 ) -> Result<(), St3Error> {
+    send_response_tx(tx, origin, ask, response, summary, answer, authorization, false)
+}
+
+/// Tells the asker of an ask whose deadline applied its default that the person had answered
+/// before the deadline on another member, so that answer stands instead. Sent once.
+fn send_overridden_default_tx(tx: &Transaction<'_>, origin: &str, ask: &ClaimRecord, response: &ClaimRecord) -> Result<(), St3Error> {
+    let summary = response.body["fields"]["summary"].as_str().unwrap_or_default().to_owned();
+    let answer = response.body["fields"].get("answer").filter(|answer| answer.is_object()).cloned();
+    send_response_tx(tx, origin, ask, response, &summary, answer.as_ref(), None, true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_response_tx(
+    tx: &Transaction<'_>,
+    origin: &str,
+    ask: &ClaimRecord,
+    response: &ClaimRecord,
+    summary: &str,
+    answer: Option<&Value>,
+    authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
+    overrides_default: bool,
+) -> Result<(), St3Error> {
     let Some(requester) = ask.actor.as_deref() else {
         return Ok(());
     };
@@ -242,12 +264,17 @@ fn send_answer_tx(
     };
     let verb = if timed_out {
         "did not answer, by its deadline,"
+    } else if overrides_default {
+        "answered, before its deadline,"
     } else if answer.is_some_and(|answer| answer["outcome"] == "dismissed") {
         "dismissed"
     } else {
         "answered"
     };
     let mut content = format!("{person} {verb} `{}`: {title}\n\n", ask.subject);
+    if overrides_default {
+        content.push_str("That answer reached the ask's own member after its deadline had applied the default, so it replaces the default.\n\n");
+    }
     if response.body["fields"].get("acted_for").is_some() {
         content.push_str(&format!(
             "Recorded by {} for {person}.\n\n",
@@ -271,16 +298,25 @@ fn send_answer_tx(
         "\n\nThe answer as data: `st work show {} --json` (person_answers).",
         ask.subject
     ));
-    let key = format!("person-answer:{}:{}", ask.subject, response.id);
+    let key = if overrides_default {
+        format!("person-answer-overrides-default:{}:{}", ask.subject, response.id)
+    } else {
+        format!("person-answer:{}:{}", ask.subject, response.id)
+    };
     let subject = format!(
         "message/{}",
         &hex::encode(Sha256::digest(key.as_bytes()))[..16]
     );
+    if overrides_default
+        && tx.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent')", [&subject], |row| row.get::<_, bool>(0)).map_err(internal)?
+    {
+        return Ok(());
+    }
     let mut tags = vec![Value::String(format!("st3-person-answer:{}", ask.subject))];
     if let Some(run) = fields["owner_run"].as_str() {
         tags.push(Value::String(format!("mission-run:{run}")));
     }
-    let heading = if timed_out { "Timed out" } else { "Answered" };
+    let heading = if timed_out { "Timed out" } else if overrides_default { "Answered before its deadline" } else { "Answered" };
     let body = json!({"fields": {"from": "daemon/runtime", "to": requester, "content": content, "status": "sent",
         "title": format!("{heading}: {title}"), "in_reply_to": null, "tags": tags}, "evidence": [response.id]});
     if let Some(authorization) = authorization {
@@ -335,6 +371,8 @@ pub trait PersonWorkStore {
     /// Resolves an unanswered ask at its deadline with its default answer, recorded as resolved
     /// by the deadline and not by the person, and resumes whatever waited on it.
     fn resolve_at_deadline(&self, tx: &Transaction<'_>, ask: &ClaimRecord, view: &StepRunView) -> Result<bool>;
+    /// Tells the asker once when a person's answer from another member overrides a default.
+    fn tell_overridden_defaults(&self) -> Result<bool>;
     /// Brings a person information they asked for. Nothing waits on an update: it stays on the
     /// person's home until they open or read it, and it is refused unless `about` names the
     /// person's own run or step, or their message to the poster.
@@ -495,6 +533,8 @@ impl PersonWorkStore for Store {
             Some(authorization) => super::assistant_write_gate::pause(&authorization.grant_subject)?,
             None => None,
         };
+        let answered_at = now_ms();
+        let deadlines = self.ask_deadlines();
         self.connection.batched(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
@@ -560,6 +600,12 @@ impl PersonWorkStore for Store {
                 || ask.as_ref().is_some_and(|a| input.episode.as_ref().is_some_and(|e| e != &a.id))
                 || ask.as_ref().map(|a| current(tx, a, now_ms())).transpose().map_err(internal)?.is_some_and(|live| !live) {
                 return Err(St3Error::new("stale-fence", "this person step is no longer waiting in that episode"));
+            }
+            // Past its deadline the ask's own member applies the default, which a later answer on
+            // another member must not race; answers before it win (`standing_responses`).
+            if !cancel && deadlines
+                && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| answered_at >= u128::from(deadline)) {
+                return Err(St3Error::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
             }
             if ask.is_none() && input.episode.as_ref().is_some_and(|episode| episode != &format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch)) {
                 return Err(St3Error::new("stale-fence", "this authored person step has moved to another episode"));
@@ -641,6 +687,13 @@ impl PersonWorkStore for Store {
     fn reconcile_person_asks_at(&self, now: u128) -> Result<PersonAskPass> {
         /// How many asks one pass ends, each with its cancellation, message and update.
         const ENDED_ASKS_PER_PASS: usize = 32;
+        let deadlines = self.ask_deadlines();
+        // Off, the count restarts when deadlines are next on, so asks made meanwhile do not
+        // resolve at once.
+        if !deadlines && ask_deadlines_since(&self.readers.get())? != 0 {
+            self.connection.batched(|tx| stop_counting_ask_deadlines(tx)).map_err(anyhow::Error::msg)??;
+        }
+        let overridden = self.tell_overridden_defaults()?;
         // Drop this read connection before submitting any cancellation transaction.
         let has_asks: bool = {
             let connection = self.readers.get();
@@ -650,10 +703,9 @@ impl PersonWorkStore for Store {
         };
         if !has_asks {
             // A concurrent new ask is handled by the next notified reconcile pass.
-            return Ok(PersonAskPass::default());
+            return Ok(PersonAskPass { changed: overridden, ..PersonAskPass::default() });
         }
         let default_ms = self.default_ask_deadline_ms();
-        let deadlines = self.ask_deadlines();
         self.connection.batched(|tx| -> Result<PersonAskPass> {
             let asks = person_asks_for_reconcile(tx)?;
             // Asks already open when deadlines are turned on count theirs from the first pass
@@ -662,7 +714,7 @@ impl PersonWorkStore for Store {
                 start_counting_ask_deadlines(tx, now)?;
             }
             let since = ask_deadlines_since(tx)?;
-            let mut pass = PersonAskPass::default();
+            let mut pass = PersonAskPass { changed: overridden, ..PersonAskPass::default() };
             let mut ended = 0;
             for ask in asks {
                 // Each ending writes a cancellation, a message and an update while holding the
@@ -714,6 +766,53 @@ impl PersonWorkStore for Store {
             }
             Ok(pass)
         }).map_err(anyhow::Error::msg)?
+    }
+
+    /// A person may answer on another member before an ask's deadline while the ask's own
+    /// member, not yet holding that answer, applies the default. The answer stands
+    /// (`standing_responses`); when it reaches this member, tell the asker once, since its step
+    /// may already have resumed on the default. Returns whether it told anyone.
+    fn tell_overridden_defaults(&self) -> Result<bool> {
+        /// How many new person answers one pass looks at.
+        const ANSWERS_PER_PASS: i64 = 256;
+        let after = self.person_answers_checked.load(std::sync::atomic::Ordering::Relaxed);
+        let (checked, overriding) = {
+            let connection = self.readers.get();
+            let mut query = connection.prepare_cached("SELECT answer.store_index, answer.id, EXISTS(SELECT 1 FROM claims ask JOIN claims applied
+                    ON applied.subject=ask.subject AND applied.kind='work.person-done' AND applied.origin=?2
+                    AND json_extract(applied.body,'$.fields.resolved_by')='deadline'
+                  WHERE ask.subject=answer.subject AND ask.kind='work.person-asked' AND ask.origin=?2
+                    AND CAST(answer.accepted_at_unix_ms AS INTEGER) < COALESCE(json_extract(ask.body,'$.fields.deadline_unix_ms'),
+                      CAST(applied.accepted_at_unix_ms AS INTEGER)))
+                FROM claims answer WHERE answer.kind='work.person-done' AND answer.store_index>?1
+                  AND json_extract(answer.body,'$.fields.resolved_by') IS NOT 'deadline'
+                ORDER BY answer.store_index LIMIT ?3")?;
+            let rows = query
+                .query_map(params![after as i64, self.origin, ANSWERS_PER_PASS], |row| {
+                    Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let checked = rows.last().map(|(index, _, _)| *index);
+            (checked, rows.into_iter().filter(|(_, _, overrides)| *overrides).map(|(_, id, _)| id).collect::<Vec<_>>())
+        };
+        let mut told = false;
+        if !overriding.is_empty() {
+            told = self.connection.batched(|tx| -> Result<bool> {
+                let mut told = false;
+                for id in &overriding {
+                    let Some(response) = tx.query_row("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1",
+                        [id], claim_from_row).optional()? else { continue };
+                    let Some(ask) = request(tx, &response.subject)? else { continue };
+                    send_overridden_default_tx(tx, &self.origin, &ask, &response).map_err(anyhow::Error::new)?;
+                    told = true;
+                }
+                Ok(told)
+            }).map_err(anyhow::Error::msg)??;
+        }
+        if let Some(checked) = checked {
+            self.person_answers_checked.fetch_max(checked, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(told)
     }
 
     fn resolve_at_deadline(&self, tx: &Transaction<'_>, ask: &ClaimRecord, view: &StepRunView) -> Result<bool> {

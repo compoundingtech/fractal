@@ -1048,18 +1048,21 @@ async fn the_reconciler_wakes_at_an_unanswered_asks_deadline_and_resolves_it() {
         "amber".into(),
         Arc::new(Notify::new()),
     );
+    // One instant for the arming and the wait, so the armed wait is known exactly.
+    let armed = now_ms();
+    smallclaims::store::set_thread_clock(Some(armed));
     assert!(!reconciler.reconcile_person_asks().unwrap());
     assert_eq!(
         reconciler.step_deadlines.lock().unwrap().get("person-ask-deadline"),
         Some(&deadline)
     );
+    let remaining = (deadline - armed) as u64;
     let _ = reconciler.notify.notified().now_or_never();
     tokio::task::yield_now().await;
-    let remaining = deadline.saturating_sub(now_ms()) as u64;
-    tokio::time::advance(Duration::from_millis(remaining.saturating_sub(1_000))).await;
+    tokio::time::advance(Duration::from_millis(remaining - 1)).await;
+    tokio::task::yield_now().await;
     assert!(reconciler.notify.notified().now_or_never().is_none());
-    // The timer was armed a little before `remaining` was read.
-    tokio::time::advance(Duration::from_millis(2_000)).await;
+    tokio::time::advance(Duration::from_millis(1)).await;
     tokio::task::yield_now().await;
     assert!(reconciler.notify.notified().now_or_never().is_some(), "the deadline wakes the reconciler");
     smallclaims::store::set_thread_clock(Some(deadline));
