@@ -1,6 +1,7 @@
 //! The part of `store::harness_questions` that moved up from fractal-store.
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
+use serde::Deserialize;
 use smallclaims::store::checkpoint::claims_of_kind_in_order;
 use fractal_schema::harness_questions::{
     Answer, OBSERVED, Question, RESOLVED, Receipt, Status, actor_key, answers, questions, subject,
@@ -18,6 +19,30 @@ pub struct QuestionObservation {
     pub native_id: String,
     pub runtime_incarnation: String,
     pub questions: Vec<Question>,
+}
+
+/// Owner-local lifecycle evidence captured after native wrapper admission, never replicated.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionWitness {
+    pub runtime_name: String,
+    pub created_at: String,
+    pub daemon: (u32, u64),
+    pub terminal: (u32, u64),
+    pub wrapper: (u32, u64),
+    pub bound: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuestionGeneration {
+    pub question: String,
+    pub agent: String,
+    pub runtime_incarnation: String,
+    pub session: String,
+    pub owner_session: String,
+    pub owner_sequence: u64,
+    pub witness: QuestionWitness,
 }
 
 fn json_fields(value: Value) -> BTreeMap<String, Value> {
@@ -61,9 +86,72 @@ pub trait HarnessQuestionsStore {
             answers: &BTreeMap<String, Answer>,
             receipt: Option<&Receipt>,
         ) -> Result<(HarnessQuestion, bool), St3Error>;
+    /// Register before appending an open, so a crash cannot strand an unwitnessed open.
+    fn retain_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<(), St3Error>;
+    fn harness_question_generation(&self, question: &str) -> Result<Option<QuestionGeneration>>;
+    fn harness_question_generations(&self, after: &str, limit: usize) -> Result<Vec<QuestionGeneration>>;
+    fn forget_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<()>;
+    /// Upgrade recovery only; current ingestion always records a generation before its claim.
+    fn unleased_local_harness_questions(&self, origin: &str, after: &str, limit: usize) -> Result<Vec<HarnessQuestion>>;
 }
 
 impl HarnessQuestionsStore for Store {
+    fn retain_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<(), St3Error> {
+        let raw = serde_json::to_string(generation).map_err(internal)?;
+        let connection = self.connection.write();
+        connection.execute(
+            "INSERT OR IGNORE INTO local_harness_question_generations(question,generation) VALUES(?1,?2)",
+            rusqlite::params![generation.question, raw],
+        ).map_err(internal)?;
+        let held: String = connection.query_row(
+            "SELECT generation FROM local_harness_question_generations WHERE question=?1",
+            [&generation.question], |row| row.get(0),
+        ).map_err(internal)?;
+        if held != raw {
+            return Err(St3Error::new("foreign-harness-question", "question generation was already bound"));
+        }
+        Ok(())
+    }
+
+    fn harness_question_generation(&self, question: &str) -> Result<Option<QuestionGeneration>> {
+        use rusqlite::OptionalExtension as _;
+        let raw: Option<String> = self.readers.get().query_row(
+            "SELECT generation FROM local_harness_question_generations WHERE question=?1",
+            [question], |row| row.get(0),
+        ).optional()?;
+        raw.map(|raw| serde_json::from_str(&raw).map_err(Into::into)).transpose()
+    }
+
+    fn harness_question_generations(&self, after: &str, limit: usize) -> Result<Vec<QuestionGeneration>> {
+        let connection = self.readers.get();
+        let raw = connection.prepare_cached(
+            "SELECT generation FROM local_harness_question_generations WHERE question>?1 ORDER BY question LIMIT ?2",
+        )?.query_map(rusqlite::params![after, limit as i64], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        raw.into_iter().map(|raw| serde_json::from_str(&raw).map_err(Into::into)).collect()
+    }
+
+    fn forget_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<()> {
+        self.connection.write().execute(
+            "DELETE FROM local_harness_question_generations WHERE question=?1 AND generation=?2",
+            rusqlite::params![generation.question, serde_json::to_string(generation)?],
+        )?;
+        Ok(())
+    }
+
+    fn unleased_local_harness_questions(&self, origin: &str, after: &str, limit: usize) -> Result<Vec<HarnessQuestion>> {
+        let connection = self.readers.get();
+        let ids = connection.prepare_cached(
+            "SELECT DISTINCT observed.subject FROM claims AS observed
+             WHERE observed.kind=?1 AND observed.origin=?2 AND observed.subject>?3
+             AND NOT EXISTS (SELECT 1 FROM local_harness_question_generations AS owner WHERE owner.question=observed.subject)
+             AND NOT EXISTS (SELECT 1 FROM claims AS closed WHERE closed.subject=observed.subject AND closed.kind=?4)
+             ORDER BY observed.subject LIMIT ?5",
+        )?.query_map(rusqlite::params![OBSERVED, origin, after, RESOLVED, limit as i64],
+            |row| row.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter().filter_map(|id| question_at(&connection, &id, None).transpose()).collect()
+    }
+
 
     fn harness_question(&self, subject: &str, at: u128) -> Result<Option<HarnessQuestion>> {
         question_at(&self.readers.get(), subject, Some(at))

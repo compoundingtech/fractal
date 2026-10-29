@@ -1,7 +1,7 @@
 //! OMP observation ingestion. This route cannot submit or acknowledge a person's answer.
 use super::*;
 use crate::HarnessQuestionsStore;
-use crate::store::harness_questions::QuestionObservation;
+use crate::store::harness_questions::{QuestionGeneration, QuestionObservation, QuestionWitness};
 use fractal_drivers::omp_questions::{CloseStatus, Observation};
 use fractal_schema::harness_questions::{Status, subject};
 
@@ -48,7 +48,7 @@ pub(super) async fn ingest(
     let checked = state.clone();
     let (id, changed) = authority_action(move || {
         let _admission = admission;
-        authority::with_observation_authority(&checked, &fence, &peer, |owner, validate| {
+        authority::with_observation_authority(&checked, &fence, &peer, |owner, witness, validate| {
             let live = live_session(&checked, &request.agent, Some(&request.runtime_incarnation))
                 .map_err(|error| {
                     let code = match error.code.as_str() {
@@ -72,7 +72,13 @@ pub(super) async fn ingest(
             }
             validate()?;
             validate_connector(&connector, &peer)?;
-            apply(&checked.store, &request)
+            let generation = QuestionGeneration {
+                question: subject(&request.agent, request.event.session(), request.event.native_id()),
+                agent: request.agent.clone(), runtime_incarnation: request.runtime_incarnation.clone(),
+                session: request.event.session().to_owned(), owner_session: owner.session.clone(),
+                owner_sequence: owner.sequence, witness: witness.clone(),
+            };
+            apply(&checked.store, &request, &generation)
         })
     }).await?;
     if changed { signal_local_change(&state); }
@@ -89,8 +95,13 @@ fn validate_connector(
     connector.validate().map_err(|_| refused("question connector generation is no longer live"))
 }
 
-fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
+fn apply(store: &Store, request: &Request, generation: &QuestionGeneration) -> Result<(String, bool), St3Error> {
     let id = subject(&request.agent, request.event.session(), request.event.native_id());
+    if generation.question != id || generation.agent != request.agent
+        || generation.runtime_incarnation != request.runtime_incarnation
+        || generation.session != request.event.session() {
+        return Err(refused("question generation does not match its observation"));
+    }
     let current = store.harness_question_held(&id)?;
     if current.as_ref().is_some_and(|question| question.agent != request.agent
         || question.runtime_incarnation != request.runtime_incarnation
@@ -103,8 +114,14 @@ fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
                 if current.questions != *questions {
                     return Err(refused("native call identity was reused with different descriptors"));
                 }
+                if current.resolution.is_none() {
+                    store.retain_harness_question_generation(generation)?;
+                }
                 return Ok((id, false));
             }
+            // Durable generation FIRST, under the provider record lock. A daemon crash
+            // between these writes leaves at worst an orphan lease, never an immortal open.
+            store.retain_harness_question_generation(generation)?;
             store.observe_harness_question_digest(&QuestionObservation {
                 agent: request.agent.clone(), session: session.clone(), native_id: native_id.clone(),
                 runtime_incarnation: request.runtime_incarnation.clone(), questions: questions.clone(),
@@ -113,6 +130,9 @@ fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
         }
         Observation::Closed { status, .. } => {
             let current = current.ok_or_else(|| refused("cannot close an unobserved native question"))?;
+            if current.resolution.is_none() {
+                store.retain_harness_question_generation(generation)?;
+            }
             let status = match status {
                 CloseStatus::AnsweredElsewhere => Status::AnsweredElsewhere,
                 CloseStatus::Expired => Status::Expired,
@@ -121,6 +141,7 @@ fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
             let (_, changed) = store.resolve_harness_question(
                 &id, status, &current.revision, &BTreeMap::new(), None,
             )?;
+            store.forget_harness_question_generation(generation).map_err(smallclaims::error::internal)?;
             Ok((id, changed))
         }
     }
@@ -137,6 +158,20 @@ pub(super) mod tests {
                 session: "native-session".into(), questions: vec![Question {
                     id: "q0".into(), options: 2, multi: false, required: true,
                 }] } }
+    }
+
+    fn generation(request: &Request) -> QuestionGeneration {
+        QuestionGeneration {
+            question: subject(&request.agent, request.event.session(), request.event.native_id()),
+            agent: request.agent.clone(), runtime_incarnation: request.runtime_incarnation.clone(),
+            session: request.event.session().to_owned(), owner_session: "owner".into(), owner_sequence: 1,
+            witness: QuestionWitness { runtime_name: "runtime".into(), created_at: "created".into(),
+                daemon: (1, 1), terminal: (2, 2), wrapper: (2, 2), bound: false },
+        }
+    }
+
+    fn apply(store: &Store, request: &Request) -> Result<(String, bool), St3Error> {
+        super::apply(store, request, &generation(request))
     }
 
     pub(in crate::api::mailbox) fn assert_forged_binding_cannot_write(
@@ -232,3 +267,7 @@ pub(super) mod tests {
         assert_eq!(store.index().unwrap(), index);
     }
 }
+
+#[cfg(test)]
+#[path = "questions_lifecycle_tests.rs"]
+mod lifecycle_tests;

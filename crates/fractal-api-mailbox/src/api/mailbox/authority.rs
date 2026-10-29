@@ -7,6 +7,7 @@ use super::*;
 use crate::mailbox::Authority;
 use smallclaims::error::internal;
 use std::path::PathBuf;
+use crate::store::harness_questions::QuestionWitness;
 
 fn refused(reason: impl Into<String>) -> St3Error {
     St3Error::new("stale-mailbox-session", reason)
@@ -1055,13 +1056,60 @@ pub fn with_argv_channel<T>(
     Ok(None)
 }
 
+/// Called under the provider record lock. A false result is positive evidence that
+/// this admitted generation ended, not a wall-clock lease expiry or a transport fault.
+pub(super) fn question_generation_current(
+    state: &AppState,
+    generation: &crate::store::harness_questions::QuestionGeneration,
+) -> anyhow::Result<bool> {
+    let captured = &generation.witness;
+    for (pid, token) in [captured.daemon, captured.terminal, captured.wrapper] {
+        if !fractal_runtime::process_generation_alive(pid, token)? {
+            return Ok(false);
+        }
+    }
+    let fence = Fence::new(&generation.agent, &generation.runtime_incarnation, "questions");
+    let dir = source_agent_dir(state, &fence);
+    let Some((runtime, raw)) = fractal_drivers::harness_events::read_bound_provider_state(&dir)? else {
+        anyhow::bail!("question provider evidence is unavailable");
+    };
+    let owner = decode_provider_authority(&raw)?;
+    if runtime != generation.runtime_incarnation
+        || owner.harness.as_deref() != Some("omp")
+        || owner.evidence_incarnation.as_deref() != Some(&generation.owner_session)
+        || owner.ownership_sequence != Some(generation.owner_sequence)
+        || owner.state == fractal_drivers::harness_state::Activity::Ended
+    {
+        return Ok(false);
+    }
+    let session_dir = dir.parent().ok_or_else(|| anyhow::anyhow!("invalid provider source"))?
+        .join("sessions").join("omp");
+    let identity = generation.agent.strip_prefix("agent/").unwrap_or(&generation.agent);
+    if !fractal_drivers::omp_session::native_question_session_current(
+        &session_dir, identity, &captured.runtime_name, &generation.owner_session, &generation.session,
+    )? {
+        return Ok(false);
+    }
+    let wrapper = BootstrapWitness {
+        name: captured.runtime_name.clone(), created_at: captured.created_at.clone(),
+        daemon: captured.daemon, terminal: captured.terminal, peer: captured.wrapper,
+        bound: captured.bound,
+    };
+    match wrapper.validate(state) {
+        Ok(()) => {}
+        Err(error) if error.code == "stale-mailbox-session" => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+    Ok(true)
+}
+
 pub fn with_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
-    with_authority_mode(state, fence, peer, true, action)
+    with_authority_mode(state, fence, peer, true, |owner, _, validate| action(owner, validate))
 }
 
 /// Native observations use physical custody without creating/promoting a mailbox lease.
@@ -1069,9 +1117,16 @@ pub(super) fn with_observation_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    action: impl FnOnce(&Authority, &QuestionWitness, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
-    with_authority_mode(state, fence, peer, false, action)
+    with_authority_mode(state, fence, peer, false, |owner, wrapper, validate| {
+        let wrapper = wrapper.ok_or_else(|| refused("question wrapper witness unavailable"))?;
+        action(owner, &QuestionWitness {
+            runtime_name: wrapper.name.clone(), created_at: wrapper.created_at.clone(),
+            daemon: wrapper.daemon, terminal: wrapper.terminal, wrapper: wrapper.peer,
+            bound: wrapper.bound,
+        }, validate)
+    })
 }
 
 fn with_authority_mode<T>(
@@ -1079,7 +1134,7 @@ fn with_authority_mode<T>(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     promote: bool,
-    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
+    action: impl FnOnce(&Authority, Option<&BootstrapWitness>, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
 ) -> Result<T, St3Error> {
     if fence.epoch != 0 {
         state.store.check_mailbox_custody_fence(fence)?;
@@ -1241,7 +1296,7 @@ fn with_authority_mode<T>(
             }
             Ok(())
         };
-        return action(&bootstrap, &validate);
+        return action(&bootstrap, None, &validate);
     };
     let observed = provider_authority(&bytes)?;
     if observed.harness.as_deref() != Some(&provider)
@@ -1313,7 +1368,7 @@ fn with_authority_mode<T>(
             if promote {
                 state.store.promote_current_mailbox_ownership(fence, &authority)?;
             }
-            action(&authority, &validate).map_err(anyhow::Error::new)
+            action(&authority, observation_wrapper.as_ref(), &validate).map_err(anyhow::Error::new)
         },
     )
     .map_err(|error| {

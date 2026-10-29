@@ -603,6 +603,27 @@ pub fn process_start_token(pid: u32) -> Result<u64> {
     process_identity(pid).map(|(_, token)| token)
 }
 
+/// Whether this exact captured generation can still execute. Missing/reused/zombie
+/// processes are definitive loss; inaccessible or malformed process evidence is an error.
+pub fn process_generation_alive(pid: u32, token: u64) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        // An unavailable procfs mount is not evidence that a particular process died.
+        crate::procfs::require_matching_procfs()?;
+        match process_identity(pid) {
+            Ok((state, current)) => Ok(current == token && !matches!(state, 'Z' | 'X' | 'x')),
+            Err(error) if error.downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (pid, token);
+        anyhow::bail!("exact process generation liveness is unavailable on this platform")
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) fn process_identity(pid: u32) -> Result<(char, u64)> {
     crate::procfs::require_matching_procfs()?;
