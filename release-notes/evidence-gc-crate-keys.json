@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "evidence-gc keeps the per-crate rust-tests keys of every live tree (open pull requests, branch tips, recent main), keyed by main's scripts/rust-test-keys; a live tree whose crates cannot be keyed keeps every rust-tests key; in a partial clone the manifests are fetched in batches before keying",
+  "replay": {"status": "none", "detail": "No claim replay or recovery behavior changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes, triggers, schema-version changes or data rewrites. The GC summary gains crate_keys."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or digest changes. GC deletes strictly less: only rust-tests keys that no live tree projects to."},
+  "compatibility": {"status": "none", "detail": "The GC timer runs main's evidence-gc, so this applies at the next run once on main. A main without scripts/rust-test-keys keys nothing this way, as before."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "changed", "detail": "The evidence-gc timer on the build host that runs it was disabled on 2026-10-28 until this lands: re-enable it (systemctl --user enable --now evidence-gc.timer) after merge, and remove ~/.local/state/evidence-gc/PAUSED."},
+  "recovery": {"status": "none", "detail": "No persistent state changes."}
+}
