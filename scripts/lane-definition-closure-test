@@ -274,6 +274,35 @@ class CommandLine(Fixture):
     def run_tool(self, *args):
         return subprocess.run([sys.executable, str(TOOL), '--root', str(self.root), *args], capture_output=True, text=True, env=GIT_ENV)
 
+    def test_check_fails_a_lane_that_reads_a_protected_file_its_ci_inputs_leave_out(self):
+        gate = "PROTECTED = ('scripts/judge', '.st/keys', '.github/workflows/fleet.yml')\nBASE_READ = ('.st/keys',)\n"
+        self.tree({'scripts/a': SH + 'bash scripts/judge\ncat .st/keys\n', 'scripts/judge': SH, '.st/keys': 'k',
+                   'scripts/ci-evidence-gate': gate, '.github/workflows/fleet.yml': 'jobs:\n  demo:\n    runs-on: box\n',
+                   '.st/policy.json': '{"checks": {"demo": {}}}'})
+        (self.root / '.st').mkdir(exist_ok=True)
+
+        def lane(ci_inputs):
+            entry = {'argv': ['bash', 'scripts/a'], 'definition_paths': ['scripts/a', 'scripts/judge']}
+            if ci_inputs is not None:
+                entry['ci_inputs'] = ci_inputs
+            (self.root / '.st/required-lanes.json').write_text(json.dumps({'version': 1, 'lanes': {'demo': entry}}))
+            return self.run_tool('--check')
+
+        self.assertEqual(lane(None).returncode, 0)  # no ci_inputs: the old rule, which any protected change on main voids
+        done = lane(['.github/workflows/fleet.yml::jobs.demo'])
+        self.assertEqual(done.returncode, 1, done.stdout)
+        self.assertIn('demo: it executes or reads the protected file scripts/judge, which its ci_inputs do not declare', done.stdout)
+        self.assertNotIn('.st/keys', done.stdout)  # read only at the base: main changing it decides nothing
+        self.assertEqual(lane(['scripts', '!scripts/judge']).returncode, 1)  # an exclusion leaves it out
+        self.assertEqual(lane(['.github/workflows/fleet.yml::jobs.demo', 'scripts/judge']).returncode, 0, lane(['scripts/judge']).stdout)
+        for typo, why in (('.github/workflows/fleet.yml::jobs.dmeo', '.github/workflows/fleet.yml has no jobs.dmeo'),
+                          ('.st/policy.json::checks.dmeo', '.st/policy.json has no checks.dmeo'),
+                          ('scripts/jugde', 'scripts/jugde is not in the tree')):
+            with self.subTest(typo):  # names nothing: the gate would always fall back, so --check says so
+                done = lane(['.github/workflows/fleet.yml::jobs.demo', 'scripts/judge', typo])
+                self.assertEqual(done.returncode, 1, done.stdout)
+                self.assertIn(f'demo: its ci_inputs entry {typo} names nothing ({why})', done.stdout)
+
     def test_check_names_an_uncovered_file_and_write_fixes_it(self):
         self.tree({'scripts/a': SH + 'bash scripts/b\n', 'scripts/b': SH})
         self.lanes(['scripts/a'])
