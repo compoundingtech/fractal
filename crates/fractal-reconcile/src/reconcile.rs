@@ -29566,6 +29566,18 @@ mission "scheduled-cycle" state="ready" {
             .unwrap()
             .revision
     }
+
+    /// Waits until every schedule timer the reconciler armed has run; only for a test whose armed
+    /// occurrences are already due. Each timer removes its operation from `armed_schedules` and
+    /// then signals the reconciler's events, so this waits on that signal. A fixed pause does not
+    /// order the two: on a loaded host the test's own timer can expire in the same tick as the
+    /// schedule's and be polled first.
+    async fn finish_armed_schedules<R>(reconciler: &Reconciler<R>) {
+        let mut events = reconciler.event_notify.subscribe();
+        while !reconciler.armed_schedules.lock().unwrap_or_else(PoisonError::into_inner).is_empty() {
+            events.changed().await.unwrap();
+        }
+    }
     #[test]
     fn scheduled_start_contention_waits_without_durable_failure_then_starts() {
         use serde_json::json;
@@ -30002,7 +30014,7 @@ schedule "daily" {{
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
         let reached = store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap();
         assert_eq!(reached.len(), 1);
         let key = reached[0].body["fields"]["occurrence"].as_u64().unwrap();
@@ -30054,7 +30066,7 @@ schedule "daily" {{
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
         let reached = store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap();
         assert_eq!(reached.len(), 1);
         assert_eq!(reached[0].body["fields"]["occurrence"], key);
@@ -31065,7 +31077,7 @@ schedule "{name}" {{
         );
 
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        finish_armed_schedules(&reconciler).await;
 
         let reached = store
             .claims_for("schedule/cycle", Some("schedule.occurrence-reached"))
