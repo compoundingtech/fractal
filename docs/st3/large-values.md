@@ -362,3 +362,23 @@ transitional exceptions do not prove byte-size or execution-cost bounds.
   rejection, not new production value producers. The test-module maintainer
   owns `bound-or-reference-values-and-reclamation`: carry those assertions to
   the bounded membership/state representation and its cleanup semantics.
+
+## Native question lifecycle inventory review (PR #4191)
+
+`fractal_store::store` owns schema site `lv-h0113908d5df7`, replacing
+`lv-h82624af80f95` because the schema adds `local_harness_question_generations`.
+The other schema declarations are unchanged. The new primary key is the derived
+question subject; its inline JSON value holds authenticated process birth,
+provider ownership and native-session witnesses, never question or option text.
+The schema maintainer retains `chunk-or-reference-variable-columns`; the local
+classification is not a SQLite value-size proof.
+
+`fractal_seats::store::harness_questions` owns `lv-h984ca628442d` (register)
+and `lv-h2b3b6ffb021b` (exact-generation delete). The former serializes the
+admitted witness before publishing an open; the latter compares that same
+generation and deletes it only after durable resolution. Inline evidence
+preserves restart recovery and prevents a foreign generation from deleting a
+lease. The maintainer retains `bound-or-reference-values-and-reclamation`:
+establish the complete serialized witness/key bounds or a bounded reference
+representation, preserving compare-and-delete and crash-recovery semantics.
+These exceptions do not claim a storage-size bound or change admission.

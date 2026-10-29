@@ -152,8 +152,10 @@ async fn native_session_lifetimes_survive_transport_and_end_with_the_driver() {
         assert_eq!(state.store.index().unwrap(), index);
         if !exited {
             control.get_mut().write_all(b"stop\n").await.unwrap();
-            assert!(child.wait().unwrap().success());
         }
+        // Child::wait retains the exit status, including when abrupt-loss setup reaped it.
+        let status = child.wait().unwrap();
+        if !exited { assert!(status.success()); }
     }
 }
 

@@ -100,7 +100,7 @@ impl HarnessQuestionsStore for Store {
         let raw = serde_json::to_string(generation).map_err(internal)?;
         let connection = self.connection.write();
         connection.execute(
-            "INSERT OR IGNORE INTO local_harness_question_generations(question,generation) VALUES(?1,?2)",
+            /* sqlite-large-value: allow-for-now lv-h984ca628442d owner=fractal_seats::store::harness_questions TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_harness_question_generations(question,generation) VALUES(?1,?2)",
             rusqlite::params![generation.question, raw],
         ).map_err(internal)?;
         let held: String = connection.query_row(
@@ -133,7 +133,7 @@ impl HarnessQuestionsStore for Store {
 
     fn forget_harness_question_generation(&self, generation: &QuestionGeneration) -> Result<()> {
         self.connection.write().execute(
-            "DELETE FROM local_harness_question_generations WHERE question=?1 AND generation=?2",
+            /* sqlite-large-value: allow-for-now lv-h2b3b6ffb021b owner=fractal_seats::store::harness_questions TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM local_harness_question_generations WHERE question=?1 AND generation=?2",
             rusqlite::params![generation.question, serde_json::to_string(generation)?],
         )?;
         Ok(())
