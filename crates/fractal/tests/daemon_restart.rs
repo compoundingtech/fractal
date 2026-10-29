@@ -1155,6 +1155,7 @@ async fn initial_bind_observes_binary_replacement(driver: &'static str) {
     let mut daemon = Daemon::new(root);
     daemon.observe_running(seat, incarnation);
     let (bind_sent, bind_received) = std::sync::mpsc::channel::<Value>();
+    let (admitted_sent, admitted_received) = std::sync::mpsc::channel();
     let bind_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let release_bind = Arc::new(tokio::sync::Semaphore::new(0));
     let release = release_bind.clone();
@@ -1162,6 +1163,7 @@ async fn initial_bind_observes_binary_replacement(driver: &'static str) {
         axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let bind_sent = bind_sent.clone();
+                let admitted_sent = admitted_sent.clone();
                 let attempts = bind_attempts.clone();
                 let release = release.clone();
                 async move {
@@ -1175,7 +1177,9 @@ async fn initial_bind_observes_binary_replacement(driver: &'static str) {
                             return std::future::pending::<axum::response::Response>().await;
                         }
                         release.acquire().await.unwrap().forget();
-                        return next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(body))).await;
+                        let response = next.run(axum::extract::Request::from_parts(parts, axum::body::Body::from(body))).await;
+                        admitted_sent.send(response.status()).unwrap();
+                        return response;
                     }
                     next.run(request).await
                 }
@@ -1206,6 +1210,7 @@ async fn initial_bind_observes_binary_replacement(driver: &'static str) {
     };
     let mut channel = TestSeat(Some(
         seat_command(root, &daemon.socket)
+            .env("ST_AGENT", seat)
             .env("ST3_BIN", &installed)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .env("ST_TEST_REPLACEMENT_BIN", test_bin!("fractal-fixture"))
@@ -1261,6 +1266,8 @@ async fn initial_bind_observes_binary_replacement(driver: &'static str) {
     assert_eq!(idle_events(), 0, "replacement must not observe input while its bind is held");
     let mut wake = fractal_drivers::harness_events::bind_wake_pipe(&paths.agent_dir).unwrap();
     release_bind.add_permits(1);
+    assert!(admitted_received.recv_timeout(Duration::from_secs(10)).unwrap().is_success(),
+        "the released replacement bind must actually be admitted");
     let deadline = Instant::now() + Duration::from_secs(10);
     while idle_events() == 0 {
         use std::os::fd::AsRawFd as _;
