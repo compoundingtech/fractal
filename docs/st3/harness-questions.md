@@ -110,6 +110,10 @@ No adapter is installed by default; capability is unavailable and submission ret
 Every per-harness flag and the web-client flag remain off; this contract does not wire
 the O1 adapter or ship an answering form.
 
+Synchronous native availability checks and settlement run on blocking workers,
+not async executor threads. This includes availability checks while building
+metadata list and detail responses, as well as capability checks and answer submission.
+
 `harness.answer` posts to `/v1/client/actions` with parameters
 `{question, answers}`, where `answers` maps canonical `q0`–`q15` or hashed question
 ids to `{positions:[0,2]}`. Positions are unique and zero-based in native option order.
