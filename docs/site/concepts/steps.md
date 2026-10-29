@@ -6,11 +6,56 @@ order: 5
 
 # Steps and work
 
+KDL is the runnable format. Effect and TS are preview APIs that illustrate the design target, not an installed SDK. Use KDL for the runnable commands in these guides.
+
 A **step** is one unit of work in a mission. It states an outcome, who may do it, and what must happen first.
 
 ## Dependencies determine order
 
-```kdl
+```ts group=steps variant=effect
+import { Effect } from 'effect'
+import { Fractal } from 'fractal/effect'
+import { worker, reviewer } from './agents'
+
+export const steps = Effect.gen(function* () {
+  yield* Fractal.step({
+    id: 'write',
+    timeout: '30m',
+    goal: 'The release notes describe the changes.',
+  }).pipe(Effect.provide(Fractal.Worker.layer(worker)))
+
+  yield* Fractal.step({
+    id: 'review',
+    timeout: '20m',
+    goal: 'The release notes have an evidence-backed review.',
+  }).pipe(Effect.provide(Fractal.Worker.layer(reviewer)))
+})
+```
+
+```ts group=steps variant=ts
+import { Fractal } from 'fractal'
+import { worker, reviewer } from './agents'
+
+export const steps = async () => {
+  await Fractal.Worker.provide(worker, async () => {
+    await Fractal.step({
+      id: 'write',
+      timeout: '30m',
+      goal: 'The release notes describe the changes.',
+    })
+  })
+
+  await Fractal.Worker.provide(reviewer, async () => {
+    await Fractal.step({
+      id: 'review',
+      timeout: '20m',
+      goal: 'The release notes have an evidence-backed review.',
+    })
+  })
+}
+```
+
+```kdl group=steps variant=kdl
 step "write" timeout="30m" {
   assigned-to "agent/example/worker"
   goal "The release notes describe the changes."
@@ -22,7 +67,7 @@ step "review" timeout="20m" {
 }
 ```
 
-The textual order is for presentation, not scheduling. Without a dependency a step can become ready immediately. Separate agents are required if independent work should run at the same time.
+In KDL, textual order is for presentation, not scheduling. The preview APIs express this dependency by awaiting the write step before starting the review. Without a dependency a step can become ready immediately. Separate agents are required if independent work should run at the same time.
 
 ## Claims are leases
 

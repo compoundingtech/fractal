@@ -1330,9 +1330,17 @@ sealing. Every participant must seal, so this stops trimming for the whole fleet
 checkpoint agreement. It is off by default. The member then seals, verifies and applies no new
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
-and is not treated as a deletion. It still syncs with every peer as before. Like `enabled = false`,
-it stops the old checkpoints on the other members until a person excuses it. No claim family is
-trimmed locally yet.
+and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
+members until a person excuses it. No claim family is trimmed locally yet.
+
+On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
+what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges
+the ledger once: an identity adoption withdrew, or that only a checkpoint that never committed
+recorded, was not a deletion and leaves it. Admission then refuses a retired envelope or claim from
+any peer, whatever its build; the inventory lists a retired envelope as held without payload, so a
+peer never sends it; and the member serves no retired envelope or claim, even while a copy is still
+held. It still syncs everything else with every peer as before. Turning the setting off stops
+reading the ledger as the authority.
 
 `[trim] notify = "agent/..."` names the agent that receives a fault when the daily answers check
 finds this member and a peer answering differently; see [Answers across members](#answers-across-members).

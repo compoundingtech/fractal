@@ -419,8 +419,13 @@ impl Store {
              FROM claims JOIN replica_envelopes AS envelopes ON envelopes.batch_id=claims.batch_id
              WHERE claims.id=?1",
         )?;
+        // A claim this member retired is not served, even while a copy is still held.
+        let authoritative = retired::authoritative(&connection)?;
         let mut found = BTreeSet::new();
         for id in claims.iter().take(CLAIM_RANGE_QUERY_CLAIMS) {
+            if authoritative && retired::claim_retired(&connection, id)? {
+                continue;
+            }
             let rows = statement.query_map([id], |row| {
                 Ok(ReplicaEnvelopeId { writer: row.get(0)?, sequence: row.get(1)?, hash: row.get(2)? })
             })?;
