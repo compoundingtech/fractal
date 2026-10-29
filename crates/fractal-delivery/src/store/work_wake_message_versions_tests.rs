@@ -161,3 +161,49 @@ fn work_wake_batch_preserves_closed_attempts_order_and_fresh_lifecycle_without_p
         serde_json::to_value(point_work_wakes(&store, "agent/worker").unwrap()).unwrap()
     );
 }
+
+#[test]
+fn a_pass_keeps_its_work_wake_views_when_the_shared_message_cache_empties() {
+    let store = Store::open_memory("fixture").unwrap();
+    for index in 0..3 {
+        send(&store, &format!("wake-{index}"), "agent/worker", vec![format!("st3-work:step-run/{index}@1@1@worker")]);
+    }
+    let views = || super::delivery::WORK_WAKE_VIEWS_READ.with(std::cell::Cell::get);
+    let decoded = || fractal_store::store::ACTUAL_HISTORY_BODIES_DECODED.with(std::cell::Cell::get);
+    let before = views();
+    assert_eq!(store.work_wake_messages_for_reconcile("agent/worker").unwrap().len(), 3);
+    assert_eq!(views() - before, 3);
+
+    // What a mailbox read past the shared cache's limit does to it.
+    store.fractal.message_cache.lock().unwrap().clear();
+    let (before, folded) = (views(), decoded());
+    let again = store.work_wake_messages_for_reconcile("agent/worker").unwrap();
+    assert_eq!(views() - before, 0, "no wake changed, so no view is read again");
+    assert_eq!(decoded() - folded, 0, "no message history is folded again");
+    assert_eq!(
+        serde_json::to_value(&again).unwrap(),
+        serde_json::to_value(point_work_wakes(&store, "agent/worker").unwrap()).unwrap()
+    );
+
+    store
+        .append_claim(&ClaimInput {
+            subject: "message/wake-1".into(),
+            kind: "message.closed".into(),
+            actor: Some("daemon/runtime".into()),
+            fields: BTreeMap::from([("status".into(), json!("closed"))]),
+            evidence: vec![],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    store.fractal.message_cache.lock().unwrap().clear();
+    let before = views();
+    let after = store.work_wake_messages_for_reconcile("agent/worker").unwrap();
+    assert_eq!(views() - before, 1, "only the closed wake is read again");
+    assert_eq!(after.iter().find(|m| m.subject == "message/wake-1").unwrap().status, "closed");
+    store.fractal.message_cache.lock().unwrap().clear();
+    assert_eq!(
+        serde_json::to_value(&after).unwrap(),
+        serde_json::to_value(point_work_wakes(&store, "agent/worker").unwrap()).unwrap()
+    );
+}

@@ -22,10 +22,17 @@ pub fn short(now: u64) -> String {
 
 /// This build as the client header names it: `stui 0.1.0+local.ab12cd3`.
 pub fn client_name() -> String {
-    client_name_labelled(std::env::var("STUI_CLIENT_LABEL").ok().as_deref())
+    client_name_with(&|name| std::env::var(name).ok())
 }
 
-/// A test client names itself apart (`STUI_CLIENT_LABEL=measure`) so a profile can tell its
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+fn client_name_with(get: &dyn Fn(&str) -> Option<String>) -> String {
+    let label = get("FRACTAL_CLIENT_LABEL").or_else(|| get("STUI_CLIENT_LABEL"));
+    client_name_labelled(label.as_deref())
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
+/// A test client names itself apart (`FRACTAL_CLIENT_LABEL=measure`) so a profile can tell its
 /// connection from a person's; the label is never identity or authority.
 fn client_name_labelled(label: Option<&str>) -> String {
     let label = label
@@ -46,6 +53,24 @@ pub fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_label_prefers_fractal_and_empty_masks_legacy() {
+        for (legacy, fractal, expected) in [
+            (None, None, None),
+            (Some("legacy"), None, Some("legacy")),
+            (None, Some("fractal"), Some("fractal")),
+            (Some("legacy"), Some("fractal"), Some("fractal")),
+            (Some("legacy"), Some(""), None),
+        ] {
+            let name = super::client_name_with(&|key| match key {
+                "STUI_CLIENT_LABEL" => legacy.map(str::to_owned),
+                "FRACTAL_CLIENT_LABEL" => fractal.map(str::to_owned),
+                _ => None,
+            });
+            assert_eq!(name, super::client_name_labelled(expected));
+        }
+    }
+
     #[test]
     fn a_test_client_labels_its_name_and_a_person_does_not() {
         assert!(!super::client_name_labelled(None).contains('['));

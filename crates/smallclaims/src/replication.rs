@@ -311,6 +311,9 @@ pub struct ReplicationStatus {
     pub waiting_claims: u64,
     pub invalid_records: u64,
     pub repaired_records: u64,
+    /// Envelopes received and not yet admitted, including those held below.
+    #[serde(default)]
+    pub pending_envelopes: u64,
     /// Envelopes of keyed writers held until their writer's signature arrives.
     #[serde(default)]
     pub unsigned_envelopes: u64,

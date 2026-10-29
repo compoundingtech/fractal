@@ -13,6 +13,25 @@ const SEAT: &str = "agent/example/terminal-claude";
 const INVOCATION: &str = "019a0000-0000-7000-8000-000000000002";
 const NEXT: &str = "019a0000-0000-7000-8000-000000000003";
 
+/// The fixture binary, linked under a directory of this test's own. The real driver follows the
+/// file ST3_BIN names as its installed image and releases its provider for adoption once that
+/// file is replaced. Another build in the same target dir can relink target/debug/fractal-fixture
+/// while these tests run (linux-gate runs its fleet-compat stage, which builds the integration
+/// target, beside the tests stage), so the shared path is not this test's to follow. A hard link
+/// keeps the image this test started with; a copy stands in across file systems.
+fn pinned_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::Builder::new()
+        .prefix("pinned-fixture")
+        .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let pinned = directory.path().join("fractal-fixture");
+    let built = test_bin!("fractal-fixture");
+    if std::fs::hard_link(built, &pinned).is_err() {
+        std::fs::copy(built, &pinned).unwrap();
+    }
+    (directory, pinned)
+}
+
 #[derive(Default)]
 struct Runtime {
     ptys: Mutex<Vec<RuntimeObservation>>,
@@ -369,6 +388,7 @@ finally:
         .map(|directory| directory.join("python3"))
         .find(|candidate| candidate.is_file())
         .expect("terminal provider fixture needs python3 on the executing runner");
+    let (_pinned, fixture) = pinned_fixture();
     let mut command = fractal_daemon::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
@@ -378,7 +398,7 @@ finally:
         .env("FIXTURE_SEAT", SEAT)
         .env("ST3_SUBJECT", TERMINAL)
         .env("ST3_ENDPOINT", root.path().join("api.sock"))
-        .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("ST3_BIN", &fixture)
         .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("FIXTURE_RECEIVED", &received)

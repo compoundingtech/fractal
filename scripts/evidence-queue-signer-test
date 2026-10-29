@@ -18,7 +18,7 @@ CLEAN = dict(PATH=os.environ['PATH'], GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_
              GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
 # The base's self-contained st-test: --list (two light checks, one heavy) and a run, recorded with the commit it ran on.
 ST_TEST = '''#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 argv = sys.argv[1:]
 if '--list' in argv:
     for name in ['typescript-client', 'genie-freshness'] + (['linux-gate'] if '--all' in argv else []):
@@ -51,6 +51,7 @@ with open(os.environ['STUB_LOG'], 'a') as log:
     log.write(json.dumps({'head': head, 'tree': tree, 'parents': parents, 'checks': checks,
                           'target': os.environ.get('CARGO_TARGET_DIR')}) + '\\n')
 results = json.loads(os.environ.get('STUB_RESULTS', '{}'))
+time.sleep(float(os.environ.get('STUB_RUN_SECONDS', '0')))  # a run that outlives the watcher's one-second sample
 if os.environ.get('STUB_PUSH_NOTES'):
     # A note per check, as evidence-wrap pushes it: a commit holding one file named after the tree, under refs/tags/evidence/TREE/.
     for name in checks:
@@ -126,7 +127,7 @@ class QueueSigner(unittest.TestCase):
     def env(self, **extra):
         return dict(CLEAN, HOME=self.tmp.name, EVIDENCE_QUEUE_CONFIG=str(self.config), EVIDENCE_QUEUE_STATE=str(self.state),
                     EVIDENCE_PRESIGN_CONFIG=str(self.presign), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
-                    EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
+                    EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo), EVIDENCE_PRESIGN_FREE_GIB='1000',
                     EVIDENCE_PRESIGN_ADMISSION='/nonexistent', EVIDENCE_QUEUE_PROC=str(self.proc), ST_TEST_POOL_MAX_GB='170', EVIDENCE_QUEUE_GH=str(Path(self.tmp.name) / 'gh'),
                     STUB_GH=str(self.gh_data), STUB_LOG=str(self.log), **extra)
 
@@ -226,6 +227,14 @@ class QueueSigner(unittest.TestCase):
         [attempt] = self.lines('attempts.jsonl')
         self.assertEqual(attempt['stage_seconds'],
                          dict.fromkeys(['typescript-client', 'genie-freshness', 'linux-gate'], 60))
+
+    def test_a_run_that_outlives_a_sample_is_judged_by_the_stand_in_disk_not_the_hosts(self):
+        self.pull(1, 'one')
+        self.enqueue(1, self.main, 1)
+        self.run_signer('observe')
+        self.run_signer('sign', STUB_RUN_SECONDS='2.5')
+        [attempt] = self.lines('attempts.jsonl')
+        self.assertEqual((attempt['outcome'], attempt.get('stopped')), ('signed', None))
 
     def test_an_entry_records_its_group_tree_and_merge_tree_and_a_dropped_entry_is_measured_too(self):
         self.pull(1, 'one')

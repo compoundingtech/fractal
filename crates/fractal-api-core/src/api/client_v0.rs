@@ -1134,7 +1134,7 @@ fn runtime_resources_from_status_access(
             .map(|selected| selected.subject.as_str())
             .collect::<Vec<_>>(),
     )?;
-    let claim_times = store.claim_acceptance_times(
+    let claim_times = store.kept_claim_acceptance_times(
         &status
             .subjects
             .iter()

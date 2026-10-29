@@ -96,6 +96,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case attentionMigrated
     case issuerRequired
     case suspendAuthoredSessionSelection
+    case legacyActionReceiptUntrusted
     case arrangementExists
     case arrangementFolderExists
     case arrangementRetired
@@ -170,6 +171,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
+        case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
         case "arrangement-exists": .arrangementExists
         case "arrangement-folder-exists": .arrangementFolderExists
         case "arrangement-retired": .arrangementRetired
@@ -245,6 +247,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
+        case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"
         case .arrangementExists: "arrangement-exists"
         case .arrangementFolderExists: "arrangement-folder-exists"
         case .arrangementRetired: "arrangement-retired"
@@ -664,6 +667,18 @@ public struct ResourcesPage: Codable, Sendable {
 public struct ResourcePage: Codable, Sendable { public let kind: String; public let collection: String; public let filters: [String: String]; public let items: [Resource]; public let page: PageInfo; public let sync: SyncNotice?; public let replicated: ReplicatedNotice? }
 public struct ReplicatedNotice: Codable, Sendable { public let ownerHostID: String; public let source: String; public let complete: Bool; public let state: String; public let reason: String?; enum CodingKeys: String, CodingKey { case ownerHostID = "owner_host_id", source, complete, state, reason } }
 public struct SyncNotice: Codable, Sendable { public let state: String; public let peers: [SyncPeer] }
+/// This host's replication as a stream frame states it: level, or catching-up or diverged with the peers ahead. A frame without one is unknown, never level.
+public struct StreamSync: Codable, Sendable {
+    public let state: String; public let peers: [SyncPeer]?
+    /// true when level, false when catching up or diverged with peers named, nil for a state this client does not know or a shape the contract forbids.
+    public var level: Bool? {
+        switch (state, peers?.isEmpty ?? true) {
+        case ("level", true): return true
+        case ("catching-up", false), ("diverged", false): return false
+        default: return nil
+        }
+    }
+}
 public struct ExchangeTransport: Codable, Sendable { public let at: String; public let carrier: String; public let fabricRoute: String?; enum CodingKeys: String, CodingKey { case at, carrier, fabricRoute = "fabric_route" } }
 public struct SyncPeer: Codable, Sendable { public let lastSuccessfulExchange, lastFailedExchange: ExchangeTransport?; public let hostID: String; public let peerOnlyEnvelopes, localOnlyEnvelopes: UInt64; public let lastExchangeAt: String?; public let estimatedCatchUpSeconds: UInt64?; public let divergedSince: String?; enum CodingKeys: String, CodingKey { case lastSuccessfulExchange = "last_successful_exchange", lastFailedExchange = "last_failed_exchange", hostID = "host_id", peerOnlyEnvelopes = "peer_only_envelopes", localOnlyEnvelopes = "local_only_envelopes", lastExchangeAt = "last_exchange_at", estimatedCatchUpSeconds = "estimated_catch_up_seconds", divergedSince = "diverged_since" } }
 
