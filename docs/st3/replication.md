@@ -1291,7 +1291,24 @@ checkpoint agreement. It is off by default. The member then seals, verifies and 
 checkpoint, and it adopts no peer's manifest, so a manifest never replaces its tombstones. A trim it
 had already committed still finishes; a checkpoint it was still recording stays recorded as it was
 and is not treated as a deletion. Like `enabled = false`, it stops the old checkpoints on the other
-members until a person excuses it. No claim family is trimmed locally yet.
+members until a person excuses it.
+
+Each day such a member trims its own due cut (the day before yesterday, as for a shared checkpoint):
+it captures the set before the cut, plans the drop with the same audited rules and guards a shared
+checkpoint uses, and trims it, with no seal, verification or copy-proof. Only the kinds in
+`LOCAL_TRIM_KINDS` are dropped, each with a test that every reader answers the same from the full
+and the trimmed log: today `observer.observed` and `resource.observed`, which observers write in
+the same batches. Everything else is kept, as a protected claim is, and envelopes still go whole.
+`harness.observed` stays out: its audited rule drops a credential transition that moves the `since`
+of a seat's needs-login state, which no projection digest covers. Two checks stand in for the
+proof. A plan that would drop the newest claim of any subject and kind is refused before anything
+is recorded. While deleting, every chunk compares the projection digests before and after and
+stops at the first change. Either stop marks the cut `graph-changed`, records a diagnostic, and
+halts local trim until `st replication checkpoint resume --reason TEXT` is run, by a person or, on
+such a member, by an agent (`--as agent/...`); the stopped cut is set aside and the next day's cut
+goes on. Deleted identities go into the retired ledger, so they travel and are never re-admitted.
+The capture is admitted by the same disk guard as a shared one, which skips and logs a cut the
+disk cannot hold.
 
 On such a member the retired ledger (`retired_claim_ids`, `retired_envelopes`) is the authority for
 what it deleted, once its import of older checkpoint rows has finished. Becoming the authority judges

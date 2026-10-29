@@ -1111,12 +1111,12 @@ impl StagedSet {
         let transaction = self.staging.unchecked_transaction()?;
         transaction.execute(
             &format!(
-                "UPDATE claims SET protected=1 WHERE protected=0 AND kind NOT IN ({})",
+                /* sqlite-large-value: allow-for-now lv-h178cf16dd35e owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET protected=1 WHERE protected=0 AND kind NOT IN ({})",
                 vec!["?"; kinds.len()].join(", ")
             ),
             rusqlite::params_from_iter(kinds),
         )?;
-        transaction.execute("UPDATE meta SET plan=NULL WHERE id=1", [])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-he7052689cff7 owner=smallclaims::store::checkpoint_staging TODO=bound-or-reference-values-and-reclamation */ "UPDATE meta SET plan=NULL WHERE id=1", [])?;
         transaction.commit()?;
         Ok(())
     }
@@ -1124,7 +1124,7 @@ impl StagedSet {
     /// Mark the newest claim of the set dropped, as a planner defect would. `TrimFault` only.
     pub(super) fn drop_newest_for_test(&self) -> Result<()> {
         self.staging.execute(
-            "UPDATE claims SET dropped=1 WHERE pos=(SELECT MAX(pos) FROM claims WHERE first=1)",
+            /* sqlite-large-value: allow-for-now lv-hf150403979fb owner=smallclaims::store::checkpoint_staging TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET dropped=1 WHERE pos=(SELECT MAX(pos) FROM claims WHERE first=1)",
             [],
         )?;
         Ok(())
