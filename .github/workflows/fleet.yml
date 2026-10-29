@@ -573,7 +573,7 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+        run: "gate_base=\"$BASE_SHA\"; if [ \"$EVENT_NAME\" = pull_request ]; then set -- $(git cat-file -p HEAD | sed -n 's/^parent //p'); if [ \"$#\" = 2 ] && [ \"$2\" = \"$PR_HEAD_SHA\" ]; then gate_base=$1; fi; fi; export EVENT_BASE_SHA=\"$BASE_SHA\" BASE_SHA=\"$gate_base\"; git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -642,7 +642,7 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+        run: "gate_base=\"$BASE_SHA\"; if [ \"$EVENT_NAME\" = pull_request ]; then set -- $(git cat-file -p HEAD | sed -n 's/^parent //p'); if [ \"$#\" = 2 ] && [ \"$2\" = \"$PR_HEAD_SHA\" ]; then gate_base=$1; fi; fi; export EVENT_BASE_SHA=\"$BASE_SHA\" BASE_SHA=\"$gate_base\"; git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -711,7 +711,7 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+        run: "gate_base=\"$BASE_SHA\"; if [ \"$EVENT_NAME\" = pull_request ]; then set -- $(git cat-file -p HEAD | sed -n 's/^parent //p'); if [ \"$#\" = 2 ] && [ \"$2\" = \"$PR_HEAD_SHA\" ]; then gate_base=$1; fi; fi; export EVENT_BASE_SHA=\"$BASE_SHA\" BASE_SHA=\"$gate_base\"; git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -780,7 +780,7 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+        run: "gate_base=\"$BASE_SHA\"; if [ \"$EVENT_NAME\" = pull_request ]; then set -- $(git cat-file -p HEAD | sed -n 's/^parent //p'); if [ \"$#\" = 2 ] && [ \"$2\" = \"$PR_HEAD_SHA\" ]; then gate_base=$1; fi; fi; export EVENT_BASE_SHA=\"$BASE_SHA\" BASE_SHA=\"$gate_base\"; git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -851,7 +851,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
           RUN_INPUTS: '{"kit_inputs":"${{ needs.fractal-web-changes.outputs.kit-inputs }}"}'
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+        run: "gate_base=\"$BASE_SHA\"; if [ \"$EVENT_NAME\" = pull_request ]; then set -- $(git cat-file -p HEAD | sed -n 's/^parent //p'); if [ \"$#\" = 2 ] && [ \"$2\" = \"$PR_HEAD_SHA\" ]; then gate_base=$1; fi; fi; export EVENT_BASE_SHA=\"$BASE_SHA\" BASE_SHA=\"$gate_base\"; git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note
@@ -920,7 +920,7 @@ jobs:
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: "git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
+        run: "gate_base=\"$BASE_SHA\"; if [ \"$EVENT_NAME\" = pull_request ]; then set -- $(git cat-file -p HEAD | sed -n 's/^parent //p'); if [ \"$#\" = 2 ] && [ \"$2\" = \"$PR_HEAD_SHA\" ]; then gate_base=$1; fi; fi; export EVENT_BASE_SHA=\"$BASE_SHA\" BASE_SHA=\"$gate_base\"; git fetch --no-tags --depth=1 -q origin \"$BASE_SHA\" && git show \"$BASE_SHA:scripts/ci-evidence-gate\" > \"$RUNNER_TEMP/ci-evidence-gate\" && python3 \"$RUNNER_TEMP/ci-evidence-gate\" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> \"$GITHUB_OUTPUT\"; echo \"evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID\"; }"
       - name: evidence satisfied by existing note
         if: steps.gate.outputs.outcome == 'satisfied'
         run: echo evidence satisfied by existing note

@@ -315,7 +315,11 @@ const evidenceGateJobs = Object.fromEntries(evidenceGateChecks.map((check) => [`
       },
       // The gate is taken from the accepted base, like the verifier, so a change cannot rewrite the
       // script that decides whether it is skipped. No gate at the base, or any failure: run the check.
-      run: `git fetch --no-tags --depth=1 -q origin "$BASE_SHA" && git show "$BASE_SHA:scripts/ci-evidence-gate" > "$RUNNER_TEMP/ci-evidence-gate" && python3 "$RUNNER_TEMP/ci-evidence-gate" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> "$GITHUB_OUTPUT"; echo "evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }`,
+      // For a pull_request run that base is the first parent of the checked-out merge (refs/pull/N/merge): the base tip GitHub
+      // merged the head into, which the gate judges. The payload's base.sha is not: a reopen or ready_for_review keeps the one from
+      // the last open or push, and on 2026-10-28 a reopen ran a gate from before .st/evidence-signed-only.json existed (#4144). The
+      // payload's base goes to the gate as EVENT_BASE_SHA, which refuses a signed-only opener's run when it is not in that history.
+      run: `gate_base="$BASE_SHA"; if [ "$EVENT_NAME" = pull_request ]; then set -- $(git cat-file -p HEAD | sed -n 's/^parent //p'); if [ "$#" = 2 ] && [ "$2" = "$PR_HEAD_SHA" ]; then gate_base=$1; fi; fi; export EVENT_BASE_SHA="$BASE_SHA" BASE_SHA="$gate_base"; git fetch --no-tags --depth=1 -q origin "$BASE_SHA" && git show "$BASE_SHA:scripts/ci-evidence-gate" > "$RUNNER_TEMP/ci-evidence-gate" && python3 "$RUNNER_TEMP/ci-evidence-gate" || { printf 'outcome=unavailable\\nskip=false\\nrecord=-\\n' >> "$GITHUB_OUTPUT"; echo "evidence-decision v1 check=$CHECK decision=run outcome=unavailable reason=no-gate-at-base run=$RUN_ID"; }`,
     },
     ...evidenceGateOutcomes.map(([outcome, name]) => ({
       name,
