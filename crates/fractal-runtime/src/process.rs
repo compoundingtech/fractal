@@ -294,9 +294,10 @@ impl ExecRuntime {
         id: &str,
         mut generation: ExecGeneration,
     ) -> Result<ExecObservation> {
-        // The leader can become a zombie after observe's first try_wait. Reap any
-        // child we still own before making its exit durable, including when its
-        // descendants keep the group running.
+        // The leader can exit after observe's first status probe. Reap a waitable
+        // child before persisting group completion, including while descendants live.
+        // A zombie leader thread can still have live sibling threads: never block
+        // waiting for the whole process to exit while holding the child-map mutex.
         if generation.exit_code.is_none() && generation.exit_signal.is_none() {
             let owned_exit = {
                 let mut children = self
@@ -305,17 +306,21 @@ impl ExecRuntime {
                     .expect("exec child mutex poisoned");
                 let status = children
                     .get_mut(&generation.pid)
-                    .map(Child::wait)
+                    .map(Child::try_wait)
                     .transpose()?;
-                if status.is_some() {
+                if matches!(status, Some(Some(_))) {
                     children.remove(&generation.pid);
                 }
                 status
             };
-            if let Some(status) = owned_exit {
-                generation.exit_code = status.code();
-                generation.exit_signal = exit_signal(&status);
-                self.write_generation(id, &generation)?;
+            match owned_exit {
+                Some(Some(status)) => {
+                    generation.exit_code = status.code();
+                    generation.exit_signal = exit_signal(&status);
+                    self.write_generation(id, &generation)?;
+                }
+                Some(None) => return Ok(ExecObservation::Running(generation)),
+                None => {}
             }
         }
         match observe_exited_group(generation)? {
@@ -576,8 +581,20 @@ fn process_group_is_live(group: u32) -> Result<bool> {
             let mut fields = tail.split_whitespace();
             let state = fields.next();
             let process_group = fields.nth(1).and_then(|field| field.parse::<u32>().ok());
-            if process_group == Some(group) && state != Some("Z") {
-                return Ok(true);
+            if process_group == Some(group) {
+                if state != Some("Z") {
+                    return Ok(true);
+                }
+                // A zombie main thread may leave live worker threads behind. Field 20
+                // counts those threads even though /proc lists only group leaders.
+                let thread_count = tail
+                    .split_whitespace()
+                    .nth(17)
+                    .context("process stat lacks a thread count")?
+                    .parse::<u32>()?;
+                if thread_count > 1 {
+                    return Ok(true);
+                }
             }
         }
         Ok(false)
@@ -1110,6 +1127,170 @@ mod tests {
             reopened.observe("work").unwrap(),
             Some(ExecObservation::Exited(ended))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_owned_exec_with_a_zombie_leader_thread_is_running() {
+        assert_zombie_leader_thread_is_running(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_adopted_exec_with_a_zombie_leader_thread_is_running() {
+        assert_zombie_leader_thread_is_running(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_zombie_leader_thread_is_running(adopted: bool) {
+        use std::io::BufRead as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let ready_path = root.path().join("ready");
+        let release_path = root.path().join("release");
+        for path in [&ready_path, &release_path] {
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        let ready = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&ready_path)
+            .unwrap();
+        // pthread_exit terminates only the main thread. The worker reports readiness
+        // after the kernel exposes that thread as Z, then lives until explicitly released.
+        let fixture = r#"
+import ctypes, os, sys, threading
+pid = os.getpid()
+def worker():
+    while open(f'/proc/{pid}/stat').read().rsplit(') ', 1)[1].split()[0] != 'Z':
+        os.sched_yield()
+    with open(sys.argv[1], 'w') as ready:
+        ready.write('ready\n')
+    with open(sys.argv[2]) as release:
+        release.readline()
+    os._exit(7)
+threading.Thread(target=worker).start()
+libc = ctypes.CDLL(None)
+libc.pthread_exit.argtypes = [ctypes.c_void_p]
+libc.pthread_exit.restype = None
+libc.pthread_exit(None)
+"#;
+        let generation = runtime
+            .spawn(
+                "work",
+                &crate::Launch::Argv(vec![
+                    "python3".into(),
+                    "-c".into(),
+                    fixture.into(),
+                    ready_path.to_str().unwrap().into(),
+                    release_path.to_str().unwrap().into(),
+                ]),
+                root.path(),
+                &std::env::vars().collect(),
+            )
+            .unwrap();
+        // A pidfd confines cleanup to this process even after its PID is reaped/reused.
+        // It must also bypass observe, which blocks in the broken implementation.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, generation.pid, 0) };
+        assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+        struct Cleanup(ExecRuntime, u32, OwnedFd);
+        impl Cleanup {
+            fn kill(&self) -> std::io::Result<()> {
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        self.2.as_raw_fd(),
+                        libc::SIGKILL,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0,
+                    )
+                };
+                if result == 0 {
+                    return Ok(());
+                }
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::ESRCH) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = self.kill();
+                if let Some(mut child) = self.0.owned_children.lock().unwrap().remove(&self.1) {
+                    let _ = child.wait();
+                }
+            }
+        }
+        let cleanup = Cleanup(runtime.clone(), generation.pid, unsafe {
+            OwnedFd::from_raw_fd(fd as i32)
+        });
+        let mut event = libc::pollfd {
+            fd: ready.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut event, 1, 10_000) },
+            1,
+            "worker never became ready"
+        );
+        let mut line = String::new();
+        std::io::BufReader::new(ready).read_line(&mut line).unwrap();
+        assert_eq!(line, "ready\n");
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+        assert!(
+            runtime
+                .owned_children
+                .lock()
+                .unwrap()
+                .get_mut(&generation.pid)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none(),
+            "the process must not yet be waitable"
+        );
+        let observing = if adopted {
+            ExecRuntime::new(root.path().join("exec"), root.path().join("logs"))
+        } else {
+            runtime.clone()
+        };
+        let (send, receive) = std::sync::mpsc::channel();
+        let observer = thread::spawn(move || {
+            send.send(observing.observe("work")).unwrap();
+        });
+        let result = receive.recv_timeout(Duration::from_secs(10));
+        if result.is_err() {
+            cleanup.kill().unwrap();
+            observer.join().unwrap();
+            panic!("observe blocked on a zombie leader thread with a live worker");
+        }
+        observer.join().unwrap();
+        assert_eq!(
+            result.unwrap().unwrap(),
+            Some(ExecObservation::Running(generation.clone()))
+        );
+        assert_eq!(
+            runtime.observe("work").unwrap(),
+            Some(ExecObservation::Running(generation))
+        );
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(release_path)
+            .unwrap();
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        let ended = wait_for_exit(&runtime, "work");
+        assert_eq!(ended.exit_code, Some(7));
+        assert!(ended.group_exited);
     }
 
     #[test]
