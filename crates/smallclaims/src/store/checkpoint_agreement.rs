@@ -426,6 +426,24 @@ pub enum CheckpointAction {
     SweptTrimmedClaimRows {
         rows: usize,
     },
+    /// This node holds envelopes from before the cut that it has not validated, so it neither
+    /// seals nor proves the checkpoint until they are. Every pass that holds back says so, with
+    /// the oldest such envelope, so a node whose envelopes never validate does not stall every
+    /// checkpoint silently.
+    HeldBack {
+        checkpoint: String,
+        pending: u64,
+        oldest_writer: String,
+        oldest_sequence: u64,
+    },
+}
+
+/// Envelopes from before a cut that this node holds but has not validated.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldEnvelopes {
+    pub pending: u64,
+    pub oldest_writer: String,
+    pub oldest_sequence: u64,
 }
 
 /// `st replication checkpoint status`: the newest stable checkpoint and the one being agreed.
@@ -920,6 +938,20 @@ impl Store {
         participants.insert(self.origin.clone());
         let verified = first_verifications(&claims, &checkpoint);
         let seals = newest_seals(&claims, &checkpoint);
+        // An envelope this node holds but has not validated is in its sealed identities without
+        // its claims, so its proof could not agree with a node that admitted them: sealing or
+        // proving now would only spend a proof on a checkpoint that cannot become stable.
+        if !verified.contains_key(&self.origin)
+            && let Some(held) = self.unvalidated_envelopes_before(cut)?
+        {
+            actions.push(CheckpointAction::HeldBack {
+                checkpoint,
+                pending: held.pending,
+                oldest_writer: held.oldest_writer,
+                oldest_sequence: held.oldest_sequence,
+            });
+            return Ok(actions);
+        }
         if !verified.contains_key(&self.origin) {
             // Register the cut and seal row with the capture guard, as a capture does, so its
             // triggers fence the history the seal reads and the next pass reuses the digest
@@ -965,6 +997,33 @@ impl Store {
             }
         }
         Ok(actions)
+    }
+
+    /// The envelopes dated before `cut` that this node holds but has not validated, pending or
+    /// degraded, whose claims are therefore not admitted here: how many, and the oldest. None
+    /// when there are none.
+    pub fn unvalidated_envelopes_before(&self, cut: u128) -> Result<Option<HeldEnvelopes>> {
+        let cut = i64::try_from(cut)?;
+        // One statement, so it needs no snapshot of its own: a waiting seal pass runs it every
+        // few minutes, and the identity-reuse test bounds what such a pass costs.
+        Ok(self
+            .readers
+            .get()
+            .query_row(
+                "SELECT COUNT(*) OVER (), writer, sequence FROM replica_envelopes
+                 WHERE receipt_state IN ('pending','degraded')
+                   AND CAST(accepted_at_unix_ms AS INTEGER) < ?1
+                 ORDER BY CAST(accepted_at_unix_ms AS INTEGER), writer, sequence LIMIT 1",
+                [cut],
+                |row| {
+                    Ok(HeldEnvelopes {
+                        pending: row.get(0)?,
+                        oldest_writer: row.get(1)?,
+                        oldest_sequence: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     pub fn verify_checkpoint(
