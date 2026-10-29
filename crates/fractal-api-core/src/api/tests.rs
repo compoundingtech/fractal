@@ -9071,6 +9071,11 @@ async fn roster_resilience_unpublished_mode_keeps_the_bounded_wait_and_503() {
             assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(error.code, "agent-roster-not-ready");
             assert_eq!(started.elapsed(), AGENT_ROSTER_READ_WAIT);
+            // A client sees this code and a retry, not `internal`.
+            let envelope = client_error_envelope(error.status,
+                &json!({"code": error.code, "message": error.message}), "request/test");
+            assert_eq!((envelope["code"].as_str(), envelope["retryable"].as_bool()),
+                (Some("agent-roster-not-ready"), Some(true)));
         }
     }
 }
@@ -12758,6 +12763,28 @@ mission "overview-renamed" state="ready" {
             serde_json::to_value(&expected.mission_provenance).unwrap(),
         );
     }
+}
+
+#[tokio::test]
+async fn native_recipient_preflight_refuses_unknown_without_writing_and_accepts_runtime_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let before = state.store.index().unwrap();
+    let (status, error) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "unknown-recipient");
+    assert_eq!(error["details"]["recipient"], "agent/ada/tester");
+    assert_eq!(state.store.index().unwrap(), before);
+    roster_fixture_append(&state.store, "agent/ada/tester", "runtime.observed", json!({
+        "status": "stopped", "runtime_id": "tester", "incarnation_id": "fixture",
+    }));
+    let (status, recipient) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::OK, "{recipient}");
+    assert_eq!(recipient["recipient_identity"], "agent/ada/tester");
+    let (status, error) = get_request(app, "/v1/messages/recipient?to=person%2Fada").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "person-has-no-inbox");
 }
 
 #[test]
