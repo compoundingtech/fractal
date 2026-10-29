@@ -11,3 +11,13 @@ record b013774f4e064435f87d3c8e91dc97e98c13ed65 rust-tests 0 host/forge 2026-10-
 record ccce9a24fc91486ca8dd840cb4e7d78ae7b098c1 rust-tests 0 host/forge 2026-10-29T02:20:01Z
 record d5bcd158d94d2095a18fdd9255b23544c1bf3de4 rust-tests 0 host/forge 2026-10-29T02:20:01Z
 record f0eb479d04c9f86ed876908de5353e524d2452b7 rust-tests 0 host/forge 2026-10-29T02:19:56Z
+record 0b2dfafccf032998e7de35a8efaa8eb908edac66 linux-tests-shard-4 0 fleet/ci 2026-10-29T02:35:18Z
+record 0e370cbcdee187835e912893cdaa40d1e5e92e50 linux-tests-shard-2 0 fleet/ci 2026-10-29T02:34:53Z
+record 3892ac69dc50c613bfe5c1c24952bb1a9dced94a linux-clippy 0 fleet/ci 2026-10-29T02:28:10Z
+record 4abe819e693bec11d01fb4b5060b74e6b5a59b20 linux-fleet-compat 0 fleet/ci 2026-10-29T02:27:47Z
+record 874842ffe8cd9ac98b5ecd369cc780530eda5a0b typescript-client 0 fleet/ci 2026-10-29T02:32:17Z
+record 9ae239971938c293fe74705422d1a711210cf229 genie-freshness 0 fleet/ci 2026-10-29T02:28:46Z
+record 9bc63f9be567e1d3e1287aa754732935d635b9fc linux-tests-shard-3 0 fleet/ci 2026-10-29T02:35:11Z
+record b24f428ac734c9cde703500bfa14adca2c8d1c21 linux-gate 0 fleet/ci 2026-10-29T02:36:32Z
+record b9537b9abc1ca0bfe82c06f3c661c2380984a9ea linux-tests 0 fleet/ci 2026-10-29T02:34:38Z
+record c67cf78a07c1f53936341327428889b4300a027a ci-script-tests 0 fleet/ci 2026-10-29T02:32:26Z
