@@ -1189,7 +1189,7 @@ mod tests {
     /// A call auto mode denied is allowed once or for its kind, or dismissed, with one tap each.
     #[test]
     fn a_denied_call_is_allowed_once_or_for_its_kind_or_dismissed() {
-        let mut ui = with_alerts(vec![prompt(
+        let ui = with_alerts(vec![prompt(
             "attention/one",
             &["approve-once", "approve-kind", "dismiss"],
         )]);
