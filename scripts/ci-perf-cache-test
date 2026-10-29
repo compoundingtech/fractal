@@ -118,9 +118,9 @@ with tempfile.TemporaryDirectory() as tmp:
     git_command('-c', 'user.name=Example Builder', '-c', 'user.email=builder@example.invalid',
                 '-c', 'commit.gpgSign=false', 'commit', '-m', 'initial fixture')
     os.environ.update(GITHUB_WORKSPACE=str(work), RUNNER_TEMP=str(temp))
-    (temp / 'st-ci-cache').mkdir()
+    (temp / 'fractal-ci-cache').mkdir()
     module.remember_sources()
-    checkpoint = temp / 'st-ci-cache/perf-source-state.json'
+    checkpoint = temp / 'fractal-ci-cache/perf-source-state.json'
     checkpoint.write_bytes((temp / 'perf-source-state.json').read_bytes())
     before = source.stat().st_mtime_ns
     source.touch()
@@ -182,7 +182,7 @@ with tempfile.TemporaryDirectory() as tmp:
                       PERF_PR_NUMBER='1', PERF_HEAD_REPOSITORY='example/project',
                       GITHUB_HEAD_REF='example-branch', GITHUB_RUN_ATTEMPT='1', GITHUB_RUN_ID='10')
     # Exercise real archives: both workspace outputs and temp caches survive a round trip.
-    for name in ('cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'st-ci-cache', 'st-bench'):
+    for name in ('cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'fractal-ci-cache', 'st-bench'):
         directory = temp / name
         directory.mkdir(parents=True)
         (directory / 'sample').write_text(name)
@@ -194,7 +194,7 @@ with tempfile.TemporaryDirectory() as tmp:
     extracted = temp / 'extracted'
     extracted.mkdir()
     module.unpack(temp / 'perf-snapshots/build.tar.zst', extracted,
-                  ('target', 'cargo-home', 'perf-sccache', 'st-ci-cache'))
+                  ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache'))
     module.unpack(temp / 'perf-snapshots/stores.tar.zst', extracted, ('st-bench',))
     assert (extracted / 'target/sample').read_text() == 'build output'
     assert (extracted / 'target/sample').stat().st_mtime_ns == precise_mtime
@@ -261,7 +261,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert sorted(p.name for p in (temp / 'perf-baseline').iterdir()) == [f'load-{i}.json' for i in range(4, 9)]
     assert all(json.loads(p.read_text()) == report for p in (temp / 'perf-baseline').iterdir())
     assert (work / 'target/cached').read_text() == 'snapshot'
-    assert (temp / 'st-ci-cache/cached').exists() and (temp / 'st-bench/cached').exists()
+    assert (temp / 'fractal-ci-cache/cached').exists() and (temp / 'st-bench/cached').exists()
     # Explicit steady and legacy reports remain supported; upgrade-only or mislabeled
     # root reports must fail before they can supply any historical comparison.
     original_reports = report_files

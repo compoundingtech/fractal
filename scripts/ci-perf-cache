@@ -133,7 +133,7 @@ def remember_sources():
 
 def restore_sources(checkpoint=None):
     work = Path(os.environ['GITHUB_WORKSPACE'])
-    checkpoint = checkpoint or Path(os.environ['RUNNER_TEMP']) / 'st-ci-cache/perf-source-state.json'
+    checkpoint = checkpoint or Path(os.environ['RUNNER_TEMP']) / 'fractal-ci-cache/perf-source-state.json'
     if not checkpoint.exists():
         print('Performance source timestamps: no saved checkpoint', flush=True)
         return
@@ -182,7 +182,7 @@ def restore():
             directory = dest / kind
             download(repo, run, name, directory)
             downloaded = time.monotonic()
-            roots = ('target', 'cargo-home', 'perf-sccache', 'st-ci-cache') if kind == 'build' else ('st-bench',)
+            roots = ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache') if kind == 'build' else ('st-bench',)
             extracted = directory / 'extracted'
             extracted.mkdir()
             unpack(directory / f'{kind}.tar.zst', extracted, roots)
@@ -293,7 +293,7 @@ def pack():
     output = temp / 'perf-snapshots'
     output.mkdir(exist_ok=True)
     checkpoint = temp / 'perf-source-state.json'
-    saved = temp / 'st-ci-cache/perf-source-state.json'
+    saved = temp / 'fractal-ci-cache/perf-source-state.json'
     saved.unlink(missing_ok=True)
     if checkpoint.exists():
         state = json.loads(checkpoint.read_text())
@@ -302,7 +302,7 @@ def pack():
     # Registry source/config files contain no runner credentials; never archive all of CARGO_HOME.
     subprocess.run(['tar', '--format=pax', '-I', 'zstd -1 -T2', '-cf', str(output / 'build.tar.zst'),
                     '-C', str(work), 'target', '-C', str(temp),
-                    'cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'st-ci-cache'], check=True)
+                    'cargo-home/registry', 'cargo-home/git', 'perf-sccache', 'fractal-ci-cache'], check=True)
     subprocess.run(['tar', '--format=pax', '-I', 'zstd -1 -T2', '-cf', str(output / 'stores.tar.zst'),
                     '-C', str(temp), 'st-bench'], check=True)
 

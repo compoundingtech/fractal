@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "CI uses fractal-ci-cache consistently for its local Nix cache, build snapshot archives and performance cache checkpoints.",
+  "replay": {
+    "status": "none",
+    "detail": "No graph or event replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No product schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No runtime checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "CI snapshot producers and consumers use the renamed archive directory together, without a legacy path bridge. Nix signing identity and Actions cache key prefixes remain unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No product downtime; expect one cold CI cache cycle after the directory rename."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator step or signing key rotation."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the coordinated workflow, script and test change."
+  }
+}
