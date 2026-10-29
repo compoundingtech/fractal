@@ -15337,10 +15337,9 @@ subscription "watch/source" {
 
     #[test]
     fn every_schema_error_code_is_preserved_by_client_normalization() {
-        let schema: Value = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../docs/st3/client-v0/schemas/client-v0.schema.json",
-        ))).unwrap();
+        let schema: Value = serde_json::from_str(include_str!(
+            "../../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        )).unwrap();
         let codes = schema["$defs"]["ErrorCode"]["anyOf"][0]["enum"].as_array().unwrap();
         assert!(!codes.is_empty());
         // Every declared code is safe for clients; there are no intentional exclusions.
