@@ -78,6 +78,7 @@ import fnmatch
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -337,19 +338,30 @@ def gate_commit(base):
     return result
 
 
+CHECKS = ()  # the checks this run signs (main sets it): the gate decides per check whether main's protected changes are that check's
+
+
 def fallback_reason(head, base_commit):
-    """Why the CI gate would judge the merge of `head` with the base rather than the head's own tree (the base's `branch_point_verdict`
-    Fallback: the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or protected files moved on main since the branch point), or
-    None when it keeps the head tree: also when the base is in the head already (the merge is the head) or the base has no such rule."""
+    """Why the CI gate would judge the merge of `head` with the base rather than the head's own tree for some check this run signs (the
+    base's `branch_point_verdict` Fallback: the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or main moved protected files
+    since the branch point that are a check's CI inputs), or None when it keeps the head tree for all of them: also when the base is in
+    the head already (the merge is the head) or the base has no such rule. A base gate that predates per-check CI inputs is asked once,
+    without a check, as before."""
     if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode == 0:
         return None
     verdict = getattr(load_base_gate(base_commit), 'branch_point_verdict', None)
     if not verdict:
         return None
-    try:
-        verdict(text(git('merge-base', base_commit, head)), head, base_commit, base_commit)
-    except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
-        return str(reason) or type(reason).__name__
+    branch_point = text(git('merge-base', base_commit, head))
+    per_check = 'check' in inspect.signature(verdict).parameters
+    for check in (CHECKS if per_check and CHECKS else (None,)):
+        try:
+            if check is None:
+                verdict(branch_point, head, base_commit, base_commit)
+            else:
+                verdict(branch_point, head, base_commit, base_commit, None, check)
+        except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
+            return str(reason) or type(reason).__name__
     return None
 
 
@@ -473,12 +485,22 @@ def target_commit(base):
 def branch_point(commit, base):
     """Where the branch left the base (the base itself when the branch holds it): the commit whose lane definition the tree is
     held to. The CI gate judges a pull request head the same way (docs/st3/gate-evidence.md, "Which lane definition a pull request
-    is held to"): a branch that only lags main changed no lane file itself. When the lane file itself changed on main since then, the
-    base: the gate never uses such a head's tree (the lane file is one of the files that decide a skip).
+    is held to"): a branch that only lags main changed no lane file itself. When main changed the lane entry of a check this run signs
+    since then, the base: the verifier holds a head to its branch point only while that check's own entry is the base's.
     """
     point = text(git('merge-base', commit, base))
-    lanes = [git('rev-parse', '--verify', '-q', f'{at}:.st/required-lanes.json', check=False).stdout for at in (point, base)]
-    return point if lanes[0] == lanes[1] else base
+    texts = [git('show', f'{at}:.st/required-lanes.json', check=False) for at in (point, base)]
+    if any(done.returncode != 0 for done in texts):
+        return point if all(done.returncode != 0 for done in texts) else base
+
+    def entries(done):
+        try:
+            lanes = json.loads(done.stdout)['lanes']
+        except (ValueError, KeyError, TypeError):
+            return None
+        return {name: json.dumps(lanes.get(name), sort_keys=True) for name in (CHECKS or lanes)}
+    here, there = (entries(done) for done in texts)
+    return point if here is not None and here == there else base
 
 
 def size_gb(path):
@@ -1830,6 +1852,8 @@ def main(argv):
         if not args.out:
             args.push = args.push or 'origin'
     checks = args.check or [name for name in LOCAL if name not in OPT_IN]
+    global CHECKS
+    CHECKS = tuple(checks)
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
