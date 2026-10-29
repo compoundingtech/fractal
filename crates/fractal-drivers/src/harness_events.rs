@@ -451,6 +451,26 @@ pub fn write_snapshot(agent_dir: &Path, kind: &str, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Questions are events, not one replaceable snapshot: every call's close must survive restart.
+pub fn write_question(
+    agent_dir: &Path,
+    owner: &str,
+    observation: &crate::omp_questions::Observation,
+) -> Result<()> {
+    observation.validate()?;
+    let value = serde_json::json!({
+        "incarnation": owner, "driver": "omp", "event": observation,
+    });
+    let mut connection = open(agent_dir)?;
+    let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    anyhow::ensure!(current_token(&tx)?.as_deref() == Some(owner),
+        "question observation owner was superseded");
+    append_event(&tx, "harness-question", &value)?;
+    tx.commit()?;
+    signal_wake(agent_dir);
+    Ok(())
+}
+
 /// Graph-native channels have no provider record writer. Their spool is scoped to one
 /// authenticated runtime incarnation; daemon publication still applies the runtime fence.
 pub fn write_channel_todo(agent_dir: &Path, runtime: &str, fields: &Value) -> Result<()> {
