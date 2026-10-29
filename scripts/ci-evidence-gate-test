@@ -644,6 +644,7 @@ class EndToEnd(unittest.TestCase):
         (repo / '.st').mkdir(exist_ok=True)
         (repo / '.st/evidence-authors.json').write_text(authors_text if authors_text is not None else json.dumps(self.AUTHORS))
         for name, content in (base_files or {}).items():
+            (repo / name).parent.mkdir(parents=True, exist_ok=True)
             (repo / name).write_text(content)
         base = self.commit_base(policy=policy or skip_policy())
         self.f.git('config', 'uploadpack.allowAnySHA1InWant', 'true')
