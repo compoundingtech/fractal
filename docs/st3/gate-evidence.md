@@ -1235,9 +1235,14 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   key yet), and the first line with a log value after the last `-` (`log_window_start`) is at least 24 hours old;
 - at least 30 lines with `outcome=satisfied` and `log=ok`, except for a check with a lowered trigger (below);
 - no `log=missing`;
-- no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
-  created, or after it. For an aggregate, the time is `log_unlogged_observed_at`, the oldest of its unlogged members, when the line has
-  it, and its `observed_at` when it does not;
+- no unexplained `log=unlogged_pass`: one is explained when the published log (`refs/evidence-log/main`, fetched shallow into a
+  bare repository under the cache) lists the record in its newest head at most 240 s (two log pulls) after the run was created, or
+  when the record was observed after the run was created. An aggregate's records are the members `log_unlogged_crates` names.
+  The run's creation is the clock, not the record's `observed_at`. On 2026-10-28 CI pushed its records at the end of its runs, 5-7
+  minutes after it observed them (`ci-script-tests` at 08:33Z was 366 s past `observed_at`, but logged 54 s after its run). Two gates
+  read the head one pull before the record they chose was published (00:13Z). Without a readable published log, or for an aggregate
+  whose list ends in `+N_more`, the old clock applies: observed at most 240 s before the run was created. The time is then the
+  aggregate's `log_unlogged_observed_at` when the line has one, else its `observed_at`; `None`, like `-`, names no time;
 - no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
@@ -1262,7 +1267,7 @@ A check can also carry preconditions on its own policy entry at origin/main, wha
 its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`
 notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
 
-It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
+It prints JSON (`log_clock`: `published log`, or `observed_at (why)` when the published log could not be read; `checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
 and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read (it pages the pull request runs newest first back to the window start, without GitHub's `created=` filter, which answers an empty listing for about one request in four; a page that is empty or short of what the listing's total says it holds is asked again up to four times, then the run counts as unreadable, not as zero lines; so does a window of more than the listing's 1,000 runs). Enforced checks are reported too. `presign` counts, per account that started the runs, the distinct pull request heads in the window: `presigned` (some check had a host or agent note), `ci_note` (only an earlier CI run's note), `no_note`, and `presigned_share`.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
 temporary worktree of origin/main it sets `"enforce": true` and `"sample_one_in": 1` (no run sampled; it replaces any other value), adds `"events": ["pull_request"]` where absent,
