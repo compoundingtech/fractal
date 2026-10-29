@@ -125,6 +125,8 @@ const CLAUDE_TRUST_RECOVERY_ATTEMPTS: usize = 3;
 const CLAUDE_TRUST_RECOVERY_WINDOW_MS: u128 = 10 * 60_000;
 // A failed checkout fetch or worktree command waits this long before Git runs again.
 const CHECKOUT_RETRY_MS: u128 = 30_000;
+/// How long a member's launch evidence, read once, is trusted before it is read again.
+const LAUNCH_EVIDENCE_RECHECK_MS: u128 = 60_000;
 // Workspace errors hold one schedule, without retrying filesystem I/O on every pass.
 const SCHEDULE_WORKSPACE_RETRY_MS: u128 = 30_000;
 // A deadline source that could not be read is read again this soon, so the deadlines it holds
@@ -1891,7 +1893,6 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 false
                             }
                         };
-                        this.incremental.finish_pass(now_ms().saturating_sub(started));
                         Some((before != smallclaims::touched::writes(), failed, started))
                     }).await;
                     if let Some(outcome) = outcome { break outcome; }
@@ -6023,8 +6024,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 let epoch = self.store.publication_evidence_epoch(&subject.subject)?;
                 if let Some(known) = known
                     && known.epoch == epoch
-                    && now.saturating_sub(known.checked_at_ms)
-                        < crate::incremental::FULL_PASS_INTERVAL_MS
+                    && now.saturating_sub(known.checked_at_ms) < LAUNCH_EVIDENCE_RECHECK_MS
                 {
                     None
                 } else {
@@ -10126,6 +10126,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         wrote: &[String],
     ) {
         crate::performance::record_correction(item);
+        smallclaims::profile::note("reconcile incremental correction");
         eprintln!(
             "st3: incremental correction: {subject} wrote {wrote:?} with no change among {} reads",
             reads.len()

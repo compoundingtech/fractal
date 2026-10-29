@@ -69,14 +69,17 @@ as flaky_tests).
 import argparse
 import atexit
 import base64
+import calendar
 import codecs
 import concurrent.futures
 import contextlib
+import errno
 import fcntl
 import fnmatch
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
@@ -336,19 +339,30 @@ def gate_commit(base):
     return result
 
 
+CHECKS = ()  # the checks this run signs (main sets it): the gate decides per check whether main's protected changes are that check's
+
+
 def fallback_reason(head, base_commit):
-    """Why the CI gate would judge the merge of `head` with the base rather than the head's own tree (the base's `branch_point_verdict`
-    Fallback: the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or protected files moved on main since the branch point), or
-    None when it keeps the head tree: also when the base is in the head already (the merge is the head) or the base has no such rule."""
+    """Why the CI gate would judge the merge of `head` with the base rather than the head's own tree for some check this run signs (the
+    base's `branch_point_verdict` Fallback: the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or main moved protected files
+    since the branch point that are a check's CI inputs), or None when it keeps the head tree for all of them: also when the base is in
+    the head already (the merge is the head) or the base has no such rule. A base gate that predates per-check CI inputs is asked once,
+    without a check, as before."""
     if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode == 0:
         return None
     verdict = getattr(load_base_gate(base_commit), 'branch_point_verdict', None)
     if not verdict:
         return None
-    try:
-        verdict(text(git('merge-base', base_commit, head)), head, base_commit, base_commit)
-    except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
-        return str(reason) or type(reason).__name__
+    branch_point = text(git('merge-base', base_commit, head))
+    per_check = 'check' in inspect.signature(verdict).parameters
+    for check in (CHECKS if per_check and CHECKS else (None,)):
+        try:
+            if check is None:
+                verdict(branch_point, head, base_commit, base_commit)
+            else:
+                verdict(branch_point, head, base_commit, base_commit, None, check)
+        except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
+            return str(reason) or type(reason).__name__
     return None
 
 
@@ -472,12 +486,22 @@ def target_commit(base):
 def branch_point(commit, base):
     """Where the branch left the base (the base itself when the branch holds it): the commit whose lane definition the tree is
     held to. The CI gate judges a pull request head the same way (docs/st3/gate-evidence.md, "Which lane definition a pull request
-    is held to"): a branch that only lags main changed no lane file itself. When the lane file itself changed on main since then, the
-    base: the gate never uses such a head's tree (the lane file is one of the files that decide a skip).
+    is held to"): a branch that only lags main changed no lane file itself. When main changed the lane entry of a check this run signs
+    since then, the base: the verifier holds a head to its branch point only while that check's own entry is the base's.
     """
     point = text(git('merge-base', commit, base))
-    lanes = [git('rev-parse', '--verify', '-q', f'{at}:.st/required-lanes.json', check=False).stdout for at in (point, base)]
-    return point if lanes[0] == lanes[1] else base
+    texts = [git('show', f'{at}:.st/required-lanes.json', check=False) for at in (point, base)]
+    if any(done.returncode != 0 for done in texts):
+        return point if all(done.returncode != 0 for done in texts) else base
+
+    def entries(done):
+        try:
+            lanes = json.loads(done.stdout)['lanes']
+        except (ValueError, KeyError, TypeError):
+            return None
+        return {name: json.dumps(lanes.get(name), sort_keys=True) for name in (CHECKS or lanes)}
+    here, there = (entries(done) for done in texts)
+    return point if here is not None and here == there else base
 
 
 def size_gb(path):
@@ -654,6 +678,18 @@ def needs_tree(checks):
     return any(name in BUILDS for name in checks)
 
 
+def heavy_slots():
+    """The host's heavy build slots, by the cargo shim's own formula, so every box counts its trees as it counts its slots: CARGO_HEAVY_SLOTS,
+    else what ~/.config/cargo-heavy-slots holds (the host's guard rewrites it), else 1; anything that is not a number is 1."""
+    value = os.environ.get('CARGO_HEAVY_SLOTS', '')
+    if not value:
+        try:
+            value = (Path.home() / '.config/cargo-heavy-slots').read_text().strip()
+        except OSError:
+            value = '1'
+    return int(value) if value.isdigit() else 1
+
+
 def pool_size():
     """How many persistent trees the pool holds: ST_TEST_TREES, else the host's heavy slots plus one; None (off) for fresh worktrees."""
     value = POOL_SETTINGS.get('ST_TEST_TREES', '')
@@ -663,11 +699,71 @@ def pool_size():
         if not value.isdigit() or int(value) < 1:
             raise Failure(f'ST_TEST_TREES={value!r} must be a positive number or "off"')
         return int(value)
-    try:
-        slots = int((Path.home() / '.config/cargo-heavy-slots').read_text().split()[0])
-    except (OSError, ValueError, IndexError):
-        slots = 1
-    return max(slots, 1) + 1
+    return max(heavy_slots(), 1) + 1
+
+
+# Slot first (2026-10-28, Factory's P0 from the st-test SLO report: on one build host the slowest run waited 42,265 s for one of its trees,
+# while the linux-gate checks of the runs holding them waited 1,000-2,400 s at a time for a build slot). A tree held while its run waits for a
+# build slot is a tree nobody can use, and a tree cannot be given back while a check is at work in it, so the best ticket takes a free tree
+# only when a build started now would get a heavy slot at once. TREE_SLOT_WAIT_LIMIT bounds that wait, as the admission gate bounds its own
+# (MAX_WAIT_SECONDS): past it the tree is taken anyway, so a host whose slots never come free starves no run; it then waits in the tree, as before.
+TREE_SLOT_WAIT_LIMIT = 2700
+
+
+def heavy_tickets_waiting(queue):
+    """How many live heavy tickets wait in the cargo shim's queue directory `queue` (CLASS.RANK.NANOSECONDS.PID). Read only: the files
+    are the shim's, so a dead one is skipped, never removed."""
+    count = 0
+    with contextlib.suppress(OSError):
+        for name in os.listdir(queue):
+            parts = name.split('.')
+            if len(parts) != 4 or parts[0] != 'heavy' or not all(part.isdigit() for part in parts[1:]):
+                continue
+            nanos, pid = int(parts[2]), int(parts[3])
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                pass
+            started = process_started_ns(pid)
+            if started is not None and started > nanos + 2 * 10**9:  # the pid now names a younger process: that waiter is gone
+                continue
+            count += 1
+    return count
+
+
+def build_slot_ready():
+    """(ready, why): whether a heavy build started now would get one of the host's heavy slots at once. The cargo shim's slots are flocks on
+    $XDG_RUNTIME_DIR/cargo-slots/heavyN: a free one is taken and let go at once to see it, and the heavy tickets already waiting there are
+    served first, so this run is ready only while more slots are free than tickets wait, and while the build admission gate (`build-admission
+    check heavy`, as the shim asks it) would admit a heavy build now. A host without the shim's slots, or a gate that cannot be read, is ready."""
+    slots = Path(os.environ.get('XDG_RUNTIME_DIR') or '/tmp') / 'cargo-slots'
+    if not slots.is_dir():
+        return True, 'this host has no build slots'
+    total, free = heavy_slots(), 0
+    for j in range(total):
+        try:
+            with open(slots / f'heavy{j}', 'a') as probe:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)  # let go when the file is closed, before the shim's next look
+                free += 1
+        except BlockingIOError:
+            continue
+        except OSError:
+            return True, 'the build slots cannot be read'
+    waiting = heavy_tickets_waiting(slots / 'queue')
+    if free <= waiting:
+        return False, f'{total - free} of {total} heavy slots busy, {waiting} heavy build(s) waiting for one'
+    gate = os.environ.get('BUILD_ADMISSION_BIN') or str(Path.home() / '.local/bin/build-admission')
+    if os.environ.get('BUILD_ADMISSION') != 'off' and os.access(gate, os.X_OK):
+        try:
+            code = subprocess.run([gate, 'check', 'heavy', 'st-test:tree'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=30).returncode
+        except (OSError, subprocess.TimeoutExpired):
+            code = 2
+        if code == 1:
+            return False, 'the build admission gate would not admit a heavy build now (load or memory)'
+    return True, f'{free} of {total} heavy slots free'
 
 
 def normalise_origin(url):
@@ -840,23 +936,34 @@ def tree_queue(queue, now_ns):
     return sorted(found)
 
 
-def acquire_tree(root, size, rank=None):
+def acquire_tree(root, size, rank=None, slot_ready=None, waits=None):
     """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use.
     Waiters queue in the build host's order, not by a race to the next free tree (2026-10-26: the CPU P0 builder, rank 3, waited two hours while
     rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees. `size` is the
     pool size or a function giving it, read again on every pass: when the host's heavy slots grow while runs wait, the best ticket takes a new
-    tree at once instead of polling only the old ones (with every ticket behind it waiting too)."""
+    tree at once instead of polling only the old ones (with every ticket behind it waiting too).
+    With `slot_ready` (a function giving (ready, why): build_slot_ready, for a run that builds) a free tree is taken only when it says a build
+    could start now, or once TREE_SLOT_WAIT_LIMIT seconds of a free tree left for want of a slot have passed (slot first, above). `waits`, a
+    dict, is given the seconds spent: 'tree_wait_s' in all, and 'slot_wait_s' of them while a free tree waited for a build slot."""
     root.mkdir(parents=True, exist_ok=True)
     queue = root / 'queue'
     queue.mkdir(exist_ok=True)
     ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
     ticket.touch()
     waited, told = False, set()
+    began, slot_waited, slot_seen, slot_told = time.monotonic(), 0.0, None, False
+
+    def taken(n, lock):
+        if waits is not None:
+            waits.update(tree_wait_s=round(time.monotonic() - began), slot_wait_s=round(slot_waited))
+        return n, lock
+
     try:
         while True:
             order = tree_queue(queue, time.time_ns())
             ahead = next((i for i, (_, _, name) in enumerate(order) if name == ticket.name), 0)
             trees = size() if callable(size) else size
+            free_tree = False
             if ahead == 0:
                 for n in range(trees):
                     lock = open(root / f'tree-{n}.lock', 'w')
@@ -868,16 +975,37 @@ def acquire_tree(root, size, rank=None):
                     # A lease ends with the run that held it, not with every process it started (2026-10-28: a seat restart killed runs
                     # whose children went on). A free tree that still has processes at work in it is busy: never two writers in one tree.
                     users = tree_users(root / f'tree-{n}')
+                    if not users and slot_ready is None:
+                        return taken(n, lock)
                     if not users:
-                        return n, lock
+                        ready, why = slot_ready()
+                        now = time.monotonic()
+                        if slot_seen is not None:
+                            slot_waited += now - slot_seen
+                        if ready or slot_waited >= TREE_SLOT_WAIT_LIMIT:
+                            if not ready:
+                                print(f'fractal-test: taking tree-{n} after {round(slot_waited)}s without a free build slot ({why}; '
+                                      f'TREE_SLOT_WAIT_LIMIT): its build waits for one in the tree', file=sys.stderr, flush=True)
+                            elif slot_told:
+                                print(f'fractal-test: a build slot is free ({why}): taking tree-{n} after {round(slot_waited)}s', file=sys.stderr, flush=True)
+                            return taken(n, lock)
+                        lock.close()
+                        slot_seen, free_tree = now, True
+                        if not slot_told:
+                            slot_told = True
+                            print(f'fractal-test: tree-{n} is free, but a build started now would wait for a slot ({why}); waiting for one '
+                                  f'without holding a tree (at most {TREE_SLOT_WAIT_LIMIT}s)', file=sys.stderr, flush=True)
+                        break  # every free tree would wait for the same slot
                     lock.close()
                     if n not in told:
                         told.add(n)
                         print(f'fractal-test: pool tree tree-{n} is free, but processes {", ".join(map(str, users))} still work in it (left by '
                               'a run that lost the tree); it is skipped until they end', file=sys.stderr)
-            if not waited:
-                print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
-                waited = True
+            if not free_tree:
+                slot_seen = None  # only the time a free tree waited for a slot counts toward TREE_SLOT_WAIT_LIMIT
+                if not waited:
+                    print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
+                    waited = True
             time.sleep(POOL_WAIT_SECONDS)
     finally:
         with contextlib.suppress(OSError):
@@ -1523,14 +1651,14 @@ CI_LOCAL_STARTED = b'ci-local: stage logs in '
 SILENCE_LIMIT = 1800  # seconds without any output, before a ci-local check has started, after which it is stopped (a waiting build-admission prints every 60 s)
 
 
-def queued_seconds(path, now=None):
-    """Seconds of the build-slot waits scripts/ci-local wrote to `path` (CI_LOCAL_QUEUE_LOG: `wait|slot EPOCH STAGE` lines) as the union of
-    their spans, so two stages waiting at the same time count once; a wait not yet ended runs to `now`. A missing or unreadable file is 0."""
+def queue_spans(path, now=None):
+    """[(stage, start, end)]: the build-slot waits scripts/ci-local wrote to `path` (CI_LOCAL_QUEUE_LOG: `wait|slot EPOCH STAGE` lines); a
+    wait not yet ended runs to `now`. A missing or unreadable file has none."""
     now = time.time() if now is None else now
     try:
         lines = Path(path).read_text(errors='replace').splitlines()
     except OSError:
-        return 0.0
+        return []
     waiting, spans = {}, []
     for line in lines:
         parts = line.split(' ', 2)
@@ -1544,14 +1672,56 @@ def queued_seconds(path, now=None):
         if kind == 'wait':
             waiting.setdefault(stage, at)
         elif kind == 'slot' and stage in waiting:
-            spans.append((waiting.pop(stage), at))
-    spans += [(start, now) for start in waiting.values()]
-    total, reach = 0.0, float('-inf')
-    for start, end in sorted(spans):  # by start: each span adds only the part past the furthest end so far
-        start = max(start, reach)
-        if end > start:
-            total += end - start
-            reach = end
+            spans.append((stage, waiting.pop(stage), at))
+    return spans + [(stage, start, now) for stage, start in waiting.items()]
+
+
+def merged_spans(spans):
+    """`spans` ((start, end) pairs) as the sorted, disjoint spans of their union."""
+    out = []
+    for start, end in sorted(spans):
+        if end <= start:
+            continue
+        if out and start <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], end)
+        else:
+            out.append([start, end])
+    return out
+
+
+def queued_seconds(path, now=None):
+    """Seconds of the build-slot waits scripts/ci-local wrote to `path` (queue_spans) as the union of their spans, so two stages waiting at
+    the same time count once; a wait not yet ended runs to `now`. A missing or unreadable file is 0."""
+    return sum(end - start for start, end in merged_spans((start, end) for _, start, end in queue_spans(path, now)))
+
+
+def blocked_seconds(path, stages, now=None):
+    """Seconds in which scripts/ci-local held its tree and built nothing: some stage waited for a build slot (the queue log `path`) while no
+    stage was running outside its own waits (the stage spans of its closing table, `stages`, as ci_local_stages reads them). Two stages run at
+    once, so one stage's wait while another builds is not counted. A stage whose times cannot be read counts as not running."""
+    waits = queue_spans(path, now)
+    running = []
+    for stage in stages:
+        try:
+            start, end = (calendar.timegm(time.strptime(stage[key], '%Y-%m-%dT%H:%M:%SZ')) for key in ('start', 'end'))
+        except (KeyError, TypeError, ValueError):
+            continue
+        cursor = start
+        for wait_start, wait_end in merged_spans((a, b) for name, a, b in waits if name == stage['name']):
+            if wait_start > cursor:
+                running.append((cursor, min(wait_start, end)))
+            cursor = max(cursor, wait_end)
+        running.append((cursor, end))
+    waited, ran = merged_spans((a, b) for _, a, b in waits), merged_spans(running)
+    total, i = 0.0, 0
+    for start, end in waited:  # each wait, less the parts in which a stage was running
+        total += end - start
+        while i < len(ran) and ran[i][1] <= start:
+            i += 1
+        j = i
+        while j < len(ran) and ran[j][0] < end:
+            total -= min(end, ran[j][1]) - max(start, ran[j][0])
+            j += 1
     return total
 
 
@@ -1653,38 +1823,80 @@ def ci_local_stages(path):
     return stages
 
 
+def pre_start_fifo(path):
+    """`path` made a FIFO (anything there before removed) for the input pre_start_s, so that what evidence-wrap reads from it is ordered after
+    every line of the check's output: see answer_pre_start."""
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+    os.mkfifo(path, 0o600)
+    return path
+
+
+def answer_pre_start(fifo, pipe, take, limit):
+    """Write the input pre_start_s to `fifo` once evidence-wrap opens it to read: True then, False while no one has it open to read.
+
+    evidence-wrap reads its --input-file inputs only after the check ended, and only after it copied all the check's output to `pipe`
+    (flushed). So when its open of the FIFO has begun, every line ci-local printed is already in `pipe`: drain it (`take` each chunk, which
+    is how the Limit hears ci-local start), then write the seconds the check waited before ci-local started, or nothing when it never did
+    (the input is then 'none'). A plain file, written when this process happened to read the start line, raced the wrapper's read and lost on
+    a loaded host: the note said 'none' for a check that had started (2026-10-28, merge-queue ejections). The open is non-blocking, so with
+    no reader yet it fails at once (ENXIO) and the caller tries again on its next pass; the write is blocking, so the wrapper reads it whole."""
+    try:
+        handle = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as error:
+        if error.errno in (errno.ENXIO, errno.ENOENT):
+            return False
+        raise
+    try:
+        while select.select([pipe], [], [], 0)[0]:
+            chunk = os.read(pipe, 65536)
+            if not chunk:
+                break
+            take(chunk)
+        os.set_blocking(handle, True)
+        if limit.begins_at is None:
+            os.write(handle, f'{round(limit.pre_start)}\n'.encode())
+    finally:
+        os.close(handle)
+    return True
+
+
 def streamed(argv, log, timeout, pre_start=None, **options):
     """`argv`'s exit code (124 once `timeout`, seconds or a Limit, has run out), with its output (stdout and stderr, as one) copied as it comes both to this terminal, unchanged,
     and to the file `log`, so the summary can read what it printed. subprocess.run's own semantics otherwise: past the timeout the process
     itself is killed (not its group: what it started is left as before) and waited for, and any error here (TERM's exit included) kills it
     too. Once it exited, what it left behind holding the pipe gets STREAM_GRACE seconds, then the pipe is closed. When the Limit waits for the
-    check to start (begins_at), the seconds it waited are written to the file `pre_start` once it has."""
+    check to start (begins_at), `pre_start` is a FIFO evidence-wrap reads after the check ended (pre_start_fifo): the seconds it waited are
+    written to it then (answer_pre_start), or nothing when it never started."""
     sys.stdout.flush()
     raw = getattr(sys.stdout, 'buffer', None)
     decode = codecs.getincrementaldecoder('utf-8')(errors='replace').decode
     limit = timeout if isinstance(timeout, Limit) else Limit(timeout)
+
+    def take(chunk):
+        kept.write(chunk)
+        limit.output(chunk)
+        if raw:
+            raw.write(chunk)
+            raw.flush()
+        else:
+            sys.stdout.write(decode(chunk))
+            sys.stdout.flush()
+
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options) as process, open(log, 'wb') as kept:
         try:
-            pipe, ended = process.stdout.fileno(), None
+            pipe, ended, answered = process.stdout.fileno(), None, pre_start is None
             while limit.remaining() > 0 and (ended is None or time.monotonic() - ended < STREAM_GRACE):
                 if ended is None and process.poll() is not None:
                     ended = time.monotonic()
+                if not answered:
+                    answered = answer_pre_start(pre_start, pipe, take, limit)
                 if not select.select([pipe], [], [], 0.2)[0]:
                     continue
                 chunk = os.read(pipe, 65536)
                 if not chunk:
                     break
-                kept.write(chunk)
-                waiting = limit.begins_at is not None
-                limit.output(chunk)
-                if waiting and limit.begins_at is None and pre_start:
-                    Path(pre_start).write_text(f'{round(limit.pre_start)}\n')
-                if raw:
-                    raw.write(chunk)
-                    raw.flush()
-                else:
-                    sys.stdout.write(decode(chunk))
-                    sys.stdout.flush()
+                take(chunk)
             return wait_limited(process, limit)
         except BaseException:
             process.kill()
@@ -1787,6 +1999,8 @@ def main(argv):
         if not args.out:
             args.push = args.push or 'origin'
     checks = args.check or [name for name in LOCAL if name not in OPT_IN]
+    global CHECKS
+    CHECKS = tuple(checks)
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
@@ -1850,13 +2064,16 @@ def main(argv):
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
         directory = Path(scratch) / 'tree'
         pool_trees, tree_lock, tree_target, n, merged = pool_size(), None, None, None, None
+        tree_waits, tree_taken, blocked = {}, None, {}  # the tree's waits, when it was taken, and what the build lane waited holding it
         if not needs_tree(checks):
             pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
         try:
             if pool_trees:
                 root = pool_root()
                 target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
-                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees)  # the slots can change while the run waits
+                # The slots can change while the run waits; a free tree is taken only when the run's build could start (slot first).
+                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees, slot_ready=build_slot_ready, waits=tree_waits)
+                tree_taken = time.monotonic()
                 # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
                 # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
                 # main that had already moved a protected file, and the push was refused).
@@ -1978,10 +2195,11 @@ def main(argv):
                 streams = output is None and CI_LOCAL in LOCAL[name]
                 limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
                 environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
-                pre_start = Path(scratch) / f'pre-start-{name}.txt'
+                pre_start = None
                 if streams and takes_input_files(tools['evidence-wrap']):
-                    # The seconds it waited before ci-local started, recorded in the note: written once it has started (read after it ends).
-                    pre_start.write_text('')
+                    # The seconds it waited before ci-local started, recorded in the note: a FIFO the wrapper reads after the check ended,
+                    # answered once it does (answer_pre_start).
+                    pre_start = pre_start_fifo(Path(scratch) / f'pre-start-{name}.txt')
                     wrap += ['--input-file', f'pre_start_s={pre_start}']
                 command = wrap + ['--'] + LOCAL[name]
                 print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
@@ -1992,6 +2210,7 @@ def main(argv):
                     log = Path(scratch) / f'{name}-output.log'
                     code = streamed(command, log, limit, cwd=directory, env=environment, pre_start=pre_start)
                     stages[:] = ci_local_stages(log)
+                    blocked[name] = (round(limit.waiting()), round(blocked_seconds(limit.queue_log, stages)))
                 else:
                     code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,
                                        stderr=subprocess.STDOUT if output else None)
@@ -2052,12 +2271,23 @@ def main(argv):
                 if line:
                     print(f'  {line}')
             code = 1 if failed else (4 if unsigned else 0)
+            held = {}
+            if tree_taken is not None:
+                # What the run's tree did for it: how long the run waited for it and held it, and how much of that the build lane spent
+                # blocked in it (before ci-local started: build admission and the dev shell; then every stage waiting for a build slot).
+                pre, slots = (sum(values) for values in zip(*blocked.values())) if blocked else (0, 0)
+                held = {'tree_wait_s': tree_waits.get('tree_wait_s'), 'tree_slot_wait_s': tree_waits.get('slot_wait_s'),
+                        'tree_held_s': round(time.monotonic() - tree_taken), 'tree_blocked_s': pre + slots, 'tree_pre_start_s': pre,
+                        'tree_slot_blocked_s': slots}
+                print(f'  tree-{n}: waited {held["tree_wait_s"]}s for it ({held["tree_slot_wait_s"]}s of that free, waiting for a build slot), held it '
+                      f'{held["tree_held_s"]}s, blocked in it {held["tree_blocked_s"]}s ({pre}s before ci-local started: admission, dev shell; '
+                      f'{slots}s with every build stage waiting for a slot)')
             # One line per run for the time objective (scripts/fractal-test-report): only a run of the whole suite (no --check, no --crate) counts.
             record_run({'v': 1, 'started': utc(started_wall), 'ended': utc(time.time()), 'total_s': round(time.monotonic() - started),
                         'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
                         'full': not args.check and not args.crate, 'checks': checks, 'pool_tree': n, 'warm': warm,
                         'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
-                        'exit': code, 'stages': stages})
+                        'exit': code, 'stages': stages, **held})
             if merged and args.push and code == 0:
                 push_branch(args.push, args.base, merged)
             elif merged:
