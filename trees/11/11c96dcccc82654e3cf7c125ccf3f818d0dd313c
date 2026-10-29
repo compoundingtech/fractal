@@ -2,3 +2,13 @@ record 81a06aba40692c7cb5cad7faf8204839fbcf47d2 typescript-client 0 host/forge 2
 record 70cb52af9a849589e4c080fff3473fd74f212ebb genie-freshness 0 host/forge 2026-10-29T21:12:08Z
 record cf7fd469c09f7c8d7d5287162ed50341b149abe2 ci-script-tests 0 host/forge 2026-10-29T21:19:10Z
 record 8a60632dcb421b481b1999a99cce114ee75d87e1 linux-gate 0 host/forge 2026-10-29T21:33:49Z
+record 0e276012b486bb15231bd943b3d24f913072eaa3 rust-tests 0 host/forge 2026-10-29T21:35:43Z
+record 15a39d7881b96d5d741d9d7c93d497dc58792ed6 rust-tests 0 host/forge 2026-10-29T21:35:44Z
+record 4f211a3f77fa251d6dfd0b43a534d328bba816fd rust-tests 0 host/forge 2026-10-29T21:35:44Z
+record 6125af749be90dced5b7648b3a6edb2b1250ed42 rust-tests 0 host/forge 2026-10-29T21:35:43Z
+record 888b6b623519acfc44de8fc907e9b3ac35fb0967 rust-tests 0 host/forge 2026-10-29T21:35:56Z
+record 94c10455128f73121b6c647d83b4ef02f4a1f7ee rust-tests 0 host/forge 2026-10-29T21:35:43Z
+record bc7825925527bc7df5705bf1e846fb9403606277 rust-tests 0 host/forge 2026-10-29T21:35:44Z
+record c03e19ec0d0b49fbd8b555900a970bc563037062 rust-tests 0 host/forge 2026-10-29T21:35:35Z
+record db51ceff265fea81cb2962da2906aa4668337e3e rust-tests 0 host/forge 2026-10-29T21:35:44Z
+record e5fa7160ad82d706b7d4b40ff6754544a5024cc3 rust-tests 0 host/forge 2026-10-29T21:35:44Z
