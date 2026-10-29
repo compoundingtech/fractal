@@ -607,14 +607,14 @@ async fn stored_claims_are_counted_when_stored_even_if_deleted_before_export() {
 }
 
 /// The limits gauge carries each window's newest measured reading, even when an older reading
-/// is appended after a newer one.
+/// is appended after a newer one, in the same export or a later one.
 #[tokio::test]
 async fn the_limits_gauge_keeps_the_newest_measured_reading() {
     use crate::store::append_limits_publication;
     let (collector, endpoint) = start_collector().await;
     let store = Arc::new(Store::open_memory("node-a").unwrap());
     let start = smallclaims::store::now_ms();
-    for (subject, percent, measured) in [("agent/node.ada", 30.0, start + 60_000), ("agent/node.bea", 20.0, start)] {
+    let reading = |subject: &str, percent: f64, measured: u128| {
         store
             .append_claim(&ClaimInput {
                 subject: subject.into(),
@@ -643,17 +643,32 @@ async fn the_limits_gauge_keeps_the_newest_measured_reading() {
             Some("inc-1"),
         )
         .unwrap();
-    }
+    };
     let exporter = OtlpExporter::new(&OtlpConfig { endpoint, headers_file: None }, "node-a").unwrap();
+    let gauges = || {
+        collector
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(_, body)| body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array())
+            .flatten()
+            .filter(|metric| metric["name"] == "st_account_limit_used_percent")
+            .map(|metric| {
+                let point = &metric["gauge"]["dataPoints"][0];
+                (point["asDouble"].as_f64().unwrap(), point["timeUnixNano"].as_str().unwrap().to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    let at = |measured: u128| (measured * 1_000_000).to_string();
+    reading("agent/node.ada", 30.0, start + 60_000);
+    reading("agent/node.bea", 20.0, start);
     exporter.export_once(&store).await.unwrap();
-    let requests = collector.requests.lock().unwrap();
-    let point = requests
-        .iter()
-        .filter_map(|(_, body)| body["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].as_array())
-        .flatten()
-        .find(|metric| metric["name"] == "st_account_limit_used_percent")
-        .map(|metric| metric["gauge"]["dataPoints"][0].clone())
-        .unwrap();
-    assert_eq!(point["asDouble"], 30.0, "the newer measurement, appended first");
-    assert_eq!(point["timeUnixNano"], ((start + 60_000) * 1_000_000).to_string());
+    assert_eq!(gauges(), [(30.0, at(start + 60_000))], "the newer measurement, appended first");
+    reading("agent/node.cara", 10.0, start + 30_000);
+    exporter.export_once(&store).await.unwrap();
+    assert_eq!(gauges().len(), 1, "an older reading in a later export sends no gauge");
+    reading("agent/node.dan", 40.0, start + 90_000);
+    exporter.export_once(&store).await.unwrap();
+    assert_eq!(gauges().last(), Some(&(40.0, at(start + 90_000))), "a newer reading still updates it");
 }

@@ -72,7 +72,14 @@ pub struct OtlpExporter {
     node: String,
     /// The claim-write totals last sent, so an export with nothing new stored sends none.
     claims_sent: std::sync::Mutex<Vec<StoredClaims>>,
+    /// The newest measured time sent for each limits gauge series, so a reading delayed into a
+    /// later batch never replaces a newer one. Kept in memory: the export cursor survives a
+    /// restart, so only a reading delayed across the restart itself can still arrive late.
+    limits_sent: std::sync::Mutex<LimitsSent>,
 }
+
+/// Each limits gauge series, (driver, account, window), and the measured time of its newest reading.
+type LimitsSent = BTreeMap<(String, String, &'static str), u128>;
 
 impl OtlpExporter {
     pub fn new(config: &OtlpConfig, node: &str) -> Result<Self> {
@@ -96,6 +103,7 @@ impl OtlpExporter {
             headers,
             node: node.to_owned(),
             claims_sent: std::sync::Mutex::new(Vec::new()),
+            limits_sent: std::sync::Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -127,8 +135,10 @@ impl OtlpExporter {
         if let Some(metrics) = otlp_usage_metrics(&self.node, &batch) {
             self.send(&self.metrics_url, &metrics).await?;
         }
-        if let Some(metrics) = otlp_limits_metrics(&self.node, &batch) {
+        let limits = otlp_limits_metrics(&self.node, &batch, &self.limits_sent.lock().unwrap());
+        if let Some((metrics, newest)) = limits {
             self.send(&self.metrics_url, &metrics).await?;
+            self.limits_sent.lock().unwrap().extend(newest);
         }
         if let Some(traces) = otlp_hook_traces(&self.node, &batch) {
             self.send(&self.traces_url, &traces).await?;
@@ -457,11 +467,12 @@ fn otlp_usage_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
 }
 
 /// Account limits as a bounded gauge: the newest reading of each driver, account and limit
-/// window. The full series, every reading with its subject and incarnation, is the batch's log
-/// records; the graph keeps only current values.
-fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
+/// window, skipping any older than the newest already `sent`. Returns the metrics and the
+/// measured times to record once the collector accepts them. The full series, every reading with
+/// its subject and incarnation, is the batch's log records; the graph keeps only current values.
+fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord], sent: &LimitsSent) -> Option<(Value, LimitsSent)> {
     let text = |fields: &Value, key: &str| fields[key].as_str().unwrap_or("unknown").to_owned();
-    let mut limits = BTreeMap::<(String, String, &str), (u128, f64)>::new();
+    let mut limits = BTreeMap::<(String, String, &'static str), (u128, f64)>::new();
     for observation in batch.iter().filter(|observation| observation.kind == "harness.limits") {
         let fields = &observation.body["fields"];
         let measured = fields["measured_at_unix_ms"]
@@ -470,8 +481,10 @@ fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
         for (window, field) in [("five_hour", "five_hour_percent"), ("weekly", "weekly_percent")] {
             if let Some(percent) = fields[field].as_f64() {
                 let key = (text(fields, "driver"), text(fields, "account"), window);
-                // Readings can arrive out of measured order; an equal time keeps the later one.
-                if limits.get(&key).is_none_or(|(newest, _)| measured >= *newest) {
+                // Readings can arrive out of measured order, within a batch or across batches; an
+                // equal time keeps the later arrival.
+                let newest = limits.get(&key).map(|(newest, _)| newest).or_else(|| sent.get(&key));
+                if newest.is_none_or(|newest| measured >= *newest) {
                     limits.insert(key, (measured, percent));
                 }
             }
@@ -493,13 +506,14 @@ fn otlp_limits_metrics(node: &str, batch: &[ClaimRecord]) -> Option<Value> {
             })
         })
         .collect::<Vec<_>>();
-    Some(json!({"resourceMetrics": [{"resource": resource(node, DAEMON_SERVICE), "scopeMetrics": [{
+    let newest = limits.iter().map(|(key, (measured, _))| (key.clone(), *measured)).collect();
+    Some((json!({"resourceMetrics": [{"resource": resource(node, DAEMON_SERVICE), "scopeMetrics": [{
         "scope": {"name": "st"}, "metrics": [{
             "name": "st_account_limit_used_percent", "unit": "%",
             "description": "Share of a paying account's usage window used, by driver, account and window (five_hour or weekly)",
             "gauge": {"dataPoints": points},
         }],
-    }]}]}))
+    }]}]}), newest))
 }
 
 /// Claims stored on this node per kind and writing node, and their body bytes, as cumulative
