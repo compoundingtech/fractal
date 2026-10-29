@@ -8563,6 +8563,91 @@ fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
     assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
 }
 
+/// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
+/// rest repeated the previous claim exactly, one per five-minute interval. An hour of the same
+/// reading every minute replicates once, and a reading that changes still replicates.
+#[test]
+fn an_unchanged_usage_reading_replicates_once_not_every_interval() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let mut sent = 0;
+    let mut read = |tokens: u64, at: u128| {
+        sent += 1;
+        let mut reading = harness_usage(subject, "context_occupancy", tokens, 0);
+        reading.idempotency_key = Some(format!("reading-{sent}"));
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let tokens = |store: &Store| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+    for tick in 1..=60 {
+        read(10, start + tick * minute);
+    }
+    assert_eq!(tokens(&store), [10], "an hour of the same reading at rest replicates once");
+    read(20, start + 61 * minute);
+    assert_eq!(tokens(&store), [10, 20], "a changed reading past its interval still replicates");
+    assert_eq!(store.local_observations_after(0, 100).unwrap().len(), 62, "the local log keeps every reading");
+}
+
+/// A pending reading that a repeat of the replicated one supersedes never replicates: when the turn
+/// ends, the replicated claim is already current.
+#[test]
+fn a_usage_reading_back_at_its_replicated_value_leaves_nothing_pending() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let read = |tokens: u64, key: &str, at: u128| {
+        let mut reading = harness_usage(subject, "context_occupancy", tokens, 0);
+        reading.idempotency_key = Some(key.into());
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let tokens = |store: &Store| {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["context_used_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    state("idle", start);
+    read(10, "first", start + minute);
+    read(20, "changed", start + 2 * minute);
+    assert_eq!(tokens(&store), [10], "the change waits for its interval");
+    read(10, "back", start + 3 * minute);
+    state("working", start + 4 * minute);
+    state("idle", start + 5 * minute);
+    assert_eq!(tokens(&store), [10], "the turn's end has nothing newer to replicate");
+}
+
+/// The fold sums `response` readings, so two equal responses are two events, not a repeat: each
+/// replicates once its interval allows, and the summary counts both.
+#[test]
+fn two_equal_response_readings_both_replicate_and_both_count() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let start = now_ms();
+    let minute = 60_000_u128;
+    let respond = |key: &str, at: u128| {
+        let mut reading = harness_usage(subject, "response", 0, 0);
+        reading.fields.remove("context_used_tokens");
+        reading.fields.insert("total_tokens".into(), Value::from(7_u64));
+        reading.idempotency_key = Some(key.into());
+        store.append_latest_observation(&reading, at).unwrap();
+    };
+    store.append_latest_observation(&harness_state(subject, "idle", start as u64), start).unwrap();
+    respond("first", start + minute);
+    respond("second", start + 7 * minute);
+    assert_eq!(store.claims_for(subject, Some("harness.usage")).unwrap().len(), 2, "both responses replicate");
+    let summary = store.usage_summary_at(subject, Some("inc-1"), None).unwrap().unwrap();
+    assert_eq!(summary.total_tokens, 14, "the summary counts both responses");
+}
+
 #[test]
 fn a_system_runtime_action_stays_local_while_a_requested_one_replicates() {
     let store = Store::open_memory("node").unwrap();
