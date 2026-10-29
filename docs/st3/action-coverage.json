@@ -1,11 +1,27 @@
 {
   "version": 1,
   "client_commands": [
+    {"command":"harness-questions.list","tests":["crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::metadata_routes_and_action_route_use_the_real_daemon_boundary"],"behavior":"Metadata-only paged question read; no text, labels or internal receipt."},
+    {"command":"harness-questions.get","tests":["crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::metadata_routes_and_action_route_use_the_real_daemon_boundary"],"behavior":"Canonical question detail with stable observation revision and runtime incarnation."},
     {"command":"collections.inventory","tests":["crates/fractal/tests/client_only.rs::an_older_member_reads_fleet_on_focus_without_attempting_inventory_subscriptions","crates/fractal-e2e/tests/feed/inventory.rs::inventories_follow_sources_switch_periods_leave_and_reconnect_over_a_real_socket","crates/fractal/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute","crates/fractal/tests/client_only.rs::the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_follows_connect_disconnect_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_open_period_uses_wall_time_on_an_empty_graph","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::usage_inventory_follows_rollups_limits_and_reconnect_for_selected_period","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::machines_inventory_follows_runtime_transport_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_follows_pairing_revocation_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::terminals_inventory_follows_runtime_changes_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::sessions_inventory_follows_files_process_exit_and_reconnect","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::inventory_subscriptions_refuse_invalid_filters_limits_and_authority","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::idle_inventory_windows_do_not_reread_across_the_old_client_intervals","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::inventory_pairing_expiry_ends_held_windows_without_a_clock_poll","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::devices_inventory_expires_a_hidden_row_and_updates_has_more_at_its_deadline","crates/fractal-api-client-v0/src/api/client_v0/collection_refresh_tests.rs::clients_inventory_expires_recent_requests_at_their_deadline"],"behavior":"Optional authorized bounded screen inventories deliver v0 snapshots and changes; reconnect reads current sources, device and recent-client membership expires at actual deadlines, and native sessions follow files and process exits. Phone inventory hooks use these authorized reads through screen-scoped subscriptions; Node fake-feed tests verify shared slots, period selection, refresh, reconnect, grace cleanup and 72-second idle without requests; native adapter event tests verify protocol heartbeat delivery."},
     {"command":"resources.list","tests":["crates/fractal-tui/src/ui/observed_resources.rs::optional_resource_read_lists_typed_prs_repositories_and_other_subjects_over_unix","crates/fractal-tui/src/ui/glass.rs::sidebar_graph_resources_open_tabs_and_finder_selection_only_previews_filing","crates/fractal-api-client-v0/src/api/client_v0.rs::resources_list_filters_latest_observations_and_fences_pages","crates/fractal-api-client-v0/src/api/client_v0.rs::resources_list_requires_projection_read_scope"],"behavior":"Existing optional bounded observation read; typed PR/repository/other catalog windows, canonical subjects, filing over Unix, missing rows retained, clicks only navigate, Enter only previews."},
     {"command":"observations.report","tests":["crates/fractal-api-core/src/api/client_observations.rs::observation_paired_session_transport_reader_doctor_and_body_limits","crates/fractal-api-core/src/api/client_observations.rs::observation_dedup_conflict_overlap_and_history_failure_have_no_partial_acceptance","crates/fractal-api-core/src/api/client_observations.rs::observation_history_is_bounded_rotates_expires_and_survives_restart"],"behavior":"Paired-only local diagnostics; no graph mutation, snapshot fence, replicated ACK or durable receipt. Memory dedup/overlap survives identical retries only within bounded process retention; JSONL history persists independently."}
   ],
   "typed_actions": [
+    {
+      "action": "harness.answer",
+      "tests": [
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::accepted_receipts_survive_reopen_without_an_adapter_or_duplicate_writes",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::harness_answer_requires_its_explicit_scope_and_unknown_harness_actions_stay_unavailable",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::every_agent_is_refused_even_unix_free_mode",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::an_agent_with_terminal_control_cannot_answer_as_a_person",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::harness_answer_authority_fences_replays_and_resolution_order",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::retained_keys_conflict_across_generic_and_harness_receipts_in_both_orders",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::harness_and_private_notes_share_action_keys_in_both_orders",
+        "crates/fractal-api-client-v0/src/api/client_v0/harness_questions.rs::oversized_receipt_action_ids_refuse_before_settlement"
+      ],
+      "behavior": "Person-only terminal authority; unknown harness actions unavailable; observation/incarnation fences; exact replay and cross-action conflicts; no adapter by default."
+    },
     {
       "action": "private-notes.write",
       "tests": [
@@ -426,6 +442,34 @@
     }
   ],
   "cli": [
+    {
+      "command": "st harness-questions list",
+      "description": "Read one explicit page of metadata-only native harness questions",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_question_cli_list_forwards_limit_and_encoded_cursor",
+        "crates/fractal/src/main_tests.rs::harness_question_cli_reads_require_an_explicit_person"
+      ],
+      "verification": "CLI parser and handler over a private Unix socket; explicit person, limit and encoded cursor"
+    },
+    {
+      "command": "st harness-questions show",
+      "description": "Read canonical native harness question metadata and answer fences",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_question_cli_reads_require_an_explicit_person",
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_canonical_detail_identity_and_all_fences"
+      ],
+      "verification": "explicit-person parser and generated detail read over a private Unix socket"
+    },
+    {
+      "command": "st harness-questions answer",
+      "description": "Submit positional answers with an explicit person, stable idempotency key and current detail fences",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_uses_canonical_detail_identity_and_all_fences",
+        "crates/fractal/src/main_tests.rs::harness_answer_action_identity_is_retryable_and_question_scoped",
+        "crates/fractal/src/main_tests.rs::harness_answer_cli_requires_positions_file_explicit_person_and_key"
+      ],
+      "verification": "CLI parser and handler over a private Unix socket; canonical question identity, positional file, deterministic action id and all three fences"
+    },
     {
       "command": "st deploy verify-go",
       "description": "Verify an existing deployment GO against the local signed replica and immutable packaged policy without changing state",
