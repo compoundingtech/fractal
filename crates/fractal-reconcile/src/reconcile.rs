@@ -30260,7 +30260,13 @@ schedule "daily" {{
             store.clone(), Arc::new(FakeRuntime::default()), "node".into(), Arc::new(Notify::new()),
         );
         reconciler.reconcile_once().unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Wait for the occurrence's timer task, not a fixed time: on a loaded host 20 ms was not
+        // always enough for it to run.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
         let reached = store.claims_for("schedule/daily", Some("schedule.occurrence-reached")).unwrap();
         assert_eq!(reached.len(), 1);
         let key = reached[0].body["fields"]["occurrence"].as_u64().unwrap();
