@@ -11,12 +11,12 @@ is pushed by no hook) and never the heavy ones. This worker closes that gap from
 One tick: list the open pull requests (gh), keep those that are ready (not draft), target main, come from this repository (no
 forks) and are authored by a GitHub login in ~/.config/evidence-presign/authors (one per line; outside authors are never run:
 their code would run here, with the host's key within reach). Newest first, take the first head with a check of the class that
-has no note yet and was not tried for that tree before, and run `scripts/st-test --check NAME... --push origin` (from origin/main,
+has no note yet and was not tried for that tree before, and run `scripts/fractal-test --check NAME... --push origin` (from origin/main,
 as the pre-push hook does) on it in DIR, a clone this worker owns. Then stop: one head per tick, so the next head waits for the
-next tick and two runs never overlap (a lock per class). The light class is what `st-test --list` prints, which is now every check
-(st-test runs the whole per-PR suite by default); the heavy class is what --all adds to that, which is nothing.
+next tick and two runs never overlap (a lock per class). The light class is what `fractal-test --list` prints, which is now every check
+(fractal-test runs the whole per-PR suite by default); the heavy class is what --all adds to that, which is nothing.
 
-What it never repeats: a check that `st-test --status` says is covered (whoever signed it), and a check this worker already ran
+What it never repeats: a check that `fractal-test --status` says is covered (whoever signed it), and a check this worker already ran
 for the tree, whatever the result (a failure is recorded as a note and CI runs the check; the same tree fails the same way).
 A run stopped for load is not a result: that tree waits DEFER seconds and is tried again.
 
@@ -63,7 +63,7 @@ LIMITS = {
     'shm_max_gb': 20.0,        # heavy: stop when the run's /dev/shm scratch passes this
     'sample': 30,              # seconds between load samples
     'defer': 1800,             # a tree stopped for load waits this long before it is tried again
-    'time_limit': 7200,        # st-test --time-limit, per check
+    'time_limit': 7200,        # fractal-test --time-limit, per check
 }
 # The heavy class's cargo target, kept between runs so a head does not start cold (about ten minutes and 19 GB of writes). It is
 # under ~/.cache/*-target, which the host's scratch sweep reclaims when it has been idle two hours and disk runs short: a busy
@@ -191,9 +191,11 @@ def clone(repo, repository):
 
 
 def base_tools(repo, scratch):
-    """st-test as origin/main has it, never a pull request's copy (it takes the wrapper, signer and verifier from the base itself)."""
+    """The base's runner, never a pull request's copy (it takes its signing tools from the base itself)."""
+    # arn:lmig:smalltalk:2026-10-27-st-test-shim — copy-only readers need the self-contained implementation, not its shim.
     path = Path(scratch) / 'st-test'
-    path.write_text(git(repo, 'show', f'origin/{BASE}:scripts/st-test').stdout)
+    source = f'origin/{BASE}:scripts/st-test'
+    path.write_text(git(repo, 'show', source).stdout)
     return path
 
 
@@ -201,7 +203,7 @@ def class_checks(st_test, repo, kind):
     def names(*extra):
         done = subprocess.run([sys.executable, '-I', str(st_test), '--list', *extra], cwd=repo, capture_output=True, text=True)
         if done.returncode != 0:
-            raise Failure('st-test --list: ' + done.stderr.strip()[-300:])
+            raise Failure('fractal-test --list: ' + done.stderr.strip()[-300:])
         return [line.split(':', 1)[0] for line in done.stdout.splitlines() if ':' in line]
     light = names()
     return light if kind == 'light' else [name for name in names('--all') if name not in light]
@@ -221,7 +223,7 @@ def uncovered(st_test, repo, wanted):
     done = subprocess.run([sys.executable, '-I', str(st_test), '--status', '--base', f'origin/{BASE}', *args], cwd=repo,
                           capture_output=True, text=True, timeout=600)
     if done.returncode not in (0, 3):
-        raise Failure('st-test --status: ' + (done.stderr or done.stdout).strip()[-300:])
+        raise Failure('fractal-test --status: ' + (done.stderr or done.stdout).strip()[-300:])
     rows = {m[1]: m[2] for m in map(STATUS_ROW.match, done.stdout.splitlines()) if m}
     return [name for name in wanted if rows.get(name) != 'covered'], [name for name in wanted if rows.get(name) == 'covered']
 
@@ -241,6 +243,9 @@ def wait_calm(rules):
 
 
 def free_gib(path):
+    given = os.environ.get('EVIDENCE_PRESIGN_FREE_GIB')  # a stand-in for the disk, as EVIDENCE_PRESIGN_MEMINFO is for memory
+    if given:
+        return float(given)
     stat = os.statvfs(path)
     return stat.f_bavail * stat.f_frsize / 2**30
 
@@ -270,7 +275,7 @@ def stop(group):
 
 
 def run(st_test, repo, checks, kind, rules, log, extra=()):
-    """st-test on the checked-out head (and `extra`, more st-test arguments), watched; (rows, stopped_reason, seconds, io60_peak)."""
+    """fractal-test on the checked-out head (and `extra`, more runner arguments), watched; (rows, stopped_reason, seconds, io60_peak)."""
     global CHILD
     env = dict(os.environ)
     scratch = None
@@ -306,7 +311,7 @@ def run(st_test, repo, checks, kind, rules, log, extra=()):
                     break
         finally:
             # Whatever the run left behind in its process group (a test's stray background process) is ended now, before the log is
-            # read: nothing may write to the log after st-test's summary.
+            # read: nothing may write to the log after fractal-test's summary.
             try:
                 os.killpg(CHILD.pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
@@ -318,10 +323,11 @@ def run(st_test, repo, checks, kind, rules, log, extra=()):
 
 
 def summary_rows(output):
-    """The per-check results of st-test's own final summary: the rows after its last `st-test: tree` line. The log also holds the
+    """The per-check results of fractal-test's own final summary: the rows after its last runner tree header. The log also holds the
     output of the pull request's tests, which could print a line shaped like a row; nothing before that header is read."""
     lines = output.splitlines()
-    starts = [i for i, line in enumerate(lines) if line.startswith('st-test: tree ')]
+    # arn:lmig:smalltalk:2026-10-27-st-test-shim — old bases still print the old header.
+    starts = [i for i, line in enumerate(lines) if line.startswith(('fractal-test: tree ', 'st-test: tree '))]
     rows = {}
     for line in lines[starts[-1] + 1:] if starts else []:
         match = ROW.match(line)

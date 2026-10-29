@@ -1,6 +1,6 @@
 //! The live probe's own consumer must prove a native handoff, not a mailbox lookup.
 //!
-//! `scripts/st3-delivery-probe-test` holds the fake-API cases and four native scenarios that each boot
+//! `scripts/fractal-delivery-probe-test` holds the fake-API cases and four native scenarios that each boot
 //! their own daemons and probe seats. One Rust test per unit lets them run side by side.
 
 /// Run the named unittest selectors of the probe script in an isolated, process-supervised child.
@@ -28,9 +28,9 @@ fn probe_with_temp(selectors: &[&str], temp: Option<&std::path::Path>) {
     }
     let result = command
         .args(["-f", "env", "-u", "ST_AGENT", "python3"])
-        .arg(repo.join("scripts/st3-delivery-probe-test"))
+        .arg(repo.join("scripts/fractal-delivery-probe-test"))
         .arg("--binary")
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg("--scratch")
         .arg(scratch.path())
         .args(selectors)

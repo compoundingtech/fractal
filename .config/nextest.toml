@@ -100,7 +100,7 @@ filter = '''
   ))
   or
   (binary_id(=fractal::integration) and (
-    test(=client_only::daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member)
+    test(=client_only::daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member)
     or test(=convergence::a_seed_runs_the_same_every_time)
     or test(=convergence::seed_1_converges)
     or test(=convergence::seed_2_converges)
@@ -279,4 +279,11 @@ success-output = "immediate"
 # Retain the actual runner PID/procfs relationship without changing test selection.
 [[profile.ci.overrides]]
 filter = 'package(=fractal-runtime) and test(=process::tests::current_process_token_matches_proc_self)'
+success-output = "immediate"
+
+# Helper credential authority must exercise a real PTY child on the PR hash shards.
+# Missing pty is a hard failure in hosted CI, including non-systemd runners.
+[[profile.ci.overrides]]
+filter = 'package(=fractal-runtime) and test(=pty::tests::process_identity_captures_the_harness_not_the_pty_server_and_fences_incarnation)'
+retries = 0
 success-output = "immediate"

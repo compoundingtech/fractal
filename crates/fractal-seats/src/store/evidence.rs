@@ -107,6 +107,14 @@ impl EvidenceSeatsStore for Store {
             append_latest_observation_publication(
                 &self.graph, &input, now_ms(), Some(&publication.runtime_incarnation),
             )
+        } else if input.kind == "harness.limits" {
+            // Every seat on an account reports its limits; only a report that changes the
+            // account's answer replicates.
+            validate_claim_input(&input)?;
+            append_limits_publication(
+                &self.graph, &input, now_ms(), Some(&publication.runtime_incarnation),
+            )
+            .map(|(record, appended)| (record, appended, false))
         } else {
             append_claim_with_fences(
                 &self.graph, &input, None, Some(&publication.runtime_incarnation),

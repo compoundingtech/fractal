@@ -111,7 +111,7 @@ receipt and preserves the member tokens, so it does not relaunch seats.
 
 The publisher derives the sequence from the commit's full first-parent depth and verifies ancestry
 against its last successful source. It must reject shallow history, non-descendants and rewritten
-branches. st checks the numeric fence and graph references; it does not fetch Git or verify that a
+branches. Fractal checks the numeric fence and graph references; it does not fetch Git or verify that a
 publisher derived the sequence honestly. Roll back with a new revert commit and a larger sequence.
 
 Every upgraded replica selects the highest source sequence, irrespective of arrival order or wall

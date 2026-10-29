@@ -56,7 +56,7 @@ export class ConversationImageViewport {
 
 export type VisibleImageState<TImage> = { kind: 'closed' } | { kind: 'loading' } | { kind: 'failed'; message: string; code?: string } | { kind: 'image'; image: TImage };
 
-/** st's code for a failed read (`remote-unavailable`, `blob-expired`, …), when the error carries one. */
+/** Fractal's code for a failed read (`remote-unavailable`, `blob-expired`, …), when the error carries one. */
 export function errorCode(error: unknown): string | undefined {
   const code = (error as { response?: { code?: unknown } } | null)?.response?.code;
   return typeof code === 'string' ? code : undefined;

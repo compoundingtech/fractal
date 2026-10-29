@@ -12,7 +12,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(auditCaches({
   jobs: {
     capture: {
       name: 'Capture the real iOS client',
-      'runs-on': 'macos-15',
+      // The app's native packages require Swift tools 6.2: use the image with Xcode 26 by default.
+      'runs-on': 'macos-26',
       'timeout-minutes': 90,
       defaults: { run: { shell: 'bash' } },
       env: { MAESTRO_CLI_NO_ANALYTICS: 'true' },
@@ -55,6 +56,17 @@ nix develop .#web -c nix shell nixpkgs#cocoapods -c apps/ios/scripts/landing-scr
           with: {
             name: 'ios-landing-screenshots-logs-${{ github.run_id }}',
             path: '${{ runner.temp }}/ios-landing-screenshots/*.log',
+            'if-no-files-found': 'ignore',
+            'retention-days': 7,
+          },
+        },
+        {
+          name: 'Retain Maestro screenshots and UI hierarchy',
+          if: 'always()',
+          uses: 'actions/upload-artifact@v4',
+          with: {
+            name: 'ios-landing-screenshots-maestro-${{ github.run_id }}',
+            path: '~/.maestro/tests',
             'if-no-files-found': 'ignore',
             'retention-days': 7,
           },

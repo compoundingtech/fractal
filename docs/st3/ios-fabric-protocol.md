@@ -81,6 +81,60 @@ Expose exactly the **paired-only** gateway socket, whose router is
 that is the privileged local API. A generic socket exposure is sufficient; no
 new server-side Rust service is needed.
 
+### st grants paired phones
+
+On a member that serves phones, run once:
+
+```sh
+st devices fabric enable            # exposes client_gateway_socket as st3-client-v0
+```
+
+It runs `fabric expose st3-client-v0 --socket CLIENT_GATEWAY_SOCKET` and records the
+service and the `fabric` executable in `STATE/fabric-gateway.toml`. From then on:
+
+- **Adding a phone** is `st devices pair NAME --fabric-gateway` on the member and the code on
+  the phone. Pairing grants nothing over Fabric unless the code was made with
+  `--fabric-gateway`: the person decides per pairing, and the default is no grant. A phone
+  asks for the member's pairing advertisement with `GET /v1/client/capabilities?accepts=fabric-gateway-grant`;
+  a member that offers the grant then lists `fabric-gateway-grant` version 1 beside
+  `device-key-proofs`, and answers any other request with `device-key-proofs` alone, as it
+  always has. The phone then sends its Fabric NodeID as `fabric_node_id` with the pairing
+  completion. If the code was made with `--fabric-gateway`, the member runs, once the pairing
+  is committed,
+  `fabric add NODE_ID st-device-<first 12 hex> --inbound-only --allow st3-client-v0`.
+  The paired session's `fabric_grant` says what happened: `granted`, `already-trusted`
+  (someone already trusts that NodeID under another name; st leaves that entry alone),
+  `not-enabled` (no `st devices fabric enable` on this member), `not-requested` (the code was
+  made without `--fabric-gateway`; the NodeID is not kept), or `failed` with a detail. The
+  pairing stands whatever Fabric says, and the phone shows a failure.
+- **Removing a phone** is `st devices revoke DEVICE`. After the revocation is recorded,
+  the member removes the `st-device-…` peer it added for that NodeID, which ends the
+  phone's admitted sessions. It keeps the grant while another live pairing on this member
+  carries the same NodeID.
+- **Replacing a phone** is pairing the new phone and revoking the old one.
+- `st devices fabric status` lists the grants st made. `st devices fabric disable`
+  removes them and the exposure.
+
+st only changes peers named `st-device-…` that it added, never a grant made by hand, and
+it never grants anything but the one client gateway service. Each member grants only
+the phones paired with it: each member is paired on its own.
+
+What this does not cover yet:
+
+- **The first pairing cannot use Fabric.** Until it is paired, the phone has no grant,
+  so it pairs over Tailscale or the LAN. Pairing with a second member over Fabric needs
+  that member's grant first, and so does pairing a phone that has only Fabric.
+- **An expired pairing keeps its grant.** A pairing expires after 30 days without any
+  record of it, so nothing removes the grant then. The grant reaches only the paired-only
+  gateway, which no longer accepts the expired credential. `st devices revoke` removes it.
+- **A failed removal is only logged.** When `fabric remove` fails after a revocation,
+  the member logs a warning and the revocation still stands. `st devices fabric status`
+  shows the grant that is left.
+- **It runs the fabric CLI** until the daemon has a runtime peer and grant API
+  (compoundingtech/fabric#312) and a control-socket client (compoundingtech/fabric#310).
+
+### By hand
+
 Illustrative member commands, with host-local paths and a real public ID supplied
 only at setup time, through the member’s owner after the real-device pairing
 plan has been agreed. An isolated dev daemon with a throwaway `FABRIC_HOME` can
@@ -187,7 +241,7 @@ with a refusal code, or `rejected` with an Error frame’s fault code. It keeps
 only the code, never the diagnostic. The app names a refusal as one; a fault
 falls back like any failed connection.
 
-After fabric admits the stream, **st still checks pairing and client scopes**.
+After fabric admits the stream, **Fractal still checks pairing and client scopes**.
 Fabric does not synthesize a person, device grant, or bearer credential. Complete
 normal short-lived gateway pairing through this same carrier if needed. The
 native carrier must not insert a privileged credential or bypass gateway checks.
@@ -226,7 +280,7 @@ log entry, so preserve HTTP keep-alive instead of reconnecting per request.
 A phone granted inbound-only gets none of the daemon’s ordinary peer behavior:
 no health probes, no announcements on start-up or peer reload, and no
 network-change checks. Its status is whether it is connected now. The
-[bridge’s pinned-daemon test](../../apps/ios/modules/st-fabric/README.md#checks)
+[bridge’s pinned-daemon test](../../apps/ios/modules/fractal-fabric/README.md#checks)
 proves it: with probes every second, the member probes an ordinarily granted
 peer and never the inbound-only phone, while the phone’s attaches succeed. An
 ordinary grant, the only kind before fabric 0.2.41, has the member probe the
@@ -499,7 +553,7 @@ here. The terminal UI owner also required bridge-owned loopback selection and an
 isolated-daemon proof before member provisioning.
 
 The executable proof should establish: unknown NodeID refusal; trusted phone
-refusal for an ungranted exposure; exact gateway admission; st refusal without a
+refusal for an ungranted exposure; exact gateway admission; Fractal refusal without a
 paired credential; pairing/capabilities and collections over the carrier; uploads
 and WebSocket/terminal capability forwarding; half-close and concurrent requests;
 network loss/foreground recovery without replaying actions; abandoned session

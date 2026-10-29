@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "An omp seat is read as the account whose key file it reads, so two API-key accounts can have a login on one host",
+  "replay": {
+    "status": "none",
+    "detail": "No claim kind or replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change and no client contract change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "With one api-key account on a host nothing changes. With two, an unlabelled omp row is read as the one that declares the default key file, and a seat launched with ST_OMP_API_KEY_FILE records the account that declares that file."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No service interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery change."
+  }
+}

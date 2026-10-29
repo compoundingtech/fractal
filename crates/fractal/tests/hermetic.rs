@@ -54,7 +54,7 @@ fn fixture_commits_ignore_local_hook_and_signing_policy() {
 #[test]
 fn renaming_the_production_cli_does_not_bypass_mutating_actor_checks() {
     let root = tempfile::tempdir().unwrap();
-    let renamed = root.path().join("st3-fixture");
+    let renamed = root.path().join("fractal-fixture");
     std::os::unix::fs::symlink(test_env!("CARGO_BIN_EXE_st3"), &renamed).unwrap();
     let output = Command::new(&renamed)
         .env_clear()

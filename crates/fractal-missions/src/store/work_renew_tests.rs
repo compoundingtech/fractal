@@ -62,6 +62,26 @@ fn claimed_step(history: usize) -> Renewal {
 }
 
 #[test]
+fn a_steps_timing_events_are_read_again_only_when_its_claims_change() {
+    let renewal = claimed_step(5);
+    let rows = || STEP_TIMING_ROWS_PARSED.with(std::cell::Cell::get);
+    let read = || step_timing_events(&renewal.store.readers.get(), &renewal.subject).unwrap();
+    let first = read();
+    let before = rows();
+    assert_eq!(read(), first);
+    assert_eq!(rows() - before, 0, "nothing changed, so no claim body is read again");
+    renewal
+        .store
+        .work_action(&renewal.subject, "progress", &request("renewal-progress-more", Some("report more")))
+        .unwrap();
+    let before = rows();
+    let after = read();
+    assert_eq!(after.len(), first.len() + 1);
+    assert_eq!(&after[..first.len()], &first[..]);
+    assert_eq!(rows() - before, after.len());
+}
+
+#[test]
 fn renewal_poll_reads_only_held_claims_without_folding_timing() {
     let renewal = claimed_step(2);
     let actor = "agent/node.worker";

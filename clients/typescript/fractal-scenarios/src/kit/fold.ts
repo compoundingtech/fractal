@@ -20,7 +20,7 @@ const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
   attention: 'attention',
   message: 'messages',
   launch: 'launches',
-  'launch-variant': 'launchVariants',
+  'launch-variant': 'launch_variants',
   'launch-decision': 'launchDecisions',
   'launch-approval': 'launchApprovals',
   observer: 'observers',

@@ -2,7 +2,7 @@
 
 A subagent is a helper that a seat's harness runs inside its own session: a Claude subagent
 started with the Agent tool, a Codex subagent thread, or an omp subagent session. It is not a seat
-or a mission. st records each subagent as claims on its parent seat, from the harness's hooks and
+or a mission. Fractal records each subagent as claims on its parent seat, from the harness's hooks and
 events, and never asks the agent about it.
 
 ## Claims
@@ -138,7 +138,7 @@ of the agent there: they select and click as the agent and have no actions of th
 
 ## Tests
 
-`scripts/st3-subagents-eval/run` runs an isolated daemon with stand-in Claude seats that report
+`scripts/fractal-subagents-eval/run` runs an isolated daemon with stand-in Claude seats that report
 subagents through the real hooks, with no model. `crates/fractal/tests/subagents_seat.rs` runs it. It
 covers:
 

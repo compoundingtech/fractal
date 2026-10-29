@@ -424,6 +424,23 @@ impl Fabric {
             .map(|_| ())
     }
 
+    /// Trust `node` under the local `name` for exactly `service`, inbound-only: it may connect
+    /// and use that one service, and this machine never dials, probes or announces to it.
+    /// Needs fabric 0.2.41 or later. `fabric add` reloads the running daemon's peers itself.
+    pub async fn add_inbound_only(&self, node: &str, name: &str, service: &str) -> Result<()> {
+        run(
+            &self.program,
+            &["add", node, name, "--inbound-only", "--allow", service],
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Remove a trusted peer by NodeID or name. Fabric ends its admitted sessions.
+    pub async fn remove(&self, peer: &str) -> Result<()> {
+        run(&self.program, &["remove", peer]).await.map(|_| ())
+    }
+
     /// The trusted peers in Fabric's `peers.toml`, as NodeID and local name.
     pub async fn peers(&self) -> Result<Vec<(String, String)>> {
         let Some(value) = run_json(&self.program, &["peers"]).await? else {
