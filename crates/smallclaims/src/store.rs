@@ -5839,10 +5839,18 @@ impl Store {
         crate::profile::tagged(
             || format!("claims_in_order {kind} at {}:{}", caller.file(), caller.line()),
             || -> Result<()> {
+                let connection = self.readers.get();
+                // Test builds read the whole history beside it, as one snapshot so a concurrent
+                // append cannot make the two disagree: inside a caller's snapshot both already
+                // read one state, otherwise both run in a read transaction of their own.
                 #[cfg(any(test, feature = "test-support"))]
-                let mut visited = Vec::new();
-                {
-                    let connection = self.readers.get();
+                let own_snapshot = connection.is_autocommit();
+                #[cfg(any(test, feature = "test-support"))]
+                if own_snapshot {
+                    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5f4a6691287 owner=smallclaims::store TODO=trace-statement-and-value-representation */ "BEGIN")?;
+                }
+                let read = (|| -> Result<Vec<String>> {
+                    let mut visited = Vec::new();
                     let mut statement = connection.prepare_cached(
                         /* sqlite-large-value: allow-for-now lv-h82d031aa5230 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &claims_in_order_query(newest_first),
                     )?;
@@ -5850,34 +5858,41 @@ impl Store {
                     while let Some(row) = rows.next()? {
                         let claim = claim_from_row(row)?;
                         let more = visit(&claim);
-                        #[cfg(any(test, feature = "test-support"))]
-                        visited.push(claim.id);
+                        if cfg!(any(test, feature = "test-support")) {
+                            visited.push(claim.id);
+                        }
                         if !more {
                             break;
                         }
                     }
-                }
-                // Every caller's tests check it reads what the whole history would have given it.
+                    // Every caller's tests check it reads what the whole history would have
+                    // given it.
+                    #[cfg(any(test, feature = "test-support"))]
+                    {
+                        let mut all = connection
+                            .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha748fd9c1480 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &claims_for_subject_query(true))?
+                            .query_map(params![subject, kind], |row| claim_from_row(row).map(|claim| claim.id))?
+                            .collect::<rusqlite::Result<Vec<_>>>()?;
+                        if newest_first {
+                            all.reverse();
+                        }
+                        assert!(
+                            all.starts_with(&visited),
+                            "claims_in_order({subject}, {kind}) at {caller} read {visited:?}, not the start of {all:?}"
+                        );
+                        // Lists the callers a test run reaches, to check each changed caller is
+                        // tested.
+                        if std::env::var_os("ST3_TEST_CLAIMS_IN_ORDER_SITES").is_some() {
+                            eprintln!("claims_in_order site {caller}");
+                        }
+                    }
+                    Ok(visited)
+                })();
                 #[cfg(any(test, feature = "test-support"))]
-                {
-                    let mut all = self
-                        .claims_for_untagged(subject, Some(kind))?
-                        .into_iter()
-                        .map(|claim| claim.id)
-                        .collect::<Vec<_>>();
-                    if newest_first {
-                        all.reverse();
-                    }
-                    assert!(
-                        all.starts_with(&visited),
-                        "claims_in_order({subject}, {kind}) at {caller} read {visited:?}, not the start of {all:?}"
-                    );
-                    // Lists the callers a test run reaches, to check each changed caller is tested.
-                    if std::env::var_os("ST3_TEST_CLAIMS_IN_ORDER_SITES").is_some() {
-                        eprintln!("claims_in_order site {caller}");
-                    }
+                if own_snapshot {
+                    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-ha96ddb40942a owner=smallclaims::store TODO=trace-statement-and-value-representation */ "COMMIT")?;
                 }
-                Ok(())
+                read.map(|_| ())
             },
         )
     }
@@ -6005,7 +6020,7 @@ impl Store {
             .clone()
             .expect("the pin holds its connection");
         let timing = crate::sqlite::ReaderTiming::start();
-        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb5f4a6691287 owner=smallclaims::store TODO=trace-statement-and-value-representation */ "BEGIN")?;
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hfafa879af33e owner=smallclaims::store TODO=trace-statement-and-value-representation */ "BEGIN")?;
         // The first read starts the snapshot; every later read in `read` sees the same one.
         let index = start(&connection)?;
         drop(timing);
@@ -6310,7 +6325,7 @@ impl Store {
         // and the reconciler asks for one kind of each agent's claims on every pass.
         let rows = match kind {
             Some(kind) => connection
-                .prepare_cached(/* sqlite-large-value: allow-for-now lv-ha748fd9c1480 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &claims_for_subject_query(true))?
+                .prepare_cached(/* sqlite-large-value: allow-for-now lv-h6c0a001dcccb owner=smallclaims::store TODO=trace-statement-and-value-representation */ &claims_for_subject_query(true))?
                 .query_map(params![subject, kind], claim_from_row)?
                 .collect::<Result<Vec<_>, _>>(),
             None => connection
