@@ -29,19 +29,24 @@ fleet_compat() {
 }
 
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — checkout missing-only bridge.
-# Only the default sentinel selects a layout; explicit paths are never rewritten.
+# Only an auto:PATH argument selects a layout; explicit paths are never rewritten.
+# The keyed caller supplies PATH: ordinary linux-gate/rust-tests must not declare a policy read.
 keyed_clippy_policy() {
-  if [[ "$CI_KEYED_CLIPPY_POLICY" != auto ]]; then
+  if [[ "$CI_KEYED_CLIPPY_POLICY" != auto:* ]]; then
     printf '%s\n' "$CI_KEYED_CLIPPY_POLICY"
     return
   fi
-  python3 -I - <<'PY'
+  python3 -I - "${CI_KEYED_CLIPPY_POLICY#auto:}" <<'PY'
 import os
-path = '.fractal/evidence-skip-policy.json'
+import sys
+path = sys.argv[1]
+preferred = os.path.join('.fractal', os.path.basename(path))
 try:
-    os.lstat(path)
+    os.lstat(preferred)
 except FileNotFoundError:
-    path = '.st/evidence-skip-policy.json'
+    pass
+else:
+    path = preferred
 print(path)
 PY
 }

@@ -650,7 +650,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         // linux-clippy's own run checks what its compiles read against its input key (scripts/dep-info-check); linux-gate's local run
         // of the same stage does not, so linux-gate never depends on the policy file.
         // arn:lmig:smalltalk:2026-10-27-dot-fractal-config — resolve the checkout layout at execution, not generation.
-        CI_KEYED_CLIPPY_POLICY: 'auto',
+        CI_KEYED_CLIPPY_POLICY: 'auto:.st/evidence-skip-policy.json',
       },
     }),
     'linux-fleet-compat': linuxStageJob({

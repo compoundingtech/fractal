@@ -5,5 +5,5 @@
 set -euo pipefail
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — ci-linux resolves the checkout default.
 # Explicit paths (and an explicit empty value disabling the check) pass through.
-export CI_KEYED_CLIPPY_POLICY=${CI_KEYED_CLIPPY_POLICY-auto}
+export CI_KEYED_CLIPPY_POLICY=${CI_KEYED_CLIPPY_POLICY-auto:.st/evidence-skip-policy.json}
 exec bash scripts/ci-local clippy "$@"

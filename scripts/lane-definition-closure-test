@@ -423,6 +423,17 @@ class CommandLine(Fixture):
 
 
 class CommittedLanes(unittest.TestCase):
+    def test_unkeyed_linux_and_rust_lanes_do_not_read_the_keyed_clippy_policy(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — only keyed callers supply the optional policy argument.
+        lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
+        repo = ldc.Repo(ROOT)
+        for name in ('linux-gate', 'rust-tests'):
+            with self.subTest(name):
+                closure = ldc.lane_closure(repo, lanes[name], name)
+                reached = set(closure.files) | set(closure.paths()) | set(closure.read())
+                self.assertNotIn('.st/evidence-skip-policy.json', reached)
+                self.assertNotIn('.fractal/evidence-skip-policy.json', reached)
+
     def test_every_lane_executes_and_declares_only_what_its_definition_paths_cover(self):
         lanes = json.loads(Path(ldc.config_path(ROOT, ldc.LANES)).read_text())['lanes']
         repo = ldc.Repo(ROOT)
