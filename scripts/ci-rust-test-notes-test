@@ -404,10 +404,13 @@ class Rule5SameKeysAndRecordsAsStTest(Fixture):
         self.assertEqual(signed.returncode, 0, signed.stdout + signed.stderr)
         self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
         result = self.members()
-        self.assertTrue(result.get('satisfied'), result)
-        self.assertEqual(sorted(result['crates']), ['alpha', 'beta', 'empty', 'idle'])
-        self.assertEqual(result['trust_level'], 'fleet')
+        # Since rust-tests is enforced (2026-10-28) its wrapper trusts host and agent notes, not CI's: every crate's CI record is
+        # well formed and found by its key, and refused only for its level. The records' shape is checked against the rule below.
+        self.assertEqual((result.get('satisfied'), result.get('reason')), (False, 'crate_uncovered'), result)
+        for crate in ('alpha', 'beta', 'empty', 'idle'):
+            self.assertIn(f'{crate} (untrusted_level)', result['detail'])
         rule = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']['kinds']['wrapper']
+        self.assertNotIn('fleet', rule['trust_levels'])
         keys = {entry['crate']: entry['key'] for entry in planned['crates']}
         for statement in self.statements():
             observed = statement['predicate']['observed']
@@ -424,13 +427,17 @@ class Rule5SameKeysAndRecordsAsStTest(Fixture):
             self.assertEqual(len([ref for ref in remote if ref.startswith(f'refs/notes/evidence-input/rust-tests/{key}/')]), 1, crate)
             self.assertEqual(len([ref for ref in remote if ref.startswith(f'refs/tags/evidence/input/rust-tests/{key}/')]), 1, crate)
         self.assertEqual(len([ref for ref in remote if ref.startswith('refs/notes/evidence/')]), 4)
-        # A later tree that changes only beta finds the other crates' notes by their keys; beta is missing.
+        # A later tree that changes only beta finds the other crates' notes by their keys (refused for their level, as above); beta's
+        # key changed, so nothing is found for it.
         git(self.work, 'checkout', '-q', '-b', 'later')
         self.write('crates/beta/src/lib.rs', '// changed\n')
         git(self.work, 'commit', '-qam', 'change beta')
         later = self.members()
         self.assertEqual(later.get('reason'), 'crate_uncovered', later)
-        self.assertEqual(sorted(later['missing']), ['beta'])
+        for crate in ('alpha', 'empty', 'idle'):
+            self.assertIn(f'{crate} (untrusted_level)', later['detail'])
+        self.assertNotIn('beta (untrusted_level)', later['detail'])
+        self.assertIn('beta (', later['detail'])
 
     def test_a_signature_that_fails_is_reported_and_the_others_are_still_published(self):
         self.queue_shards({'alpha': {'a1': 'pass'}, 'beta': {'b1': 'pass'}})
@@ -490,8 +497,8 @@ class Rule6PublishedFailSoft(unittest.TestCase):
             artifact = re.search(r'name: "(rust-test-junit-[^"]*)"', step_chunk(blocks[name], 'Retain the JUnit report for the per-crate notes')).group(1)
             self.assertEqual(artifact, f'rust-test-junit-{name}-${{{{ github.run_attempt }}}}')
             self.assertTrue(notes.ARTIFACT.fullmatch(artifact.replace('${{ github.run_attempt }}', '3')), artifact)
-        # The rust-tests policy entry stays in shadow: these notes are produced, never acted on.
-        self.assertIs(json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']['enforce'], False)
+        # The rust-tests policy entry is enforced (2026-10-28): a pull request skips rust-tests on per-crate notes.
+        self.assertIs(json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())['checks']['rust-tests']['enforce'], True)
 
     def test_the_shard_partitions_are_the_workflow_s(self):
         blocks = workflow_blocks()
