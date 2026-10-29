@@ -1057,7 +1057,7 @@ fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
         ("mission", "mission/membership-registry", MissionDeclaration),
         ("mission-run", "mission-run/membership", RetainedClaim),
         ("observer", "observer/membership/work", DesiredDeclaration),
-        ("person", "person/membership", RetainedClaim),
+        ("person", "person/fixture", RetainedClaim),
         ("planning-session", "planning-session/membership", RetainedClaim),
         ("resource", "resource/membership", DesiredDeclaration),
         ("schedule", "schedule/membership", DesiredDeclaration),
