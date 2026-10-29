@@ -319,6 +319,72 @@ mod tests {
 
     const FLEET: &str = "1f91ca65-7793-48cc-866e-ac15690130e1";
 
+    /// A store this process holds that answers on request, as a daemon's cache does.
+    #[derive(Clone)]
+    struct Answering(Local<Store>);
+
+    impl Backend for Answering {
+        async fn export(
+            &self,
+            fleet_id: &str,
+            inventory: &ReplicationInventory,
+            summary_only: bool,
+            signature_requests: &[crate::claim::ReplicaEnvelopeId],
+        ) -> Result<crate::replication::ReplicationExportResponse> {
+            self.0.export(fleet_id, inventory, summary_only, signature_requests).await
+        }
+
+        async fn receive(
+            &self,
+            peer: &str,
+            fleet_id: &str,
+            exchange: &crate::replication::ReplicationExchange,
+            round_trip: Option<Duration>,
+            carrier: crate::replication::ReplicationCarrier,
+        ) -> Result<crate::replication::ReplicationReceiveResponse> {
+            self.0.receive(peer, fleet_id, exchange, round_trip, carrier).await
+        }
+
+        async fn checkpoint_manifest(&self, request: &CheckpointManifestRequest) -> Result<CheckpointManifestPage> {
+            self.0.checkpoint_manifest(request).await
+        }
+
+        async fn checkpoint_need(&self) -> Result<Option<crate::store::CheckpointManifestNeed>> {
+            self.0.checkpoint_need().await
+        }
+
+        async fn adopt_checkpoint(&self, manifest: &CheckpointManifest) -> Result<Vec<crate::store::CheckpointAction>> {
+            self.0.adopt_checkpoint(manifest).await
+        }
+
+        async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {
+            self.0.publish_endpoints(mode, endpoints).await
+        }
+
+        async fn redeem(&self, request: &crate::fleet::handshake::JoinRequest) -> Result<Value> {
+            self.0.redeem(request).await
+        }
+
+        async fn fleet_view(&self) -> Result<FleetView> {
+            self.0.fleet_view().await
+        }
+
+        async fn record_failure(
+            &self,
+            peer: &str,
+            status: &str,
+            error: &str,
+            carrier: Option<crate::replication::ReplicationCarrier>,
+            failure: Option<&ReplicationExchangeFailure>,
+        ) -> Result<()> {
+            self.0.record_failure(peer, status, error, carrier, failure).await
+        }
+
+        async fn answers(&self, request: &AnswersRequest) -> Result<Option<AnswersReply>> {
+            Ok(Some(self.0.0.answer(request)?))
+        }
+    }
+
     fn node(name: &str) -> Arc<Store> {
         Arc::new(Store::open_memory(name, Arc::new(crate::store::runtime::Plain)).unwrap())
     }
@@ -356,7 +422,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let state = PeerState::new(
-            Local(store),
+            Answering(Local(store)),
             "alder".into(),
             auth.clone(),
             FleetContext::legacy(BTreeSet::from(["birch".into()])),
@@ -377,7 +443,7 @@ mod tests {
         let (peer, server) = serve(alder.clone(), &auth).await;
         let http = replication_http_client();
         let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
-        let backend = Local(birch.clone());
+        let backend = Answering(Local(birch.clone()));
         let cut = tomorrow();
         let compare = async |settled| {
             compare_answers(&http, &backend, "birch", &peer, &auth, &dialer, cut, settled).await.unwrap()
@@ -414,6 +480,20 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_without_answers_asks_no_peer() {
+        let auth = FleetAuth::test(FLEET, &[6; 32]);
+        // Nothing listens here: asking would fail.
+        let peer = PeerConfig { name: "alder".into(), url: "http://127.0.0.1:9".into() };
+        let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
+        let step = compare_answers(
+            &replication_http_client(), &Local(node("birch")), "birch", &peer, &auth, &dialer, tomorrow(), false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(step, Step::Unsupported);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_peer_without_answers_is_not_compared() {
         let auth = FleetAuth::test(FLEET, &[6; 32]);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -424,7 +504,7 @@ mod tests {
         let dialer = FleetContext::legacy(BTreeSet::from(["alder".into()]));
         let step = compare_answers(
             &replication_http_client(),
-            &Local(node("birch")),
+            &Answering(Local(node("birch"))),
             "birch",
             &peer,
             &auth,
