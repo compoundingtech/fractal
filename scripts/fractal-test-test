@@ -2160,6 +2160,58 @@ class PoolQueue(unittest.TestCase):
         self.assertEqual(got[0][0], 0)
         got[0][1].close()
 
+    def test_a_best_ticket_that_never_takes_the_free_tree_does_not_stop_the_next_waiter(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        stuck = queue / f'003.{time.time_ns():019d}.{os.getpid()}'            # alive, best in this waiter's order, and never going to try a tree (an old copy deferring to us)
+        stuck.touch()
+        got = []
+        began = time.monotonic()
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 1.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)))
+            worse.start()
+            time.sleep(0.8)
+            self.assertEqual(got, [])                                           # the tree is free but not yet for the fallback time
+            worse.join(8)
+        self.assertEqual(len(got), 1)                                           # within the fallback time plus a poll or two the next waiter has it
+        self.assertLess(time.monotonic() - began, 6)
+        self.assertGreaterEqual(time.monotonic() - began, 1.5)
+        got[0][1].close()
+
+    def test_the_fallback_never_takes_a_tree_that_is_in_use(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        (queue / f'003.{time.time_ns():019d}.{os.getpid()}').touch()
+        holder = open(self.root / 'tree-0.lock', 'w')
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        self.addCleanup(holder.close)
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50)), daemon=True)
+            worse.start()
+            time.sleep(2.5)
+            self.assertEqual(got, [])                                           # tree-0 is held, so the flock refuses however long the wait
+            holder.close()
+            worse.join(8)
+        self.assertEqual(len(got), 1)
+        got[0][1].close()
+
+    def test_the_fallback_waits_for_a_build_slot_like_the_head_does(self):
+        queue = self.root / 'queue'
+        queue.mkdir(parents=True)
+        (queue / f'003.{time.time_ns():019d}.{os.getpid()}').touch()
+        ready = [False]
+        got = []
+        with mock.patch.object(st_test, 'TREE_FREE_FALLBACK_SECONDS', 0.5), contextlib.redirect_stderr(io.StringIO()):
+            worse = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 1, rank=50, slot_ready=lambda: (ready[0], 'no slot'))), daemon=True)
+            worse.start()
+            time.sleep(2.5)
+            self.assertEqual(got, [])                                           # free for longer than the fallback time, but a build would wait for a slot
+            ready[0] = True
+            worse.join(8)
+        self.assertEqual(len(got), 1)
+        got[0][1].close()
+
     def test_a_waiter_sees_a_tree_the_pool_gains_while_it_waits(self):
         self.root.mkdir(parents=True)
         holder = open(self.root / 'tree-0.lock', 'w')
