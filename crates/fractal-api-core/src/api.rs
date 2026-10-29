@@ -6732,7 +6732,7 @@ fn native_delivery_identity(
         peer_process: None,
     })
 }
-/// Capture the kernel connector generation, independently of generic local auth.
+/// Capture the accepted connector generation, independently of generic local auth.
 pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {
     #[cfg(target_os = "linux")]
     {
@@ -6756,13 +6756,18 @@ pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fra
         } else {
             let error = std::io::Error::last_os_error();
             if matches!(error.raw_os_error(), Some(libc::ENOPROTOOPT | libc::EINVAL)) {
-                anyhow::bail!("helper credential inheritance requires Linux SO_PEERPIDFD (kernel 6.5+): {error}");
+                return fractal_runtime::PeerProcessIdentity::capture_generation(pid);
             }
             anyhow::bail!("SO_PEERPIDFD failed: {error}");
         };
         fractal_runtime::PeerProcessIdentity::capture(pid, pidfd)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = local_peer_pid(stream).ok_or_else(|| anyhow::anyhow!("socket peer PID unavailable"))?;
+        fractal_runtime::PeerProcessIdentity::capture_generation(pid)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = stream;
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
@@ -6794,7 +6799,8 @@ pub fn local_peer_pid(stream: &tokio::net::UnixStream) -> Option<u32> {
             &mut size,
         )
     };
-    (result == 0).then(|| u32::try_from(pid).ok()).flatten()
+    (result == 0 && size as usize == std::mem::size_of_val(&pid) && pid > 0)
+        .then(|| u32::try_from(pid).ok()).flatten()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

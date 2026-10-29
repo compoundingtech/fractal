@@ -59,7 +59,12 @@ pub async fn bootstrap(
         if kernel.pid() != peer.pid { return Err(refused("provider PID differs from accepted kernel identity")); }
         kernel.validate().map_err(internal)?;
         if !matches!(request.harness.as_str(), "omp" | "pi") { return Err(refused("provider does not register native connectors")); }
-        let fence = Fence::new(&request.subject, &request.runtime_incarnation, "delivery");
+        let subject = if request.subject.starts_with("agent/") {
+            request.subject
+        } else {
+            format!("agent/{}", request.subject)
+        };
+        let fence = Fence::new(&subject, &request.runtime_incarnation, "delivery");
         let selected = physical_selection(&state, &fence, &request.harness)?;
         let dir = source_agent_dir(&state, &fence);
         let identity = native_connector::incarnation(&dir, selected.3, &request.harness).map_err(internal)?;
@@ -69,6 +74,7 @@ pub async fn bootstrap(
         let current = physical_selection(&state, &fence, &request.harness)?;
         if current != selected { return Err(refused("physical wrapper changed during connector registration")); }
         native_connector::register_connector(&dir, peer.pid, request.connector_pid, &request.harness, &request.session, request.sequence).map_err(internal)?;
+        kernel.validate().map_err(internal)?;
         Ok(())
     }).await?;
     Ok(axum::Json(serde_json::json!({ "registered": true })))
@@ -119,7 +125,8 @@ impl ProcessRoleProof {
             Some(ProcessWitness::Native(witness)) => witness.revalidate().map_err(internal),
             Some(ProcessWitness::Claude(witness)) => witness.revalidate().map_err(claude_role_error),
             None => require_absent_witness(&self.dir, if self.claude { "claude" } else { "native" }),
-        }
+        }?;
+        self.kernel.validate().map_err(|error| refused(format!("admitted connector generation ended during validation: {error:#}")))
     }
 }
 
@@ -213,7 +220,8 @@ impl Proof {
             Custody::Retained { owner, .. } => require_absent_witness(
                 &source_agent_dir(&self.state, &self.fence), &owner.provider,
             ),
-        }
+        }?;
+        self.peer.require_kernel()
     }
     pub fn wrapper(&self) -> Option<Process> {
         self.physical.as_ref().map(|physical| physical.wrapper)
@@ -229,6 +237,9 @@ impl Proof {
         let stamp = record["writtenAtMs"].as_u64().ok_or_else(|| refused("provider stamp absent"))?;
         let current = fractal_drivers::harness_state::read_raw_at(raw, None, stamp);
         let fields = &publication.claim.fields;
+        // Queued state from an older ownership is disposed by the connector against its
+        // runtime-bound spool snapshot, before publication. Never use historical producer
+        // provenance to relax the current role/session proof at this boundary.
         if publication.claim.kind == "harness.observed"
             && (fields.get("evidence_incarnation").and_then(serde_json::Value::as_str) != current.evidence_incarnation.as_deref()
                 || fields.get("ownership_sequence").and_then(serde_json::Value::as_u64) != current.ownership_sequence) {
@@ -262,7 +273,8 @@ impl Proof {
                 self.state.store.check_mailbox_custody_fence(fence)?;
                 self.state.store.mailbox_session_active(fence, owner)
             }
-        }
+        }?;
+        self.peer.require_kernel()
     }
 }
 

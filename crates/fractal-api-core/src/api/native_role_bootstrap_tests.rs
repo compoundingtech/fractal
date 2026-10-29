@@ -53,7 +53,22 @@ control.on('data', (chunk) => {
   if (!input.includes('\n')) return;
   const facts = JSON.parse(input.trim());
   control.removeAllListeners('data');
-  register(child, httpPath, {...facts, subject:identity, harness});
+  // Older provider integrations may still send their bare launch identity directly.
+  // Exercise the daemon's canonicalization independently, then the actual asset helper.
+  const body = JSON.stringify({...facts, subject:identity, harness, connector_pid:child.pid});
+  const request = http.request({socketPath:httpPath, path:'/v1/native-connectors/bootstrap',
+    method:'POST', agent:false, headers:{'content-type':'application/json',
+      'content-length':Buffer.byteLength(body)}}, (response) => {
+    response.resume();
+    response.on('end', () => {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw Error(`direct bootstrap refused: ${response.statusCode}`);
+      }
+      register(child, httpPath, {...facts, subject:identity, harness});
+    });
+  });
+  request.on('error', (error) => { throw error; });
+  request.end(body);
 });
 process.on('exit', () => child.kill());
 "#;
@@ -107,6 +122,12 @@ async fn declared_bootstrap(crate_name: &str, harness: &'static str, canonical_i
     let (connector, _) = connector_listener.accept().await.unwrap();
     let connector_kernel = super::super::local_peer_process(&connector).unwrap();
     assert_eq!(connector_kernel.pid(), connector_pid);
+    let connector_kernel = if canonical_identity {
+        connector_kernel
+    } else {
+        // Exercise fresh (not retained) custody with the older-kernel generation proof too.
+        fractal_runtime::PeerProcessIdentity::capture_generation(connector_pid).unwrap()
+    };
     let mut connector = BufReader::new(connector);
     line.clear();
     connector.read_line(&mut line).await.unwrap();
@@ -134,19 +155,27 @@ async fn declared_bootstrap(crate_name: &str, harness: &'static str, canonical_i
     assert!(state.store.current_mailbox_fence(subject, &incarnation, "delivery").unwrap().is_none());
     let facts = json!({"runtime_incarnation":incarnation,"session":session,"sequence":sequence});
     control.get_mut().write_all(format!("{facts}\n").as_bytes()).await.unwrap();
-    let (http, _) = http_listener.accept().await.unwrap();
-    let accepted = super::super::local_peer_process(&http).unwrap();
-    assert_eq!(accepted.pid(), provider_kernel.pid());
-    let local_peer = super::super::LocalPeer { pid:accepted.pid(), peer_process:Some(accepted), ancestor:None };
-    let app = axum::Router::new().route("/v1/native-connectors/bootstrap", post(bootstrap))
-        .with_state(state.clone()).layer(axum::Extension(local_peer));
-    let service = hyper::service::service_fn(move |request: axum::http::Request<hyper::body::Incoming>| {
-        app.clone().oneshot(request.map(Body::new))
-    });
-    let server = tokio::spawn(async move {
-        hyper::server::conn::http1::Builder::new()
-            .serve_connection(hyper_util::rt::TokioIo::new(http), service).await.unwrap();
-    });
+    let mut servers = Vec::new();
+    for _ in 0..2 {
+        let (http, _) = http_listener.accept().await.unwrap();
+        let accepted = super::super::local_peer_process(&http).unwrap();
+        assert_eq!(accepted.pid(), provider_kernel.pid());
+        let accepted = if canonical_identity {
+            accepted
+        } else {
+            fractal_runtime::PeerProcessIdentity::capture_generation(accepted.pid()).unwrap()
+        };
+        let local_peer = super::super::LocalPeer { pid:accepted.pid(), peer_process:Some(accepted), ancestor:None };
+        let app = axum::Router::new().route("/v1/native-connectors/bootstrap", post(bootstrap))
+            .with_state(state.clone()).layer(axum::Extension(local_peer));
+        let service = hyper::service::service_fn(move |request: axum::http::Request<hyper::body::Incoming>| {
+            app.clone().oneshot(request.map(Body::new))
+        });
+        servers.push(tokio::spawn(async move {
+            hyper::server::conn::http1::Builder::new()
+                .serve_connection(hyper_util::rt::TokioIo::new(http), service).await.unwrap();
+        }));
+    }
     line.clear();
     connector.read_line(&mut line).await.unwrap();
     assert_eq!(line, "ready\n", "only successful real bootstrap releases the hook's FD3 gate");
@@ -155,7 +184,7 @@ async fn declared_bootstrap(crate_name: &str, harness: &'static str, canonical_i
     assert_eq!(proof.wrapper(), Some(wrapper));
     // Registration proves custody, not an implicit mailbox lease or readiness report.
     assert!(state.store.current_mailbox_fence(subject, &incarnation, "delivery").unwrap().is_none());
-    server.abort();
+    for server in servers { server.abort(); }
 }
 
 #[tokio::test]

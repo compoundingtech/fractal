@@ -246,6 +246,25 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn queued_observation_disposition_does_not_relax_publication_session_freshness() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::state(root.path());
+        runtime(&state, "native-one");
+        for (session, sequence) in [("predecessor", 1), ("event-provider", 2)] {
+            let mut input = event(1, "working");
+            input.claim.fields.insert("evidence_incarnation".into(), json!(session));
+            input.claim.fields.insert("ownership_sequence".into(), json!(sequence));
+            let (code, rejected) = post(&state, &input, SEAT).await;
+            assert!(!code.is_success(), "{rejected}");
+            assert!(rejected.to_string().contains("native-role-refused"), "{rejected}");
+            assert!(state.store.local_observations_tail(100).unwrap().is_empty());
+        }
+        let (code, accepted) = post(&state, &event(1, "idle"), SEAT).await;
+        assert_eq!(code, StatusCode::OK, "{accepted}");
+        assert_eq!(state.store.local_observations_tail(100).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn native_readiness_and_idle_events_wake_reconcile_but_replay_does_not() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::state(root.path());

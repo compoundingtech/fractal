@@ -6,19 +6,23 @@ use anyhow::Context as _;
 use std::os::fd::OwnedFd;
 #[cfg(target_os = "linux")]
 use std::{os::fd::AsRawFd as _, sync::Arc};
+#[cfg(target_os = "linux")]
+use crate::process::process_identity;
+#[cfg(target_os = "macos")]
+use crate::process::peer_process_identity as process_identity;
 
 /// The original connector's process generation. A socket may outlive this process.
 #[derive(Clone, Debug)]
 pub struct PeerProcessIdentity {
     pid: u32,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     start_token: u64,
     #[cfg(target_os = "linux")]
-    pidfd: Arc<OwnedFd>,
+    pidfd: Option<Arc<OwnedFd>>,
 }
 
 impl PeerProcessIdentity {
-    /// Capture immediately at accept using the socket's mandatory SO_PEERPIDFD witness.
+    /// Capture immediately at accept using the socket's preferred SO_PEERPIDFD witness.
     pub fn capture(pid: u32, pidfd: OwnedFd) -> Result<Self> {
         #[cfg(target_os = "linux")]
         {
@@ -28,15 +32,44 @@ impl PeerProcessIdentity {
             let result = unsafe { libc::poll(&mut poll, 1, 0) };
             anyhow::ensure!(result == 0 && poll.revents == 0,
                 "socket connector pidfd is exited or invalid at accept");
-            let (state, start_token) = crate::process::process_identity(pid)?;
+            let (state, start_token) = process_identity(pid)?;
             anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x'), "socket connector has exited");
-            let identity = Self { pid, start_token, pidfd: Arc::new(pidfd) };
+            let identity = Self { pid, start_token, pidfd: Some(Arc::new(pidfd)) };
             identity.validate()?;
             Ok(identity)
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (pid, pidfd);
+            anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
+        }
+    }
+
+    /// Capture immediately after reading SO_PEERCRED / LOCAL_PEERPID from an
+    /// accepted socket. The caller must supply that PID, never a request PID or
+    /// the PID of a process that merely holds an inherited socket.
+    ///
+    /// This fallback checks a live process's start token at capture and on each
+    /// validation. Unlike a kernel pidfd it cannot exclude PID reuse before the
+    /// first lookup, or generations colliding at the platform clock resolution.
+    /// Callers must validate both before and after using process-derived proof.
+    pub fn capture_generation(pid: u32) -> Result<Self> {
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        {
+            let (state, start_token) = process_identity(pid)?;
+            anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x'), "socket connector has exited");
+            let identity = Self {
+                pid,
+                start_token,
+                #[cfg(target_os = "linux")]
+                pidfd: None,
+            };
+            identity.validate()?;
+            Ok(identity)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = pid;
             anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
         }
     }
@@ -50,29 +83,43 @@ impl PeerProcessIdentity {
         #[cfg(target_os = "linux")]
         {
             crate::procfs::require_matching_procfs()?;
-            // A pidfd is readable after exit; invalid/other descriptor types must
-            // never turn into a start-token-only authorization.
-            let mut poll = libc::pollfd { fd: self.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let Some(pidfd) = &self.pidfd else {
+                return self.validate_generation();
+            };
+            // An invalid pidfd must never downgrade to start-token authorization.
+            let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
             let result = unsafe { libc::poll(&mut poll, 1, 0) };
             if result < 0 {
                 return Err(std::io::Error::last_os_error()).context("poll connector pidfd");
             }
             anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector pidfd is exited or invalid");
-            let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", self.pidfd.as_raw_fd()))?;
+            let info = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", pidfd.as_raw_fd()))?;
             let pid = info.lines().find_map(|line| line.strip_prefix("Pid:")).and_then(|pid| pid.trim().parse::<u32>().ok());
             anyhow::ensure!(pid == Some(self.pid), "socket connector pidfd does not identify the accepted peer");
-            let (state, token) = crate::process::process_identity(self.pid)?;
+            let (state, token) = process_identity(self.pid)?;
             anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x') && token == self.start_token,
                 "socket connector exited or its PID was reused");
             // Check again after procfs: exit/reuse during that read cannot replace
             // the exact kernel witness with a merely matching numeric candidate.
-            let mut poll = libc::pollfd { fd: self.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            let mut poll = libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
             let result = unsafe { libc::poll(&mut poll, 1, 0) };
             anyhow::ensure!(result == 0 && poll.revents == 0, "socket connector exited during validation");
             Ok(())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            self.validate_generation()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         anyhow::bail!("socket connector generation witnesses are unavailable on this platform")
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn validate_generation(&self) -> Result<()> {
+        let (state, token) = process_identity(self.pid)?;
+        anyhow::ensure!(!matches!(state, 'Z' | 'X' | 'x') && token == self.start_token,
+            "socket connector exited or its PID was reused");
+        Ok(())
     }
 }
 
@@ -242,7 +289,7 @@ mod tests {
         // socket query nor relabeling its original kernel pidfd gives its identity.
         assert_eq!(accepted_socket_identity(&socket).pid(), connector.id());
         assert!(PeerProcessIdentity::capture(
-            descendant_pid, identity.pidfd.as_ref().try_clone().unwrap(),
+            descendant_pid, identity.pidfd.as_ref().unwrap().as_ref().try_clone().unwrap(),
         ).is_err());
         identity.validate().unwrap();
 
@@ -260,9 +307,51 @@ mod tests {
         // The connector cannot reap a descendant that deliberately outlives it.
         // Wait on the descendant's exact generation instead of a timed probe.
         let mut exited = libc::pollfd {
-            fd: descendant_identity.pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0,
+            fd: descendant_identity.pidfd.as_ref().unwrap().as_raw_fd(), events: libc::POLLIN, revents: 0,
         };
         assert_eq!(unsafe { libc::poll(&mut exited, 1, -1) }, 1);
         assert_ne!(exited.revents & libc::POLLIN, 0);
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod generation_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_accepts_live_generation_and_refuses_reuse() {
+        let mut identity = PeerProcessIdentity::capture_generation(std::process::id()).unwrap();
+        identity.validate().unwrap();
+        #[cfg(target_os = "linux")]
+        assert!(identity.pidfd.is_none());
+        // Deterministically model an observed different generation, without
+        // forcing PID reuse or claiming uniqueness within clock resolution.
+        identity.start_token = identity.start_token.wrapping_add(1);
+        assert!(identity.validate().is_err());
+    }
+
+    #[test]
+    fn generation_waiting_child() {
+        if std::env::var_os("FRACTAL_GENERATION_WAITING_CHILD").is_some() {
+            use std::io::Read as _;
+            std::io::stdin().read_exact(&mut [0_u8]).unwrap();
+        }
+    }
+
+    #[test]
+    fn fallback_refuses_exit_at_capture_and_after_capture() {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "peer_process::generation_tests::generation_waiting_child"])
+            .env("FRACTAL_GENERATION_WAITING_CHILD", "1")
+            .stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
+        let pid = child.id();
+        let identity = PeerProcessIdentity::capture_generation(pid).unwrap();
+        identity.validate().unwrap();
+        child.stdin.take().unwrap().write_all(b"x").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert!(identity.validate().is_err());
+        assert!(PeerProcessIdentity::capture_generation(pid).is_err());
     }
 }

@@ -8197,6 +8197,88 @@ async fn committed_observations_survive_daemon_outage_lost_ack_and_driver_reexec
     assert_eq!(store.local_observations_tail(100).unwrap().len(), 1);
     server.abort();
 }
+
+#[tokio::test]
+async fn superseded_session_observations_are_disposed_once_before_reopened_queue_publishes() {
+    for driver in ["omp", "pi"] {
+        assert_superseded_session_queue_reopens(driver).await;
+    }
+}
+
+async fn assert_superseded_session_queue_reopens(driver: &'static str) {
+    use axum::{Json, Router, routing::post};
+    use fractal_drivers::harness_state::{Activity, BlockedOn, InputBuffer, Observation, Writer};
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+    let root = tempfile::tempdir().unwrap();
+    fractal_drivers::harness_events::enable(root.path(), "runtime-a").unwrap();
+    let old_sequence = fractal_drivers::harness_state::claim(
+        root.path(), "example/seat", driver, "provider-old",
+    ).unwrap();
+    let mut old = Writer::new(root.path(), "example/seat", driver, Some("pty".into()))
+        .with_ownership("provider-old", old_sequence);
+    old.observe(Observation::new(Activity::Active, BlockedOn::None, InputBuffer::Unknown)).unwrap();
+
+    // The daemon is unavailable while the same wrapper switches provider sessions.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let client = Client::new(fractal_daemon::client::Endpoint::Http(format!("http://{address}")));
+    let mut observations = NativeObservations::start(root.path(), "runtime-a").unwrap();
+    let mut ready = false;
+    assert!(observations.drain(&client, "agent/example/seat", driver, &mut ready).await.is_err());
+    ready = false;
+    let current_sequence = fractal_drivers::harness_state::claim(
+        root.path(), "example/seat", driver, "provider-current",
+    ).unwrap();
+    assert!(current_sequence > old_sequence);
+    drop(observations);
+    let mut observations = NativeObservations::start(root.path(), "runtime-a").unwrap();
+    observations.drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
+    assert!(!ready, "a superseded active observation must not mark this session ready");
+    assert!(!observations.native_state_seen);
+    assert_eq!(observations.provider_incarnation.as_deref(), Some("provider-current"));
+    assert!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
+    observations.drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
+    assert!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
+
+    let mut current = Writer::new(root.path(), "example/seat", driver, Some("pty".into()))
+        .with_ownership("provider-current", current_sequence);
+    current.observe(Observation::new(Activity::Idle, BlockedOn::None, InputBuffer::Unknown)).unwrap();
+    assert!(observations.drain(&client, "agent/example/seat", driver, &mut ready).await.is_err());
+    assert_eq!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().len(), 1);
+    drop(observations);
+
+    let posted = Arc::new(AtomicUsize::new(0));
+    let store = Arc::new(Store::open_memory("amber").unwrap());
+    let app = Router::new().route("/v1/harness-events", post({
+        let posted = posted.clone();
+        let store = store.clone();
+        move |Json(request): Json<fractal_daemon::harness_events::Publication>| {
+            let posted = posted.clone();
+            let store = store.clone();
+            async move {
+                assert_eq!(request.claim.fields["evidence_incarnation"], json!("provider-current"));
+                assert_eq!(request.claim.fields["ownership_sequence"], json!(current_sequence));
+                posted.fetch_add(1, Ordering::SeqCst);
+                let record = store.append_claim(&request.claim).unwrap();
+                Json(json!({"api_version":"st3.v1","value":record}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut reopened = NativeObservations::start(root.path(), "runtime-a").unwrap();
+    reopened.drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
+    assert!(ready);
+    assert!(fractal_drivers::harness_events::pending(root.path(), 100).unwrap().is_empty());
+    drop(reopened);
+    NativeObservations::start(root.path(), "runtime-a").unwrap()
+        .drain(&client, "agent/example/seat", driver, &mut ready).await.unwrap();
+    assert_eq!(posted.load(Ordering::SeqCst), 1, "disposed events never return after reopen");
+    assert_eq!(store.local_observations_tail(100).unwrap().len(), 1);
+    server.abort();
+}
 #[tokio::test(start_paused = true)]
 async fn resumed_driver_retry_ticks_wait_for_settle_without_delaying_delivery() {
     let started = tokio::time::Instant::now();

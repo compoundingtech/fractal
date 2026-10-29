@@ -1514,7 +1514,11 @@ mod tests {
             let pidfd = unsafe { OwnedFd::from_raw_fd(fd as libc::c_int) };
             Some(fractal_runtime::PeerProcessIdentity::capture(pid, pidfd).unwrap())
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            fractal_runtime::PeerProcessIdentity::capture_generation(pid).ok()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = pid;
             None
