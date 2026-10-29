@@ -902,6 +902,12 @@ impl Store {
         participants.insert(self.origin.clone());
         let verified = first_verifications(&claims, &checkpoint);
         let seals = newest_seals(&claims, &checkpoint);
+        // An envelope this node holds but has not validated is in its sealed identities without
+        // its claims, so its proof could not agree with a node that admitted them: sealing or
+        // proving now would only spend a proof on a checkpoint that cannot become stable.
+        if !verified.contains_key(&self.origin) && self.holds_unvalidated_envelopes_before(cut)? {
+            return Ok(actions);
+        }
         if !verified.contains_key(&self.origin) {
             // Register the cut and seal row with the capture guard, as a capture does, so its
             // triggers fence the history the seal reads and the next pass reuses the digest
@@ -947,6 +953,20 @@ impl Store {
             }
         }
         Ok(actions)
+    }
+
+    /// Whether this node holds an envelope dated before `cut` that it has not validated, whose
+    /// claims are therefore not admitted here.
+    pub fn holds_unvalidated_envelopes_before(&self, cut: u128) -> Result<bool> {
+        let cut = i64::try_from(cut)?;
+        self.read_snapshot(|_| {
+            Ok(self.readers.get().query_row(
+                "SELECT EXISTS(SELECT 1 FROM replica_envelopes
+                 WHERE receipt_state='pending' AND CAST(accepted_at_unix_ms AS INTEGER) < ?1)",
+                [cut],
+                |row| row.get(0),
+            )?)
+        })
     }
 
     pub fn verify_checkpoint(

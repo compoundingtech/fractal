@@ -1233,3 +1233,43 @@ fn the_agent_card_fold_matches_per_subject_reductions_after_a_trim() {
         crate::store::card_fold_tests_shared::assert_card_fold_parity(node, &indexes);
     }
 }
+
+/// Mark `writer`'s envelopes on `store` as received but not validated, or validated again.
+fn set_receipt(store: &Store, writer: &str, state: &str) {
+    store
+        .connection
+        .write()
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-hdea17c1f14d1 owner=fractal_store::store::checkpoint_agreement_tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_envelopes SET receipt_state=?2 WHERE writer=?1",
+            params![writer, state],
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_node_holding_unvalidated_envelopes_before_the_cut_neither_seals_nor_proves() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let cut = newest_due_cut(context.now_unix_ms);
+    let [alder, birch] = ["alder", "birch"].map(|name| Store::open_memory(name).unwrap());
+    observe(&alder, 2);
+    observe(&birch, 2);
+    sync(&[&alder, &birch]);
+
+    // Alder received birch's envelopes but did not validate them: its sealed identities would
+    // name envelopes whose claims it does not hold, so its proof could not agree with birch's.
+    set_receipt(&alder, "birch", "pending");
+    assert!(alder.holds_unvalidated_envelopes_before(cut).unwrap());
+    assert!(step(&alder, &context).is_empty(), "sealed while holding unvalidated envelopes");
+    set_receipt(&alder, "birch", "validated");
+    assert_eq!(kinds(&step(&alder, &context)), ["sealed"]);
+    assert_eq!(kinds(&step(&birch, &context)), ["sealed"]);
+    sync(&[&alder, &birch]);
+
+    // Nor does it prove, once every seal matches, while an envelope before the cut is pending.
+    set_receipt(&alder, "birch", "pending");
+    assert!(step(&alder, &context).is_empty(), "proved while holding unvalidated envelopes");
+    set_receipt(&alder, "birch", "validated");
+    assert!(!alder.holds_unvalidated_envelopes_before(cut).unwrap());
+    assert_eq!(kinds(&step(&alder, &context)), ["verified"]);
+}
