@@ -6467,6 +6467,7 @@ impl Store {
                 )?;
                 transaction.commit()?;
                 self.seeded_batch_rowid.store(prepared.through, Ordering::Release);
+                crate::windows::holds::covered("sealed batches", prepared.batches.len());
                 // The FIFO writer services already queued requests before the next bounded loan.
                 return Ok(true);
             }
@@ -7134,6 +7135,7 @@ impl Store {
                 Ok((received, duplicate, signatures, received_at))
             })(&transaction)?;
             transaction.commit().map_err(internal)?;
+            crate::windows::holds::covered("received envelopes", input.envelopes.len());
             counts
         };
         // Only a response to our own dial is carrier evidence for a locally initiated
@@ -7615,6 +7617,7 @@ impl Store {
                         [current_index_tx(&pass)?.to_string()])?;
                 }
                 pass.commit()?;
+                crate::windows::holds::covered("admitted envelopes", next - first);
                 #[cfg(any(test, feature = "test-support"))]
                 ADMISSION_TRANSACTIONS.with(|count| count.set(count.get() + 1));
             }
@@ -8068,6 +8071,11 @@ impl Store {
                         )?;
                         stages.enter("commit");
                         transaction.commit_with_deferred_runtime()?;
+                        // A fallback replay folds the whole log in this one hold.
+                        crate::windows::holds::covered(
+                            "projected claims",
+                            usize::try_from(if replayed { through } else { count }).unwrap_or(usize::MAX),
+                        );
                     }
                     if !replayed {
                         processed += count;
@@ -8183,6 +8191,7 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
+        let applying = repairs.len();
         let mut changed = 0;
         let mut operation_ids = BTreeSet::new();
         for (repair_claim, body) in repairs {
@@ -8219,6 +8228,7 @@ impl Store {
             repair_operations_tx(&transaction, &operation_ids.into_iter().collect::<Vec<_>>())?;
         }
         transaction.commit()?;
+        crate::windows::holds::covered("applied repairs", applying);
         drop(connection);
         if changed != 0 {
             self.runtime.forget_views();
