@@ -268,7 +268,7 @@ async fn wait_until_for(limit: Duration, mut condition: impl FnMut() -> bool) ->
 /// A seat process launched with the environment the reconciler gives it, but with every home
 /// and state directory inside the test root.
 fn seat_command(root: &Path, socket: &Path) -> Command {
-    let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
     // Its own process group, so stopping the seat also stops the stand-in provider.
     command
         .process_group(0)
@@ -732,7 +732,7 @@ time.sleep(300)
             .env("ST_AGENT", seat)
             .env("ST3_MAILBOX_TRANSPORT", "push")
             .args(["driver", "claude", "--subject", seat, "--", "python3", "-c", provider,
-                test_env!("CARGO_BIN_EXE_st3-fixture")])
+                test_env!("CARGO_BIN_EXE_fractal-fixture")])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -2270,7 +2270,7 @@ time.sleep(300)
                 "python3",
                 "-c",
                 provider,
-                test_env!("CARGO_BIN_EXE_st3-fixture"),
+                test_env!("CARGO_BIN_EXE_fractal-fixture"),
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

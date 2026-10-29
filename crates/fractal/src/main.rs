@@ -239,7 +239,7 @@ fn cli_command_with_bindings(
 /// supported cap, so integration tests check what converges without waiting out pass spacing;
 /// a test about spacing sets its cap in the config. The binary name is a compile-time value.
 fn default_max_passes_per_minute() -> u32 {
-    if env!("CARGO_BIN_NAME") == "st3-fixture" {
+    if env!("CARGO_BIN_NAME") == "fractal-fixture" {
         600
     } else {
         fractal_daemon::config::DEFAULT_MAX_PASSES_PER_MINUTE
@@ -790,7 +790,7 @@ struct UninstallArgs {
     /// Leave the fleet without reaching any member first.
     #[arg(long)]
     offline: bool,
-    /// Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty).
+    /// Keep the installed Fractal executables (fractal, st3, st, fractal-migrate, and pty).
     #[arg(long)]
     keep_binaries: bool,
     /// Also required when this machine's graph exists nowhere else.
@@ -4767,7 +4767,7 @@ fn cli_main() -> ExitCode {
     // Cargo bakes the target name into each executable. The installed st3 binary cannot
     // enable this with an argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell = (env!("CARGO_BIN_NAME") == "st3-fixture")
+    let _fixture_shell = (env!("CARGO_BIN_NAME") == "fractal-fixture")
         .then(fractal_daemon::test_support::initialize_fixture);
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { fractal_drivers::reexec::take_resume_environment() };
@@ -18087,7 +18087,7 @@ impl NativeMailbox {
             }
             Some(fractal_daemon::mailbox::Frame::Seat { seat }) => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "st3-fixture"
+                if env!("CARGO_BIN_NAME") == "fractal-fixture"
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
                     fs::write(PathBuf::from(root).join("title-stream-admitted"), b"seat")?;

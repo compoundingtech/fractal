@@ -37,7 +37,7 @@ fn a_seats_subagents_appear_renew_and_end() {
             "python3",
         ])
         .arg(repo.join("scripts/fractal-subagents-eval/run"))
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg(&evidence)
         .output()
         .expect("run the subagent seat eval");

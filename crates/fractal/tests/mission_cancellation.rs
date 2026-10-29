@@ -50,7 +50,7 @@ impl Daemon {
         }
         let log = File::create(self.root.join("daemon.log")).unwrap();
         self.child = Some(
-            fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+            fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
                 .env_clear()
                 .env("HOME", &self.root)
                     .env(
@@ -93,7 +93,7 @@ impl Daemon {
     }
 
     fn command(&self, args: &[&str]) -> Value {
-        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .env_clear()
             .env("HOME", &self.root)
             .env("ST3_DAEMON_WAIT", "0")
