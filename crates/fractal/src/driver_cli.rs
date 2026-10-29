@@ -1596,6 +1596,24 @@ async fn run_pi_channel(
         if cli_output::closed() {
             return Ok(());
         }
+        if !binding {
+            // Re-exec can carry complete frames from a still-unbound predecessor.
+            // They must run after admission even if stdin never produces another chunk.
+            let mut publish = false;
+            while let Some(line) = state.lines.next_line() {
+                publish |= accept_managed_channel_frame(
+                    &mut state, &mut observer, &line,
+                    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+                    subject,
+                    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
+                )?;
+            }
+            if publish
+                && let Err(error) = state.pending.publish(client, subject, driver, &incarnation, &session).await
+            {
+                warn_pi_channel(subject, &error, &mut last_warning);
+            }
+        }
         tokio::select! {
             fence = &mut initial_bind, if binding => {
                 state.pending.fence = fence?;
@@ -1860,8 +1878,8 @@ async fn run_pi_channel(
                     None => None,
                 };
                 if let Some(binary) = ready {
-                    // Take every byte the reader already consumed and act on every complete
-                    // frame; only a partial frame crosses the exec.
+                    // Preserve every consumed byte. Before admission, even complete frames
+                    // cross exec untouched: accepting them can publish observations or PTY input.
                     if let Some(reader) = reader.take() {
                         tokio::task::block_in_place(|| reader.stop());
                     }
@@ -1875,13 +1893,15 @@ async fn run_pi_channel(
                             }
                         }
                     }
-                    while let Some(line) = state.lines.next_line() {
-                        publish |= accept_managed_channel_frame(
-                            &mut state, &mut observer, &line,
-                            // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
-                            subject,
-                            // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
-                        )?;
+                    if !binding {
+                        while let Some(line) = state.lines.next_line() {
+                            publish |= accept_managed_channel_frame(
+                                &mut state, &mut observer, &line,
+                                // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge — DELETE at contraction — https://app.notion.com/p/OMP-interrupted-ask-resume-bridge-st3-3ede3d41f4a3818a9e37ec160c006bbf
+                                subject,
+                                // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-02-omp-ask-resume-bridge
+                            )?;
+                        }
                     }
                     if publish && !binding {
                         let _ = state
