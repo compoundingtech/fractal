@@ -44,21 +44,19 @@ async fn daemon(root: &Path, name: &str, key: Arc<MemberKey>, anchor: &MemberKey
         json!({"status":"running","features":{"owned_sets":1}}),
     );
     let socket = root.join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: name.into(),
-        state_dir: root.clone(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: Some(FLEET.into()),
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: name.into(),
+    state_dir: root.clone(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: Some(FLEET.into()),
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state))
@@ -330,7 +328,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
         let previous = previous.clone();
         tokio::task::spawn_blocking(move || {
             let mut command =
-                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
             command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
@@ -503,7 +501,7 @@ async fn disconnected_daemons_heal_to_newest_source_and_pruning_requires_confirm
     ] {
         let socket = root.path().join("amber/st3.sock");
         let output = tokio::task::spawn_blocking(move || {
-            fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+            fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--json", "--endpoint"])
                 .arg(socket)
@@ -620,6 +618,14 @@ impl fractal_daemon::reconcile::RuntimeControl for RolloutRuntime {
 }
 
 fn native_observation(store: &Store, subject: &str, incarnation: &str) {
+    // The fixture producer retries on each reconciliation pass, just as the native
+    // report waits for the graph to acknowledge the newly started runtime.
+    if !store.latest_claim(subject, Some("runtime.observed")).unwrap()
+        .is_some_and(|runtime| runtime.body["fields"]["status"] == "running"
+            && runtime.body["fields"]["incarnation_id"].as_str() == Some(incarnation))
+    {
+        return;
+    }
     append(
         store,
         subject,
@@ -837,7 +843,7 @@ async fn manual_rollout_publishes_with_automatic_member_and_only_moves_on_explic
     let (shown, output) = tokio::task::spawn_blocking(move || {
         let command = || {
             let mut command =
-                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
             command.env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
                 .env_remove("ST_MISSION_RUN")
                 .args(["--endpoint"])
@@ -1174,7 +1180,7 @@ async fn manual_authored_selection_publication(
 
     let socket = d.client.socket_path().unwrap().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .args(["--endpoint"])
             .arg(socket)
@@ -1604,7 +1610,7 @@ async fn suspended_authored_selection_refuses_start_and_resumes_the_recorded_ses
     assert_eq!(held.code.as_deref(), Some("authored-session-selection"));
     let socket = d.client.socket_path().unwrap().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .env_remove("ST_AGENT").env_remove("FRACTAL_AGENT").env_remove("ST_MISSION_RUN")
             .args(["--endpoint"]).arg(socket)
             .args(["agents", "start", "garden/orchard", "--as", "person/operator"])

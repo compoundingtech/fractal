@@ -23,13 +23,14 @@ export function AlertsStrip({ agentId, entries }: { agentId: string; entries: Re
   const alerts = useMemo(() => alertsIn(data.attention, agentId, caps?.session_actor), [data.attention, agentId, caps?.session_actor]);
   const [toggled, setToggled] = useState<ReadonlySet<string>>(new Set());
   const calls = useMemo(() => pendingCalls(entries), [entries]);
-  // One line until it is opened, as in stui: the cards take the conversation's room only when asked for.
+  // One line until it is opened, as in the Fractal terminal UI: the cards take the conversation's room only when asked for.
   const [expanded, setExpanded] = useState(false);
+  const { palette } = useTextAppearance();
   if (!alerts.length) return null;
   // Opened, one alert starts open; with several, each opens on a tap.
   const isOpen = (id: string) => (alerts.length === 1) !== toggled.has(id);
   const toggle = (id: string) => setToggled(previous => { const next = new Set(previous); if (next.has(id)) next.delete(id); else next.add(id); return next; });
-  return <View style={{ backgroundColor: theme.mantle }}>
+  return <View style={{ backgroundColor: palette.mantle }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${alerts.length} alert${alerts.length === 1 ? '' : 's'}, ${expanded ? 'hide' : 'show'}`} onPress={() => setExpanded(open => !open)} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 6 }}>
       <T numberOfLines={1} style={{ flex: 1 }}><T bold color={theme.person}>◆ {alerts.length} alert{alerts.length === 1 ? '' : 's'}</T><T dim> · </T><T>{alerts[0]!.title}</T></T>
       <T dim>{expanded ? '▾ hide' : '▸ show'}</T>
@@ -45,7 +46,8 @@ function AlertCard({ item, agentId, open, onToggle, calls }: { item: KeptAttenti
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const seats = (item.conversation_ids ?? []).filter(id => id !== agentId).map(id => { const seat = data.agents.find(candidate => candidate.id === id); return seat ? agentName(seat) : id.replace(/^agent\//, ''); });
   const from = (() => { const asker = data.agents.find(candidate => candidate.id === (item.requester_id ?? agentId)); return asker ? agentName(asker) : (item.requester_id ?? agentId).replace(/^agent\//, ''); })();
-  return <View style={{ borderLeftWidth: 3, borderLeftColor: theme.person, backgroundColor: theme.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
+  const { palette } = useTextAppearance();
+  return <View style={{ borderLeftWidth: 3, borderLeftColor: palette.person, backgroundColor: palette.surface0, borderRadius: 6, padding: 8, gap: 6 }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onToggle}>
       <T numberOfLines={open ? undefined : 1}><T bold color={theme.person}>◆ alert  </T><T bold>{item.title}</T></T>
       {open ? null : <T dim numberOfLines={1}>{attentionKindLabel(item.attention_kind)} · waited {ago(item.requested_at)}</T>}
@@ -123,7 +125,7 @@ function PromptAnswerView({ item, calls }: { item: KeptAttention; calls: Pending
           return <Button key={choice} label={`${on ? '✓ ' : ''}${option.label}`} color={on ? theme.green : theme.text} disabled={disabled} onPress={() => choose(index, choice, question.multiSelect)} />;
         })}
       </View>
-    </View>) : shown.map(each => <View key={each.id} style={{ backgroundColor: appearance.system ? appearance.colors.grouped : theme.crust, borderRadius: 4, padding: 8, gap: 2 }}>
+    </View>) : shown.map(each => <View key={each.id} style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.crust, borderRadius: 4, padding: 8, gap: 2 }}>
       <T bold color={theme.person}>{each.tool}</T>
       {each.lines.map((line, index) => <T key={index} selectable>{line}</T>)}
     </View>)}
@@ -140,7 +142,7 @@ function PromptAnswerView({ item, calls }: { item: KeptAttention; calls: Pending
   </View>;
 }
 
-// A structured request (#1010) as stui shows it: the recommendation first, then the question, its
+// A structured request (#1010) as the Fractal terminal UI shows it: the recommendation first, then the question, its
 // summary, reasons and links, and each named answer with what it does. A tap on an answer asks
 // to confirm, then sends it by its id.
 type Structured = NonNullable<Parameters<ReturnType<typeof useStore>['actions']['done']>[0]['request']>;
@@ -156,7 +158,7 @@ export function StructuredRequestView({ item, request, from, onAnswered }: { ite
     { text: 'Cancel', style: 'cancel' },
     { text: 'Send', onPress: () => void actions.done(item, answer.label, answer.id).then(done => { if (done) onAnswered(); }) },
   ]);
-  // The images the ask carries, read from st by its person step, as a message's are by the message.
+  // The images the ask carries, read from Fractal by its person step, as a message's are by the message.
   const images = useMemo(() => requestImages(request, item.source_id), [request, item.source_id]);
   const viewport = useWindowViewport();
   const words = () => Alert.prompt(`Answer ${from}`, item.title, text => { if (text.trim()) void actions.done(item, text.trim()).then(done => { if (done) onAnswered(); }); });
@@ -193,7 +195,7 @@ export function RequestQuestion({ text }: { text: string }) {
   </View>;
 }
 
-// stui's answers: Yes and No for a yes-or-no question, words, or Nothing to do. Each completes
+// The Fractal terminal UI's answers: Yes and No for a yes-or-no question, words, or Nothing to do. Each completes
 // the waiting step with a short reason, after the person confirms it.
 export function RequestAnswers({ item, from, onAnswered }: { item: Parameters<ReturnType<typeof useStore>['actions']['done']>[0]; from: string; onAnswered: () => void }) {
   const { busy, status, actions } = useStore();

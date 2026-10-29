@@ -40,7 +40,7 @@ impl Daemon {
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "[reconcile]\nmax_passes_per_minute = 600\n").unwrap();
         let log = File::create(root.join("daemon.log")).unwrap();
-        let child = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        let child = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .env_clear()
             .env("HOME", root)
             .env(
@@ -109,7 +109,7 @@ impl Daemon {
     }
 
     fn run_cli_format(&self, args: &[&str], json: bool) -> std::process::Output {
-        let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
         command
             .env_clear()
             .env("HOME", &self.root)
@@ -338,6 +338,44 @@ mission "example/preview" state="ready" {
         let agents = daemon.command(&["agents", "ls", "--all"]);
         assert!(!agents.to_string().contains("example/helper"), "{agents}");
     }
+}
+
+#[test]
+fn harness_bare_codex_dry_run_uses_defaults() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("worker.kdl");
+    std::fs::write(
+        &file,
+        "version 2\nagent \"garden/worker\" {\n  workspace \"/tmp/garden\"\n  restart \"always\"\n  harness \"codex\"\n}\n",
+    )
+    .unwrap();
+    let preview = daemon.command(&[
+        "apply", file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run",
+    ]);
+    assert_eq!(preview["blockers"], serde_json::json!([]));
+}
+
+#[test]
+fn harness_explicit_executable_dry_run_is_accepted() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let daemon = Daemon::start(root.path());
+    let file = root.path().join("worker.kdl");
+    std::fs::write(
+        &file,
+        "version 2\nagent \"garden/worker\" {\n  workspace \"/tmp/garden\"\n  harness \"codex\" { executable \"/opt/codex/bin/codex\"; }\n}\n",
+    )
+    .unwrap();
+    let preview = daemon.command(&[
+        "apply", file.to_str().unwrap(), "--as", PUBLISHER, "--dry-run",
+    ]);
+    assert_eq!(preview["blockers"], serde_json::json!([]));
 }
 
 #[test]
@@ -782,7 +820,7 @@ mission "orchid/replay" state="ready" {
         health["message"].as_str().unwrap().contains(stuck),
         "{health}"
     );
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env_clear()
         .env("HOME", root.path())
         .env("ST3_DAEMON_WAIT", "0")

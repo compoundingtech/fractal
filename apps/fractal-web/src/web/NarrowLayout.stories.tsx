@@ -50,6 +50,7 @@ const emulateCoarsePointer = () => {
 
 /** Below 900 px the thread is the only thing on screen; one Agent details button opens the agent's actions and Details as a sheet. Wider windows keep the inline panel. */
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal/Narrow layout',
   component: NarrowLayoutStory,
   parameters: { layout: 'fullscreen' },
@@ -66,6 +67,24 @@ const meta = {
   },
 } satisfies Meta<typeof NarrowLayoutStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AgentRowDetails:contract-fixture',
+  'AgentRowDetailsLight:contract-fixture',
+  'BreakpointDensity:contract-fixture',
+  'BreakpointDensityCoarse:contract-fixture',
+  'DecodeStaleSidebarHosts:contract-fixture',
+  'DrawerFocusReturn:contract-fixture',
+  'Drawers:contract-fixture',
+  'DrawersFlow:contract-fixture',
+  'DrawersLight:contract-fixture',
+  'DrawersOpen:contract-fixture',
+  'SidebarDragUnmountCleanup:contract-fixture',
+  'SidebarShortcutFocusReturn:contract-fixture',
+  'TerminalToggle:contract-fixture',
+  'TerminalToggleLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 /**
@@ -78,7 +97,13 @@ const restoringStoryUrl = (play: NonNullable<Story['play']>): NonNullable<Story[
 }
 
 const workspace = async (canvasElement: HTMLElement) => {
-  await waitFor(() => expect(within(canvasElement).getByText('Let me find where groups close.')).toBeVisible(), { timeout: 60000 })
+  // Match ConversationPane's commitment observer: a real turn exists and adoption's placeholder is gone.
+  await waitFor(() => {
+    const lane = within(canvasElement).getByTestId('transcript-scroll')
+    expect(lane).toBeVisible()
+    expect(within(lane).queryByTestId('transcript-placeholder')).toBeNull()
+    expect(within(lane).getAllByTestId('transcript-turn')[0]).toBeVisible()
+  }, { timeout: 60000 })
   const narrow = window.matchMedia(narrowLayoutQuery).matches
   return { canvas: within(canvasElement), narrow, header: within(within(canvasElement).getByTestId('thread-header')) }
 }
@@ -322,32 +347,49 @@ export const SidebarDragUnmountCleanup: Story = {
       releasePointerCapture: { configurable: true, value: () => { held = false } },
     })
     const add = doc.addEventListener, remove = doc.removeEventListener
-    const captureKeys = new Set<EventListenerOrEventListenerObject>()
+    const dragKeys = new Set<EventListenerOrEventListenerObject>()
+    const activeKeys = new Set<EventListenerOrEventListenerObject>()
+    const removedKeys = new Set<EventListenerOrEventListenerObject>()
+    let recordingDrag = false
     const capture = (options: boolean | EventListenerOptions | undefined) => options === true || typeof options === 'object' && options.capture === true
     doc.addEventListener = function (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) {
-      if (type === 'keydown' && capture(options)) captureKeys.add(listener)
+      if (type === 'keydown' && capture(options)) {
+        if (recordingDrag) dragKeys.add(listener)
+        if (dragKeys.has(listener)) activeKeys.add(listener)
+      }
       return add.call(this, type, listener, options)
     }
     doc.removeEventListener = function (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) {
-      if (type === 'keydown' && capture(options)) captureKeys.delete(listener)
+      if (type === 'keydown' && capture(options) && dragKeys.has(listener)) {
+        activeKeys.delete(listener)
+        removedKeys.add(listener)
+      }
       return remove.call(this, type, listener, options)
     }
     try {
-      splitter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0, clientX: 250 }))
+      // Shell installs its Escape listener synchronously; later Find/menu listeners are unrelated.
+      recordingDrag = true
+      try {
+        splitter.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 1, button: 0, clientX: 250 }))
+      } finally { recordingDrag = false }
+      await expect(dragKeys.size).toBe(1)
       splitter.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 1, clientX: 266 }))
       await waitFor(() => expect(splitter).toHaveAttribute('aria-valuenow', String(before + 16)))
-      await expect(captureKeys.size).toBe(1)
+      await expect(activeKeys).toEqual(dragKeys)
+      await expect(removedKeys.size).toBe(0)
       await user.keyboard('{Control>}b{/Control}')
       await waitFor(() => expect(canvas.queryByRole('separator', { name: 'Agent sidebar width' })).toBeNull())
       await expect(held).toBe(false)
-      await expect(captureKeys.size).toBe(0)
+      await expect(removedKeys).toEqual(dragKeys)
+      await expect(activeKeys.size).toBe(0)
       await user.click(canvas.getByRole('button', { name: 'Conversation menu' }))
       await expect(await canvas.findByRole('menu')).toBeVisible()
       await user.keyboard('{Escape}')
       await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
       await user.keyboard('{Control>}b{/Control}')
       await expect(await canvas.findByRole('separator', { name: 'Agent sidebar width' })).toHaveAttribute('aria-valuenow', String(before + 16))
-      await expect(captureKeys.size).toBe(0)
+      await expect(removedKeys).toEqual(dragKeys)
+      await expect(activeKeys.size).toBe(0)
     } finally { doc.addEventListener = add; doc.removeEventListener = remove }
   },
 }

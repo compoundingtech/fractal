@@ -25,7 +25,7 @@ fn closed_pipe() -> Stdio {
 
 async fn run(socket: Option<&Path>, args: &[&str], closed: bool) -> Output {
     let scratch = tempfile::tempdir().unwrap();
-    let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
     command
         .env("NO_COLOR", "1")
         .env("TMPDIR", scratch.path())
@@ -74,7 +74,7 @@ async fn shared_cli_output_exits_cleanly_with_a_closed_pipe() {
 #[tokio::test]
 async fn shared_cli_output_reports_errors_other_than_a_closed_pipe() {
     let scratch = tempfile::tempdir().unwrap();
-    let output = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"))
         .env("TMPDIR", scratch.path())
         .arg("skill")
         .stdout(
@@ -186,7 +186,7 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
             .await
         });
         started.await.unwrap();
-        let child = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
+        let child = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"))
             .env("HOME", root.path())
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("TMPDIR", root.path())
@@ -254,21 +254,19 @@ mission "orchid" state="ready" {
     )
     .unwrap();
     store.apply_internal(&intent, "cli-output-fixture").unwrap();
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "cli-output".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "cli-output".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let socket = root.path().join("st3.sock");
     let served = socket.clone();
     let (ready, started) = oneshot::channel();

@@ -134,6 +134,7 @@ function MissionRowsStory({ scheme, phone = false }: { readonly scheme: Scheme; 
 
 type Args = React.ComponentProps<typeof MissionRowsStory>
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Sidebar/Mission row',
   component: MissionRowsStory,
   parameters: {
@@ -145,6 +146,16 @@ const meta = {
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, phone: { control: 'boolean' } },
 } satisfies Meta<Args>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'MissionRows:contract-fixture',
+  'MissionRowsLight:contract-fixture',
+  'Phone:contract-fixture',
+  'PhoneLight:contract-fixture',
+  'QueuedMissions:contract-fixture',
+  'QueuedMissionsLight:contract-fixture',
+]
 type Story = StoryObj<Args>
 
 const designedRow = (canvasElement: HTMLElement, title: string) => {

@@ -120,6 +120,34 @@ async fn run_handoff(
     }
 }
 
+pub(super) async fn run_persons(
+    endpoint: &Endpoint,
+    configured_person: Option<&str>,
+    command: PersonsCommand,
+    json_output: bool,
+) -> Result<()> {
+    match command {
+        PersonsCommand::Rename(args) => {
+            let actor = args.actor.as_deref().or(configured_person).context(
+                "fractal persons rename needs --as ACTOR or a configured person",
+            )?;
+            let response: Value = cli_client(endpoint)
+                .post(
+                    "/v1/persons/rename",
+                    &json!({
+                        "old_person": args.old_person,
+                        "new_person": args.new_person,
+                        "actor": actor,
+                        "idempotency_key": args.idempotency_key
+                            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string()),
+                    }),
+                )
+                .await?;
+            print_value(&response, json_output)
+        }
+    }
+}
+
 pub(super) async fn run_agents(
     endpoint: &Endpoint,
     configured_person: Option<&str>,
@@ -264,9 +292,7 @@ pub(super) async fn run_agents(
         }
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-10-st-apply-aliases — DELETE at contraction — https://www.notion.so/3f5e3d41f4a3818aadb6f4b74030c1da
         AgentsCommand::Apply(args) => {
-            eprintln!(
-                "st: agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"
-            );
+            crate::stderr_message("st", format_args!("agents apply is legacy; use fractal apply FILE --no-gate-check with the same options"));
             let client = cli_client(endpoint);
             if !args.dry_run {
                 let (kdl, source_name) = read_intent(Some(&args.file))?;
@@ -339,7 +365,22 @@ pub(super) async fn run_agents(
                     )
                     .await?
             } else {
-                let kdl = agent_start_document(&args, existing.as_ref())?;
+                let mut uris = BTreeMap::new();
+                if let Some(existing) = &existing {
+                    for reference in fractal_daemon::graph::declared_resources(&existing.desired) {
+                        let status = status_for(&client, &reference.subject).await?;
+                        if let Some(uri) = status
+                            .subjects
+                            .iter()
+                            .find(|subject| subject.subject == reference.subject)
+                            .and_then(|subject| subject.desired.as_ref())
+                            .and_then(fractal_daemon::graph::declared_uri)
+                        {
+                            uris.insert(reference.subject, uri.to_owned());
+                        }
+                    }
+                }
+                let kdl = agent_start_document(&args, existing.as_ref(), &uris)?;
                 if args.print_kdl {
                     print!("{kdl}");
                     return Ok(());
@@ -390,11 +431,7 @@ pub(super) async fn run_agents(
             Ok(())
         }
         AgentsCommand::Retire(args) => {
-            let subject = if args.subject.starts_with("agent/") {
-                args.subject.clone()
-            } else {
-                format!("agent/{}", args.subject)
-            };
+            let subject = normalize_agent_subject(&args.subject);
             let client = generated_client(endpoint, Some(&args.actor))?;
             let status = status_for(&cli_client(endpoint), &subject).await?;
             let token = status
@@ -419,7 +456,7 @@ pub(super) async fn run_agents(
                     fractal_client::AgentRetireParameters {
                         agent: subject.clone(),
                         reason: args.reason,
-                        successor: args.successor.map(|value| if value.starts_with("agent/") { value } else { format!("agent/{value}") }),
+                        successor: args.successor.map(|value| normalize_agent_subject(&value)),
                     },
                 )
                 .await?;
@@ -431,7 +468,7 @@ pub(super) async fn run_agents(
             }
         }
         AgentsCommand::Suspend(args) => {
-            let subject = format!("agent/{}", args.subject);
+            let subject = normalize_agent_subject(&args.subject);
             let agent = request_suspension(
                 endpoint,
                 "/v1/agents/suspend",
@@ -459,7 +496,7 @@ pub(super) async fn run_agents(
             }
         }
         AgentsCommand::Resume(args) => {
-            let subject = format!("agent/{}", args.subject);
+            let subject = normalize_agent_subject(&args.subject);
             let agent = request_suspension(
                 endpoint,
                 "/v1/agents/resume",
@@ -486,7 +523,7 @@ pub(super) async fn run_agents(
             }
         }
         AgentsCommand::Rollout(args) => {
-            let subject = format!("agent/{}", args.subject);
+            let subject = normalize_agent_subject(&args.subject);
             let client = cli_client(endpoint);
             let status = status_for(&client, &subject).await?;
             let current = status
@@ -508,7 +545,7 @@ pub(super) async fn run_agents(
         }
         AgentsCommand::Restart(args) => {
             let timeout = fractal_daemon::graph::parse_duration(&args.timeout, false)?;
-            let subject = format!("agent/{}", args.subject);
+            let subject = normalize_agent_subject(&args.subject);
             let client = cli_client(endpoint);
             let request: ClaimRecord = client
                 .post(
@@ -713,7 +750,7 @@ async fn agent_start_declaration(
     Option<fractal_daemon::model::DesiredSubject>,
     Option<MissionSeatStart>,
 )> {
-    let mut subject = format!("agent/{}", args.identity);
+    let mut subject = normalize_agent_subject(&args.identity);
     let mut status = status_for(client, &subject).await?;
     if status
         .subjects
@@ -787,6 +824,10 @@ async fn run_agent_new(
     mut args: AgentNewArgs,
     json_output: bool,
 ) -> Result<()> {
+    let identity = fractal_daemon::creation::agent_identity(&args.name);
+    if identity.len() != args.name.len() {
+        args.name = identity.to_owned();
+    }
     let client = cli_client(endpoint);
     if let Some(repository) = &args.repo {
         let health: Value = client.get("/v1/health").await?;
@@ -844,9 +885,7 @@ async fn run_agent_new(
             Err(error)
                 if fractal_daemon::client::is_missing_route(&error) || fractal_daemon::client::is_not_found(&error) =>
             {
-                eprintln!(
-                    "st: the daemon is older than this st and cannot check which providers are installed; creating the seat anyway"
-                );
+                crate::stderr_message("st", format_args!("the daemon is older than this {} and cannot check which providers are installed; creating the seat anyway", ClientMessage::for_output(false).product_name()));
             }
             Err(error) => return Err(error),
         }
@@ -1137,11 +1176,7 @@ async fn run_agent_inspection(
         AgentsCommand::Ls(args) => (args, false),
         AgentsCommand::Tree(args) => (args, true),
         AgentsCommand::Show { subject, all } => {
-            let subject = if subject.starts_with("agent/") {
-                subject
-            } else {
-                format!("agent/{subject}")
-            };
+            let subject = normalize_agent_subject(&subject);
             let response = generated_client(endpoint, None)?
                 .agents_get_with_history(&subject, all)
                 .await

@@ -1,6 +1,6 @@
 # Listing schedule declarations
 
-`st schedules ls` (also `fractal schedules ls`) reads one bounded page of schedule declarations
+`st schedules ls` (also `st schedules ls`) reads one bounded page of schedule declarations
 already applied on the selected local member. It includes declarations from other hosts that
 this member has received through replication. It never contacts those hosts to answer the list.
 

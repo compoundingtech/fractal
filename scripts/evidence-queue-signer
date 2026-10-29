@@ -21,10 +21,10 @@ job is its result); when they finished, or after three hours, its line goes to e
 
 sign (every minute, one run at a time): takes one tree with no attempt yet, the prediction first (only a tree signed before
 enqueue can be ready before the gate looks), then the queue's entries in position order, builds its commit in a clone of its own
-(the group commit as fetched, or the prediction's merge of the same two parents), and runs st-test from origin/main with every local
+(the group commit as fetched, or the prediction's merge of the same two parents), and runs fractal-test from origin/main with every local
 check on it, signing as the host and pushing the notes. Only our own authors' code runs here, the host's key within reach: a tree runs when its PR and every entry ahead of it
 are by a login in the pre-sign worker's authors file (~/.config/evidence-presign/authors); every entry is still observed and
-recorded. ~/.config/evidence-queue-signer/every-author, the host operator's decision, runs every entry. st-test runs a heavy check
+recorded. ~/.config/evidence-queue-signer/every-author, the host operator's decision, runs every entry. fractal-test runs a heavy check
 through the host's build slot; this adds no slot.
 The pre-sign worker's stop limits apply (scripts/evidence-presign-worker). It starts on operations' terms for this host (START below):
 IO pressure under 12% (three points under the 15% stop, so a run is not started only to be killed a minute later), at least 165 GiB
@@ -32,16 +32,16 @@ free (a cold run writes about 19 GiB above the host's 134 GiB reserve) and 20 Gi
 minutes: the queue does not wait for a calm host, and a measurement that never starts measures nothing.
 A tree is never run twice, whatever the outcome: one stopped for load is not retried (for measurement, that is a result too).
 When the run ended, each note's time is read back from the notes pushed for the tree (their observed_at); when none can be read it
-is estimated from the run's start and st-test's per-check seconds, and the line says which (signed_at_source).
-seed (every minute, one run at a time): once main has moved, runs `st-test --seed COMMIT` on main's new tip, from origin/main like
+is estimated from the run's start and fractal-test's per-check seconds, and the line says which (signed_at_source).
+seed (every minute, one run at a time): once main has moved, runs `fractal-test --seed COMMIT` on main's new tip, from origin/main like
 sign: it signs the per-crate rust-tests notes of that tree for the crates whose key has none yet and pushes them, so pull requests
 branched from main reuse them (most merges move a handful of crates; one that moves the lane, all of them). Main's code is merged
 code, the code every run on this host already builds under a pull request, so no author rule applies. Its nextest takes the host's
-build slots through the admission shim as every st-test build does; this adds no slot. It starts on the same terms as sign, and not
-while another st-test --seed runs on the host (a seat's, or one by hand): that tick is skipped and the next one tries again. A tip
+build slots through the admission shim as every fractal-test build does; this adds no slot. It starts on the same terms as sign, and not
+while another fractal-test --seed runs on the host (a seat's, or one by hand): that tick is skipped and the next one tries again. A tip
 is seeded once, whatever the outcome, with one exception: a seed that load stopped before its tests started (waiting for a build
 slot, or building) tries the same tip again on the next tick, up to SEED_TRIES tries, until a newer merge replaces it; each try is a
-line of its own. The next merge's seed covers what one left missing. Each line records the pool cap its st-test ran with.
+line of its own. The next merge's seed covers what one left missing. Each line records the pool cap its fractal-test ran with.
 ~/.config/evidence-queue-signer/off stops all three before they do anything.
 
 State: ~/.local/state/evidence-queue-signer/ (entries.json, the open records; entries.jsonl, one line per finished entry;
@@ -69,7 +69,7 @@ STATE = Path(os.environ.get('EVIDENCE_QUEUE_STATE') or Path.home() / '.local/sta
 BASE = 'main'
 START = {'start_io60': 12.0, 'min_free_gib': 165.0, 'start_mem_gib': 20.0}  # operations' start terms (stops: the worker's)
 SETTLE = 3 * 3600  # an entry that left the queue is written out once its checks finished, or after this long
-# st-test's summary rows, as --seed prints them: rust-tests (covered, passed or not) and a row for each crate that did not sign.
+# fractal-test's summary rows, as --seed prints them: rust-tests (covered, passed or not) and a row for each crate that did not sign.
 SEED_TRIES = 6  # tries per tip when load stops a seed before its tests start (Factory, 2026-10-25)
 TESTS_STARTED = re.compile(r'^\s*Starting \d+ tests? across ', re.M)  # nextest's first line of the run
 SEED_ROW = re.compile(r'^  (\S+)\s+(covered|passed|timed out|not signed|NOT SIGNED|NOT RUN|FAILED(?: \([^)]*\))?)\s+(\d+)s\s+(.*)$')
@@ -402,7 +402,7 @@ def sign(args):
         log = STATE / 'logs' / f'{time.strftime("%Y%m%dT%H%M%S")}-{pick["pr"]}-{pick["kind"]}.log'
         log.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
-        # Not the heavy class's kept target: st-test's own (with its lock) is shared with every other st-test run on the host.
+        # Not the heavy class's kept target: fractal-test's own (with its lock) is shared with every other runner on the host.
         rows, reason, seconds, peak = W.run(st_test, repo, checks, 'queue', rules, log)
     line = {'time': stamp(), 'pr': pick['pr'], 'kind': pick['kind'], 'tree': pick['tree'], 'commit': commit,
             'since': pick['since'], 'started_at': stamp(started), 'wait_s': round(started - seconds_of(pick['since'])),
@@ -411,8 +411,8 @@ def sign(args):
     line['stage_seconds'] = stage_seconds(log)
     line['signed_at'], line['signed_at_source'] = note_times(repo, pick['tree'], started), 'note'
     if not line['signed_at']:
-        # No note read back: estimate it as the start plus the checks run up to it (st-test pushes each note when it is signed),
-        # which is early by the time st-test spends between checks.
+        # No note read back: estimate it as the start plus the checks run up to it (fractal-test pushes each note when it is signed),
+        # which is early by the time fractal-test spends between checks.
         elapsed, line['signed_at_source'] = started, 'estimate'
         for name in checks:
             elapsed += line['stage_seconds'].get(name, 0)
@@ -452,13 +452,14 @@ def held_back(repo, rules):
 
 
 def seeding_elsewhere():
-    """True when an st-test --seed runs on this host (another seat's, or one started by hand): two would run and sign the same crates."""
+    """True when a fractal-test --seed runs on this host (another seat's, or one started by hand): two would run and sign the same crates."""
     for cmdline in Path(os.environ.get('EVIDENCE_QUEUE_PROC') or '/proc').glob('[0-9]*/cmdline'):
         try:
             argv = cmdline.read_bytes().split(b'\0')
         except OSError:
             continue
-        if b'--seed' in argv and any(Path(arg.decode(errors='replace')).name == 'st-test' for arg in argv):
+        # arn:lmig:smalltalk:2026-10-27-st-test-shim — both human-entry and copied implementation process names own the seed.
+        if b'--seed' in argv and any(Path(arg.decode(errors='replace')).name in ('fractal-test', 'st-test') for arg in argv):
             return True
     return False
 
@@ -485,7 +486,7 @@ def seed(args):
         append(STATE / 'skips.jsonl', {'time': stamp(), 'kind': 'seed', 'commit': commit, 'tree': tree, 'reason': reason})
         return 0
     if seeding_elsewhere():
-        return not_starting('seeding', 'another st-test --seed runs on this host: not starting this tick')
+        return not_starting('seeding', 'another fractal-test --seed runs on this host: not starting this tick')
     held = held_back(repo, rules)
     if held:
         return not_starting(*held)
@@ -495,7 +496,7 @@ def seed(args):
         log = STATE / 'logs' / f'{time.strftime("%Y%m%dT%H%M%S")}-seed-{commit[:12]}.log'
         log.parent.mkdir(parents=True, exist_ok=True)
         started = time.time()
-        # The commit, not origin/main: st-test fetches the base again, and main may have moved since; this tip is the one recorded.
+        # The commit, not origin/main: fractal-test fetches the base again, and main may have moved since; this tip is the one recorded.
         _, reason, seconds, peak = W.run(st_test, repo, [], 'seed', rules, log, extra=('--seed', commit))
     rows = seed_rows(log)
     result, detail = rows.pop('rust-tests', ('no result', ''))
@@ -504,7 +505,7 @@ def seed(args):
             'wait_s': round(started - seconds_of(merged_at)), 'seconds': seconds, 'rust_tests': result, 'detail': detail,
             'not_signed': {name: row[0] for name, row in rows.items()}, 'io60_peak': round(peak, 2), 'log': str(log),
             'try': len(tries) + 1, 'tests_started': tests_started,
-            # None: st-test's own default cap (POOL_MAX_GB)
+            # None: fractal-test's own default cap (POOL_MAX_GB)
             'pool_max_gb': os.environ.get('ST_TEST_POOL_MAX_GB')}
     if reason:
         # Stopped before its tests started: the next tick tries this tip again, while tries are left.
@@ -520,9 +521,10 @@ def seed(args):
 
 
 def seed_rows(log):
-    """{name: (result, detail)} from st-test's summary after its last `st-test: tree` line."""
+    """{name: (result, detail)} from fractal-test's summary after its last runner tree header."""
     lines = Path(log).read_text(errors='replace').splitlines()
-    starts = [i for i, line in enumerate(lines) if line.startswith('st-test: tree ')]
+    # arn:lmig:smalltalk:2026-10-27-st-test-shim — old bases still print the old header.
+    starts = [i for i, line in enumerate(lines) if line.startswith(('fractal-test: tree ', 'st-test: tree '))]
     rows = {}
     for line in lines[starts[-1] + 1:] if starts else []:
         match = SEED_ROW.match(line)
@@ -551,9 +553,10 @@ def note_times(repo, tree, since):
 
 
 def stage_seconds(log):
-    """st-test's own per-check seconds, from the summary rows after its last `st-test: tree` line."""
+    """The runner's own per-check seconds, from the summary rows after its last tree header."""
     lines = Path(log).read_text(errors='replace').splitlines()
-    starts = [i for i, line in enumerate(lines) if line.startswith('st-test: tree ')]
+    # arn:lmig:smalltalk:2026-10-27-st-test-shim — old bases still print the old header.
+    starts = [i for i, line in enumerate(lines) if line.startswith(('fractal-test: tree ', 'st-test: tree '))]
     seconds = {}
     for line in lines[starts[-1] + 1:] if starts else []:
         match = W.ROW.match(line)

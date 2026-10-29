@@ -532,7 +532,7 @@ mod tests {
 
     /// The sidebar's agent rows, shown with Ctrl+S.
     fn agent_rows() -> Ui {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.toggle_sidebar();
         ui
     }
@@ -623,7 +623,7 @@ mod tests {
 
     #[test]
     fn mission_rows_open_their_own_declaration_and_home_reuses_every_card_key() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.open_in_glass(Pane::List(2), glass::Open::Tab);
         draw(&ui, 160, 48);
         let subject = ui.frame.borrow().context_rows[1].1.clone();
@@ -709,7 +709,7 @@ mod tests {
 
     #[test]
     fn messages_copy_exact_text_and_ids_and_reply_in_the_existing_send_thread() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let agent = ui.world.agents.items()[0].id.clone();
         let body = "First line: **copper**.\n\nSecond line: café 🐚.";
         let message = "message/copper";
@@ -834,7 +834,7 @@ mod tests {
         use pty_core::protocol::{MessageType, PacketReader, encode_packet};
         use std::io::{Read as _, Write as _};
         use std::os::unix::net::UnixStream;
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let shell = "terminal/copper-shell";
         ui.open_in_glass(Pane::Terminal(shell.into()), glass::Open::Tab);
         let (client, mut peer) = UnixStream::pair().unwrap();

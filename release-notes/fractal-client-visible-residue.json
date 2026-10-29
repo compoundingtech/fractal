@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Finish Fractal naming in phone screens, shared views, Storybook, the Effect SDK and iOS native module build names",
+  "replay": { "status": "none", "detail": "Stored messages, replay inputs and protocol values are unchanged." },
+  "schema": { "status": "none", "detail": "No database or serialized data changes. Effect schema annotation identifiers now use Fractal." },
+  "rules": { "status": "none", "detail": "No checkpoint or coordinated member upgrade changes." },
+  "compatibility": { "status": "changed", "detail": "The handwritten Effect SDK exports Fractal, FractalLive and FractalPlatform instead of the St3 family; callers migrate together. iOS module source and build identifiers now use Fractal. Existing client classifiers still accept legacy names, and durable keys, storage, wire tags and span names remain unchanged." },
+  "downtime": { "status": "none", "detail": "No startup migration or expected interruption." },
+  "manual": { "status": "changed", "detail": "External Effect SDK consumers must use the Fractal export family. Native iOS builds use the fractal-* module paths and FRACTAL_FABRIC environment names; legacy ST3_FABRIC reads remain supported." },
+  "recovery": { "status": "none", "detail": "Persistent state and signing identities are unchanged; no new rollback restrictions." }
+}

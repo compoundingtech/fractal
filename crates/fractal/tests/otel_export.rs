@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 fn st3() -> &'static Path {
-    test_bin!("st3-fixture")
+    test_bin!("fractal-fixture")
 }
 
 fn otelite(test: &str) -> Option<PathBuf> {
@@ -627,6 +627,27 @@ impl ExportDaemon {
 
     fn diagnostics(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
+    }
+
+    /// Waits until the published mission list answers. Readiness does not wait for its first publication, and a
+    /// missions window opened before it resyncs first and records that frame on its first-frame span too.
+    fn await_mission_list(&self) {
+        use std::io::{Read as _, Write as _};
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let mut socket = std::os::unix::net::UnixStream::connect(&self.socket).unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            write!(socket, "GET /v1/client/missions HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+                x-st3-client: fractal\r\nx-st3-person: person/ada\r\n\r\n").unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            if response.starts_with("HTTP/1.1 200 ") {
+                return;
+            }
+            assert!(response.contains("mission-list-not-ready") && Instant::now() < deadline,
+                "mission list: {response}\n{}", self.diagnostics());
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn health(&self, traceparent: Option<&str>) {
@@ -1858,6 +1879,79 @@ async fn daemon_request_id_and_roster_stages_match_response() {
 
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
+async fn subscribe_frame_context_is_lenient_and_continues_action_trace() {
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+    const TRACE: &str = "b1af7651916cd43dd8448eb211c80319";
+    const PARENT: &str = "b7ad6b7169203339";
+    const UPGRADE: &str = "00-c1af7651916cd43dd8448eb211c80319-b7ad6b7169203340-01";
+    let Some(collector) = otelite("subscribe_frame_context_is_lenient_and_continues_action_trace") else { return };
+    let root = tempfile::tempdir().unwrap();
+    seed_roster(root.path(), "agent/otel-test.observed");
+    let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Each missions window's first frame must be its snapshot (see collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans).
+    daemon.await_mission_list();
+    let mut socket = daemon.websocket("/v1/client/collections/stream",
+        "st3.client.collections.v0", UPGRADE).await;
+    let upgrade = daemon.await_span(root.path(), |span| {
+        span["traceId"] == "c1af7651916cd43dd8448eb211c80319"
+            && span["name"] == "GET /v1/client/collections/stream"
+    });
+    let cases = [
+        ("sampled", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"vendor=value"}), Some(true)),
+        ("unsampled", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-00")}), Some(false)),
+        ("st-marked", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01"), "tracestate":"st=1"}), Some(false)),
+        ("conversation", serde_json::json!({"traceparent":format!("00-{TRACE}-{PARENT}-01")}), Some(true)),
+        ("invalid", serde_json::json!({"traceparent":"not-a-traceparent", "tracestate":"vendor=value"}), None),
+        ("zero-trace", serde_json::json!({"traceparent":format!("00-00000000000000000000000000000000-{PARENT}-01")}), None),
+        ("zero-span", serde_json::json!({"traceparent":format!("00-{TRACE}-0000000000000000-01")}), None),
+        ("invalid-version", serde_json::json!({"traceparent":format!("ff-{TRACE}-{PARENT}-01")}), None),
+        ("number", serde_json::json!(42), None),
+        ("string", serde_json::json!("not-an-object"), None),
+        ("array", serde_json::json!([]), None),
+        ("missing-parent", serde_json::json!({"tracestate":"vendor=value"}), None),
+        ("wrong-parent-type", serde_json::json!({"traceparent":42}), None),
+        ("null", Value::Null, None),
+    ];
+    for (id, trace, sampled) in &cases {
+        socket.send(Message::Text(serde_json::json!({
+            "kind":"subscribe", "id":id,
+            "collection": if *id == "conversation" { "conversation" } else { "missions" },
+            "conversation":"agent/otel-test.observed", "trace":trace
+        }).to_string().into())).await.unwrap();
+        let (frame, _) = next_json_frame(&mut socket).await;
+        assert_eq!(frame["kind"], if *id == "conversation" { "conversation" } else { "snapshot" }, "{frame}");
+        assert_eq!(frame["id"], *id);
+        let first = daemon.await_span(root.path(), |span| {
+            span["name"] == "st.subscription.first_frame"
+                && string_attribute(span, "st.subscription.id") == Some(*id)
+        });
+        if let Some(sampled) = sampled {
+            assert!(first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER", "{first}");
+            assert_eq!(first["traceId"], TRACE);
+            assert_eq!(first["parentSpanId"], PARENT);
+            let links = first["links"].as_array().expect("upgrade link");
+            assert_eq!(links.len(), 1, "{first}");
+            assert_eq!(links[0]["traceId"], upgrade["traceId"]);
+            assert_eq!(links[0]["spanId"], upgrade["spanId"]);
+            assert!(first["attributes"].as_array().unwrap().iter().any(|attribute| {
+                attribute["key"] == "st.parent.sampled"
+                    && attribute["value"]["boolValue"] == *sampled
+            }), "{first}");
+        } else {
+            assert_upgrade_link(&first, &upgrade);
+            assert!(first["attributes"].as_array().unwrap().iter()
+                .all(|attribute| attribute["key"] != "st.parent.sampled"), "{first}");
+        }
+        socket.send(Message::Text(serde_json::json!({
+            "kind":"unsubscribe", "id":id
+        }).to_string().into())).await.unwrap();
+    }
+    socket.close(None).await.unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
 async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() {
     use futures_util::SinkExt as _;
     use tokio_tungstenite::tungstenite::Message;
@@ -1868,6 +1962,9 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     let root = tempfile::tempdir().unwrap();
     let source = stage_replication_source(root.path());
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // Each window's first frame must be its snapshot (a resync before it is covered by
+    // daemon_collection_stream_without_export_delivers_first_frame).
+    daemon.await_mission_list();
     let mut socket = daemon.websocket("/v1/client/collections/stream",
         "st3.client.collections.v0", TRACEPARENT).await;
     let upgrade = daemon.await_span(root.path(), |span| {
@@ -1879,7 +1976,10 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     for collection in ["missions", "attention", "agents", "work", "glasses", "arrangements"] {
         socket.send(Message::Text(serde_json::json!({
             "kind":"subscribe", "id":collection, "collection":collection, "limit":2,
-            "person": if collection == "arrangements" { Some("person/ada") } else { None }
+            "person": if collection == "arrangements" { Some("person/ada") } else { None },
+            "trace": if collection == "glasses" {
+                serde_json::json!({"traceparent":BARRIER})
+            } else { Value::Null }
         }).to_string().into())).await.unwrap();
         let (frame, bytes) = next_json_frame(&mut socket).await;
         assert_eq!(frame["kind"], "snapshot", "{frame}");
@@ -1888,7 +1988,15 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
             span["name"] == "st.subscription.first_frame"
                 && string_attribute(span, "st.subscription.id") == Some(collection)
         });
-        assert_upgrade_link(&first, &upgrade);
+        if collection == "glasses" {
+            assert!(first["kind"] == 2 || first["kind"] == "SPAN_KIND_SERVER", "{first}");
+            assert_eq!(first["traceId"], "51af7651916cd43dd8448eb211c80319");
+            assert_eq!(first["parentSpanId"], "b7ad6b7169203333");
+            assert_eq!(first["links"][0]["traceId"], upgrade["traceId"]);
+            assert_eq!(first["links"][0]["spanId"], upgrade["spanId"]);
+        } else {
+            assert_upgrade_link(&first, &upgrade);
+        }
         assert_eq!(string_attribute(&first, "st.collection"), Some(collection));
         assert!(string_attribute(&first, "span.label").is_some_and(|label| !label.is_empty()), "{first}");
         assert_eq!(int_attribute(&first, "st.page.rows"),
@@ -1925,7 +2033,8 @@ async fn collection_first_frame_links_upgrade_and_changes_emit_no_extra_spans() 
     socket.close(None).await.unwrap();
     // The captured server marker closes the exporter FIFO after all observed frames.
     daemon.health(Some(BARRIER));
-    daemon.await_span(root.path(), |span| span["traceId"] == "51af7651916cd43dd8448eb211c80319");
+    daemon.await_span(root.path(), |span| span["traceId"] == "51af7651916cd43dd8448eb211c80319"
+        && span["name"] == "GET /v1/health");
     let spans = daemon.captured_spans(root.path());
     let first: Vec<_> = spans.iter().filter(|span| span["name"] == "st.subscription.first_frame").collect();
     assert_eq!(first.len(), 6, "changes must not start more first-frame spans: {first:?}");
@@ -1987,6 +2096,7 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     const NEW: &str = "00-81af7651916cd43dd8448eb211c80319-b7ad6b7169203336-01";
     const DUPLICATE: &str = "00-91af7651916cd43dd8448eb211c80319-b7ad6b7169203337-01";
     const HEARTBEAT: &str = "00-a1af7651916cd43dd8448eb211c80319-b7ad6b7169203338-01";
+    const SETTLE: &str = "00-b1af7651916cd43dd8448eb211c80319-b7ad6b7169203339-01";
     let Some(collector) = otelite("replication_projection_is_linked_root_only_for_new_data") else { return };
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("daemon-state");
@@ -2011,6 +2121,21 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     assert!(heartbeat.envelopes.is_empty());
     drop(target);
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // The daemon seals its first checkpoint in the background just after it starts. A seal that
+    // commits while the first receive projects moves the store past that projection's target, so
+    // the projection stays deferred and the duplicate receive below projects again, with a root of
+    // its own. Wait for the seal, so that the receives meet a store nothing else is writing to.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (page, _) = daemon.request("GET", "/v1/claims?after_index=0&limit=500", None, SETTLE, None).await;
+        if page["value"]["claims"].as_array().is_some_and(|claims| {
+            claims.iter().any(|claim| claim["kind"] == "checkpoint.sealed")
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the first checkpoint was never sealed: {page}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let payload = serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":exchange});
     let (received, _) = daemon.request("POST", "/v1/internal/replication/receive",
         Some(payload.clone()), NEW, None).await;

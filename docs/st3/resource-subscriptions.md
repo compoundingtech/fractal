@@ -179,7 +179,7 @@ The run’s subjects are `observer/RUN/watch` and `subscription/RUN/watch`.
 
 The subscription stores the selected changes and delivery intent.
 
-A provider locator is an opaque provider value. st does not assign meaning to it outside the registered provider.
+A provider locator is an opaque provider value. Fractal does not assign meaning to it outside the registered provider.
 
 The `github.ref` locator is `OWNER/REPOSITORY@BRANCH`. Branch names can contain `/`. For example:
 
@@ -268,7 +268,7 @@ The GitHub repository provider reads what changed since its cursor. Its first po
 item, up to 10 pages; a larger open listing fails the observation instead of recording part of it.
 After that, it reads the issues listing for items updated since its watermark, which also names
 each closed pull request's merge, and the repository's comments updated since a second watermark.
-A comment watermark starts at the first poll, so st does not read old comments. Each read is
+A comment watermark starts at the first poll, so Fractal does not read old comments. Each read is
 conditional and its URL changes only when something changed, so an idle repository answers 304
 and costs nothing. A read longer than 10 pages records what it read and continues at once.
 
@@ -306,7 +306,32 @@ The daemon records that deadline as a one-shot wake. It does not run a periodic 
 
 Conditional requests use provider cursors such as an ETag. Cursors are local progress state, not resource facts.
 
-The daemon keeps each next-check deadline and cursor in local scheduler memory. A daemon restart performs one immediate observation.
+The daemon keeps each next-check deadline in local scheduler memory. A daemon restart performs one immediate observation.
+
+Each observer's cursor stays on the member that polls it, in the GitHub plugin's own database,
+`<state>/plugins/github/github.sqlite3`. That database never syncs and is not in a backup. For a
+`github.repository` observer, `observer.observed` carries only how far the observer has read:
+its `cursor` holds `items_since` and `comments_since`. The version maps, which are most of a
+cursor's bytes, stay in the plugin database. Builds before it wrote the whole cursor there.
+
+A member with no row for an observer polls from the cursor in that observer's newest
+`observer.observed` claim: the whole cursor an older build wrote, or how far another member had
+read. Once a poll there had a cursor, before or after, it keeps a row, even if a later poll ends
+without one, so it adopts a claim's cursor once per database. A member drops its row when the
+observer stops or another member declares it.
+
+A member that takes over polling, or lost its database, reads on from the claim's position. Each
+item it reads is compared with the facts the graph already recorded for it, so it delivers what
+changed in between once, such as an issue closed or a comment written in the gap, and nothing
+twice. A claim is written only when a poll changes facts, so its position can be behind the
+polling member's; reading from an earlier point only reads more again. A repository with no
+recorded facts is a baseline, which delivers nothing.
+
+A database file the daemon cannot use, damaged or from a newer build, is set aside beside it as
+`github.sqlite3.set-aside-*` and replaced by an empty one, and the daemon starts. A read that
+fails is the observer's fault, and a later pass polls it again. An observer whose poll cannot keep
+its cursor there is `degraded` with error code `github-plugin-database`: it retries the write each
+minute and does not ask GitHub again until the database takes the cursor.
 
 The provider applies bounded retries and backoff. It records authentication, rate-limit, and transport failures on the observer subject.
 
@@ -328,7 +353,7 @@ An unchanged failure creates no new claim. A later success replaces the complete
 
 An observer checks its declared fields. Its effective field set also includes the union of its subscription fields.
 
-st does not fetch once for each target. A subscription update can expand or reduce the observer field set.
+Fractal does not fetch once for each target. A subscription update can expand or reduce the observer field set.
 
 ## The intake pipeline
 

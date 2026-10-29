@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::{Notify, watch};
 
 fn backup_cli(root: &Path, socket: &Path) -> tokio::process::Command {
-    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     command.env("XDG_CONFIG_HOME", root.join("config"));
     command.env("XDG_STATE_HOME", root.join("state"));
     command.env("XDG_DATA_HOME", root.join("data"));
@@ -49,21 +49,19 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
             .unwrap();
     }
     let socket = root.path().join("api.sock");
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "alder".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "alder".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();

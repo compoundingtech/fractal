@@ -63,6 +63,7 @@ function BoundedSplitStory({ scheme }: { readonly scheme: Scheme }) {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Fractal UI/Docked split',
   component: DockedSplitStory,
   parameters: { scenario: { _tag: 'primitive', reason: "Exercises pane geometry, resize input and workspace width persistence without scenario data." }, layout: 'fullscreen', docs: { description: { component: 'Main pane with a right-docked, resizable Changes panel: 320–720 px, persisted per workspace key, sized through a CSS variable so a drag never re-renders the host. Pane headers share the 32px geometry.' } } },
@@ -71,6 +72,18 @@ const meta = {
   beforeEach: () => { for (const workspace of workspaces) window.localStorage.removeItem(dockedSplitStorageKey(persistKey(workspace))); window.localStorage.removeItem(dockedSplitStorageKey('bounded-story')) },
 } satisfies Meta<typeof DockedSplitStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AvailableWidth:primitive',
+  'Default:primitive',
+  'DefaultLight:primitive',
+  'KeyboardResize:primitive',
+  'Persistence:primitive',
+  'PointerResize:primitive',
+  'SharedHeaders:primitive',
+  'WorkspaceIsolation:primitive',
+]
 type Story = StoryObj<typeof meta>
 
 const separator = (canvasElement: HTMLElement) => within(canvasElement).getByRole('separator', { name: 'Resize changes' })

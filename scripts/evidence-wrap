@@ -16,6 +16,7 @@ GLIBC_TUNABLES, GCONV_PATH, NLSPATH) and with a fixed PATH.
 The note is imported as refs/tags/evidence/<tree>/<record> in this checkout and, while gates on older bases
 read only notes, as refs/notes/evidence/<tree>/<record> naming the same record. With --push REMOTE both are
 also pushed, after scripts/evidence-verify accepts it. CI finds a note by its tree, so it only helps when the commit you push has the tree CI will test (a branch current with main).
+A ref the remote answers with a bare `(failed)` is pushed again, up to 3 times; a refusal that gives a reason fails at once.
 
 With --aggregate FILE nothing is run: FILE is JSON {"command": [...], "exit_code": N, "output": ANY,
 "inputs": {name: string}} written by a job that summarizes other jobs (an aggregate gate). The
@@ -30,7 +31,7 @@ In --aggregate mode a dirty workspace does not stop the signature (the job has a
 tests); it is recorded as the input workspace_clean instead.
 
 --input-file NAME=PATH records an input the command itself reports, read after it ends: the sorted, distinct non-empty lines of
-PATH joined by commas (a count and digest past 500 characters), or 'none' when PATH is missing or empty. st-test uses it for env_skips, the tests that skipped because this
+PATH joined by commas (a count and digest past 500 characters), or 'none' when PATH is missing or empty. fractal-test uses it for env_skips, the tests that skipped because this
 host cannot run them (CI_TEST_ENV_SKIPS), so the note says which tests did not run here.
 
 With EVIDENCE_PUSH_TOKEN set, --push uses it as an HTTP authorization header (never printed).
@@ -55,6 +56,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 
 sys.dont_write_bytecode = True
 
@@ -73,6 +75,36 @@ class Failure(Exception):
     pass
 
 
+PUSH_TRIES, PUSH_BACKOFF = 3, 2.0
+
+
+def push_refs(remote, refs, env_extra):
+    """Push refs to remote. GitHub now and then answers a ref with a bare `(failed)` and takes the same ref on the next push
+    (scripts/st-test's push_records retries it too): only those refs go again, up to PUSH_TRIES times, after 2 s and then 4 s.
+    A refusal that gives a reason (a rule, a non-fast-forward, an update the ruleset forbids) or a transport error fails at once.
+    The failure names every ref still refused, with its reason."""
+    pending = list(refs)
+    for attempt in range(1, PUSH_TRIES + 1):
+        done = git('push', '--porcelain', remote, *(f'{name}:{name}' for name in pending), check=False, env_extra=env_extra, transport=True)
+        if done.returncode == 0:
+            return
+        refused = {}
+        for line in done.stdout.decode(errors='replace').splitlines():
+            fields = line.split('\t')
+            if line.startswith('!') and len(fields) >= 3:
+                refused[fields[1].split(':')[0]] = fields[2].strip()
+        if not refused:
+            raise Failure(f'push failed: {done.stderr.decode(errors="replace").strip()[-500:]}')
+        transient = [name for name, why in refused.items() if why == '[remote rejected] (failed)']
+        if len(transient) < len(refused) or attempt == PUSH_TRIES:
+            shown = '; '.join(f'{name} {why}' for name, why in refused.items())
+            raise Failure(f'push failed (try {attempt} of {PUSH_TRIES}): {shown}')
+        print(f'evidence-wrap: {remote} answered {len(transient)} ref(s) with a bare (failed); pushing them again ({attempt + 1} of {PUSH_TRIES})',
+              file=sys.stderr, flush=True)
+        time.sleep(PUSH_BACKOFF * attempt)
+        pending = transient
+
+
 def signer_launch(argv, environ=None):
     """(argv, env) that start the signer: the program as an absolute path, the caller's environment without any
     loader or interpreter variable, and SIGNER_PATH as PATH."""
@@ -87,10 +119,15 @@ def signer_launch(argv, environ=None):
     return [os.path.abspath(program), *argv[1:]], env
 
 
-def git(*args, stdin=None, check=True, env_extra=None):
-    # Runs with the signing HOME in a job whose checkout holds code under test: no GIT_* variable of
-    # the job reaches git, and the checkout's fsmonitor, hooks and pager cannot name a program.
+def git(*args, stdin=None, check=True, env_extra=None, transport=False):
+    # Measurement git calls ignore the job's GIT_* environment. Publication alone keeps
+    # transport settings; neither path lets the checkout's fsmonitor, hooks or pager name a program.
     clean = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
+    if transport:
+        # Only publication uses the caller's transport configuration. In particular, dropping
+        # GIT_CONFIG_* here loses HTTPS remote/pushurl overrides and credential helpers.
+        clean.update({k: v for k, v in os.environ.items()
+                      if k.startswith('GIT_CONFIG_') or k in ('GIT_SSH', 'GIT_SSH_COMMAND', 'GIT_SSH_VARIANT', 'GIT_ASKPASS')})
     done = subprocess.run(['git', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null', '-c', 'core.pager=cat', *args],
                           input=stdin, capture_output=True, timeout=600,
                           env=dict(clean, GIT_NO_REPLACE_OBJECTS='1', GIT_TERMINAL_PROMPT='0', LC_ALL='C', **(env_extra or {})))
@@ -136,14 +173,16 @@ def toolchain_digest(override):
 def run_command(command):
     digest = hashlib.sha256()
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    for chunk in iter(lambda: process.stdout.read(65536), b''):
+    # read1, not read: read(65536) waits for a full 64 KiB, so a caller reading this output as it comes (fractal-test's limit, which starts
+    # when ci-local says it has, and stops a check silent too long) would see it only in late bursts. The digest is of the same bytes.
+    for chunk in iter(lambda: process.stdout.read1(65536), b''):
         digest.update(chunk)
         sys.stdout.buffer.write(chunk)
         sys.stdout.buffer.flush()
     return process.wait(), digest.hexdigest()
 
 
-# st-test reads this from the base's copy: a base whose wrapper signs a tree that edits its lane (it no longer reports such a check as "not signed").
+# fractal-test reads this from the base's copy: a base whose wrapper signs a tree that edits its lane (it no longer reports such a check as "not signed").
 SIGNS_LANE_EDITS = True
 
 
@@ -316,12 +355,13 @@ def main(argv):
             extra = {}
             if token:
                 header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-                extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader',
-                         'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
-            pushed = git('push', '--quiet', args.push, f'{tag}:{tag}', f'{ref}:{ref}', *(f'{name}:{name}' for name in indexes), check=False, env_extra=extra)
-            if pushed.returncode != 0:
-                text = pushed.stderr.decode(errors='replace').replace(token, '***') if token else pushed.stderr.decode(errors='replace')
-                raise Failure(f'push failed: {text.strip()[-500:]}')
+                count = int(os.environ.get('GIT_CONFIG_COUNT', '0'))
+                extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                         f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
+            try:
+                push_refs(args.push, [tag, ref, *indexes], extra)
+            except Failure as failure:
+                raise Failure(str(failure).replace(token, '***') if token else str(failure))
             result['pushed'] = True
         print(json.dumps(result, indent=2), file=sys.stderr)
         return 0 if exit_code == 0 else exit_code

@@ -49,7 +49,7 @@ describe('declaration dialog', () => {
     expect(node.querySelector('h2')?.textContent).toBe('mission/kdl-view')
     expect(node.getAttribute('aria-labelledby')).toBe(node.querySelector('h2')?.id)
     expect(node.querySelector('[data-testid="declaration-language"]')?.textContent).toBe('JSON')
-    expect(node.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('st serves no mission KDL')
+    expect(node.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('Fractal serves no mission KDL')
     expect(node.textContent).toContain('OPENAI_API_KEY')
     expect(node.textContent).not.toContain(SECRET)
     expect(host.contains(node)).toBe(true)

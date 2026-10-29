@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 """Run the required checks on this machine and sign what they measured. Nobody has to ask for a signature.
 
-  scripts/st-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE | --out DIR] [--attempt N] [--time-limit SECONDS]
-  scripts/st-test --seed [REF] [--base origin/main] [--push REMOTE | --out DIR]
-  scripts/st-test --list
-  scripts/st-test --status [--base origin/main]
+  scripts/fractal-test [--check NAME]... [--rerun] [--base origin/main] [--push REMOTE | --out DIR] [--attempt N] [--time-limit SECONDS] [--queue-limit SECONDS]
+  scripts/fractal-test --seed [REF] [--base origin/main] [--push REMOTE | --out DIR]
+  scripts/fractal-test --list
+  scripts/fractal-test --status [--base origin/main]
 
-For every check that has a local command (the table below: the whole per-PR suite; run `scripts/st-test --push origin` on the head
+For every check that has a local command (the table below: the whole per-PR suite; run `scripts/fractal-test --push origin` on the head
 you mark ready, and --all, accepted, means the same) it runs that command once, on the tree the pull request will be tested as, through scripts/evidence-wrap, and the signer records the exit code and the digest of
 the output it measured under this host's key (scripts/evidence-keygen). A failing run is recorded too. It then
 asks the verifier, from the accepted base, whether the tree is now covered, and prints one line per check.
 
 The tree: HEAD, the commit you are pushing. The CI gate looks up the note for the pull request head's own tree, so the tree
 you built and signed is the tree that counts even when main has moved since; the merge queue still tests the integrated tree.
+When the gate would judge the merge instead (the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or protected files moved on
+main since the branch point), a signing run first merges the base into the branch here, as a new head commit, and signs that head; with
+--push it then pushes the branch at that merge (merge_base_in, push_branch; docs/st3/gate-evidence.md).
 A check this tree already has a passing signature for (the verifier's answer, the one asked after a run) is not run again: it
 prints `already signed`, so re-running on an unchanged tree is near instant (with --push its note is pushed as it is, so
 the remote has it too); --rerun runs it anyway. It tells you how far behind the base the branch is.
 The command always runs in a clean worktree of that commit, never
 in this checkout, so untracked or ignored files here cannot change the result. The worktree is one of a small pool of persistent
-ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one), reset to the
+ones per repository (~/.cache/st-test/<hash of the git common dir>/tree-N, one flock each, so no two runs share one; waiters are served in the build host's
+cargo-priority order, then arrival), reset to the
 commit and stripped of untracked and ignored files (except the megarepo members, node_modules and target/compat-baselines) before every run: the same path every time keeps cargo's fingerprints and
 sccache's absolute-path keys valid, so a second run is warm. Nothing is linked in from here: when the tree
 has a megarepo.lock, its members are materialized under repos/ first, with the command CI's `megarepoApplyStep` runs
@@ -44,9 +48,15 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
+Each check's --time-limit counts only the time it runs: the waits for a host build slot that scripts/ci-local reports as they happen
+(CI_LOCAL_QUEUE_LOG) extend it, up to --queue-limit seconds of waiting in all, so a busy host's queue cannot use up a check's time. A
+scripts/ci-local check's time counts only from ci-local's own start (its `ci-local: stage logs in` line, after its load gate): before it,
+the build admission of its `nix develop` and the dev shell are waiting, which no queue log records, and only SILENCE_LIMIT seconds without
+any output stop it. The note records that wait as the input pre_start_s. The summary row says how long a check waited, and for what.
+
 Every run that gets as far as its summary appends one JSON line (version 1: start, end and total seconds, host, tree, the checks, every
 summary row and, when scripts/ci-local printed its stage table, linux-gate's stages) to ${XDG_STATE_HOME:-~/.local/state}/st-test/runs.jsonl,
-or to the path in ST_TEST_RUNS (`off` records nothing); scripts/st-test-report reads it against the per-PR suite's time objective
+or to the path in ST_TEST_RUNS (`off` records nothing); scripts/fractal-test-report reads it against the per-PR suite's time objective
 (docs/st3/gate-evidence.md). Recording never changes the result: a file that cannot be written is one line on stderr.
 
 Exit 0 when every selected check passed and was signed (with --out, exported but not verified); 1 when a check failed, timed out or
@@ -57,17 +67,23 @@ because one of its tests passed only on a retry (CI's own per-crate notes refuse
 as flaky_tests).
 """
 import argparse
+import atexit
 import base64
 import codecs
 import concurrent.futures
+import contextlib
+import errno
 import fcntl
+import fnmatch
 import hashlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import os
 from pathlib import Path
 import re
+import shlex
 import select
 import shutil
 import signal
@@ -138,7 +154,7 @@ BASE_SCRIPTS = ('evidence-wrap', 'evidence-sign', 'evidence-verify')
 TARGET_MAX_GB = 80.0
 # The pool of persistent worktrees: ST_TEST_TREES trees (default: the host's heavy slots from ~/.config/cargo-heavy-slots, plus one)
 # under ST_TEST_POOL (default ~/.cache/st-test). ST_TEST_TREES=off runs in a fresh throwaway worktree, as before.
-POOL_WAIT_SECONDS = 5
+POOL_WAIT_SECONDS = 1  # how often a waiter looks at the tree queue again
 # Ignored inputs a pool tree keeps between runs (git clean -e): the megarepo members, the installed dependencies and the downloaded
 # compat baselines cost minutes to materialize, install and download again. They are not tracked files, so the tree stays exact.
 POOL_KEEP = ('/repos/', 'node_modules/', '/target/compat-baselines/')
@@ -186,7 +202,7 @@ def wait_for_load(limit, read_load=lambda: os.getloadavg()[0], sleep=time.sleep,
         if now - started >= deadline_minutes * 60:
             raise Failure(f'the host stayed above its load limit: load1 {load:.0f} > {limit:g} (host limit) for {deadline_minutes:g} min; nothing was started')
         if announced is None or now - announced >= LOAD_ANNOUNCE_SECONDS:
-            print(f'st-test: waiting: load1 {load:.0f} > {limit:g} (host limit)', file=sys.stderr, flush=True)
+            print(f'fractal-test: waiting: load1 {load:.0f} > {limit:g} (host limit)', file=sys.stderr, flush=True)
             announced = now
         sleep(min(10, LOAD_ANNOUNCE_SECONDS))
 
@@ -207,7 +223,7 @@ def selecting(name):
     return name in SELECTING or name.startswith('GIT_PUSH_OPTION')
 
 
-SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'CLAUDE', 'ANTHROPIC_')
+SEAT_PREFIXES = ('ST_', 'ST2_', 'ST3_', 'FRACTAL_', 'CLAUDE', 'ANTHROPIC_', 'PTY_')
 KEPT_SEAT = ('ST_AGENT', 'ST_SKIP_EVIDENCE')  # exact names, plus every ST_EVIDENCE* switch; this list is the only exception mechanism
 
 
@@ -233,8 +249,12 @@ def check_path():
 
 def scrub_seat_environment():
     """A CI runner has none of the variables an agent seat carries (identity, mission, session, daemon endpoint, hook and messaging
-    settings), and the checks must see what CI sees: tests that read them fail or behave differently under a seat (the ci-local-gate
-    drill's claude hook tests did). ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
+    settings, and the pty session it runs in), and the checks must see what CI sees: tests that read them fail or behave differently
+    under a seat (the ci-local-gate drill's claude hook tests did). A seat's PTY_ROOT names its live pty root: the legacy-runner tests
+    that spawn sessions then all spawn there instead of under their own catalogs, and concurrent ones collide (stream_authoring_cli's
+    "spawning pty 'example-linux.worker' failed"). FRACTAL_* are the seat's own names for the same things (FRACTAL_ENDPOINT,
+    FRACTAL_AGENT): a check that kept them could reach the live daemon as the seat. Every check starts in `nix develop`, whose shell
+    sets the dev shell's FRACTAL_* settings (flake.nix) itself, and scripts/ci-local drops the rest for its stages. ST_AGENT stays because the host ranks `nix develop` starts by it (so a check can still read it: the nix wrapper that needs it
     starts the check); the evidence switches stay. The kept list is the only exception mechanism for a future ST_* switch."""
     for name in [name for name in os.environ
                  if name.startswith(SEAT_PREFIXES) and name not in KEPT_SEAT and not name.startswith('ST_EVIDENCE')]:
@@ -307,23 +327,156 @@ def gate_commit(base):
     if key in GATE_TREE:
         return GATE_TREE[key]
     result = (head, '')
-    if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode != 0:  # the base is in the head already: the merge is the head
-        gate = load_base_gate(base_commit)
-        verdict = getattr(gate, 'branch_point_verdict', None)
-        if verdict:
-            try:
-                verdict(text(git('merge-base', base_commit, head)), head, base_commit, base_commit)
-            except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
-                merged = git('merge-tree', '--write-tree', '--no-messages', head, base_commit, check=False)
-                if merged.returncode != 0:
-                    raise Failure(f'CI will judge the merge of this branch with {base} ({reason}), and it does not merge cleanly: merge {base} into the branch first')
-                tree = merged.stdout.decode().split()[0]
-                env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
-                       'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
-                commit = text(git('commit-tree', tree, '-p', head, '-p', base_commit, '-m', f'merge of {head[:12]} with {base}', env=env))
-                result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
+    reason = fallback_reason(head, base_commit)
+    if reason:
+        merged = git('merge-tree', '--write-tree', '--no-messages', head, base_commit, check=False)
+        if merged.returncode != 0:
+            raise Failure(f'CI will judge the merge of this branch with {base} ({reason}), and it does not merge cleanly: merge {base} into the branch first')
+        tree = merged.stdout.decode().split()[0]
+        env = {'GIT_AUTHOR_NAME': 'st-test', 'GIT_AUTHOR_EMAIL': 'st-test@example.invalid', 'GIT_COMMITTER_NAME': 'st-test',
+               'GIT_COMMITTER_EMAIL': 'st-test@example.invalid'}
+        commit = text(git('commit-tree', tree, '-p', head, '-p', base_commit, '-m', f'merge of {head[:12]} with {base}', env=env))
+        result = (commit, f'{reason}: CI will judge the merge of this branch with {base}, so that is what is signed')
     GATE_TREE[key] = result
     return result
+
+
+CHECKS = ()  # the checks this run signs (main sets it): the gate decides per check whether main's protected changes are that check's
+
+
+def fallback_reason(head, base_commit):
+    """Why the CI gate would judge the merge of `head` with the base rather than the head's own tree for some check this run signs (the
+    base's `branch_point_verdict` Fallback: the branch is more than HEAD_TREE_MAX_BEHIND commits behind, or main moved protected files
+    since the branch point that are a check's CI inputs), or None when it keeps the head tree for all of them: also when the base is in
+    the head already (the merge is the head) or the base has no such rule. A base gate that predates per-check CI inputs is asked once,
+    without a check, as before."""
+    if git('merge-base', '--is-ancestor', base_commit, head, check=False).returncode == 0:
+        return None
+    verdict = getattr(load_base_gate(base_commit), 'branch_point_verdict', None)
+    if not verdict:
+        return None
+    branch_point = text(git('merge-base', base_commit, head))
+    per_check = 'check' in inspect.signature(verdict).parameters
+    for check in (CHECKS if per_check and CHECKS else (None,)):
+        try:
+            if check is None:
+                verdict(branch_point, head, base_commit, base_commit)
+            else:
+                verdict(branch_point, head, base_commit, base_commit, None, check)
+        except Exception as reason:  # the gate's Fallback, or anything its rule raises: it asks about the merge tree
+            return str(reason) or type(reason).__name__
+    return None
+
+
+def merge_base_in(base):
+    """When the CI gate would judge the merge tree (fallback_reason), merge the base into the branch in this checkout first, as a new head
+    commit, and return it (None when the head is signed as it is). The tree then signed is the head's own, which stays the tree CI judges
+    for HEAD_TREE_MAX_BEHIND more commits of main; a signed merge tree is void at main's next commit, and a run that waited hours for a
+    pool tree past the bound (or after main moved a protected file) was lost to whatever landed during it. Runs after the wait, at the
+    base's tip as just fetched. Stops (Failure) on a conflict, with the branch as it was, or when the checkout gained uncommitted changes
+    to tracked files during the wait. Not for --seed, which names its tree."""
+    if TARGET:
+        return None
+    head = head_commit()
+    base_commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    reason = fallback_reason(head, base_commit) if base_commit else None
+    if not reason:
+        return None
+    if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
+        raise Failure(f'{reason}, so fractal-test merges {base} into the branch before it signs, but the checkout now has uncommitted changes '
+                      'to tracked files: commit them and run again')
+    branch = text(git('symbolic-ref', '-q', '--short', 'HEAD', check=False))
+    message = (f'Merge {base} into {branch or "HEAD"}\n\nfractal-test merged {base} ({base_commit[:12]}) before signing: {reason}, so CI would '
+               'otherwise judge the merge tree, which no signature on the head covers.')
+    done = git('merge', '--no-ff', '--no-edit', '-m', message, base_commit, check=False)
+    if done.returncode != 0:
+        conflicts = text(git('diff', '--name-only', '--diff-filter=U', check=False)).split()
+        git('merge', '--abort', check=False)
+        raise Failure(f'{reason}, so fractal-test merges {base} into the branch before it signs, and it does not merge cleanly'
+                      f'{" (" + ", ".join(conflicts[:6]) + ")" if conflicts else " (" + (text(done) + " " + done.stderr.decode(errors="replace")).strip()[-300:] + ")"}'
+                      f': merge {base} into the branch yourself, then run again')
+    merged = head_commit()
+    print(f'fractal-test: {reason}: merged {base} ({base_commit[:12]}) into {branch or "the detached HEAD"} as {merged}; '
+          'the head tree is what is signed', flush=True)
+    return merged
+
+
+def push_branch(remote, base, merged):
+    """Push the merge commit merge_base_in made to the branch of the same name on `remote`, never forced, as any push (the pre-push hook
+    asks --status). A detached HEAD, or a branch named as the base's, is not pushed: the command is printed. A remote branch with commits
+    this one lacks stops the run (Failure), and nothing is pushed."""
+    branch = text(git('symbolic-ref', '-q', '--short', 'HEAD', check=False))
+    if not branch or branch in (base, base.partition('/')[2]):
+        print(f'fractal-test: the merge {merged[:12]} is not pushed ({"a detached HEAD" if not branch else f"{branch} is the base branch"}); push it yourself: '
+              f'git push {remote} {merged}:refs/heads/<branch>', flush=True)
+        return
+    if git('fetch', '-q', remote, f'refs/heads/{branch}', check=False).returncode == 0:
+        theirs = text(git('rev-parse', 'FETCH_HEAD'))
+        if git('merge-base', '--is-ancestor', theirs, merged, check=False).returncode != 0:
+            raise Failure(f'{remote}/{branch} has commits this branch lacks ({theirs[:12]}), so the merge {merged[:12]} is not pushed: '
+                          f'bring them in, then run again (never force)')
+    done = git('push', remote, f'{merged}:refs/heads/{branch}', check=False)
+    if done.returncode != 0:
+        raise Failure(f'pushing the merge {merged[:12]} to {remote}/{branch} failed: {done.stderr.decode(errors="replace").strip()[-400:]}')
+    print(f'fractal-test: pushed {branch} at the merge {merged[:12]} to {remote}', flush=True)
+
+
+REEXEC = 'ST_TEST_REEXEC'  # set to the base commit in the base's copy that run_base_copy started: it never re-executes again
+
+
+def run_base_copy(argv):
+    """Replace this process with the base's self-contained scripts/st-test, as BASE_SCRIPTS does for the wrapper, signer and verifier.
+    Every seat runs fractal-test from its own branch, so without this, how runs queue for pool trees and build slots (and which commit they
+    sign) stays at whatever the branch last merged, for days, and old branches keep racing while new ones queue. A branch's own runner
+    changes are still tested by ci-script-tests (fractal-test-test runs from the tree), and that is what is signed. There is no opt-out.
+    This copy runs only when the base's st-test is absent, empty or this file, or this already is the base's copy (ST_TEST_REEXEC).
+    The human-facing fractal-test shim cannot be copied alone; retain st-test until every supported base permits contraction."""
+    if os.environ.get(REEXEC):
+        return
+    scrub_git_environment()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('--base', default='origin/main')
+    base = parser.parse_known_args(argv)[0].base
+    try:
+        commit = fetch_base(base)
+    except Exception:  # offline, or no such remote: the base as this clone has it, else this copy
+        commit = text(git('rev-parse', '--verify', '-q', base + '^{commit}', check=False))
+    if not commit:
+        return
+    # arn:lmig:smalltalk:2026-10-27-st-test-shim — copy the self-contained implementation, never the adjacent-file shim.
+    shown = git('show', f'{commit}:scripts/st-test', check=False)
+    if shown.returncode or not shown.stdout or shown.stdout == Path(__file__).read_bytes():
+        return
+    scratch = Path(tempfile.mkdtemp(prefix='st-test-base-'))
+    path = scratch / 'st-test'
+    path.write_bytes(shown.stdout)
+    path.chmod(0o700)
+    print(f"fractal-test: running the base's st-test ({base} at {commit[:12]}), not this branch's copy", file=sys.stderr, flush=True)
+    os.execve(sys.executable, [sys.executable, str(path), *argv], dict(os.environ, **{REEXEC: commit}))
+
+
+FETCH_LOCK_TRIES, FETCH_LOCK_BACKOFF = 3, 2.0  # seconds before the second try, twice that before the third
+
+
+def fetch_base(base):
+    """The base's commit at its current tip: a remote-tracking base (origin/main) is fetched first, since main moves; the lag and the
+    policy are read at that tip. A shared clone has many worktrees and seats fetching at once, and git refuses to update a remote-tracking
+    ref another fetch moved under it ("cannot lock ref 'refs/remotes/origin/main': is at X but expected Y"): that fetch is tried again,
+    up to FETCH_LOCK_TRIES times with a short backoff, as the race is no failure of the run's (2026-10-27: one ended a run after its
+    44-minute wait for a pool tree). Any other fetch error fails at once."""
+    remote, _, branch = base.partition('/')
+    if branch:
+        for attempt in range(1, FETCH_LOCK_TRIES + 1):
+            done = git('fetch', '-q', remote, branch, check=False)
+            if done.returncode == 0:
+                break
+            error = done.stderr.decode(errors='replace').strip()
+            if 'cannot lock ref' not in error or attempt == FETCH_LOCK_TRIES:
+                raise Failure(f'git fetch failed: {error[-400:]}')
+            print(f'fractal-test: another fetch moved {base} at the same moment; fetching again ({attempt + 1} of {FETCH_LOCK_TRIES})',
+                  file=sys.stderr, flush=True)
+            time.sleep(FETCH_LOCK_BACKOFF * attempt)
+    return text(git('rev-parse', '--verify', '-q', base + '^{commit}'))
 
 
 def target_commit(base):
@@ -335,12 +488,22 @@ def target_commit(base):
 def branch_point(commit, base):
     """Where the branch left the base (the base itself when the branch holds it): the commit whose lane definition the tree is
     held to. The CI gate judges a pull request head the same way (docs/st3/gate-evidence.md, "Which lane definition a pull request
-    is held to"): a branch that only lags main changed no lane file itself. When the lane file itself changed on main since then, the
-    base: the gate never uses such a head's tree (the lane file is one of the files that decide a skip).
+    is held to"): a branch that only lags main changed no lane file itself. When main changed the lane entry of a check this run signs
+    since then, the base: the verifier holds a head to its branch point only while that check's own entry is the base's.
     """
     point = text(git('merge-base', commit, base))
-    lanes = [git('rev-parse', '--verify', '-q', f'{at}:.st/required-lanes.json', check=False).stdout for at in (point, base)]
-    return point if lanes[0] == lanes[1] else base
+    texts = [git('show', f'{at}:.st/required-lanes.json', check=False) for at in (point, base)]
+    if any(done.returncode != 0 for done in texts):
+        return point if all(done.returncode != 0 for done in texts) else base
+
+    def entries(done):
+        try:
+            lanes = json.loads(done.stdout)['lanes']
+        except (ValueError, KeyError, TypeError):
+            return None
+        return {name: json.dumps(lanes.get(name), sort_keys=True) for name in (CHECKS or lanes)}
+    here, there = (entries(done) for done in texts)
+    return point if here is not None and here == there else base
 
 
 def size_gb(path):
@@ -382,7 +545,7 @@ def shared_target(tree_target=None):
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        print(f'st-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
+        print(f'fractal-test: another run is using {target}; waiting for it (one run builds and tests in it at a time)', file=sys.stderr, flush=True)
         fcntl.flock(lock, fcntl.LOCK_EX)
     trim(target)  # nobody else is using it: the moment to keep it small
     return target, lock
@@ -394,7 +557,7 @@ def governed(argv, name):
     memory limits, while each cargo command inside takes the host's build slots through the admission shim as any build does.
 
     No heavy-slot ticket is held for the whole check (`cargo --stage-slot`): the checks' tests run under the test guardian
-    (scripts/st3_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
+    (scripts/fractal_test_process.py), which detaches from its parents, and the shim lets a cargo command skip the queue under a held
     stage only when the stage is its ancestor. The cargo commands under the guardian then queued for the one heavy slot their own
     stage held, until the stage limit killed it (2026-10-23, on a build host). The recorded command is unchanged: only what starts
     evidence-wrap changes. A host without a user systemd bus runs it as before, and says so; ST_EVIDENCE_GOVERN=off does too."""
@@ -404,7 +567,7 @@ def governed(argv, name):
     scope = shutil.which('systemd-run')  # by its full path: the check's PATH is a fixed one, not the caller's
     if scope and runtime and Path(runtime, 'bus').exists():
         return [scope, '--user', '--scope', '--quiet', '--collect', '--slice=builds.slice', '--'] + argv
-    print(f'st-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
+    print(f'fractal-test: {name} runs without the host build cap (no user systemd bus for a builds.slice scope)', file=sys.stderr)
     return argv
 
 
@@ -508,6 +671,13 @@ def target_worktree(base, scratch):
     directory = Path(scratch) / 'tree'
     git('worktree', 'add', '--detach', '-q', str(directory), commit)
     return directory, commit
+
+
+def needs_tree(checks):
+    """Whether a run of `checks` takes a pool tree: what a tree keeps is a warm cargo target, which only a check that builds (BUILDS) uses. A run
+    of light checks alone (ci-script-tests, typescript-client, genie-freshness) takes a throwaway worktree instead of waiting behind runs that
+    build for a tree it does not need (2026-10-26: a 10-second ci-script-tests rerun waited behind 30-minute runs)."""
+    return any(name in BUILDS for name in checks)
 
 
 def pool_size():
@@ -628,29 +798,150 @@ def evict_to_cap(base, limit_gb, keep=None):
                 shutil.rmtree(path, ignore_errors=True)
             total -= sizes[(repo, n)]
             idle = max(0, int((time.time() - used) / 60))
-            print(f'st-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
+            print(f'fractal-test: pool over {limit_gb:g} GB: evicted {repo.name}/tree-{n} and target-{n} ({sizes[(repo, n)]:.1f} GB, idle {idle} min)', file=sys.stderr)
         finally:
             lock.close()
     if total > limit_gb:
-        print(f'st-test: pool is {total:.1f} GB, over {limit_gb:g} GB, and every other tree is in use', file=sys.stderr)
+        print(f'fractal-test: pool is {total:.1f} GB, over {limit_gb:g} GB, and every other tree is in use', file=sys.stderr)
 
 
-def acquire_tree(root, size):
-    """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use."""
+PRIORITY_AGING_SECONDS, PRIORITY_FLOOR = 120, 5  # the cargo shim's rank aging: a waiting ticket's rank improves by 1 per 120 s, never below 5 (ranks under 5 never age)
+
+
+def priority_rank(environment=None):
+    """The caller's rank in the build host's priority file (lines 'RANK GLOB', first glob matching the caller; lower is served first), as the cargo
+    shim reads it: the caller is ST_AGENT, else CARGO_PRIORITY_CALLER (a run that carries only that one ranked 50 here while the shim ranked it
+    right); the file is CARGO_PRIORITY_FILE or ~/.config/cargo-priority; 50 when unlisted or unreadable."""
+    environment = os.environ if environment is None else environment
+    caller = environment.get('ST_AGENT') or environment.get('CARGO_PRIORITY_CALLER', '')
+    path = environment.get('CARGO_PRIORITY_FILE') or str(Path.home() / '.config/cargo-priority')
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        fields = line.split('#')[0].split()
+        if caller and len(fields) >= 2 and fields[0].isdigit() and fnmatch.fnmatchcase(caller, fields[1]):
+            return int(fields[0])
+    return 50
+
+
+def process_started_ns(pid):
+    """When process `pid` started, in epoch nanoseconds (the boot time plus /proc/PID/stat's start ticks, to about a second); None where /proc
+    cannot tell."""
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+        ticks = int(stat[stat.rindex(')') + 2:].split()[19])  # field 22, counted after the command name, which may hold spaces
+        boot = next(int(line.split()[1]) for line in Path('/proc/stat').read_text().splitlines() if line.startswith('btime '))
+        return (boot * 10**9) + ticks * 10**9 // os.sysconf('SC_CLK_TCK')
+    except (OSError, ValueError, IndexError, StopIteration):
+        return None
+
+
+def tree_queue(queue, now_ns):
+    """The live tickets waiting for a pool tree (name RANK.NANOS.PID), best first: the shim's order, effective rank (aged) then arrival. A ticket
+    whose process is gone is removed, and so is one whose pid now names a process that started after the ticket was taken (a waiter killed
+    with SIGKILL leaves its ticket; a reused pid must not keep its place)."""
+    found = []
+    for name in os.listdir(queue):
+        try:
+            rank, nanos, pid = (int(part) for part in name.split('.'))
+        except ValueError:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            with contextlib.suppress(OSError):
+                os.unlink(queue / name)
+            continue
+        except PermissionError:
+            pass
+        started = process_started_ns(pid)
+        if started is not None and started > nanos + 2 * 10**9:  # the pid was reused by a process younger than the ticket: its waiter is gone
+            with contextlib.suppress(OSError):
+                os.unlink(queue / name)
+            continue
+        effective = rank if rank < PRIORITY_FLOOR else max(PRIORITY_FLOOR, rank - (now_ns - nanos) // (PRIORITY_AGING_SECONDS * 10**9))
+        found.append((effective, nanos, name))
+    return sorted(found)
+
+
+def acquire_tree(root, size, rank=None):
+    """(n, lock): the lowest free tree of the pool, held by an flock until the lock is closed; waits while every tree is in use.
+    Waiters queue in the build host's order, not by a race to the next free tree (2026-10-26: the CPU P0 builder, rank 3, waited two hours while
+    rank-50 runs took each tree as it came free): each takes a ticket in queue/ and only the best live ticket tries the trees. `size` is the
+    pool size or a function giving it, read again on every pass: when the host's heavy slots grow while runs wait, the best ticket takes a new
+    tree at once instead of polling only the old ones (with every ticket behind it waiting too)."""
     root.mkdir(parents=True, exist_ok=True)
-    waited = False
-    while True:
-        for n in range(size):
-            lock = open(root / f'tree-{n}.lock', 'w')
+    queue = root / 'queue'
+    queue.mkdir(exist_ok=True)
+    ticket = queue / f'{priority_rank() if rank is None else rank:03d}.{time.time_ns():019d}.{os.getpid()}'
+    ticket.touch()
+    waited, told = False, set()
+    try:
+        while True:
+            order = tree_queue(queue, time.time_ns())
+            ahead = next((i for i, (_, _, name) in enumerate(order) if name == ticket.name), 0)
+            trees = size() if callable(size) else size
+            if ahead == 0:
+                for n in range(trees):
+                    lock = open(root / f'tree-{n}.lock', 'w')
+                    try:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        lock.close()
+                        continue
+                    # A lease ends with the run that held it, not with every process it started (2026-10-28: a seat restart killed runs
+                    # whose children went on). A free tree that still has processes at work in it is busy: never two writers in one tree.
+                    users = tree_users(root / f'tree-{n}')
+                    if not users:
+                        return n, lock
+                    lock.close()
+                    if n not in told:
+                        told.add(n)
+                        print(f'fractal-test: pool tree tree-{n} is free, but processes {", ".join(map(str, users))} still work in it (left by '
+                              'a run that lost the tree); it is skipped until they end', file=sys.stderr)
+            if not waited:
+                print(f'fractal-test: all {trees} pool trees are in use; waiting for one ({ahead} ahead in the build host\'s order)', file=sys.stderr)
+                waited = True
+            time.sleep(POOL_WAIT_SECONDS)
+    finally:
+        with contextlib.suppress(OSError):
+            ticket.unlink()
+
+
+def tree_users(directory):
+    """The live processes other than this one whose working directory is in the pool tree `directory`: work a run left there when it lost
+    the tree's lease (its children, a lane's build in a scope of its own). Read from /proc; where there is none, nothing can be seen."""
+    base = os.path.realpath(directory)
+    found = []
+    with contextlib.suppress(OSError):
+        for entry in os.scandir('/proc'):
+            if not entry.name.isdigit() or int(entry.name) == os.getpid():
+                continue
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                return n, lock
-            except BlockingIOError:
-                lock.close()
-        if not waited:
-            print(f'st-test: all {size} pool trees are in use; waiting for one', file=sys.stderr)
-            waited = True
-        time.sleep(POOL_WAIT_SECONDS)
+                cwd = os.readlink(f'/proc/{entry.name}/cwd')
+            except OSError:
+                continue  # gone, or not ours to read
+            if cwd == base or cwd.startswith(base + os.sep):
+                found.append(int(entry.name))
+    return sorted(found)
+
+
+def clear_stale_index_lock(directory):
+    """Remove the index.lock a run left in the pool tree `directory` when it died while git wrote the index (2026-10-28: a seat restart killed
+    a run in its checkout of tree-2, and the next five runs given the tree failed on the lock). The caller holds the tree's lease and no
+    process is left in the tree, so no git can be writing it. Logged; with a process still in the tree it is left alone and the run fails."""
+    path = text(git('rev-parse', '--path-format=absolute', '--git-path', 'index.lock', cwd=directory, check=False))
+    lock = Path(path) if path else None
+    if lock is None or lock.name != 'index.lock' or not lock.exists():
+        return
+    users = tree_users(directory)
+    if users:
+        raise Failure(f'pool tree {directory} has an index.lock and processes {", ".join(map(str, users))} still in it: not taking it')
+    lock.unlink(missing_ok=True)
+    print(f'fractal-test: removed a stale {lock} (git was killed while writing it; no process is left in the tree)', file=sys.stderr,
+          flush=True)
 
 
 def is_pool_tree(directory):
@@ -694,6 +985,7 @@ def prepare_tree(root, n, commit):
         os.rename(directory, kept)
     git('worktree', 'prune', check=False)
     if directory.exists():
+        clear_stale_index_lock(directory)
         # Forced detached checkout replaces both index and tracked files, even after an interrupted run.
         # A separate reset --hard is redundant and is refused by agent git policies.
         git('checkout', '--detach', '-q', '-f', commit, cwd=directory)
@@ -776,7 +1068,7 @@ def materialize_members(directory):
 
 
 def reap_stale():
-    """Remove worktrees an earlier st-test left when it was killed (no TERM, no cleanup): its scratch directory names its pid."""
+    """Remove worktrees an earlier fractal-test left when it was killed (no TERM, no cleanup): its scratch directory names its pid."""
     listing = text(git('worktree', 'list', '--porcelain', check=False))
     for block in listing.split('\n\n'):
         match = re.search(r'^worktree (\S*/st-test-[^/]+)/tree$', block, re.M)
@@ -844,7 +1136,9 @@ def push_record(directory, remote, tree, record):
     token = os.environ.get('EVIDENCE_PUSH_TOKEN', '')
     if token:
         header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        extra = {'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'http.extraheader', 'GIT_CONFIG_VALUE_0': f'Authorization: Basic {header}'}
+        count = int(os.environ.get('GIT_CONFIG_COUNT', '0'))
+        extra = {'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                 f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'}
     pushed = git('push', '--quiet', remote, *[f'{ref}:{ref}' for ref in refs], cwd=directory, env=extra, check=False)
     if pushed.returncode != 0:
         message = pushed.stderr.decode(errors='replace')
@@ -1007,7 +1301,9 @@ def push_records(directory, remote, refs):
     environment = dict(os.environ)
     if token:  # the same header evidence-wrap sets; it travels in the environment, never in an argument
         header = base64.b64encode(f'x-access-token:{token}'.encode()).decode()
-        environment.update(GIT_CONFIG_COUNT='1', GIT_CONFIG_KEY_0='http.extraheader', GIT_CONFIG_VALUE_0=f'Authorization: Basic {header}')
+        count = int(environment.get('GIT_CONFIG_COUNT', '0'))
+        environment.update({'GIT_CONFIG_COUNT': str(count + 1), f'GIT_CONFIG_KEY_{count}': 'http.extraheader',
+                            f'GIT_CONFIG_VALUE_{count}': f'Authorization: Basic {header}'})
     pending, reasons = list(refs), {}
     for attempt in range(PUSH_TRIES):
         if attempt:
@@ -1137,14 +1433,13 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         skips = env_skips_file(scratch, RUST_TESTS)
         environment.update(CI_TEST_PACKAGES=','.join(selected), CI_TEST_JUNIT=str(junit), CI_TEST_ENV_SKIPS=str(skips))
         environment.setdefault('CARGO_INCREMENTAL', '0')  # as the other checks: no incremental state in a one-shot build
+        environment.pop('BUILD_ADMISSION_CLASS', None)  # it builds: never a light start
         if target:
             environment['CARGO_TARGET_DIR'] = str(target)
         started = time.monotonic()
-        try:
-            done = subprocess.run(governed(RUN_TESTS, 'rust-tests'), cwd=directory, timeout=args.time_limit, env=environment)
-            code = done.returncode
-        except subprocess.TimeoutExpired:
-            code = 124
+        limit = Limit(args.time_limit, Path(scratch) / 'rust-tests.queue', args.queue_limit)
+        environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
+        code = run_limited(governed(RUN_TESTS, 'rust-tests'), limit, cwd=directory, env=environment)
         ran_seconds = round(time.monotonic() - started)
         if code not in RUN_COMPLETED or not junit.exists():
             return [('rust-tests', 'timed out' if code == 124 else 'NOT SIGNED', ran_seconds,
@@ -1185,7 +1480,9 @@ def run_rust_tests(args, directory, tools, scratch, tree, commit, base_commit, l
         if args.out:
             wrap += ['--out', args.out]
         started = time.monotonic()
-        signed = subprocess.run(wrap + ['--'] + RUST_TESTS_COMMAND, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
+        command = wrap + ['--'] + RUST_TESTS_COMMAND
+        print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
+        signed = subprocess.run(command, cwd=directory, env=dict(os.environ, RUST_TEST_JUNIT=str(junit), RUST_TEST_CRATE=crate),
                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if signed.returncode != 0:
             detail = (signed.stderr.strip().splitlines() or ['failed'])[-1][:160]
@@ -1257,6 +1554,123 @@ STAGE_LINE = re.compile(r'ci-local:\s+(\S+)\s+(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\
                         r'(?:\s+exit\s+(\S+)(?:\s+queue:\s+(\d+)\s+waits,\s+(\d+)s)?)?\s*')
 # How long a check's output is still copied after the check itself exited: a process it left behind may hold the pipe open.
 STREAM_GRACE = 5
+QUEUE_LIMIT = 14400  # default --queue-limit: the build-slot waits a check may spend, apart from its --time-limit
+LIMIT_POLL = 1.0  # how often a check's limit is read again while it runs
+# scripts/ci-local prints this once its own host-load gate has let it start, before its setup: a ci-local check's --time-limit counts from
+# here. Before it the check waits (build admission for its `nix develop`, the dev shell, ci-local's load gate) and only SILENCE_LIMIT bounds it.
+CI_LOCAL_STARTED = b'ci-local: stage logs in '
+SILENCE_LIMIT = 1800  # seconds without any output, before a ci-local check has started, after which it is stopped (a waiting build-admission prints every 60 s)
+
+
+def queued_seconds(path, now=None):
+    """Seconds of the build-slot waits scripts/ci-local wrote to `path` (CI_LOCAL_QUEUE_LOG: `wait|slot EPOCH STAGE` lines) as the union of
+    their spans, so two stages waiting at the same time count once; a wait not yet ended runs to `now`. A missing or unreadable file is 0."""
+    now = time.time() if now is None else now
+    try:
+        lines = Path(path).read_text(errors='replace').splitlines()
+    except OSError:
+        return 0.0
+    waiting, spans = {}, []
+    for line in lines:
+        parts = line.split(' ', 2)
+        if len(parts) != 3:
+            continue
+        kind, at, stage = parts
+        try:
+            at = float(at)
+        except ValueError:
+            continue
+        if kind == 'wait':
+            waiting.setdefault(stage, at)
+        elif kind == 'slot' and stage in waiting:
+            spans.append((waiting.pop(stage), at))
+    spans += [(start, now) for start in waiting.values()]
+    total, reach = 0.0, float('-inf')
+    for start, end in sorted(spans):  # by start: each span adds only the part past the furthest end so far
+        start = max(start, reach)
+        if end > start:
+            total += end - start
+            reach = end
+    return total
+
+
+class Limit:
+    """A check's time limit that counts only the time it runs: `seconds` of running, plus the build-slot waits read from `queue_log`
+    (queued_seconds), of which at most `queue_limit` seconds in all.
+
+    With `begins_at` (bytes the check prints once it really starts, CI_LOCAL_STARTED) the running time counts only from that output on
+    (`output` is given every chunk the check prints): what comes before it is waiting, admission for its dev shell included, which no
+    queue log records (2026-10-27: a linux-gate spent its whole 7200 s before ci-local started and was stopped with its tests passing). Until
+    then `silence` seconds without any output stop it (`silent` is then True), and so does waiting longer than `queue_limit` in all (`waited_out`):
+    a wedged admission prints every 60 s and is never silent. `pre_start` is the waiting time."""
+
+    def __init__(self, seconds, queue_log=None, queue_limit=QUEUE_LIMIT, begins_at=None, silence=None):
+        self.seconds, self.queue_log, self.queue_limit = seconds, queue_log, queue_limit
+        self.started = self.heard = time.monotonic()
+        self.begins_at, self.tail, self.pre_start, self.silent, self.waited_out = begins_at, b'', 0.0, False, False
+        self.silence = SILENCE_LIMIT if silence is None else silence
+
+    def output(self, chunk):
+        """The check printed `chunk`: it is not silent, and when `begins_at` is in it, its running time starts now."""
+        now = self.heard = time.monotonic()
+        if self.begins_at:
+            seen = self.tail + chunk
+            if self.begins_at in seen:
+                self.pre_start, self.started, self.begins_at = now - self.started, now, None
+            else:
+                self.tail = seen[-len(self.begins_at):]
+
+    def queued(self):
+        return queued_seconds(self.queue_log) if self.queue_log else 0.0
+
+    def remaining(self):
+        """Seconds left before the check is over its limit (0 or less once it is): running time or waiting time, whichever ends first."""
+        if self.begins_at:  # not started yet: silence ends it, and so does a wait past queue_limit
+            now = time.monotonic()
+            quiet, waiting = self.silence - (now - self.heard), self.queue_limit - (now - self.started)
+            self.silent, self.waited_out = quiet <= 0, waiting <= 0 < quiet
+            return min(quiet, waiting)
+        queued = self.queued()
+        ran = time.monotonic() - self.started - queued
+        return min(self.seconds - ran, self.queue_limit - queued)
+
+    def waiting(self):
+        """Seconds the check has waited before it started: so far, while it has not."""
+        return time.monotonic() - self.started if self.begins_at else self.pre_start
+
+
+def wait_limited(process, limit):
+    """`process`'s exit code, or 124 after killing it (the process itself, as subprocess.run's timeout does) once `limit` has run out."""
+    while True:
+        left = limit.remaining()
+        if left <= 0:
+            process.kill()
+            process.wait()
+            return 124
+        try:
+            return process.wait(timeout=min(left, LIMIT_POLL))
+        except subprocess.TimeoutExpired:
+            continue
+
+
+def run_limited(argv, limit, **options):
+    """subprocess.run(argv, **options).returncode under `limit` (a Limit): 124 when it ran out. Any error here kills the process."""
+    with subprocess.Popen(argv, **options) as process:
+        try:
+            return wait_limited(process, limit)
+        except BaseException:
+            process.kill()
+            raise
+
+
+def queue_note(limit):
+    """What the summary row adds about the check's waits before it started and for build slots, or ''."""
+    queued, waited = round(limit.queued()), round(limit.waiting())
+    notes = ([f'stopped after {limit.silence:g}s without output before ci-local started'] if limit.silent else []) + \
+            ([f'stopped after waiting {limit.queue_limit:g}s (--queue-limit) before ci-local started'] if limit.waited_out else []) + \
+            ([f'waited {waited}s before ci-local started (admission, dev shell)'] if waited else []) + \
+            ([f'waited {queued}s for build slots'] if queued else [])
+    return f'; {", ".join(notes)} (not counted against --time-limit)' if notes else ''
 
 
 def ci_local_stages(path):
@@ -1278,39 +1692,81 @@ def ci_local_stages(path):
     return stages
 
 
-def streamed(argv, log, timeout, **options):
-    """`argv`'s exit code (124 past `timeout`), with its output (stdout and stderr, as one) copied as it comes both to this terminal, unchanged,
+def pre_start_fifo(path):
+    """`path` made a FIFO (anything there before removed) for the input pre_start_s, so that what evidence-wrap reads from it is ordered after
+    every line of the check's output: see answer_pre_start."""
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(path)
+    os.mkfifo(path, 0o600)
+    return path
+
+
+def answer_pre_start(fifo, pipe, take, limit):
+    """Write the input pre_start_s to `fifo` once evidence-wrap opens it to read: True then, False while no one has it open to read.
+
+    evidence-wrap reads its --input-file inputs only after the check ended, and only after it copied all the check's output to `pipe`
+    (flushed). So when its open of the FIFO has begun, every line ci-local printed is already in `pipe`: drain it (`take` each chunk, which
+    is how the Limit hears ci-local start), then write the seconds the check waited before ci-local started, or nothing when it never did
+    (the input is then 'none'). A plain file, written when this process happened to read the start line, raced the wrapper's read and lost on
+    a loaded host: the note said 'none' for a check that had started (2026-10-28, merge-queue ejections). The open is non-blocking, so with
+    no reader yet it fails at once (ENXIO) and the caller tries again on its next pass; the write is blocking, so the wrapper reads it whole."""
+    try:
+        handle = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as error:
+        if error.errno in (errno.ENXIO, errno.ENOENT):
+            return False
+        raise
+    try:
+        while select.select([pipe], [], [], 0)[0]:
+            chunk = os.read(pipe, 65536)
+            if not chunk:
+                break
+            take(chunk)
+        os.set_blocking(handle, True)
+        if limit.begins_at is None:
+            os.write(handle, f'{round(limit.pre_start)}\n'.encode())
+    finally:
+        os.close(handle)
+    return True
+
+
+def streamed(argv, log, timeout, pre_start=None, **options):
+    """`argv`'s exit code (124 once `timeout`, seconds or a Limit, has run out), with its output (stdout and stderr, as one) copied as it comes both to this terminal, unchanged,
     and to the file `log`, so the summary can read what it printed. subprocess.run's own semantics otherwise: past the timeout the process
     itself is killed (not its group: what it started is left as before) and waited for, and any error here (TERM's exit included) kills it
-    too. Once it exited, what it left behind holding the pipe gets STREAM_GRACE seconds, then the pipe is closed."""
+    too. Once it exited, what it left behind holding the pipe gets STREAM_GRACE seconds, then the pipe is closed. When the Limit waits for the
+    check to start (begins_at), `pre_start` is a FIFO evidence-wrap reads after the check ended (pre_start_fifo): the seconds it waited are
+    written to it then (answer_pre_start), or nothing when it never started."""
     sys.stdout.flush()
     raw = getattr(sys.stdout, 'buffer', None)
     decode = codecs.getincrementaldecoder('utf-8')(errors='replace').decode
-    deadline = time.monotonic() + timeout
+    limit = timeout if isinstance(timeout, Limit) else Limit(timeout)
+
+    def take(chunk):
+        kept.write(chunk)
+        limit.output(chunk)
+        if raw:
+            raw.write(chunk)
+            raw.flush()
+        else:
+            sys.stdout.write(decode(chunk))
+            sys.stdout.flush()
+
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **options) as process, open(log, 'wb') as kept:
         try:
-            pipe, ended = process.stdout.fileno(), None
-            while time.monotonic() < deadline and (ended is None or time.monotonic() - ended < STREAM_GRACE):
+            pipe, ended, answered = process.stdout.fileno(), None, pre_start is None
+            while limit.remaining() > 0 and (ended is None or time.monotonic() - ended < STREAM_GRACE):
                 if ended is None and process.poll() is not None:
                     ended = time.monotonic()
+                if not answered:
+                    answered = answer_pre_start(pre_start, pipe, take, limit)
                 if not select.select([pipe], [], [], 0.2)[0]:
                     continue
                 chunk = os.read(pipe, 65536)
                 if not chunk:
                     break
-                kept.write(chunk)
-                if raw:
-                    raw.write(chunk)
-                    raw.flush()
-                else:
-                    sys.stdout.write(decode(chunk))
-                    sys.stdout.flush()
-            try:
-                return process.wait(timeout=max(0, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-                return 124
+                take(chunk)
+            return wait_limited(process, limit)
         except BaseException:
             process.kill()
             raise
@@ -1354,7 +1810,7 @@ def record_run(record):
         if written != len(line):
             raise OSError(f'short write to {path} ({written} of {len(line)} bytes)')
     except OSError as error:
-        print(f'st-test: could not record this run\'s times: {error}', file=sys.stderr)
+        print(f'fractal-test: could not record this run\'s times: {error}', file=sys.stderr)
 
 
 def utc(seconds):
@@ -1367,6 +1823,9 @@ def main(argv):
     POOL_SETTINGS.update({name: os.environ[name] for name in SETTING_NAMES if name in os.environ})
     scrub_git_environment()
     scrub_seat_environment()
+    # The build host's finish-first admission order: every stage of this run carries one run name and start time, so once
+    # the run has had a heavy admission its later stages are served by the run's start instead of queueing behind runs that began after it.
+    os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
     parser.add_argument('--base', default='origin/main', help='the accepted base (default origin/main)')
@@ -1377,7 +1836,9 @@ def main(argv):
     parser.add_argument('--rerun', action='store_true', help='run a check even when this tree already has a passing signature for it')
     parser.add_argument('--crate', action='append', default=[], metavar='NAME', help='with --check rust-tests: only these crates (repeatable)')
     parser.add_argument('--attempt', default='1')
-    parser.add_argument('--time-limit', type=int, default=7200, help='seconds per check (default 7200)')
+    parser.add_argument('--time-limit', type=int, default=7200, help='seconds each check may run, not counting its waits for a build slot (default 7200)')
+    parser.add_argument('--queue-limit', type=int, default=QUEUE_LIMIT,
+                        help=f'seconds each check may wait for build slots, apart from --time-limit (default {QUEUE_LIMIT})')
     parser.add_argument('--list', action='store_true', help='print the checks and their commands and stop')
     parser.add_argument('--seed', nargs='?', const='', metavar='REF', help='sign the per-crate rust-tests notes of REF (default: the base) instead of HEAD, '
                         'for the crates that lack one, and push them (to origin unless --push says otherwise); with --out, export every selected crate instead: '
@@ -1407,6 +1868,8 @@ def main(argv):
         if not args.out:
             args.push = args.push or 'origin'
     checks = args.check or [name for name in LOCAL if name not in OPT_IN]
+    global CHECKS
+    CHECKS = tuple(checks)
     if args.list:
         for name in checks:
             print(f'{name}: {" ".join(LOCAL[name])}')
@@ -1414,14 +1877,12 @@ def main(argv):
 
     # A run's times count from here (the base fetch, the pool tree, the members and the notes fetch are part of what a run costs).
     started_wall, started = time.time(), time.monotonic()
-    remote, _, branch = args.base.partition('/')
-    if branch:
-        git('fetch', '-q', remote, branch)  # the base moves; the lag and the policy are read at its current tip
-    base_commit = text(git('rev-parse', '--verify', '-q', args.base + '^{commit}'))
+    remote = args.base.partition('/')[0]
+    base_commit = fetch_base(args.base)
     if args.status:
         commit, why_merge = gate_commit(args.base)
         if why_merge:
-            print(f'st-test: {why_merge}')
+            print(f'fractal-test: {why_merge}')
         tree = text(git('rev-parse', f'{commit}^{{tree}}'))
         lane_base = branch_point(commit, base_commit)
         with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
@@ -1470,25 +1931,35 @@ def main(argv):
     with tempfile.TemporaryDirectory(prefix='st-test-') as scratch:
         os.chmod(scratch, 0o700)
         (Path(scratch) / 'pid').write_text(str(os.getpid()))
-        tools = {}
-        for name in BASE_SCRIPTS:
-            path = Path(scratch) / name
-            path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
-            path.chmod(0o700)
-            tools[name] = str(path)
         directory = Path(scratch) / 'tree'
-        pool_trees, tree_lock, tree_target, n = pool_size(), None, None, None
+        pool_trees, tree_lock, tree_target, n, merged = pool_size(), None, None, None, None
+        if not needs_tree(checks):
+            pool_trees = None  # a throwaway worktree, as with ST_TEST_TREES=off, and no wait for a tree
         try:
             if pool_trees:
-                commit, root = target_commit(args.base), pool_root()
-                if gate_commit(args.base)[1]:
-                    print(f'st-test: {gate_commit(args.base)[1]}', flush=True)
-                n, tree_lock = acquire_tree(root, pool_trees)
+                root = pool_root()
+                target_commit(args.base)  # a branch that does not merge with the base fails now, not after the wait for a tree
+                n, tree_lock = acquire_tree(root, lambda: pool_size() or pool_trees)  # the slots can change while the run waits
+                # The wait for a tree can take hours, and main moves meanwhile: the base is fetched again and the commit to sign chosen at
+                # its tip now, so what is signed is only as old as the run itself (2026-10-26: a run that waited 1h50m signed a merge with a
+                # main that had already moved a protected file, and the push was refused).
+                base_commit = fetch_base(args.base)
+                merged = merge_base_in(args.base)
+                commit, why_merge = gate_commit(args.base)
+                if why_merge:
+                    print(f'fractal-test: {why_merge}', flush=True)
                 if pool_max_gb():
                     evict_to_cap(pool_base(), pool_max_gb(), keep=(root, n))
                 directory, tree_target = prepare_tree(root, n, commit), root / f'target-{n}'
             else:
+                merged = merge_base_in(args.base)
                 directory, commit = target_worktree(args.base, scratch)
+            tools = {}
+            for name in BASE_SCRIPTS:  # from the base as it is now, after any wait for a tree
+                path = Path(scratch) / name
+                path.write_bytes(git('show', f'{args.base}:scripts/{name}').stdout)
+                path.chmod(0o700)
+                tools[name] = str(path)
             lag = behind(args.base)
             tree = text(git('rev-parse', f'{commit}^{{tree}}', cwd=directory))
             lane_base = branch_point(commit, base_commit)
@@ -1555,6 +2026,12 @@ def main(argv):
                 environment.setdefault('CARGO_INCREMENTAL', '0')  # as CI builds: a one-shot run gains nothing from incremental state and it is ~40% of the target
                 if target and name in BUILDS:
                     environment['CARGO_TARGET_DIR'] = str(target)
+                # The nix wrapper admits a `nix develop`/`nix shell` start as heavy unless told the shell compiles no Rust: a check that
+                # builds nothing starts as light (as the pre-sign worker starts .#web and .#genie), and one that builds never does.
+                if name in BUILDS:
+                    environment.pop('BUILD_ADMISSION_CLASS', None)
+                else:
+                    environment['BUILD_ADMISSION_CLASS'] = 'light'
                 if name == 'linux-gate' and RUST_TESTS in checks and 'tests' in LOCAL[name]:
                     # rust-tests signs from this run's own nextest report (same build, whole selection): ask the tests stage to write it.
                     environment['CI_TEST_JUNIT'] = str(gate_report)
@@ -1585,28 +2062,34 @@ def main(argv):
                 if name == WEB:
                     wrap += [argument for key, value in WEB_INPUTS.items() for argument in ('--input', f'{key}={value}')]
                 started = time.monotonic()
+                streams = output is None and CI_LOCAL in LOCAL[name]
+                limit = Limit(args.time_limit, Path(scratch) / f'{name}.queue', args.queue_limit, begins_at=CI_LOCAL_STARTED if streams else None)
+                environment['CI_LOCAL_QUEUE_LOG'] = str(limit.queue_log)
+                pre_start = None
+                if streams and takes_input_files(tools['evidence-wrap']):
+                    # The seconds it waited before ci-local started, recorded in the note: a FIFO the wrapper reads after the check ended,
+                    # answered once it does (answer_pre_start).
+                    pre_start = pre_start_fifo(Path(scratch) / f'pre-start-{name}.txt')
+                    wrap += ['--input-file', f'pre_start_s={pre_start}']
                 command = wrap + ['--'] + LOCAL[name]
+                print(f'fractal-test: evidence-wrap argv: {shlex.join(command)}', file=sys.stderr, flush=True)
                 command = governed(command, name) if name in BUILDS else command
-                if output is None and CI_LOCAL in LOCAL[name]:
+                if streams:
                     # scripts/ci-local ends with a table of its stages' times: its output still reaches this terminal as it comes, and is kept
                     # so the run's record can carry the stages.
                     log = Path(scratch) / f'{name}-output.log'
-                    code = streamed(command, log, args.time_limit, cwd=directory, env=environment)
+                    code = streamed(command, log, limit, cwd=directory, env=environment, pre_start=pre_start)
                     stages[:] = ci_local_stages(log)
                 else:
-                    try:
-                        done = subprocess.run(command, cwd=directory, timeout=args.time_limit, env=environment, stdout=output,
-                                              stderr=subprocess.STDOUT if output else None)
-                        code = done.returncode
-                    except subprocess.TimeoutExpired:
-                        code = 124
+                    code = run_limited(command, limit, cwd=directory, env=environment, stdout=output,
+                                       stderr=subprocess.STDOUT if output else None)
                 seconds = round(time.monotonic() - started)
                 ok = code == 0
                 if args.out:
                     why = 'packs exported, not imported or verified' if ok else 'export failed'
                 else:
                     is_covered, why = covered(tools['evidence-verify'], directory, tree, name, args.base, repository, lane_base)
-                return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why), not ok, False
+                return (name, 'passed' if ok else ('timed out' if code == 124 else f'FAILED ({code})'), seconds, why + queue_note(limit)), not ok, False
 
             # The light checks run alongside the ones that build, one after another in a lane of their own, as CI runs them on runners of
             # their own: they wait on network, Nix and Node rather than the Rust build, and run after it they added minutes to every
@@ -1628,13 +2111,13 @@ def main(argv):
                                 results[name] = ((name, f'FAILED ({type(error).__name__})', 0, str(error)[:120]), True, False)
 
                 lane = threading.Thread(target=light_lane, name='st-test-light')
-                print(f'st-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
+                print(f'fractal-test: {", ".join(light)} run alongside {", ".join(builds)}; their output follows when it is done', flush=True)
                 lane.start()
                 for name in builds:
                     results[name] = run_one(name)
                 lane.join()
                 for name in light:
-                    print(f'\n----- st-test: {name} output -----', flush=True)
+                    print(f'\n----- fractal-test: {name} output -----', flush=True)
                     sys.stdout.write(logs[name].read_text(errors='replace') if logs[name].exists() else '(no output)\n')
                     sys.stdout.flush()
             else:
@@ -1645,7 +2128,7 @@ def main(argv):
                 rows += row if isinstance(row, list) else [row]
                 failed = failed or check_failed
                 unsigned = unsigned or check_unsigned
-            print(f'\nst-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
+            print(f'\nfractal-test: tree {tree[:12]} (HEAD{f", {lag} commit(s) behind {args.base}: the queue tests the merge" if lag else ""}), in a clean worktree')
             rows.insert(0, ('setup', 'done', setup_seconds, 'fetch and the clean tree (the megarepo members are fetched when a check first needs them)'))
             for name, result, seconds, why in rows:
                 print(f'  {name:<20} {result:<12} {seconds:>6}s  {why}')
@@ -1657,12 +2140,16 @@ def main(argv):
                 if line:
                     print(f'  {line}')
             code = 1 if failed else (4 if unsigned else 0)
-            # One line per run for the time objective (scripts/st-test-report): only a run of the whole suite (no --check, no --crate) counts.
+            # One line per run for the time objective (scripts/fractal-test-report): only a run of the whole suite (no --check, no --crate) counts.
             record_run({'v': 1, 'started': utc(started_wall), 'ended': utc(time.time()), 'total_s': round(time.monotonic() - started),
                         'host': socket.gethostname().split('.')[0], 'tree': tree, 'commit': commit, 'base': base_commit, 'behind': lag,
                         'full': not args.check and not args.crate, 'checks': checks, 'pool_tree': n, 'warm': warm,
                         'parallel': parallel, 'rows': [{'name': name, 'result': result, 'seconds': seconds} for name, result, seconds, _ in rows],
                         'exit': code, 'stages': stages})
+            if merged and args.push and code == 0:
+                push_branch(args.push, args.base, merged)
+            elif merged:
+                print(f'fractal-test: the merge {merged[:12]} is on the branch here, not pushed' + (f' (exit {code})' if code else ''), flush=True)
             return code
         finally:
             if not pool_trees and directory.exists():
@@ -1675,8 +2162,11 @@ def main(argv):
 if __name__ == '__main__':
     # TERM (the pre-push hook's timeout, a closed terminal) unwinds like an error so the throwaway worktree is removed.
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(143))
+    if os.environ.get(REEXEC) and Path(__file__).parent.name.startswith('st-test-base-'):
+        atexit.register(shutil.rmtree, Path(__file__).parent, True)  # the copy run_base_copy wrote: gone when this run ends
     try:
+        run_base_copy(sys.argv[1:])
         sys.exit(main(sys.argv[1:]))
     except Failure as error:
-        print(f'st-test: {error}', file=sys.stderr)
+        print(f'fractal-test: {error}', file=sys.stderr)
         sys.exit(2)

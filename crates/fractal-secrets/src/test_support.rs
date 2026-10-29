@@ -1,4 +1,4 @@
-//! Process-local fixture tools. Only the separate `st3-fixture` executable enables fixture mode;
+//! Process-local fixture tools. Only the separate `fractal-fixture` executable enables fixture mode;
 //! the production CLI has no argument or environment switch for it.
 
 use std::path::{Path, PathBuf};
@@ -188,7 +188,7 @@ pub fn supervise_test() -> bool {
             return false;
         }
         let script =
-            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3_test_process.py");
+            Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/fractal_test_process.py");
         let output = Command::new("python3")
             .arg(script)
             .args(["--owner", &std::process::id().to_string(), "--"])

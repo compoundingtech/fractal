@@ -1,6 +1,6 @@
-# st fleet replication
+# Fractal fleet replication
 
-Fleet replication is optional. A node outside a fleet is a complete local-only st system.
+Fleet replication is optional. A node outside a fleet is a complete local-only Fractal system.
 `st doctor` reports this default as `pass` with “no fleet is configured” and points to
 `st fleet create` or `st fleet join`. It reports “intentionally local-only after leaving its
 fleet” only when `st fleet leave` has recorded that explicit decision in `left-fleet.json`.
@@ -292,6 +292,31 @@ a shared derived column and is digested with the document row. The fleet-size re
 260,000 claims and 10,000 document versions, then requires latest listings, history pages,
 lookup and cursor reads to finish within two seconds and verifies the indexed latest query plan.
 
+## Peer protocol capability negotiation
+
+Hosts roll out independently. A new peer operation, or a changed ID or wire format, MUST
+be gated on an explicit versioned capability before dispatch. Each forwarding hop checks
+its next hop independently. Missing capability data (including an older endpoint without
+discovery) means unsupported, not permission to probe the older closed-enum decoder.
+The caller MUST either use a genuinely compatible operation or return a typed refusal
+with actionable upgrade guidance; mixed versions are not globally unsupported, and an
+older peer must not become a generic “conversation unavailable” error.
+
+Owner-read relays discover capabilities through the existing authenticated, signed
+`GET /v1/peer/client-read` response's `capabilities` set (`id`, `version`, `state`).
+`session-detail-child-id` version 1, `state: granted`, binds the `session-detail`
+operation to three-field subagent child IDs: native parent, task ID, and root routing
+session. Relays require it for session detail and child conversation reads; absent or
+incompatible advertisements, and discovery HTTP 404/405, return HTTP 422 `peer-too-old`
+with “This host runs an older Fractal version; update it to open subagent conversations.”
+No session-detail POST or changed child ID is sent to that peer.
+
+Writers emit only three-field child IDs. At the link boundary, readers still accept
+two-field native-parent/task links because open or bookmarked links can outlive the
+gateway version that generated them. The reader derives the root routing session from
+the native parent (recursively for descendants), then uses the current internal shape.
+This does not add a legacy writer or relax transcript ownership and path validation.
+
 ## Rolling upgrades and waiting claims
 
 A registry difference never refuses an exchange. Admission checks the envelope signature,
@@ -320,7 +345,7 @@ replication activation after the daemon serves runs them on a read connection.
 
 Admission prepares each envelope before it takes the writer: it decodes the payload, checks
 the envelope, batch, blob and claim hashes, encodes each claim and, for a runtime that
-classifies without the store (st3's does), classifies its kinds and fields. The writer is held
+classifies without the store (Fractal's does), classifies its kinds and fields. The writer is held
 only for the checks that read stored state and the writes: the envelope row is still there and
 not dropped by a checkpoint, membership and signatures still admit it, earlier record states
 (a `repaired` record stays repaired), tombstones and blobs. The envelope hash names its bytes,
@@ -455,7 +480,7 @@ This projection is independent of the claim/resource vocabulary and replication 
 
 ## Add any machine
 
-Install st on the new machine and configure the person who operates it, as described in the
+Install Fractal on the new machine and configure the person who operates it, as described in the
 [README](../getting-started.md#daemon-details). On an existing listening member, invite the new name:
 
 ```sh
@@ -525,13 +550,33 @@ Fabric routes name the lasting remote endpoint: the worker creates or reacquires
 tunnel itself. Several peer entries may name the same member with distinct routes.
 Arbitrary DNS names and LAN/public HTTP peer URLs remain rejected. The listener refuses a
 wildcard, LAN or public address unless `peer_listen_allow_plain_http = true` (or
-`--peer-listen-allow-plain-http`) is set: st cannot tell whether such a path is encrypted,
+`--peer-listen-allow-plain-http`) is set: Fractal cannot tell whether such a path is encrypted,
 and the listener carries terminal input and attach grants as well as replication.
 Replication is plain HTTP, encrypted between hosts by Tailscale or a Fabric tunnel;
 the fleet secret and joined members' signatures still authenticate the exchange.
 See [Tailscale setup](tailscale.md) for direct-host setup and
 [the migration procedure](../fleet-join.md#move-an-existing-fleet-off-local-dial-helpers)
 for replacing a legacy local dial helper.
+
+The per-peer HTTP client retires pooled connections after ten idle seconds.
+The Axum listener enables keep-alive but configures no finite idle deadline:
+Hyper's nominal 30-second header-read default is inactive without a timer.
+TCP keepalive remains reqwest's default; it does not detect an established
+carrier stream that accepts TCP traffic but stops forwarding application bytes.
+
+A signed exchange that fails with a typed transport error or timeout before
+complete response headers is retried once using a new client with an empty pool.
+The retry retains the signed body and correlation ID. The protocol has no
+request nonce or timestamp window; identical active requests share a backend job
+by sender and body digest, and envelope receipt remains idempotent after completion.
+No retry occurs after response headers (including overload or refusal), during
+response-body reads, for application errors, or for other peer endpoints.
+Each HTTP send retains its twenty-second timeout, so two stalled sends can take
+forty seconds before route fallback/backoff. The enclosing five-minute overload
+poll deadline still bounds both sends; poll counts and retry delays are unchanged.
+The fallback cooldown and recent-peer retry waits begin after the final outcome,
+so this additional attempt can delay route fallback by up to twenty seconds.
+
 
 Only transport failures advance to the next configured route: connection failures,
 broken request/response streams (including typed TLS fatal alerts and bad records),
@@ -600,6 +645,24 @@ The main daemon owns the local API, projections, reconciliation, and runtime cha
 The `replication-worker` process owns peer HTTP, authentication, exchange, and admission.
 
 The service installer creates a separate systemd user service or launchd agent for the worker. A worker crash cannot stop the main daemon.
+
+Deploy the same build to the daemon and its **same-host worker**. Updating only
+the daemon does not upgrade the worker's exchange algorithm: an old initiating worker can
+still stall behind checkpoint-only ranges even when the daemon includes the recovery fix.
+Different fleet members may continue running different compatible builds.
+
+`/v1/health` exposes the daemon's existing `build.commit`. At startup the worker compares that
+identity and logs a warning on mismatch, or when an older daemon cannot report it;
+replication continues rather than introducing an outage during a coordinated rollout.
+The worker atomically records its build, PID and runtime process-start token in
+`STATE/replication-worker-build.json`, outside the replicated store. A failure to write this
+diagnostic file logs a warning without stopping replication.
+`st doctor`'s `replication-worker-build` check warns on a mismatch, a stale process identity,
+or a missing/unreadable report. Missing, empty and `unknown` build identities cannot be
+compared: neither a match nor skew is claimed unless both commits are known. Older workers
+without reports remain explicitly **unknown**. The runtime's existing start-token fencing
+detects PID reuse on Linux; other platforms retain the runtime's PID-based token limitation.
+The check also detects a daemon-only upgrade while the reporting worker keeps running.
 
 A local graph change writes `replication.wake`. The worker watches only this file, not the SQLite files.
 
@@ -944,10 +1007,17 @@ It shows as `refused`, with the Fabric node and service, in `st replication stat
 `last_error` is empty and the JSON status carries `refusal_reason`. Doctor's replication check
 passes when the refusal is the only issue.
 
-The worker keeps a refused route selected and retries with normal peer backoff, as
-for other application errors; it does not bypass the refusal through a fallback
-route. A changed membership route retries immediately, and a later successful
-outbound exchange clears the refusal. Members that do not grant each other the
+A refused preferred route stays selected and retries with normal peer backoff, as
+for other application errors; the worker does not bypass the refusal through a fallback
+route. A refusal answers for its own route only. When the worker reached a refused
+route by failing over from the preferred one (a tailnet exchange broken by the member's
+restart, say), it holds that fallback route for 30 minutes and returns to the preferred
+route at once: the refusal adds nothing to the preferred route's backoff, and the held
+route is not redialed as if it were a network fault. The peer shows `refused` until an
+exchange over another route works, and then `up`; the refused attempt stays as its last
+failed exchange. A peer whose every usable route fails keeps the long, accumulating
+backoff. A changed membership route clears the hold and retries immediately, and a
+later successful outbound exchange clears the refusal. Members that do not grant each other the
 service can still converge through a common hub; the hub must grant and exchange
 with both leaves. The worker never changes Fabric grants itself.
 
@@ -1187,7 +1257,7 @@ st replication checkpoint excuse node-c --reason "away for a week" --as person/o
 
 `plan` proves in the same scratch directory as the node's own checkpoint proofs, and one proof
 runs there at a time. While another proof runs, as one does right after the daemon starts, the
-daemon holds the plan for up to a minute, and `st` asks again for up to four minutes more and
+daemon holds the plan for up to a minute, and Fractal asks again for up to four minutes more and
 prints that it is waiting. A proof still running after that is refused with
 `checkpoint-proof-in-progress` (HTTP 503); run the plan again shortly.
 
@@ -1283,8 +1353,9 @@ Success records omit `failure`. Older worker requests and older observations wit
 details remain readable and do not invent a cause. Carrier-only client sync notices
 remain unchanged; use replication-status JSON for the diagnostic details.
 
-For HTTP failures, `failure.correlation_id` identifies one request (each overload
-poll has its own ID), and `failure.client_stage` names the last observed client
+For HTTP failures, `failure.correlation_id` identifies one signed request including
+its optional fresh-connection retry (each overload poll has its own ID), and
+`failure.client_stage` names the last observed client
 boundary: `send-started`, `connected`, `headers-received`, or `pooled-or-unknown`.
 `connected` means request-scoped connector middleware observed a fresh connection;
 on a Fabric route this is the local tunnel connection, not proof that the remote
@@ -1299,17 +1370,26 @@ Structured `smallclaims::replication` events carry `correlation_id`, `stage`,
 Fast successful clients log boundaries at DEBUG. A locally failed client exchange
 or one crossing five seconds promotes retained boundaries to INFO with their
 original timestamps; subsequent client boundaries remain INFO. The client emits
-`client-send-start`, `connect-done`, `client-headers-received`, and `client-failed`.
+`client-send-start`, `connect-done`, `client-fresh-retry`,
+`client-headers-received`, and `client-failed`.
 
 Every handled server request emits exactly one INFO `replication exchange server
 summary`, including fast successes whose response never reaches the client.
 Search both hosts' journals for the ID from the failed record; no DEBUG logging
-is required. The summary includes `status`, `server_ingress_unix_ms`,
+is required. The summary includes `status`, `head_received_unix_ms`,
+`body_read_complete_unix_ms`, `request_body_bytes`, `server_ingress_unix_ms`,
 `server_ingress_elapsed_us`, `backend_done_unix_ms`, `backend_done_elapsed_us`,
 `response_headers_ready_unix_ms`, and `response_headers_ready_elapsed_us`.
 `backend_done: false` and absent backend timestamps mean no completed backend
 answer was observed at response handoff (for example an overload or early refusal).
 The server's individual boundaries remain DEBUG, including late backend completion.
+Head-received means the HTTP request head reached the route middleware, before
+Axum buffers the body. Body-read-complete means that buffering reached the end
+of the wire body; the byte count is compressed bytes when content encoding is used.
+An upload that errors, exceeds the body limit, or is cancelled before completion
+emits one INFO `replication exchange request body incomplete` record when dropped,
+with correlation ID, head arrival time, bytes read so far and `body_read_error`.
+A missing handler summary alone therefore does not prove a missing request head.
 Ingress means the handler entered after Axum extracted the body. Headers-ready
 means the signed/compressed response was handed to Axum, not that the socket write
 completed. A retained backend job records completion with its originating request

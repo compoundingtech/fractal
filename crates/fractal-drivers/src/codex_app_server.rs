@@ -3284,6 +3284,8 @@ fn run_controlled_owned(
         .append(true)
         .mode(0o600)
         .open(state_dir.join("app-server.log"))?;
+    // Only this attempt's output belongs to its failure, never an earlier incarnation's.
+    let log_start = log.metadata()?.len();
     let mut server_args = prepared.server_args;
     if resume_thread.is_some() && authored_bypasses_hook_trust(&codex_argv[1..])? {
         let hook_cwd = controlled_hook_cwd(&codex_argv[1..])?;
@@ -3342,8 +3344,43 @@ fn run_controlled_owned(
         }
         .into());
     }
+    let observed_exit = server.child_mut().try_wait().ok().flatten();
     server.terminate();
-    result
+    result.map_err(|error| {
+        let tail = app_server_log_tail(&state_dir.join("app-server.log"), log_start)
+            .unwrap_or_default();
+        error.context(format!(
+            "Codex app-server outcome: {}; last stderr/output lines:\n{}",
+            describe_tui_exit(observed_exit),
+            if tail.is_empty() { "(no output)" } else { &tail },
+        ))
+    })
+}
+
+/// Bound both disk reads and the diagnostic while retaining the provider's final lines.
+fn app_server_log_tail(path: &Path, start: u64) -> Result<String> {
+    let mut file = File::open(path)?;
+    let end = file.metadata()?.len();
+    let offset = start.max(end.saturating_sub(8 * 1024)).min(end);
+    file.seek(SeekFrom::Start(offset))?;
+    let mut bytes = Vec::new();
+    file.take(8 * 1024).read_to_end(&mut bytes)?;
+    Ok(diagnostic_output_tail(&bytes))
+}
+
+fn diagnostic_output_tail(bytes: &[u8]) -> String {
+    let bytes = &bytes[bytes.len().saturating_sub(8 * 1024)..];
+    let text = String::from_utf8_lossy(bytes);
+    // Replacement characters can expand invalid input threefold. Bound the UTF-8
+    // diagnostic itself, not just the bytes read from the provider.
+    let mut start = text.len().saturating_sub(8 * 1024);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let text = &text[start..];
+    let mut lines: Vec<_> = text.lines().rev().take(20).collect();
+    lines.reverse();
+    lines.join("\n")
 }
 
 /// A preloaded resume that fails drops its completion sender, which reads as "channel is empty and

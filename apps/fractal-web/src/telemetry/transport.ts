@@ -1,5 +1,5 @@
 import * as Atom from 'effect/reactivity/Atom'
-import type { St3Options } from '@fractal/sdk/effect'
+import type { FractalOptions } from '@fractal/sdk/effect'
 import { wrapTraceFetch } from '../data/sdk-browser/trace.ts'
 
 import { getDebug, incrDebug, setDebug } from './meters.tsx'
@@ -8,7 +8,7 @@ import { getDebug, incrDebug, setDebug } from './meters.tsx'
 export const instrumentFetch = ({ fetchImpl, origin, traceContext }: {
   readonly fetchImpl: typeof globalThis.fetch
   readonly origin: string
-  readonly traceContext?: St3Options['traceContext']
+  readonly traceContext?: FractalOptions['traceContext']
 }): typeof globalThis.fetch => {
   const fetch = traceContext === undefined ? fetchImpl : wrapTraceFetch({ fetchImpl, traceContext, baseUrl: origin })
   const samples: number[] = []

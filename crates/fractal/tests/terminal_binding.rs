@@ -13,6 +13,25 @@ const SEAT: &str = "agent/example/terminal-claude";
 const INVOCATION: &str = "019a0000-0000-7000-8000-000000000002";
 const NEXT: &str = "019a0000-0000-7000-8000-000000000003";
 
+/// The fixture binary, linked under a directory of this test's own. The real driver follows the
+/// file ST3_BIN names as its installed image and releases its provider for adoption once that
+/// file is replaced. Another build in the same target dir can relink target/debug/fractal-fixture
+/// while these tests run (linux-gate runs its fleet-compat stage, which builds the integration
+/// target, beside the tests stage), so the shared path is not this test's to follow. A hard link
+/// keeps the image this test started with; a copy stands in across file systems.
+fn pinned_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::Builder::new()
+        .prefix("pinned-fixture")
+        .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let pinned = directory.path().join("fractal-fixture");
+    let built = test_bin!("fractal-fixture");
+    if std::fs::hard_link(built, &pinned).is_err() {
+        std::fs::copy(built, &pinned).unwrap();
+    }
+    (directory, pinned)
+}
+
 #[derive(Default)]
 struct Runtime {
     ptys: Mutex<Vec<RuntimeObservation>>,
@@ -99,6 +118,33 @@ fn runtime() -> Arc<Runtime> {
         ..Default::default()
     })
 }
+fn register_live_pty(
+    root: &std::path::Path,
+    runtime_id: &str,
+    subject: &str,
+    pid: u32,
+) -> std::os::unix::net::UnixListener {
+    std::fs::create_dir_all(root).unwrap();
+    std::fs::write(root.join(format!("{runtime_id}.pid")), pid.to_string()).unwrap();
+    let listener =
+        std::os::unix::net::UnixListener::bind(root.join(format!("{runtime_id}.sock"))).unwrap();
+    let daemon_start_token = pty_core::registry::read_process_start_token(pid as i32).unwrap();
+    let daemon_boot_id = pty_core::boot::read_boot_identity().unwrap();
+    std::fs::write(
+        root.join(format!("{runtime_id}.json")),
+        json!({
+            "createdAt": "created",
+            "daemonPid": pid,
+            "daemonStartToken": daemon_start_token,
+            "daemonBootId": daemon_boot_id,
+            "tags": {"st3.subject": subject},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    listener
+}
+
 fn reconcile(store: &Arc<Store>, runtime: &Arc<Runtime>) {
     Reconciler::new(
         store.clone(),
@@ -281,21 +327,19 @@ async fn fake_harness_receives_mail_and_exits_while_the_shell_survives_daemon_re
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = fractal_daemon::api::AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "orchid".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "orchid".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         let store = state.store.clone();
@@ -344,6 +388,7 @@ finally:
         .map(|directory| directory.join("python3"))
         .find(|candidate| candidate.is_file())
         .expect("terminal provider fixture needs python3 on the executing runner");
+    let (_pinned, fixture) = pinned_fixture();
     let mut command = fractal_daemon::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
@@ -353,7 +398,7 @@ finally:
         .env("FIXTURE_SEAT", SEAT)
         .env("ST3_SUBJECT", TERMINAL)
         .env("ST3_ENDPOINT", root.path().join("api.sock"))
-        .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("ST3_BIN", &fixture)
         .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("FIXTURE_RECEIVED", &received)
@@ -375,18 +420,9 @@ read -r _
     let physical = format!("{}:created", shell.id().unwrap());
     let agent_incarnation = format!("{physical}:bound:{INVOCATION}");
     let pty_root = root.path().join("pty");
-    std::fs::create_dir_all(&pty_root).unwrap();
     let runtime_id = TERMINAL.replace('/', ".");
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.pid")),
-        shell.id().unwrap().to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.json")),
-        json!({"createdAt":"created","tags":{"st3.subject":TERMINAL}}).to_string(),
-    )
-    .unwrap();
+    let _pty_listener =
+        register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
     runtime.ptys.lock().unwrap()[0].incarnation_id = Some(physical.clone());
     apply(
         &store,

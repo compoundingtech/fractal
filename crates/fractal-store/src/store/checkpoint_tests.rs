@@ -357,15 +357,6 @@ fn a_sealed_set_read_in_pages_is_the_same_set_whatever_the_page() {
     // Epoch checks keep the capture coherent across bounded page snapshots. The set must not
     // depend on how the pages fall: one row to a page, a few, or the maximum bounded page.
     let store = Store::open_memory("alder").unwrap();
-    store
-        .append_claim_outcome(&input(
-            AGENT,
-            "harness.observed",
-            Some(AGENT),
-            json!({"state": "idle", "incarnation_id": "inc-1"}),
-            "harness",
-        ))
-        .unwrap();
     let old = now_ms() - 9 * DAY_MS;
     for n in 0..40_u64 {
         store
@@ -544,6 +535,7 @@ fn sealed_capture_rejects_invalid_envelope_times_at_first_use() {
 }
 
 #[test]
+
 fn sealed_capture_restarts_when_trim_commits_between_metadata_and_bodies() {
     use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}, mpsc};
     struct Pause {
@@ -574,10 +566,6 @@ fn sealed_capture_restarts_when_trim_commits_between_metadata_and_bodies() {
     let scratch = tempfile::tempdir().unwrap();
     // WAL lets the trim commit while one bounded body page holds its read snapshot.
     let store = Arc::new(Store::open(&scratch.path().join("claims.sqlite3"), "alder").unwrap());
-    store.append_claim(&input(
-        AGENT, "harness.observed", Some(AGENT),
-        json!({"state":"idle","incarnation_id":"one"}), "harness",
-    )).unwrap();
     let old = now_ms() - 9 * DAY_MS;
     for n in 0..3 {
         store.append_claim(&input(

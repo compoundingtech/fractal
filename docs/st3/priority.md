@@ -1,10 +1,10 @@
 # Live-path priority
 
-A person must always be able to ask st what is happening and attach to a terminal, even while the
-host's builds, tests and CI use every core and saturate the disk. st keeps its live path ahead of
+A person must always be able to ask Fractal what is happening and attach to a terminal, even while the
+host's builds, tests and CI use every core and saturate the disk. Fractal keeps its live path ahead of
 that work.
 
-The live path is the st daemon and each terminal's PTY server. The daemon answers every command.
+The live path is the Fractal daemon and each terminal's PTY server. The daemon answers every command.
 The PTY server owns a terminal's screen and serves each attach. A harness and everything it starts
 are work: its compiles, its tests, its tools.
 
@@ -61,14 +61,14 @@ IO level 7 acts only under the `bfq` and `mq-deadline` disk schedulers. On an NV
 
 ## Linux
 
-On Linux with a systemd user manager, st starts each terminal in a transient scope that it records
+On Linux with a systemd user manager, Fractal starts each terminal in a transient scope that it records
 on the session as the `st3.scope-unit` tag. The PTY server starts there and forks the harness.
-Once the session is published, st moves the PTY server alone into a scope of its own. The harness
+Once the session is published, Fractal moves the PTY server alone into a scope of its own. The harness
 stays behind.
 
 | What | Unit | CPU weight | IO weight |
 | --- | --- | --- | --- |
-| st daemon | `st3.service` | 1000 | 1000 |
+| Fractal daemon | `st3.service` | 1000 | 1000 |
 | each PTY server | `st3-pty-server-RUNTIME-PID.scope` | 1000 | 1000 |
 | each harness and its children | `st3-RUNTIME-DAEMONPID-N.scope` | 100 (default) | 100 (default) |
 | each exec task, such as a gate | `st3-RUNTIME-DAEMONPID-N.scope` | 100 (default) | 100 (default) |
@@ -79,7 +79,7 @@ owns both scopes and collects each one when its last process exits. The server s
 below). The move does not change what a stop ends; see [Stopping a session](#stopping-a-session).
 
 The daemon moves a PTY server that an older release started, the first time its reconciler
-observes it. It moves only a process that is still in the exact scope st recorded for that
+observes it. It moves only a process that is still in the exact scope Fractal recorded for that
 session, and never itself.
 
 `st service install` renders `CPUWeight=1000` and `IOWeight=1000` into `st3.service`. The
@@ -115,13 +115,13 @@ Then, as the user, `systemctl --user set-property app.slice MemoryLow=8G` and
 `systemctl --user set-property st3.service MemoryLow=3G` protect the daemon, and each PTY server
 scope's `MemoryLow=64M` applies.
 
-Without a systemd user manager, st runs sessions detached and PTY servers share CPU and IO with
+Without a systemd user manager, Fractal runs sessions detached and PTY servers share CPU and IO with
 their harnesses.
 
 ## macOS
 
 macOS has no cgroups. The daemon runs as a launchd agent with `ProcessType` `Interactive`, and the
-PTY servers it starts keep that agent's default QoS. st starts each harness, and each exec task,
+PTY servers it starts keep that agent's default QoS. Fractal starts each harness, and each exec task,
 under `/usr/sbin/taskpolicy -b`. That runs the program and every child it starts with its resources
 throttled, below the daemon's default QoS. `nice` alone is not enough on macOS: on a
 10-core Mac, a test run at `nice 20` (13 processes, 226% CPU) took the load average to 54 and made
@@ -139,14 +139,14 @@ or process group of its own, such as each test `cargo nextest` runs, and one sta
 runs. A stop ends that scope.
 
 1. For a PTY session, pty stops the PTY server, then signals the process tree and process groups
-   it measured before the signal. st then sends SIGTERM to every process still in the work scope
+   it measured before the signal. Fractal then sends SIGTERM to every process still in the work scope
    (`systemctl --user kill`), waits up to two seconds, and sends SIGKILL.
 2. For an exec task, the whole work scope gets SIGTERM, not only the task's process group.
 3. At the shutdown deadline, a kill sends SIGKILL to the terminal's or the task's process group and
    to the whole work scope. A PTY server still in the work scope leaves it first, so it outlives
    its harness and records the exit.
 4. A harness can exit on its own and leave processes behind, and its session's record then removes
-   itself. st keeps the name of each launch's work scope beside the session's spawn lock. It ends
+   itself. Fractal keeps the name of each launch's work scope beside the session's spawn lock. It ends
    that scope, SIGTERM and then SIGKILL as above, when the reconciler next finds the stopped
    runtime not running, when the session is removed, and before a restart launches the next
    incarnation. An exec task's record names its scope, and the same three moments end it. Each
@@ -161,10 +161,10 @@ earlier release could outlive a stop of its root; it no longer does. A task is s
 host it runs on. Starting the root again declares them again.
 
 A unit that is no longer loaded has ended: systemd collects a work scope once its last process
-exits. st never ends a PTY server's own scope, a service, or the unit it runs in.
+exits. Fractal never ends a PTY server's own scope, a service, or the unit it runs in.
 
 Without a systemd user manager, on macOS and on Linux without a user bus such as many CI runners,
-st has no scope to end. A stop ends the PTY server's process tree and the process groups pty
+Fractal has no scope to end. A stop ends the PTY server's process tree and the process groups pty
 measured before the signal, and an exec task's process group. Three kinds of process keep
 running: one that left that tree before the stop because its parent exited (`nohup`, `setsid`, a
 tool's background task), a process group started after pty measured the tree, and whatever a
@@ -191,12 +191,12 @@ done
 
 ## What this does not cover
 
-- The st CLI runs in its caller's cgroup. An agent that runs `st` from its own seat shares that
+- The Fractal CLI runs in its caller's cgroup. An agent that runs `st` from its own seat shares that
   seat's weight with its own build.
 - A process that a harness moves out of its work scope itself, such as one it starts with
   `systemd-run --user`, is no longer in that scope and outlives a stop of the seat.
-- Remote attach also crosses `fabric.service`, which st does not install. Give it the live weights
+- Remote attach also crosses `fabric.service`, which Fractal does not install. Give it the live weights
   with `systemctl --user set-property fabric.service CPUWeight=1000 IOWeight=1000`.
 - Weights share a resource under contention. They cannot make a disk that is queued for seconds
-  answer in milliseconds. Keeping the st state directory on a disk the builds do not use removes
+  answer in milliseconds. Keeping the Fractal state directory on a disk the builds do not use removes
   that contention entirely.

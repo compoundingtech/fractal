@@ -124,14 +124,22 @@ async fn follow_conversation(
                 message: Some(message),
                 ..
             }) => {
-                let message = fractal_client::plain_message(code.as_ref(), &message);
-                if stalled.as_deref() != Some(message.as_str()) {
-                    eprintln!("st: {message} · trying again");
-                    stalled = Some(message);
-                }
+                report_resync(code.as_ref(), &message, &mut stalled);
             }
             Some(_) => {}
         }
+    }
+}
+
+pub(super) fn report_resync(
+    code: Option<&fractal_client::ErrorCode>,
+    message: &str,
+    stalled: &mut Option<String>,
+) {
+    let message = ClientMessage::for_output(false).message(code, message);
+    if stalled.as_deref() != Some(message.as_str()) {
+        crate::stderr_message("st", format_args!("{message} · trying again"));
+        *stalled = Some(message);
     }
 }
 
@@ -169,16 +177,14 @@ pub(super) async fn run_message(
             // The message has landed. A projection that misses it catches up on the next command;
             // failing here would invite a resend of a message that was sent.
             if let Err(error) = sync_message_projection(client).await {
-                eprintln!(
-                    "st: {} was sent (idempotency key {}), but the message projection was not refreshed: {}",
-                    receipt.message.subject,
-                    receipt.idempotency_key,
-                    plain_error(&error)
-                );
+                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
+                receipt.idempotency_key,
+                plain_error(&error)));
             }
             print_message_receipt(&receipt, json_output)
         }
         MessageCommand::Status(args) => {
+            notice_ignored_read_actor(args.ignored_actor.as_deref());
             if let Some(key) = args.idempotency_key {
                 return print_message_key_status(client, &key, json_output).await;
             }

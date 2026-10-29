@@ -17,21 +17,19 @@ use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "client-v0-cli".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec!["offline-peer".into()],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "client-v0-cli".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec!["offline-peer".into()],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 #[tokio::test]
@@ -66,7 +64,7 @@ async fn ordinary_agent_list_and_tree_cli_send_no_freshness_barrier() {
                 response.len(), response).as_bytes()).await.unwrap();
             String::from_utf8(request).unwrap().lines().next().unwrap().to_owned()
         });
-        let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
         command.kill_on_drop(true).env_remove("ST_AGENT").env_remove("ST_MISSION_RUN")
             .args(["--endpoint", socket.to_str().unwrap(), "--daemon-wait", "0", "--json"])
             .args(args);
@@ -123,7 +121,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
         let config = config.clone();
         tokio::task::spawn_blocking(move || {
             let mut command =
-                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
             let mut child = command
                 .env("XDG_CONFIG_HOME", config)
                 .args(args)
@@ -142,7 +140,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             device_name: "CLI device".into(),
             person_id: "person/avery".into(),
             full_control: Some(true),
-            scopes: None, })
+            scopes: None, fabric_gateway: None, })
                 .await
                 .unwrap()
                 .value;
@@ -291,7 +289,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -319,7 +317,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     assert!(loaded.devices[0].session.device_key_chain.is_empty());
     assert!(loaded.devices[0].person_root_fingerprint.is_some());
     let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
-    person_id: "person/avery".into(), full_control: Some(true), scopes: None, }).await.unwrap().value;
+    person_id: "person/avery".into(), full_control: Some(true), scopes: None, fabric_gateway: None, }).await.unwrap().value;
     let unpinned_profile = root.path().join("unpinned/devices.json");
     let output = run(vec!["devices".into(), "complete".into(), base.clone(), challenge.pairing_id,
         "--unpinned".into(), "--profile".into(), unpinned_profile.to_str().unwrap().into()], challenge.code).await.unwrap();
@@ -342,7 +340,7 @@ async fn run_cli_human(socket: &Path, args: &[&str]) -> Output {
 }
 
 async fn run_cli_mode(socket: &Path, json: bool, args: &[&str]) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
@@ -363,7 +361,7 @@ async fn run_cli_mode(socket: &Path, json: bool, args: &[&str]) -> Output {
 }
 
 async fn run_cli_with_agent_env(socket: &Path, agent: &str, args: &[&str]) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let agent = agent.to_owned();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -569,6 +567,11 @@ async fn usage_cli_and_client_keep_pricing_provenance_and_native_session_binding
     );
     // A single response already published has no pending token change. Its late native
     // binding must still be captured at stop, without publishing at binding time.
+    // A driver's binding is accepted only while its incarnation is the running one.
+    append(
+        "runtime.observed",
+        json!({"status":"running","incarnation_id":"inc-one"}),
+    );
     append(
         "harness.session-file",
         json!({"harness":"codex","session_id":"native-example",
@@ -1331,7 +1334,7 @@ async fn operational_cli_lists_outcomes_summarizes_runs_and_reports_performance(
             .unwrap()
             .iter()
             .any(
-                |row| row["client"].as_str().unwrap().contains("st3-fixture missions")
+                |row| row["client"].as_str().unwrap().contains("fractal-fixture missions")
                     && row["count"].as_u64().unwrap() > 0
             ),
         "{report:#}"
@@ -1416,7 +1419,7 @@ async fn agent_declaration_cli_redacts_environment_unless_explicitly_requested()
 
 #[test]
 fn service_permissions_honors_global_json_flag() {
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .args(["--json", "service", "permissions"])
         .output()
         .unwrap();
@@ -1837,7 +1840,7 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn attention_discuss_sends_the_message_stui_chat_about_this_sends() {
+async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = test_state(root.path());
@@ -2581,7 +2584,7 @@ mission "cli/child" state="ready" {
 }
 
 async fn run_queue_cli(socket: &Path, config_home: &Path, json: bool, args: &[&str]) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let config_home = config_home.to_path_buf();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -3226,7 +3229,7 @@ async fn run_lane_cli(
     json: bool,
     args: &[&str],
 ) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let config_home = config_home.to_path_buf();
     let agent = agent.map(str::to_owned);
@@ -3622,7 +3625,7 @@ mission "example/merge-train" state="ready" {
 #[test]
 fn help_starts_with_examples_and_keeps_plumbing_reachable() {
     let help = |args: &[&str]| {
-        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .args(args)
             .output()
             .unwrap();
@@ -3661,7 +3664,7 @@ fn help_starts_with_examples_and_keeps_plumbing_reachable() {
         nested.insert(1, "help");
         assert_eq!(help(&flag), help(&nested));
     }
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .args(["help", "missing-command"])
         .output()
         .unwrap();
@@ -3901,28 +3904,36 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     let subject = "agent/example/typed";
     let original = agent_declaration(&socket, subject).await;
     for (option, model, effort, arguments, driver) in [
-        (vec![], "old", "low", vec!["--old"], "omp"),
-        (vec!["--model", "new"], "new", "low", vec!["--old"], "omp"),
+        (vec![], Some("old"), Some("low"), vec!["--old"], "omp"),
+        (vec!["--model", "new"], Some("new"), Some("low"), vec!["--old"], "omp"),
         (
             vec!["--effort", "high"],
-            "new",
-            "high",
+            Some("new"),
+            Some("high"),
             vec!["--old"],
             "omp",
         ),
         (
             vec!["--arg=--new", "--arg", "value"],
-            "new",
-            "high",
+            Some("new"),
+            Some("high"),
             vec!["--new", "value"],
             "omp",
         ),
+        (vec!["--harness", "pi"], None, None, vec![], "pi"),
         (
-            vec!["--harness", "pi"],
-            "new",
-            "high",
-            vec!["--new", "value"],
+            vec!["--model", "pi-model", "--effort", "high", "--arg=--pi"],
+            Some("pi-model"),
+            Some("high"),
+            vec!["--pi"],
             "pi",
+        ),
+        (
+            vec!["--harness", "omp", "--model", "omp-model"],
+            Some("omp-model"),
+            None,
+            vec![],
+            "omp",
         ),
     ] {
         let mut args = vec!["agents", "start", subject, "--as", "person/avery"];
@@ -3937,12 +3948,15 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
         assert_eq!(member.environment, previous.environment);
         let nodes = current.desired["children"].as_array().unwrap();
         let harness = nodes.iter().find(|node| node["name"] == "harness").unwrap();
-        let children = harness["children"].as_array().unwrap();
-        let field =
-            |name: &str| &children.iter().find(|node| node["name"] == name).unwrap()["arguments"];
-        assert_eq!(field("model"), &serde_json::json!([model]));
-        assert_eq!(field("effort"), &serde_json::json!([effort]));
-        assert_eq!(field("args"), &serde_json::json!(arguments));
+        let children = harness["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let field = |name: &str| children.iter()
+            .find(|node| node["name"] == name).map(|node| &node["arguments"]);
+        assert_eq!(field("model"), model.map(|model| serde_json::json!([model])).as_ref());
+        assert_eq!(field("effort"), effort.map(|effort| serde_json::json!([effort])).as_ref());
+        assert_eq!(
+            field("args"),
+            (!arguments.is_empty()).then(|| serde_json::json!(arguments)).as_ref(),
+        );
         assert_eq!(harness["arguments"][0], driver);
     }
     server.abort();
@@ -4705,7 +4719,7 @@ mission "orchid-actor" state="ready" {
                     String::from_utf8_lossy(&output.stderr)
                         .lines()
                         .collect::<Vec<_>>(),
-                    ["st: --as is ignored for this read; no actor is required"]
+                    ["fractal: --as is ignored for this read; no actor is required"]
                 );
                 if json {
                     let returned = value(&output);
@@ -4731,7 +4745,7 @@ mission "orchid-actor" state="ready" {
             String::from_utf8_lossy(&seat_read.stderr)
                 .lines()
                 .collect::<Vec<_>>(),
-            ["st: --as is ignored for this read; no actor is required"]
+            ["fractal: --as is ignored for this read; no actor is required"]
         );
         if command == "work" {
             assert_eq!(returned["value"], plain_json["value"]);
@@ -4780,7 +4794,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
     std::fs::create_dir_all(config_root.join("st3")).unwrap();
     std::fs::write(config_root.join("st3/config.toml"),
         "node = 'fixture'\nseat_priority = 'normal'\nfuture_root = 'never-print-this'\n[github]\nfuture_nested = 'also-private'\n").unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4821,7 +4835,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         assert!(!text.contains("never-print-this"));
         assert!(!text.contains("also-private"));
     }
-    let strict = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let strict = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4848,7 +4862,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         "node = 'fixture'\nseat_priority = 'normal'\n",
     )
     .unwrap();
-    let valid = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let valid = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4876,7 +4890,7 @@ fn setup_rejects_unknown_config_before_any_rewrite() {
     let path = root.path().join("config.toml");
     let original = b"# retain this text\nnode = 'fixture'\nfuture_root = 'fixture-secret'\n[github]\nfuture_nested = true\n";
     std::fs::write(&path, original).unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -4937,7 +4951,7 @@ fn local_state_commands_reject_unknown_config_before_using_default_state() {
         vec!["service", "status"],
     ];
     for args in cases {
-        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("HOME", root.path())
             .env("XDG_CONFIG_HOME", &config_root)

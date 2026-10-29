@@ -83,7 +83,22 @@ struct State {
 }
 
 /// How often a pass evaluates every item even when nothing marked them, counting what it corrects.
-pub const FULL_PASS_INTERVAL_MS: u128 = 60_000;
+/// Every minute, a large node's full passes re-read every settled item and reached a third of
+/// the pass's disk reads, and in a day they corrected nothing; each one is noted in the profile
+/// with any correction it makes.
+pub const FULL_PASS_INTERVAL_MS: u128 = 30 * 60_000;
+/// Periodic work that is slow waits at least this many times its own cost; see
+/// [`cost_scaled_interval`].
+pub const FULL_PASS_COST_MULTIPLE: u128 = 10;
+
+/// The interval for periodic work that costs `cost_ms` each time: at least `base_ms`, at least
+/// [`FULL_PASS_COST_MULTIPLE`] times its cost, at most `max_ms`.
+pub fn cost_scaled_interval(base_ms: u128, cost_ms: u128, max_ms: u128) -> u128 {
+    cost_ms
+        .saturating_mul(FULL_PASS_COST_MULTIPLE)
+        .min(max_ms)
+        .max(base_ms)
+}
 
 struct Item {
     reads: BTreeSet<String>,
@@ -195,7 +210,8 @@ impl Incremental {
     }
 
     /// Whether this pass must evaluate every item of `section`: the first since a start, or the
-    /// first after [`FULL_PASS_INTERVAL_MS`]. Records it as the section's last full pass.
+    /// first [`FULL_PASS_INTERVAL_MS`] after the section's last one. Records it as the section's
+    /// last full pass, and notes it in the profile.
     pub fn take_full_pass(&self, section: &'static str, now: u128) -> bool {
         let mut state = self
             .state
@@ -207,6 +223,7 @@ impl Incremental {
             .is_none_or(|last| now.saturating_sub(*last) >= FULL_PASS_INTERVAL_MS);
         if due {
             state.last_full.insert(section, now);
+            smallclaims::profile::note("reconcile full pass");
         }
         due
     }
@@ -409,7 +426,42 @@ impl Incremental {
             .is_none_or(|item| item.dirty || item.due.is_some_and(|due| due <= now))
     }
 
-    /// Remember what `item`'s evaluation read and when its result could next change with time.
+    /// The items named with `prefix` that read something the feed has after `cursor`, in name
+    /// order, and the cursor to pass next time. With no cursor it starts where the passes' own
+    /// reading of the feed is. Unlike [`Self::observe`], it marks nothing and leaves the passes'
+    /// place in the feed alone: an evaluation clears its item's mark, so a mark set from another
+    /// thread while a pass evaluates that item would be lost until the next full pass.
+    pub fn readers_since<S: ChangeSource + ?Sized>(
+        &self,
+        store: &S,
+        cursor: Option<(u64, i64)>,
+        prefix: &str,
+    ) -> Result<((u64, i64), Vec<String>)> {
+        let watermark = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .watermark;
+        let Some((index, local)) = cursor.or(watermark) else {
+            let feed = store.changes_since(i64::MAX as u64, i64::MAX)?;
+            return Ok(((feed.index, feed.local), Vec::new()));
+        };
+        let feed = store.changes_since(index, local)?;
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let readers = feed
+            .changes
+            .iter()
+            .flat_map(change_keys)
+            .flat_map(|key| state.readers.get(&key).into_iter().flatten())
+            .filter(|item| item.starts_with(prefix))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Ok(((feed.index, feed.local), readers.into_iter().collect()))
+    }
+
     pub fn evaluated(&self, item: &str, reads: BTreeSet<String>, due: Option<u128>) {
         let mut state = self
             .state
@@ -511,6 +563,31 @@ pub fn step_due(step: &fractal_kernel::model::StepRunView, now: u128) -> Option<
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_section_is_evaluated_in_full_once_every_half_hour() {
+        use super::*;
+        let incremental = Incremental::default();
+        // The first pass after a start is full, and the reconciler wakes for the next one.
+        assert!(incremental.take_full_pass("member", 0));
+        assert_eq!(incremental.next_full_pass(), Some(30 * 60_000));
+        // Every pass in between skips what nothing marked, however long the full pass took.
+        for now in [60_000, 10 * 60_000, 30 * 60_000 - 1] {
+            assert!(
+                !incremental.take_full_pass("member", now),
+                "full again at {now}"
+            );
+        }
+        assert!(incremental.take_full_pass("member", 30 * 60_000));
+        assert_eq!(incremental.next_full_pass(), Some(60 * 60_000));
+        // Each section keeps its own half hour.
+        assert!(incremental.take_full_pass("stop", 31 * 60_000));
+        assert!(!incremental.take_full_pass("stop", 60 * 60_000));
+        assert!(incremental.take_full_pass("member", 60 * 60_000));
+        assert_eq!(cost_scaled_interval(30_000, 0, 600_000), 30_000);
+        assert_eq!(cost_scaled_interval(30_000, 25_000, 600_000), 250_000);
+        assert_eq!(cost_scaled_interval(30_000, u128::MAX, 600_000), 600_000);
+    }
+
+    #[test]
     fn agent_collection_keys_ignore_message_declarations_and_cover_owned_set_members() {
         assert!(
             !super::change_keys(&change("message/m", "intent.desired", None, "{}"))
@@ -545,6 +622,45 @@ mod tests {
         );
         assert_eq!(split_watch_subject("subscription/watch/acme/garden/x/planner"), None);
         assert_eq!(split_watch_subject("intent/acme/garden/12/planner"), None);
+    }
+
+    /// Every change so far; an index is how many of them a reader has seen.
+    struct Feed(Mutex<Vec<Change>>);
+
+    impl ChangeSource for Feed {
+        fn changes_since(&self, index: u64, _local: i64) -> Result<ChangeFeed> {
+            let changes = self.0.lock().unwrap();
+            let seen = usize::try_from(index).unwrap_or(usize::MAX).min(changes.len());
+            Ok(ChangeFeed {
+                index: changes.len() as u64,
+                local: 0,
+                changes: changes[seen..].to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn readers_since_names_the_readers_of_a_change_and_leaves_the_passes_marks_alone() {
+        let feed = Feed(Mutex::new(Vec::new()));
+        let incremental = Incremental::default();
+        incremental.observe(&feed).unwrap();
+        let reads = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();
+        incremental.evaluated("mission-run/a", reads(&["resource/x"]), None);
+        incremental.evaluated("mission-run/b", reads(&["resource/y"]), None);
+        incremental.evaluated("stop/c", reads(&["resource/x"]), None);
+        feed.0.lock().unwrap().push(change("resource/x", "resource.observed", None, "{}"));
+
+        let (cursor, readers) = incremental.readers_since(&feed, None, "mission-run/").unwrap();
+        assert_eq!(readers, ["mission-run/a"]);
+        let (_, again) = incremental.readers_since(&feed, Some(cursor), "mission-run/").unwrap();
+        assert!(again.is_empty());
+
+        // It marked nothing, and the passes still read the change from where they were.
+        assert!(!incremental.needs("stop/c", 0));
+        incremental.observe(&feed).unwrap();
+        assert!(incremental.needs("stop/c", 0));
+        assert!(incremental.needs("mission-run/a", 0));
+        assert!(!incremental.needs("mission-run/b", 0));
     }
 
     fn change(subject: &str, kind: &str, actor: Option<&str>, body: &str) -> Change {

@@ -126,21 +126,19 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     declare_terminal(&store);
     let runtime = runtime();
     let socket = root.path().join("api.sock");
-    let state = fractal_daemon::api::AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "orchid".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "orchid".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         let store = state.store.clone();
@@ -199,6 +197,7 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .map(|directory| directory.join("python3"))
         .find(|candidate| candidate.is_file())
         .expect("terminal provider fixture needs python3 on the executing runner");
+    let (_pinned, fixture) = pinned_fixture();
     let mut command = fractal_daemon::test_support::async_command(env!("ST3_FIXTURE_BASH"));
     command
         .env_clear()
@@ -208,7 +207,7 @@ sys.exit(int(os.environ.get('FIXTURE_PROVIDER_EXIT', '0')))
         .env("FIXTURE_SEAT", SEAT)
         .env("ST3_SUBJECT", TERMINAL)
         .env("ST3_ENDPOINT", root.path().join("api.sock"))
-        .env("ST3_BIN", test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .env("ST3_BIN", &fixture)
         .env("ST3_DRIVER_STATE_DIR", root.path().join("drivers"))
         .env("ST3_MAILBOX_TRANSPORT", "push")
         .env("FIXTURE_RECEIVED", &received)
@@ -242,18 +241,9 @@ read -r _
     let physical = format!("{}:created", shell.id().unwrap());
     let agent_incarnation = format!("{physical}:bound:{INVOCATION}");
     let pty_root = root.path().join("pty");
-    std::fs::create_dir_all(&pty_root).unwrap();
     let runtime_id = TERMINAL.replace('/', ".");
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.pid")),
-        shell.id().unwrap().to_string(),
-    )
-    .unwrap();
-    std::fs::write(
-        pty_root.join(format!("{runtime_id}.json")),
-        json!({"createdAt":"created","tags":{"st3.subject":TERMINAL}}).to_string(),
-    )
-    .unwrap();
+    let _pty_listener =
+        register_live_pty(&pty_root, &runtime_id, TERMINAL, shell.id().unwrap());
     runtime.ptys.lock().unwrap()[0].incarnation_id = Some(physical.clone());
     apply(
         &store,

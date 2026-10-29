@@ -24,7 +24,7 @@ in_terminal() {
     script -q /dev/null "$@" </dev/null | LC_ALL=C sed "1s/^\^D$(printf '\b\b')//"
   fi
 }
-for args in "agents ls" "missions show $run"; do
+for args in "now" "agents ls" "missions show $run"; do
   printf '$ fractal %s\n' "$args"
   read -ra words <<<"$args"
   in_terminal "$here/run.sh" "${words[@]}"

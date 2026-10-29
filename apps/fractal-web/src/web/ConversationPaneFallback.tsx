@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import { EmbraceScrollViewport } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { readingColumnStyles } from '../../../../packages/fractal-ui/src/assistant-ui/reading-column.stylex.ts'
 import { ErrorOverlayHost } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ErrorOverlay.tsx'
-import { SyncLine } from '../../../../packages/fractal-ui/src/assistant-ui/st3-views/SyncLine.tsx'
+import { SyncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/SyncLine.tsx'
 import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const waiting = { _tag: 'Requested', since: 0 } as const

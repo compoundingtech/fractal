@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -502,8 +503,8 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
-ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
-# The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
+ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests', 'rust-tests')
+# The checks a host or agent may sign (scripts/fractal-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
 HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy'})
 HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests', 'linux-clippy'})
@@ -1490,7 +1491,8 @@ class CommittedPolicy(unittest.TestCase):
                     self.assertIn('agent', rule.get('by_level') or {}, (check, kind))  # admitted only with its own rule
         self.assertEqual(sorted(with_host), [(check, 'wrapper') for check in sorted(HOST_CHECKS)])
         for (check, kind), rule in with_host.items():
-            self.assertEqual(rule['trust_levels'], ['fleet', 'host', 'agent', 'queue'], check)
+            # rust-tests, enforced since 2026-10-28, trusts host and agent notes only: CI's own per-crate notes do not skip it.
+            self.assertEqual(rule['trust_levels'], ['host', 'agent', 'queue'] if check == 'rust-tests' else ['fleet', 'host', 'agent', 'queue'], check)
             override = dict(rule['by_level']['host'])
             # The first two checks admitted a host note unbound (cooperative machine trust); every check added since holds the host
             # to the lane as well (Factory, 2026-10-22); since 2026-10-26 to the lane as the signed tree defines it, so a tree that edits
@@ -1510,7 +1512,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
             self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
-        # The commands are the ones scripts/st-test records, so a local note can match.
+        # The commands are the ones scripts/fractal-test records, so a local note can match.
         script = ROOT / 'scripts/st-test'
         if script.exists():
             loader = importlib.machinery.SourceFileLoader('st_test_policy', str(script))
@@ -1620,9 +1622,125 @@ class CommittedPolicy(unittest.TestCase):
         self.assertEqual(web['kinds']['wrapper']['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
         # Its shard inputs are values, not just present: every shard a success, and one shard on a pull request.
         self.assertEqual(web['kinds']['wrapper']['shard_inputs'],
-                         {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1})
+                         {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1, 'index': 'kit_shard'})
         # A note made without kit plays covers only a run whose own change detection says the kit did not change either.
         self.assertEqual(web['kinds']['wrapper']['input_order'], {'kit_inputs': ['true', 'false']})
+
+
+class CIInputs(unittest.TestCase):
+    """A check's CI inputs (a lane's ci_inputs): the part of a shared CI file the check uses is a key of its own, and nothing else in
+    that file moves it (docs/st3/gate-evidence.md, "A check's CI inputs")."""
+
+    WORKFLOW = ('# Generated file\n\nname: W\n\non:\n  pull_request: {}\n\nenv:\n  LEVEL: "1"\n\njobs:\n'
+                '  gate:\n    runs-on: box\n    needs: [build]\n    steps:\n      - run: echo gate\n'
+                '  build:\n    runs-on: box\n    needs:\n      - setup\n  setup:\n    runs-on: box\n'
+                '  other:\n    runs-on: box\n')
+    LANES = {'version': 1, 'lanes': {'gate': {'argv': ['x'], 'definition_paths': ['tools']},
+                                     'other': {'argv': ['y'], 'definition_paths': ['tools']}}}
+    CI = ('.github/workflows/fleet.yml::jobs.gate', '.st/required-lanes.json::lanes.gate', 'tools', '!tools/judge')
+
+    def setUp(self):
+        self.f = Fixture()
+        self.addCleanup(self.f.tmp.cleanup)
+        self.tree = self.commit({'.github/workflows/fleet.yml': self.WORKFLOW, '.st/required-lanes.json': json.dumps(self.LANES),
+                                 'tools/run': 'r', 'tools/judge': 'j'})
+
+    def commit(self, files):
+        for name, content in files.items():
+            path = self.f.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.f.git('add', '-A')
+        self.f.git('commit', '-q', '-m', 'change ' + ','.join(sorted(files)))
+        return self.f.git('rev-parse', 'HEAD^{tree}')
+
+    def key(self, tree):
+        return evidence_verify.project(str(self.f.repo), tree, evidence_verify.declared_paths(list(self.CI), 'test', selectors=True))
+
+    def edited(self, old, new, name='.github/workflows/fleet.yml'):
+        text = (self.f.repo / name).read_text()
+        self.assertIn(old, text)
+        return self.commit({name: text.replace(old, new, 1)})
+
+    def test_a_top_level_block_moves_every_job_s_key(self):
+        before = self.key(self.tree)
+        self.assertNotEqual(self.key(self.edited('LEVEL: "1"', 'LEVEL: "2"')), before)
+
+    def test_the_job_and_every_job_it_needs_move_its_key_and_another_job_does_not(self):
+        before = self.key(self.tree)
+        self.assertEqual(self.key(self.edited('  other:\n    runs-on: box', '  other:\n    runs-on: elsewhere')), before)
+        own = self.edited('echo gate', 'echo changed')
+        self.assertNotEqual(self.key(own), before)
+        needed = self.edited('  setup:\n    runs-on: box', '  setup:\n    runs-on: elsewhere')  # needed through build, transitively
+        self.assertNotEqual(self.key(needed), self.key(own))
+
+    def test_a_json_entry_moves_its_key_and_another_entry_does_not(self):
+        before = self.key(self.tree)
+        lanes = json.loads(json.dumps(self.LANES))
+        lanes['lanes']['other']['argv'] = ['z']
+        other = self.commit({'.st/required-lanes.json': json.dumps(lanes, indent=4)})  # another entry, and the file's layout, change
+        self.assertEqual(self.key(other), before)
+        lanes['lanes']['gate']['argv'] = ['changed']
+        self.assertNotEqual(self.key(self.commit({'.st/required-lanes.json': json.dumps(lanes)})), before)
+
+    def test_an_excluded_file_does_not_move_the_key_and_the_rest_of_its_directory_does(self):
+        before = self.key(self.tree)
+        self.assertEqual(self.key(self.commit({'tools/judge': 'judged differently'})), before)
+        self.assertNotEqual(self.key(self.commit({'tools/run': 'runs differently'})), before)
+
+    def test_unchanged_is_true_only_when_every_revision_has_the_same_key(self):
+        first = self.f.git('rev-parse', 'HEAD')
+        self.commit({'tools/judge': 'judged differently'})
+        second = self.f.git('rev-parse', 'HEAD')
+        ci = evidence_verify.declared_paths(list(self.CI), 'test', selectors=True)
+        self.assertTrue(evidence_verify.ci_inputs_unchanged(str(self.f.repo), ci, (first, second)))
+        self.edited('LEVEL: "1"', 'LEVEL: "2"')
+        self.assertFalse(evidence_verify.ci_inputs_unchanged(str(self.f.repo), ci, (first, second, self.f.git('rev-parse', 'HEAD'))))
+
+    def test_an_entry_that_names_nothing_is_never_unchanged(self):
+        """A renamed job or a typo would project to nothing at every revision; unchanged would then keep the head tree however the job
+        it meant changes, so an entry that names nothing at any revision is not unchanged."""
+        first = self.f.git('rev-parse', 'HEAD')
+        self.commit({'tools/judge': 'judged differently'})
+        second = self.f.git('rev-parse', 'HEAD')
+        for typo in ('.github/workflows/fleet.yml::jobs.gaet', '.st/required-lanes.json::lanes.gaet', 'tool', '.github/workflows/flet.yml::jobs.gate'):
+            with self.subTest(typo):
+                ci = evidence_verify.declared_paths([*self.CI, typo], 'test', selectors=True)
+                self.assertEqual(evidence_verify.unresolved_ci_inputs(str(self.f.repo), self.tree, ci), [typo])
+                self.assertFalse(evidence_verify.ci_inputs_unchanged(str(self.f.repo), ci, (first, second)))
+        ci = evidence_verify.declared_paths(list(self.CI), 'test', selectors=True)
+        self.assertEqual(evidence_verify.unresolved_ci_inputs(str(self.f.repo), self.tree, ci), [])
+        self.edited('  gate:\n', '  renamed:\n')  # main renames the job: the base no longer has it
+        self.assertFalse(evidence_verify.ci_inputs_unchanged(str(self.f.repo), ci, (first, second, self.f.git('rev-parse', 'HEAD'))))
+
+    def test_a_workflow_it_cannot_read_has_no_key_rather_than_a_guess(self):
+        self.commit({'.github/workflows/fleet.yml': self.WORKFLOW.replace('jobs:\n', 'jobs:\n   stray: at three spaces\n')})
+        with self.assertRaises(evidence_verify.Failure):
+            self.key(self.f.git('rev-parse', 'HEAD^{tree}'))
+
+    def test_the_new_forms_are_only_for_ci_inputs_and_must_be_well_formed(self):
+        with self.assertRaises(evidence_verify.Failure):
+            evidence_verify.declared_paths(['tools', '!tools/judge'], 'lane definition_paths')  # not where selectors are allowed
+        for bad in (['tools', '!elsewhere/x'], ['a.txt::jobs.x'], ['fleet.yml::KEY'], ['x.json::jobs.y'], ['x.json::a..b'], ['!../x', 'x']):
+            with self.subTest(bad), self.assertRaises(evidence_verify.Failure):
+                evidence_verify.declared_paths(bad, 'test', selectors=True)
+        self.assertEqual(evidence_verify.declared_paths(['x.json::a.b', 'w.yml::jobs.j', 'd', '!d/e'], 'test', selectors=True),
+                         ('!d/e', 'd', 'w.yml::jobs.j', 'x.json::a.b'))
+
+    def test_a_lane_is_held_to_its_own_entry_at_the_branch_point_not_the_whole_lane_file(self):
+        point = self.f.git('rev-parse', 'HEAD')
+        lanes = json.loads(json.dumps(self.LANES))
+        lanes['lanes']['other']['argv'] = ['z']
+        self.commit({'.st/required-lanes.json': json.dumps(lanes)})
+        base = self.f.git('rev-parse', 'HEAD')
+        text = (self.f.repo / '.st/required-lanes.json').read_text()
+        self.assertIsNotNone(evidence_verify.lane_for(str(self.f.repo), self.tree, (text, base), 'gate', lane_base=point))
+        lanes['lanes']['gate']['argv'] = ['changed']
+        self.commit({'.st/required-lanes.json': json.dumps(lanes)})
+        base, text = self.f.git('rev-parse', 'HEAD'), (self.f.repo / '.st/required-lanes.json').read_text()
+        with self.assertRaises(evidence_verify.Failure) as raised:
+            evidence_verify.lane_for(str(self.f.repo), self.tree, (text, base), 'gate', lane_base=point)
+        self.assertEqual(raised.exception.reason, 'definition_changed')
 
 
 class PerCrateNotes(unittest.TestCase):
@@ -1713,6 +1831,22 @@ class MembersLogView(unittest.TestCase):
         self.log({self.keys['base']: [base]})
         view = self.view({'base': base, 'top': top})
         self.assertEqual((view['log'], view['log_missing'], view['log_unlogged']), ('unlogged_pass', 0, 1), view)
+        self.assertEqual((view['log_unlogged_crates'], view['log_unlogged_observed_at']), (f'top={top[:12]}', None), view)
+
+    def test_an_unlogged_pass_names_its_first_members_and_the_oldest_of_their_observed_at(self):
+        base, top = self.record('base'), self.record('top')
+        self.log({})
+        times = {'base': '2026-10-25T20:30:00Z', 'top': '2026-10-25T20:28:02Z'}
+        view = evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                {crate: (self.keys[crate], {'base': base, 'top': top}[crate], times[crate])
+                                                 for crate in self.keys}, now=NOW + timedelta(seconds=30))
+        self.assertEqual((view['log'], view['log_unlogged'], view['log_unlogged_crates'], view['log_unlogged_observed_at']),
+                         ('unlogged_pass', 2, f'base={base[:12]}+top={top[:12]}', '2026-10-25T20:28:02Z'), view)
+        with mock.patch.object(evidence_verify, 'UNLOGGED_SHOWN', 1):
+            view = evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                    {crate: (self.keys[crate], {'base': base, 'top': top}[crate]) for crate in self.keys},
+                                                    now=NOW + timedelta(seconds=30))
+        self.assertEqual((view['log_unlogged_crates'], view['log_unlogged_observed_at']), (f'base={base[:12]}+1_more', None), view)
 
     def test_a_record_the_log_lists_under_a_members_key_that_is_not_here_is_missing_with_or_without_a_choice(self):
         base, top = self.record('base'), self.record('top')
@@ -2083,6 +2217,26 @@ class InputKeyed(unittest.TestCase):
         self.observed(self.f.git('rev-parse', 'HEAD'), third, key, seconds=0)  # a clearly newer pass lifts it
         _, fourth = self.commit_files({'docs/readme.txt': 'and again'})
         self.assertEqual(self.check(fourth)[0], 0)
+
+    def test_preferred_levels_take_the_hosts_own_pass_over_a_newer_ci_pass_but_not_over_a_failure_after_it(self):
+        rules = evidence_verify.policy_rules(policy_text(inputs=self.PATHS, trust_levels=['machine', 'host']), 'unit', 'org/repo')
+        host = self.f.key('host', 'host/box')
+        key = self.key(self.tree)
+        mine = self.f.note(self.commit, self.tree, host, 'host/box', runner=OBSERVED, inputs={'source_inputs': key}, seconds=-900,
+                           command=('github-actions', 'org/repo', '.github/workflows/fleet.yml', 'unit'))
+        later, other = self.commit_files({'docs/readme.txt': 'another pull request, same inputs'})
+        ci = self.observed(later, other, key, seconds=-600)  # CI ran the same inputs for someone else after the host signed
+        code, result = self.f.verify(self.tree, rules=rules)
+        self.assertEqual((code, result['record'], result['trust_level']), (0, ci, 'machine'))  # the latest record decides, as before
+        code, result = self.f.verify(self.tree, rules=rules, prefer_levels=('host',))
+        self.assertEqual((code, result['record'], result['signer']), (0, mine, 'host/box'))
+        # A failure dated after the host's pass is not passed over, even when a still newer pass decides without the preference.
+        self.observed(later, other, key, exit_code=1, seconds=-400)
+        newest = self.observed(later, other, key, seconds=0)
+        code, result = self.f.verify(self.tree, rules=rules, prefer_levels=('host',))
+        self.assertEqual((code, result['record'], result['trust_level']), (0, newest, 'machine'))
+        self.assertEqual(self.f.cli('--check', 'unit', '--revision', 'HEAD', '--members', '--prefer-levels', 'host',
+                                    '--keys', str(self.f.keys))[0], 2)
 
     def test_the_policy_validates_inputs_and_sampling(self):
         def reason(**overrides):
