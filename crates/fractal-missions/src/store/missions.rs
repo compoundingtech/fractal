@@ -63,7 +63,7 @@ impl ObservationBatches {
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-hdf9b80decde2 owner=fractal_missions::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![batch_id, origin, sequence, previous_hash, batch_hash, now.to_string()],
             )
             .map_err(internal)?;
