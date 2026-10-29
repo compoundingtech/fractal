@@ -1847,6 +1847,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "identity-cycle"
         | "identity-occupied"
         | "identity-retired-source"
+        | "identity-cross-kind"
+        | "identity-unknown"
         | "lifecycle-unavailable"
         | "retirement-upgrade-required"
         | "invalid-custody-successor"
@@ -1855,6 +1857,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "forbidden"
         | "attention-migrated"
         | "unsupported-capability"
+        | "peer-too-old"
         | "validation-failed"
         | "idempotency-conflict"
         | "idempotency-key-expired"
@@ -1915,6 +1918,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "message-send-unconfirmed"
         | "response-budget-exceeded"
         | "content-not-text"
+        | "invalid-document-reference"
+        | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
         "launch-review-not-authorized"
