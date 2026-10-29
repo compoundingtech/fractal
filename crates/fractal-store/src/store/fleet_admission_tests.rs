@@ -814,21 +814,27 @@ fn a_fresh_member_admits_a_migrated_writers_history_once_its_signatures_travel()
     assert_eq!(status.pending_envelopes, 1);
     assert_eq!(status.pending_records, 0, "records alone do not show the held envelope");
 
-    // a asks for the signature its admitted copy lacks. An old build ignores the request and
-    // nothing breaks; a keeps asking.
+    // Exports ask for nothing the scan has not found, and the scan runs off the request path.
+    assert!(a.replication_signature_requests().unwrap().is_empty());
+    // a's scan finds the signature its admitted copy lacks, and an exchange takes it once. An
+    // old build ignores the request and nothing breaks; a's next scan asks again.
+    assert!(a.advance_signature_backfill().unwrap());
     let wanted = a.replication_signature_requests().unwrap();
     assert!(wanted.iter().any(|id| id.writer == "m"), "{wanted:?}");
+    assert!(a.replication_signature_requests().unwrap().is_empty());
     let old = m
         .export_replication_exchange_answering(FLEET, &a.replication_inventory().unwrap(), &[])
         .unwrap();
     a.receive_replication_exchange("m", FLEET, &old).unwrap();
     a.validate_replication_backlog().unwrap();
+    assert!(a.advance_signature_backfill().unwrap());
     assert!(
         a.replication_signature_requests().unwrap().iter().any(|id| id.writer == "m"),
         "a must keep asking after a peer that cannot answer"
     );
 
     // m answers, a stores and serves the signature, and f admits the history.
+    assert!(a.advance_signature_backfill().unwrap());
     sync(&m, &a);
     sync(&a, &f);
     assert!(admitted(&f, &history));
@@ -836,9 +842,10 @@ fn a_fresh_member_admits_a_migrated_writers_history_once_its_signatures_travel()
     assert_eq!(status.unsigned_envelopes, 0);
     assert_eq!(status.pending_envelopes, 0);
     assert!(
-        a.replication_signature_requests().unwrap().is_empty(),
-        "nothing is missing once the signature arrived"
+        !a.advance_signature_backfill().unwrap(),
+        "the scan stops once nothing is missing"
     );
+    assert!(a.replication_signature_requests().unwrap().is_empty());
 }
 
 #[test]
@@ -847,6 +854,7 @@ fn an_unsigned_legacy_writer_is_never_asked_for_signatures() {
     let legacy = node("legacy", None, None);
     note(&legacy, "legacy history");
     sync(&legacy, &a);
+    assert!(!a.advance_signature_backfill().unwrap());
     assert!(a.replication_signature_requests().unwrap().is_empty());
 }
 

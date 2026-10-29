@@ -4229,6 +4229,9 @@ struct MessageSendArgs {
     /// the message already sent instead of sending it twice.
     #[arg(long)]
     idempotency_key: Option<String>,
+    /// Send even if this daemon has not yet learned the recipient through fleet replication.
+    #[arg(long)]
+    allow_undeclared_recipient: bool,
 }
 
 /// Whether a message wakes its recipient. A person's message, a handoff, a fault, a ready step
@@ -6374,7 +6377,12 @@ async fn run_up(args: UpArgs) -> Result<()> {
         store.bind_fleet(fleet_id)?;
     }
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
-    store.trim_locally(config.trim.local);
+    store.trim_locally(config.trim.local)?;
+    *store
+        .extension::<fractal_store::store::answers_check::TrimSettings>()
+        .notify
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = config.trim.notify.clone();
     // A member pins its anchor, applies its writer floor, and signs with its key before it
     // writes anything, so every local batch after this point is signed.
     if let Some(file) = &config.fleet {
@@ -6556,6 +6564,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
@@ -10831,7 +10840,7 @@ fn render_performance(view: &Value) -> String {
     {
         let _ = writeln!(
             out,
-            "INCREMENTAL CORRECTIONS  count · item (writes an incremental pass would have missed; each is a bug)"
+            "INCREMENTAL CORRECTIONS  count · item · cause (a write or a due time an incremental pass would have missed; each is a bug)"
         );
         for row in corrections {
             let _ = writeln!(
@@ -14026,6 +14035,27 @@ async fn for_each_message(
             Some(next) => cursor = Some(next),
             None => return Ok(()),
         }
+    }
+}
+
+async fn preflight_message_recipient(client: &Client, to: &str, allow_undeclared: bool) -> Result<()> {
+    let to = normalize_message_subject(to);
+    fractal_daemon::model::refuse_person_recipient(&to)
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    if !to.starts_with("agent/") || allow_undeclared {
+        return Ok(());
+    }
+    match client.get::<serde::de::IgnoredAny>(&format!(
+        "/v1/messages/recipient?to={}", urlencoding::encode(&to),
+    )).await {
+        Ok(_) => Ok(()),
+        Err(error) if fractal_daemon::client::http_status(&error) == Some(404)
+            && fractal_daemon::client::api_error_code(&error) != Some("unknown-recipient") =>
+        {
+            eprintln!("st: this daemon has no recipient preflight; sending without checking the recipient. Upgrade the daemon to reject unknown recipients.");
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -19314,6 +19344,21 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
+    }
+}
+
+/// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request
+/// path: exchanges only take what a scan found. A stopped scan restarts after a membership change.
+async fn backfill_envelope_signatures(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            fractal_daemon::task_cpu::blocking("maintenance.signature_backfill", || worker.advance_signature_backfill())
+        }).await;
+        if !matches!(result, Ok(Ok(_))) {
+            stderr_message("st3", format_args!("signature backfill scan failed: {result:?}"));
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
