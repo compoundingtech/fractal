@@ -8952,6 +8952,39 @@ async fn roster_resilience_refresher_fault_reads_degrade_only_at_the_wall_backst
     }
 }
 
+#[test]
+fn roster_folds_outside_a_request_and_a_snapshot_read_faults_through_scheduling_pauses() {
+    for history in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let store = &state(root.path()).store;
+        let subject = "agent/faulted";
+        roster_resilience_runtime(store, subject, "new");
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "operational.failure".into(), actor: Some("daemon/runtime".into()),
+            fields: serde_json::from_value(json!({"condition":"mailbox-channel-lost",
+                "incarnation":"one", "reason":"fixture loss", "reviewer":subject,
+                "title":"Mailbox lost", "severity":"error", "targets":[subject]})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let cut = store.index().unwrap();
+        // Test folds call these directly, with no request budget and no pinned snapshot. A
+        // pause past the 25 ms work allowance spends no query work: the card keeps its fault.
+        let folds: [(&str, &dyn Fn() -> anyhow::Result<Vec<Value>>); 3] = [
+            ("cold", &|| client_agent_resources_uncached(store, history, cut)),
+            ("cached", &|| client_agent_resources_cached(store, history, cut)),
+            ("exact", &|| client_exact_agent_resources(store, history, cut, subject)),
+        ];
+        for (name, fold) in folds {
+            Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
+            let started = std::time::Instant::now();
+            let cards = fold().unwrap();
+            assert!(started.elapsed() >= std::time::Duration::from_millis(60), "the {name} fold must read the stalled faults");
+            let card = cards.iter().find(|card| card["id"] == subject).unwrap();
+            assert_eq!(card["fault"], "fixture loss", "the {name} fold must keep the real fault");
+        }
+    }
+}
+
 #[tokio::test]
 async fn roster_resilience_always_expired_fault_reads_publish_from_the_first_attempt_per_mode() {
     for history in [false, true] {
