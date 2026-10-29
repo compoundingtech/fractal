@@ -52,7 +52,7 @@ still name the existing `.st/` directory: adding an absent definition would
 invalidate accepted-base evidence. Directory names remain part of signed
 projections, so moving identical bytes does not preserve path-sensitive keys.
 The bridge is removed only after the accepted-base rollout and installed-reader
-observations specified in [Q27's rollout plan](https://github.com/compoundingtech/fractal/issues/3032#issuecomment-6445632509);
+observations specified in [the rollout plan](https://github.com/compoundingtech/fractal/issues/3032#issuecomment-6445632509);
 historical replay uses the tools from the historical accepted base.
 
 

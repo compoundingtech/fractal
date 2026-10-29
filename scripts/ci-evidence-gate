@@ -61,16 +61,20 @@ PROTECTED = (
     '.st/evidence-log-key',
     # Whose pull requests are refused instead of run when unsigned (refusal).
     '.st/evidence-signed-only.json',
+    # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — literal so the closure checker reads the same source of truth.
+    '.fractal/evidence-skip-policy.json', '.fractal/evidence-keys', '.fractal/evidence-authors.json',
+    '.fractal/required-lanes.json', '.fractal/evidence-log-key', '.fractal/evidence-signed-only.json',
 )
-# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — preserve the same protected permissions in either layout.
-PROTECTED += tuple(path.replace('.st/', '.fractal/', 1) for path in PROTECTED if path.startswith('.st/'))
 # The protected files the gate and verifier only ever read at the accepted BASE when they judge a note: the signing keys (--keys-from),
 # the author list (check_authors, from the base's ci-evidence-signing) and the evidence log's key (--log-keys-from). The copy in a head
 # tree decides nothing, so main changing one after the branch point does not make a pull request fall back to the merge tree (a key
 # rotation on main voided every head signature made before it, 2026-10-26). A note the change distrusts, a dropped key say, is still
 # refused, by the lists as they are at the base. The branch's OWN edits to them still count as protected changes (choose_tree).
-BASE_READ = ('.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key', '.st/evidence-signed-only.json')
-BASE_READ += tuple(path.replace('.st/', '.fractal/', 1) for path in BASE_READ)
+# arn:lmig:smalltalk:2026-10-27-dot-fractal-config — keep the full base-only list literal for the closure checker.
+BASE_READ = (
+    '.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key', '.st/evidence-signed-only.json',
+    '.fractal/evidence-keys', '.fractal/evidence-authors.json', '.fractal/evidence-log-key', '.fractal/evidence-signed-only.json',
+)
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
 # may be at most this many first-parent commits of main behind the tip GitHub merged into. Further behind, the run asks about the
@@ -561,7 +565,8 @@ def ci_inputs_kept(check, branch_point, base, current):
         return False
     try:
         verify = base_module(base, 'scripts/evidence-verify', 'base_evidence_verify')
-        lanes = run('git', 'show', f'{base}:.st/required-lanes.json')
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — authority and layout both belong to the accepted base.
+        lanes = run('git', 'show', f'{base}:{config_path(base, ".st/required-lanes.json")}')
         if lanes.returncode != 0 or not hasattr(verify, 'ci_inputs_unchanged'):
             return False
         ci = verify.lane_rules(lanes.stdout.decode(), check).get('ci_inputs')

@@ -327,6 +327,20 @@ class CommandLine(Fixture):
         with self.assertRaises(OSError):
             ldc.unresolved_ci(ldc.Repo(self.root), [item])
 
+    def test_real_gate_protects_preferred_layout_inputs_but_excludes_base_only_counterparts(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — consume the same literal lists as the production gate.
+        path = '.fractal/evidence-skip-policy.json'
+        closure = self.closure(['bash', 'scripts/demo'], {
+            'scripts/demo': SH + f'cat {path}\ncat .fractal/evidence-keys\n',
+            path: '{}', '.fractal/evidence-keys': 'key',
+            'scripts/ci-evidence-gate': (ROOT / 'scripts/ci-evidence-gate').read_text(),
+        })
+        protected = ldc.protected_files(ldc.Repo(self.root))
+        self.assertIn(path, protected)
+        self.assertNotIn('.fractal/evidence-keys', protected)
+        self.assertEqual(ldc.undeclared_ci(closure, [], [], protected), [path])
+        self.assertEqual(ldc.undeclared_ci(closure, [], [path], protected), [])
+
     def test_check_fails_a_lane_that_reads_a_protected_file_its_ci_inputs_leave_out(self):
         gate = "PROTECTED = ('scripts/judge', '.st/keys', '.github/workflows/fleet.yml')\nBASE_READ = ('.st/keys',)\n"
         self.tree({'scripts/a': SH + 'bash scripts/judge\ncat .st/keys\n', 'scripts/judge': SH, '.st/keys': 'k',

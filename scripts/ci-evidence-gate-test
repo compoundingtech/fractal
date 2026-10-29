@@ -4,6 +4,7 @@
 The aim is that no skip can be a false positive: every way a note can fail to cover a check
 must end in `decision=run`, and every hostile or broken verifier must too.
 """
+import ast
 import importlib.machinery
 import importlib.util
 import itertools
@@ -88,6 +89,50 @@ class BaseReadPermissions(unittest.TestCase):
             '.st/evidence-signed-only.json', '.fractal/evidence-signed-only.json',
         })
         self.assertEqual(set(gate.PROTECTED), set(EXPECTED_PROTECTED))
+
+    def test_closure_and_gate_share_complete_literal_protection_lists(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — AST consumers must see the runtime lists, not just legacy entries.
+        source = ast.parse((ROOT / 'scripts/ci-evidence-gate').read_text())
+        literal = {node.targets[0].id: ast.literal_eval(node.value) for node in source.body
+                   if isinstance(node, ast.Assign) and len(node.targets) == 1
+                   and getattr(node.targets[0], 'id', None) in ('PROTECTED', 'BASE_READ')}
+        self.assertEqual(literal['PROTECTED'], gate.PROTECTED)
+        self.assertEqual(literal['BASE_READ'], gate.BASE_READ)
+        closure = load('gate_test_lane_closure', 'scripts/lane-definition-closure')
+        self.assertEqual(closure.protected_files(closure.Repo(ROOT)), set(gate.PROTECTED) - set(gate.BASE_READ))
+
+    def test_ci_inputs_exemption_selects_base_lanes_in_either_layout_and_refuses_preferred_errors(self):
+        # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — real pinned Git reads, with projection delegated to the base verifier.
+        for layout in ('old', 'new', 'both', 'malformed'):
+            with self.subTest(layout), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                def git(*args):
+                    return subprocess.run(['git', '-C', directory, *args], capture_output=True, check=True).stdout.decode().strip()
+                git('init', '-q')
+                good = json.dumps({'lanes': {'demo': {'ci_inputs': ['scripts/demo']}}})
+                for name, text in ({'old': {'.st/required-lanes.json': good},
+                                    'new': {'.fractal/required-lanes.json': good},
+                                    'both': {'.st/required-lanes.json': '{bad legacy', '.fractal/required-lanes.json': good},
+                                    'malformed': {'.st/required-lanes.json': good, '.fractal/required-lanes.json': '{bad'}}[layout]).items():
+                    path = root / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(text)
+                git('add', '-A')
+                base = git('write-tree')
+                # Uncommitted candidate bytes must never supply the base's declaration.
+                (root / '.fractal').mkdir(exist_ok=True)
+                (root / '.fractal/required-lanes.json').write_text('candidate is invalid')
+                verify = mock.Mock()
+                verify.lane_rules.side_effect = lambda text, check: json.loads(text)['lanes'][check]
+                verify.ci_inputs_unchanged.return_value = True
+                def run(*command, **kwargs):
+                    return subprocess.run(command, cwd=root, capture_output=True, check=False)
+                with mock.patch.object(gate, 'run', side_effect=run), mock.patch.object(gate, 'base_module', return_value=verify):
+                    self.assertEqual(gate.ci_inputs_kept('demo', base, base, base), layout != 'malformed')
+                    if layout != 'malformed':
+                        verify.ci_inputs_unchanged.assert_called_once_with('.', ['scripts/demo'], (base, base, base))
+                    else:
+                        verify.ci_inputs_unchanged.assert_not_called()
 
 
 # arn:lmig:smalltalk:2026-10-27-dot-fractal-config — live checkout, not the intentional legacy fixtures.
