@@ -6305,6 +6305,11 @@ mod tests {
         ui.world.slo = Load::Ready(Vec::new());
         let shown = screen(&ui);
         assert!(shown.contains("No spend recorded in this"), "{shown}");
+        // An empty reading that could not be read again is the last reading, not an all clear.
+        ui.world.slo_stale = Some("timed out".into());
+        let shown = screen(&ui);
+        assert!(shown.contains("Last reading"), "{shown}");
+        assert!(!shown.contains("No spend recorded in this"), "{shown}");
     }
 
     #[test]

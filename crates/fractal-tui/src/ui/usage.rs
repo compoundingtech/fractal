@@ -416,7 +416,8 @@ pub fn list(world: &World, by: By, hours: u64) -> Listing {
             if rows.is_empty()
                 && world.usage_limits.is_empty()
                 && world.agent_messages.is_none()
-                && matches!(&world.slo, Load::Ready(slo) if slo.is_empty()) =>
+                && matches!(&world.slo, Load::Ready(slo) if slo.is_empty())
+                && world.slo_stale.is_none() =>
         {
             ListState::Empty("No spend recorded in this period.")
         }
