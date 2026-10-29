@@ -643,6 +643,36 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
 }
 
 #[tokio::test]
+async fn an_unprepared_agents_roster_prints_its_own_code_and_says_to_retry() {
+    use axum::{Json, Router, http::StatusCode};
+    let directory = tempfile::tempdir().unwrap();
+    let socket = directory.path().join("roster.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = Router::new().fallback(|| async {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/roster-test",
+            "code": "agent-roster-not-ready",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        })))
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let error = generated_client(&Endpoint::Unix(socket), None).unwrap()
+        .agents_list(None, Some(50), false).await.unwrap_err();
+    assert!(error.is_transient(), "{error:?}");
+    let error = anyhow::Error::new(error);
+    assert_eq!(cli_error_message(&error, false),
+        "Fractal is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    assert_eq!(plain_error(&error),
+        "st is still preparing the agents roster; try again shortly (agent-roster-not-ready)");
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn blob_errors_keep_their_type_until_the_rendering_boundary() {
     use axum::{Json, Router, http::StatusCode};
     let directory = tempfile::tempdir().unwrap();
@@ -2056,6 +2086,7 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
                 refilled_at_ms: 1_234,
             },
             claude_attachment_polled: Some((("incarnation".into(), 4, "token".into()), 1_234)),
+            claude_attachment_answered: Some(Instant::now()),
             settle: ResumeSettle::resumed(),
         },
     };
@@ -2082,6 +2113,8 @@ fn a_driver_resume_state_names_its_driver_session_and_loop() {
     assert!(back.loop_state.predecessor_harness_record.is_none());
     // Nor does a settle: the replacement image draws its own.
     assert!(back.loop_state.settle.0.is_none());
+    // Nor the daemon's first answer: the replacement's attach window counts from its own.
+    assert!(back.loop_state.claude_attachment_answered.is_none());
     // An unpushed attachment poll is not carried: the replacement image polls once at once.
     assert!(back.loop_state.claude_attachment_polled.is_none());
 }
@@ -4417,6 +4450,7 @@ async fn a_send_or_reply_to_a_person_fails_in_the_cli_before_it_reaches_the_daem
         wake: MessageWakeArgs::default(),
         print_kdl: false,
         idempotency_key: Some("refuse-a-person".into()),
+        allow_undeclared_recipient: false,
     };
     for to in ["person/ada", "requester"] {
         let error = send_message(&client, args(to), Vec::new()).await.unwrap_err();

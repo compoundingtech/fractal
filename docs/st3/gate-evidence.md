@@ -131,7 +131,8 @@ so anyone with the same refs gets the same plan; the output names its `inputs_sh
   by id in batches before keying. The summary's `crate_keys` reports how many trees were keyed, how many keys are kept, and any
   unreadable trees.
 - **retention**: `.st/evidence-retention.json` at `--main` (`--retention FILE` to try another), reviewed like any
-  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (20,000).
+  change: `main_days` (3), `branch_days` (14), `grace_hours` (24), `soft_records` (3,000), `cap_records` (45,000), and an
+  optional `reason` that says why (JSON has no comments).
 - **as_of**: main's tip commit time unless `--as-of` is given, so a quiet main ages nothing.
 
 **Whole trees.** A tree's records are deleted together or not at all, and a live tree's never; an input key's index
@@ -142,10 +143,16 @@ age, as the first version did, could remove a failure and keep the pass dated wi
 which the failure still shadowed: that tree then verified. `scripts/evidence-gc-test` checks these properties on 400
 random worlds against a model of the verifier, and end to end with the verifier on real records.
 
-**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is kept (a record written moments
-ago for a head the listing raced with) unless more than `soft_records` records remain: then dead groups go oldest
-first by their newest record. Records are counted, not refs, so a record filed as a tag and a note counts once. If the
-live set alone is over `cap_records`, nothing live is deleted, the set is printed and the exit status is 3.
+**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is always kept: a record written
+moments ago for a head the listing raced with, or the first records of a signing run, which pushes each record as its
+lane finishes and its branch only at the end. The summary's `grace_records` counts them. Records are counted, not refs,
+so a record filed as a tag and a note counts once. If the live set alone is over `cap_records`, nothing live is
+deleted, the set is printed and the exit status is 3.
+
+`soft_records` deletes nothing; it is still read and checked. Until 2026-10-29 dead groups in grace went oldest first
+while more than `soft_records` records remained. The live set alone has been over 3,000 records since about
+2026-10-23, so from then on every run deleted every dead group in grace: 20,836 refs on 2026-10-28 and 7,408 on
+2026-10-29, among them the first two records of a signing run whose branch was not pushed yet (#4186).
 
 **Measured 2026-10-21** (a dry run against the remote): 5,021 refs, 4,562 records; 960 branch tips within 30 days
 (their trees hold 434 refs) and 217 main trees within 3 days (2,593 refs); 155 dead trees and 22 dead keys are deleted
@@ -157,6 +164,10 @@ run in the same repository took 68 s, 56 s of it projecting 2,350 input keys.
 6,452 on 196 main trees within 3 days (12,904 refs), 241 on the trees of 193 open pull requests, and 92 on 183 other
 branch tips within 14 days. That is over the old cap of 5,000, so every daily run exited 3; `cap_records` is 20,000,
 about 2.5 times that live set. The plan leaves 15,541 refs.
+
+**Measured 2026-10-29**, the first run that kept every live tree's per-crate `rust-tests` keys: 57,529 refs, 28,790
+records. The live set was 21,518 records (7,399 crate keys of 532 live trees among them), over the cap of 20,000, so the
+run exited 3. `cap_records` is 45,000, about twice that live set.
 
 **On the remote.** A dead group goes whole or not at all. First go the names whose record keeps another name in its
 own group: a note beside its tag, a migrated or duplicate first-layout name. No record leaves any group, so no verdict
@@ -983,6 +994,16 @@ A gate job that dies before it decides also leaves the check to run: the refusal
 fix a refused check, sign the head with `scripts/st-test --all --push origin` and push, or re-run the jobs once the notes are on the
 remote. A failed check never needs a new commit.
 
+**Which base a pull request run is judged at.** The gate and everything it reads at the accepted base (the signed-only list, the
+author list, the keys, the policy) come from the first parent of the checked-out merge, `refs/pull/N/merge`: the base tip GitHub
+merged the head into, the same merge the gate judges. They used to come from the payload's `pull_request.base.sha`, which GitHub moves
+only on an open or a push: a reopen or a `ready_for_review` keeps the old one. On 2026-10-28 a reopen of #4144 ran its gate from main
+as it was before this list existed, so every check ran (46.6 runner minutes). The payload's base reaches the gate as `EVENT_BASE_SHA`
+(`event_base` on the decision line). A stale one in main's history decides nothing. One outside the history of the merge's first
+parent (a retargeted or rewritten base) is a doubt, and for a signed-only opener's enforced check it is a refusal
+(`reason=payload_base_outside_the_merge`): push again so GitHub records the current base, then re-run all jobs. A merge group and a
+push take the gate from their payload base, as before.
+
 ### The Linux group
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
@@ -1160,9 +1181,10 @@ tree that edits its own lane never skips on one. It is inert until a check's own
 `pull_request` only, so the intersection is empty and a queue note skips nothing. That flip is made per check, on its own measured trigger,
 and `.st/evidence-keys` names the key (a `queue/NAME` line) only once it exists; deleting that line revokes it.
 
-#### Input values (`input_order`, `shard_inputs`)
+#### Input values (`input_order`, `shard_inputs`, `base_inputs`)
 
-`required_inputs` checks only that an input is present. Two optional keys on a kind's rule check values. They apply whatever the signer level.
+`required_inputs` checks only that an input is present. Three optional keys on a kind's rule check values. They apply whatever the signer
+level.
 
 **`input_order`** maps an input to its values, strongest first, for example `{"kit_inputs": ["true", "false"]}`. A note covers a run only
 when its value ranks at or above the run's own value.
@@ -1192,6 +1214,16 @@ fractal-web's policy checks both. The run's own `kit_inputs` reaches the verifie
 - A malformed `RUN_INPUTS` is dropped, so no note covers the run.
 
 `scripts/evidence-flip-ready` does not propose fractal-web's flip until both keys are in the policy.
+
+**`base_inputs`** maps an input to a file whose content at the accepted base the verdict depends on, though the file is not in the tree,
+for example linux-clippy's `{"clippy_base_baseline_sha256": ".github/clippy-baseline.json"}` (its ratchet fails a tree whose baseline
+rose above the base's). A note covers a run only when it recorded the sha256 of that file at the run's accepted base, or `absent` when
+the base has none.
+- The verifier computes the run's value itself from `--policy-from`. A `--run-input` of the same name is ignored, so no caller can
+  supply it.
+- `evidence-verify --project` prints the values (`base_inputs`) for a signer to record. `ci-evidence-signing` records them at
+  `BASE_INPUTS_SHA`, the base the job compared against, and records none when that is empty or all zeros.
+- The base's file changes rarely, so a note stays reusable across merges until it does (docs/keyed-clippy.md).
 
 `app_test_set=related` (pull requests run the app tests reached from their own diff) has no value rule: every pull request's base is a
 main commit that passed the full set, and the merge queue runs everything. It must be revisited before the merge queue stops running what a
@@ -1235,9 +1267,14 @@ the policy at origin/main, says `ready` when all of these hold, and otherwise li
   key yet), and the first line with a log value after the last `-` (`log_window_start`) is at least 24 hours old;
 - at least 30 lines with `outcome=satisfied` and `log=ok`, except for a check with a lowered trigger (below);
 - no `log=missing`;
-- no unexplained `log=unlogged_pass`: one is explained when the record was observed at most 240 s (two log pulls) before the run was
-  created, or after it. For an aggregate, the time is `log_unlogged_observed_at`, the oldest of its unlogged members, when the line has
-  it, and its `observed_at` when it does not;
+- no unexplained `log=unlogged_pass`: one is explained when the published log (`refs/evidence-log/main`, fetched shallow into a
+  bare repository under the cache) lists the record in its newest head at most 240 s (two log pulls) after the run was created, or
+  when the record was observed after the run was created. An aggregate's records are the members `log_unlogged_crates` names.
+  The run's creation is the clock, not the record's `observed_at`. On 2026-10-28 CI pushed its records at the end of its runs, 5-7
+  minutes after it observed them (`ci-script-tests` at 08:33Z was 366 s past `observed_at`, but logged 54 s after its run). Two gates
+  read the head one pull before the record they chose was published (00:13Z). Without a readable published log, or for an aggregate
+  whose list ends in `+N_more`, the old clock applies: observed at most 240 s before the run was created. The time is then the
+  aggregate's `log_unlogged_observed_at` when the line has one, else its `observed_at`; `None`, like `-`, names no time;
 - no hidden red: no satisfied line in a run (and attempt) whose real job, the job named exactly the check, concluded `failure`. A real
   job the gate skipped is evidence neither way. For the aggregate `linux-gate` the red is hidden only when a member that a skip skips
   (the jobs whose `if` reads `needs.evidence-gate-linux-gate.outputs.skip`: `linux-test-build`, `linux-tests` and its shards,
@@ -1262,7 +1299,7 @@ A check can also carry preconditions on its own policy entry at origin/main, wha
 its clippy stage ratchets against a base, so it is not ready until the policy requires `clippy_base_sha` of both its `host` and `agent`
 notes (each note then names the base it was measured against, not whatever a local `origin/main` happened to be).
 
-It prints JSON (`checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
+It prints JSON (`log_clock`: `published log`, or `observed_at (why)` when the published log could not be read; `checks.<check>`: `enforce`, `lines`, `satisfied_log_ok`, `log_missing`, `unlogged_pass_unexplained`, `hidden_red`
 and `visible_red` run ids, `log_window_start`, `ready`, `why_not`) and exits 0, or 2 when GitHub could not be read (it pages the pull request runs newest first back to the window start, without GitHub's `created=` filter, which answers an empty listing for about one request in four; a page that is empty or short of what the listing's total says it holds is asked again up to four times, then the run counts as unreadable, not as zero lines; so does a window of more than the listing's 1,000 runs). Enforced checks are reported too. `presign` counts, per account that started the runs, the distinct pull request heads in the window: `presigned` (some check had a host or agent note), `ci_note` (only an earlier CI run's note), `no_note`, and `presigned_share`.
 `--propose` opens the flip for each ready check that is not enforced and has no open pull request from `evidence-flip/<check>`: in a
 temporary worktree of origin/main it sets `"enforce": true` and `"sample_one_in": 1` (no run sampled; it replaces any other value), adds `"events": ["pull_request"]` where absent,
@@ -1957,7 +1994,8 @@ A verifier that is missing, slow (30 seconds), crashes, prints invalid UTF-8 or 
 leaves `decision=run`.
 
 **The gate script comes from the accepted base, like the verifier.** The step runs
-`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy, and if the base has no
+`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy (for a `pull_request` run `BASE_SHA` is the merge's first
+parent, see "Which base a pull request run is judged at"), and if the base has no
 gate or it fails in any way the step reports `unavailable` and the check runs. A change that rewrites
 the gate therefore cannot make itself skip, and the protected-path rule above makes any such change
 run in full. What remains is the workflow file itself, which a same-repo change can edit; that is

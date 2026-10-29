@@ -3081,7 +3081,11 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    // The subscription pauses after each of its three failed connections (MailboxRetry: half to
+    // one and a half seconds each). On a paused clock those pauses are its own timers, which the
+    // runtime skips when idle, so only the connections and reads count against the six seconds,
+    // measured on a real clock: a tokio timer of six seconds would be skipped to as well.
+    #[tokio::test(start_paused = true)]
     async fn current_owner_recovers_recent_unoffered_mail_after_an_injected_snapshot_failure() {
         let root = tempfile::tempdir().unwrap();
         let mut state = crate::api::tests_shared::state(root.path());
@@ -3156,10 +3160,15 @@ mod tests {
             fence.clone(),
             json!({}),
         );
-        let frame = tokio::time::timeout(Duration::from_secs(6), subscription.receiver.recv())
-            .await
-            .unwrap()
-            .unwrap();
+        let (elapsed, deadline) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(6));
+            let _ = elapsed.send(());
+        });
+        let frame = tokio::select! {
+            frame = subscription.receiver.recv() => frame.unwrap(),
+            _ = deadline => panic!("no mailbox frame within six seconds of real time"),
+        };
         assert!(matches!(frame, Frame::Mailbox { messages }
             if messages.len() == 1 && messages[0].subject == input.subject));
         assert!(calls.load(std::sync::atomic::Ordering::SeqCst) >= 4);

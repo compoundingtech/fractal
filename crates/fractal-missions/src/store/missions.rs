@@ -4,6 +4,74 @@ use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
 
+/// The batches one resource observation seals its claims in. A claim whose retention class
+/// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
+/// class: an envelope is signed and deleted whole, so a durable message in an observer's batch
+/// would pin every superseded observation beside it. The one exception is a mission request,
+/// which travels with the discovery it names (see `with_observation`). Each batch is made at its
+/// first claim, so an observation that writes only one class seals one batch, as before.
+#[derive(Default)]
+pub struct ObservationBatches {
+    latest: Option<String>,
+    lasting: Option<String>,
+}
+
+impl ObservationBatches {
+    /// The batch a claim of `kind` goes in.
+    pub fn for_kind(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+        kind: &str,
+    ) -> Result<String, St3Error> {
+        use fractal_schema::retention::Class;
+        let latest = matches!(
+            fractal_schema::retention::policy().kind(kind).class,
+            Class::Current | Class::Otel
+        );
+        self.for_class(transaction, origin, latest)
+    }
+
+    /// The latest-state batch, for a claim that must reach every member together with the
+    /// observation it names by ID. A subscription's mission request names its discovery, and
+    /// the host that starts the mission reads that claim when the request arrives, so the two
+    /// travel in one envelope. Few observations make a request, so few batches stay pinned.
+    pub fn with_observation(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+    ) -> Result<String, St3Error> {
+        self.for_class(transaction, origin, true)
+    }
+
+    fn for_class(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+        latest: bool,
+    ) -> Result<String, St3Error> {
+        let slot = if latest { &mut self.latest } else { &mut self.lasting };
+        if let Some(batch) = slot {
+            return Ok(batch.clone());
+        }
+        let now = write_time(transaction, origin).map_err(internal)?;
+        let sequence = next_replica_sequence(transaction, origin).map_err(internal)?;
+        let previous_hash = previous_batch_hash(transaction, origin).map_err(internal)?;
+        let batch_hash = batch_header_hash(origin, sequence, previous_hash.as_deref(), now)
+            .map_err(internal)?;
+        let batch_id = format!("batch/{origin}/{sequence}/{batch_hash}");
+        transaction
+            .execute(
+                /* sqlite-large-value: allow-for-now lv-hdf9b80decde2 owner=fractal_missions::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![batch_id, origin, sequence, previous_hash, batch_hash, now.to_string()],
+            )
+            .map_err(internal)?;
+        *slot = Some(batch_id.clone());
+        Ok(batch_id)
+    }
+}
+
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, St3Error> {
     let actor = normalize_actor(actor, "agent");
     resolve_reference_conn(connection, &actor)
@@ -6840,26 +6908,7 @@ impl MissionsStore for Store {
                         message_subjects: Vec::new(),
                     }, false)));
                 }
-                let now = write_time(transaction, &self.origin).map_err(internal)?;
-                let sequence = next_replica_sequence(transaction, &self.origin).map_err(internal)?;
-                let previous_hash = previous_batch_hash(transaction, &self.origin).map_err(internal)?;
-                let batch_hash = batch_header_hash(&self.origin, sequence, previous_hash.as_deref(), now)
-                    .map_err(internal)?;
-                let batch_id = format!("batch/{}/{sequence}/{batch_hash}", self.origin);
-                transaction
-                    .execute(
-                        /* sqlite-large-value: allow-for-now lv-hdf9b80decde2 owner=fractal_missions::store::missions TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id, origin, replica_sequence, previous_hash, hash, accepted_at_unix_ms)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![
-                            batch_id,
-                            self.origin,
-                            sequence,
-                            previous_hash,
-                            batch_hash,
-                            now.to_string()
-                        ],
-                    )
-                    .map_err(internal)?;
+                let mut batches = ObservationBatches::default();
                 let mut receipt_key = Some(idempotency_key.as_str());
                 let observer_predecessors = latest_claim_id_tx(transaction, observer)
                     .map_err(internal)?
@@ -6877,7 +6926,7 @@ impl MissionsStore for Store {
                             "revision": desired_revision,
                         }}),
                         &observer_predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "observer.state")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
@@ -6909,7 +6958,7 @@ impl MissionsStore for Store {
                         None,
                         &json!({"fields": observer_fields}),
                         &observer_predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "observer.observed")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
@@ -6939,7 +6988,7 @@ impl MissionsStore for Store {
                                 "changed_fields": repository_changed_fields,
                             }}),
                             &predecessors,
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
                             &mut receipt_key,
                         )
                         .map_err(internal)?,
@@ -7015,7 +7064,7 @@ impl MissionsStore for Store {
                             "changed_fields": item_changed_fields,
                         }, "evidence": evidence}),
                         &predecessors,
-                        Some(&batch_id),
+                        Some(&batches.for_kind(transaction, &self.origin, "resource.observed")?),
                         &mut receipt_key,
                     )
                     .map_err(internal)?;
@@ -7058,7 +7107,7 @@ impl MissionsStore for Store {
                                 "reason": (!target_exists).then_some("the delivery target is absent"),
                             }}),
                             &predecessors,
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "subscription.state")?),
                             &mut receipt_key,
                         )
                         .map_err(internal)?;
@@ -7092,7 +7141,7 @@ impl MissionsStore for Store {
                             continue;
                         }
                         message_subjects.extend(github_workflow_failures::deliver_tx(
-                            transaction, &self.origin, &batch_id, observer, resource,
+                            transaction, &self.origin, &mut batches, observer, resource,
                             subject, &subscription.to,
                             current_object.get("repository_id").unwrap_or(&Value::Null),
                             failures, workflow_baseline,
@@ -7182,7 +7231,7 @@ impl MissionsStore for Store {
                                         "tags": wake.tags,
                                     }, "evidence": [item_claim]}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7196,7 +7245,7 @@ impl MissionsStore for Store {
                                 end_watch_tx(
                                     transaction,
                                     &self.origin,
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "subscription.watch-ended")?),
                                     subscription_subject,
                                     watch,
                                     if merged { "merged" } else { "closed" },
@@ -7267,7 +7316,7 @@ impl MissionsStore for Store {
                             let entries = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batch_id,
+                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 &subscription.to,
@@ -7310,7 +7359,7 @@ impl MissionsStore for Store {
                                         "delivery_key": delivery_key,
                                     }, "evidence": entries.iter().map(|(_, claim, _)| claim).collect::<Vec<_>>()}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.for_kind(transaction, &self.origin, "subscription.batched")?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7344,7 +7393,7 @@ impl MissionsStore for Store {
                             let unowned = batch_entries_tx(
                                 transaction,
                                 &self.origin,
-                                &batch_id,
+                                &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                 subscription_subject,
                                 subscription,
                                 mission,
@@ -7415,7 +7464,7 @@ impl MissionsStore for Store {
                                     .map(|(_, claim, _)| claim.clone())
                                     .collect::<Vec<_>>()}),
                                 &[],
-                                Some(&batch_id),
+                                Some(&batches.with_observation(transaction, &self.origin)?),
                                 &mut receipt_key,
                             )
                             .map_err(claim_append_error)?;
@@ -7516,7 +7565,7 @@ impl MissionsStore for Store {
                                     message_subjects.extend(route_item_to_owner_tx(
                                         transaction,
                                         &self.origin,
-                                        &batch_id,
+                                        &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                         subscription_subject,
                                         &delivery_resource,
                                         &owner,
@@ -7563,7 +7612,7 @@ impl MissionsStore for Store {
                                     None,
                                     &json!({"fields": request_fields, "evidence": evidence}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.with_observation(transaction, &self.origin)?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7617,7 +7666,7 @@ impl MissionsStore for Store {
                                 "tags": ["resource-change", subscription_subject],
                             }, "evidence": evidence}),
                             &[],
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
                             &mut receipt_key,
                         )
                         .map_err(claim_append_error)?;
