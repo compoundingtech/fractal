@@ -78,7 +78,7 @@ def unquote(name):
 
 
 TEST_MODULE = re.compile(r"^#\[cfg\(test\)\]\n(?:pub(?:\([a-z]+\))? )?mod tests \{\n", re.M)
-RAW_STRING = re.compile(r'b?r(#*)"')
+RAW_STRING = re.compile(r'[bc]?r(#*)"')
 CHAR_LITERAL = re.compile(r"'(?:\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.)|[^'\\\n])'")
 HUNK = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
@@ -128,7 +128,7 @@ def closes_only_at_the_end(body):
                     nesting, index = nesting + 1, opens + 2
                 else:
                     nesting, index = nesting - 1, closes + 2
-        elif char == "r" and RAW_STRING.match(body, index) and not (index and (body[index - 1].isalnum() or body[index - 1] == "_")):
+        elif char in "brc" and RAW_STRING.match(body, index) and not (index and (body[index - 1].isalnum() or body[index - 1] == "_")):
             raw = RAW_STRING.match(body, index)
             end = body.find('"' + raw.group(1), raw.end())
             if end < 0:

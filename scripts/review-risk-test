@@ -139,6 +139,14 @@ class ReviewRisk(unittest.TestCase):
                        "#[cfg(test)]\nmod tests {\n    fn a() {}\n    }\n    fn b() {\n}\n"):
             self.assertIsNone(self.module.test_block_start(self.SOURCE + "\n" + broken))
 
+    def test_byte_and_c_raw_strings_are_raw_strings_so_a_backslash_before_their_closing_quote_does_not_desync_the_scan(self):
+        for prefix in ("br", "cr", "r"):
+            honest = "#[cfg(test)]\nmod tests {\n    const A: &[u8] = %s\"\\\";\n    const B: &str = \"x\";\n}\n" % prefix
+            self.assertEqual(self.module.test_block_start(self.SOURCE + "\n" + honest), 3, prefix)
+            early = ("#[cfg(test)]\nmod tests {\n    const A: &[u8] = %s\"\\\";\n    }\n    fn production() {}\n"
+                     "    const B: &str = \"x\";\n    const C: &str = \"y\";\n}\n") % prefix
+            self.assertIsNone(self.module.test_block_start(self.SOURCE + "\n" + early), prefix)
+
     def test_deleting_data_is_high_in_source_and_ignored_in_tests(self):
         self.write("crates/fractal-store/src/store/plain_tests.rs", 'fn t() { exec("DELETE FROM t"); }\n')
         self.assertEqual(self.risk()["level"], "low")
