@@ -5,10 +5,11 @@ pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
 
 /// The batches one resource observation seals its claims in. A claim whose retention class
-/// keeps only the latest state (`current`, `otel`) never shares a batch with a claim of another
+/// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
 /// class: an envelope is signed and deleted whole, so a durable message in an observer's batch
-/// would pin every superseded observation beside it. Each batch is made at its first claim, so
-/// an observation that writes only one class seals one batch, as before.
+/// would pin every superseded observation beside it. The one exception is a mission request,
+/// which travels with the discovery it names (see `with_observation`). Each batch is made at its
+/// first claim, so an observation that writes only one class seals one batch, as before.
 #[derive(Default)]
 pub struct ObservationBatches {
     latest: Option<String>,
@@ -28,6 +29,27 @@ impl ObservationBatches {
             fractal_schema::retention::policy().kind(kind).class,
             Class::Current | Class::Otel
         );
+        self.for_class(transaction, origin, latest)
+    }
+
+    /// The latest-state batch, for a claim that must reach every member together with the
+    /// observation it names by ID. A subscription's mission request names its discovery, and
+    /// the host that starts the mission reads that claim when the request arrives, so the two
+    /// travel in one envelope. Few observations make a request, so few batches stay pinned.
+    pub fn with_observation(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+    ) -> Result<String, St3Error> {
+        self.for_class(transaction, origin, true)
+    }
+
+    fn for_class(
+        &mut self,
+        transaction: &rusqlite::Transaction<'_>,
+        origin: &str,
+        latest: bool,
+    ) -> Result<String, St3Error> {
         let slot = if latest { &mut self.latest } else { &mut self.lasting };
         if let Some(batch) = slot {
             return Ok(batch.clone());
@@ -7397,7 +7419,7 @@ impl MissionsStore for Store {
                                     .map(|(_, claim, _)| claim.clone())
                                     .collect::<Vec<_>>()}),
                                 &[],
-                                Some(&batches.for_kind(transaction, &self.origin, "subscription.mission-requested")?),
+                                Some(&batches.with_observation(transaction, &self.origin)?),
                                 &mut receipt_key,
                             )
                             .map_err(claim_append_error)?;
@@ -7498,7 +7520,7 @@ impl MissionsStore for Store {
                                     message_subjects.extend(route_item_to_owner_tx(
                                         transaction,
                                         &self.origin,
-                                        &batch_id,
+                                        &batches.for_kind(transaction, &self.origin, "message.sent")?,
                                         subscription_subject,
                                         &delivery_resource,
                                         &owner,
@@ -7545,7 +7567,7 @@ impl MissionsStore for Store {
                                     None,
                                     &json!({"fields": request_fields, "evidence": evidence}),
                                     &[],
-                                    Some(&batch_id),
+                                    Some(&batches.with_observation(transaction, &self.origin)?),
                                     &mut receipt_key,
                                 )
                                 .map_err(claim_append_error)?;
@@ -7599,7 +7621,7 @@ impl MissionsStore for Store {
                                 "tags": ["resource-change", subscription_subject],
                             }, "evidence": evidence}),
                             &[],
-                            Some(&batch_id),
+                            Some(&batches.for_kind(transaction, &self.origin, "message.sent")?),
                             &mut receipt_key,
                         )
                         .map_err(claim_append_error)?;
