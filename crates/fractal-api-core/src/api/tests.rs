@@ -4482,7 +4482,10 @@ async fn retention_event_timeout_rereads_a_new_unsignaled_floor() {
 #[tokio::test]
 async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
     let root = tempfile::tempdir().unwrap();
-    let state = state(root.path());
+    let mut state = state(root.path());
+    // A file store, as the daemon runs: the waiter reads while this test appends, and in
+    // shared-cache memory that read fails at once with "database table is locked".
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let waiter_state = state.clone();
     let waiter = tokio::spawn(async move {
         let response = events(
