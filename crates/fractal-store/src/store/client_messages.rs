@@ -1580,6 +1580,9 @@ mod tests {
                 ]), evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
         }
+        // A commit folds for at most BACKFILL_WORK_BUDGET of wall time, so on a loaded host the
+        // last seeded subjects can still be pending. Every caller starts from a folded seed.
+        while store.maintain_client_message_selectors().unwrap() {}
     }
 
     fn paged_backfill_rows(store: &Store, person: Option<&str>, actor: Option<&str>, history: bool) -> Vec<Value> {
@@ -2546,9 +2549,6 @@ mod tests {
     fn retired_headers_outlive_cursors_issued_late_in_publication_lag() {
         let store = Store::open_memory("node").unwrap();
         seed_backfill(&store,2);
-        // A commit folds for at most BACKFILL_WORK_BUDGET of wall time, so on a loaded host a
-        // seeded subject can still be pending here. The cut below must cover both headers.
-        while store.maintain_client_message_selectors().unwrap() {}
         let through = store.client_messages_page_cut(store.index().unwrap()).unwrap();
         let baseline = paged_backfill_rows(&store,None,None,true);
         {
