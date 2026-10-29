@@ -7,6 +7,10 @@ use serde_json::json;
 const MAX_ATTEMPTS: usize = 3;
 const RECHECK_BACKOFF_MS: u128 = 10_000;
 const ATTEMPT_WINDOW_MS: u128 = 6 * 60 * 60 * 1_000;
+/// How long after this daemon starts an incarnation whose channel attached under an earlier daemon
+/// is charged no recovery attempt. Each driver has to reach the new daemon again before its channel
+/// reads as attached, and on a loaded host that takes minutes; mail waits in the graph meanwhile.
+const DAEMON_START_GRACE_MS: u128 = 10 * 60 * 1_000;
 
 /// The first recheck backoff; later ones double it. `ST3_CLAUDE_CHANNEL_BACKOFF_MS` can only
 /// shorten it, so the boot canaries need not wait out the production schedule.
@@ -258,13 +262,22 @@ impl<R: RuntimeControl> Reconciler<R> {
             );
             return Ok(false);
         }
-        let due = harness
+        let mut due = harness
             .since_unix_ms
             .saturating_add(if attempts.len() >= MAX_ATTEMPTS {
                 0
             } else {
                 recheck_backoff_ms() * (1_u128 << attempts.len())
             });
+        // A daemon restart is not a lost channel: a seat that was attached before it is charged
+        // nothing until the new daemon has had its startup grace.
+        let grace_ends = self.started_at_unix_ms.saturating_add(DAEMON_START_GRACE_MS);
+        if attempts.len() < MAX_ATTEMPTS
+            && due < grace_ends
+            && self.attached_before_start(&subject.subject, incarnation)?
+        {
+            due = grace_ends;
+        }
         if now < due {
             self.arm_restart(&format!("channel-recovery:{}", subject.subject), due);
             return Ok(false);
@@ -312,6 +325,20 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         self.signal_changed();
         Ok(true)
+    }
+
+    /// Whether `incarnation`'s channel reported attached before this daemon started. Only phase
+    /// changes publish these diagnostics, and only a blocked seat inside the grace asks.
+    fn attached_before_start(&self, subject: &str, incarnation: &str) -> Result<bool> {
+        Ok(self
+            .store
+            .claims_for(subject, Some("harness.diagnostic"))?
+            .iter()
+            .any(|claim| {
+                claim.body["fields"]["code"] == "claude-channel-attached"
+                    && claim_incarnation(claim) == Some(incarnation)
+                    && claim.accepted_at_unix_ms < self.started_at_unix_ms
+            }))
     }
 
     /// Claude keeps running when managed policy rejects channels: this is a banner, not an
