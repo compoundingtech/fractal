@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the st3 module graph against .st/module-layers.json, and report what a change affects.
+"""Check the fractal-daemon module graph against .st/module-layers.json, and report what a change affects.
 
   check-module-layers                  fail on a module cycle outside the allowlist or a stale entry
   check-module-layers --layers         print the computed layer of every module

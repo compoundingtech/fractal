@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Close the conversation sync-details dialog state when the retained sync failure clears, so a later failure does not reopen it unasked. Follow-up to #3386.",
+  "replay": {"status": "none", "detail": "UI state only; no replay or stored data changes."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No protocol or rule change."},
+  "compatibility": {"status": "none", "detail": "No runtime compatibility change."},
+  "downtime": {"status": "none", "detail": "No deployment transition."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "No persisted state or recovery change."}
+}

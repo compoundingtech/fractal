@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry current main routing and raw CPU kit gate into OMP child transcript tabs",
+  "replay": {"status": "none", "detail": "The merge does not change stored transcript content or replay behavior."},
+  "schema": {"status": "none", "detail": "No additional schema or generated client contract changes are introduced by this merge."},
+  "rules": {"status": "none", "detail": "No additional claim rules or digest changes are introduced."},
+  "compatibility": {"status": "changed", "detail": "Includes main's routing-parent child IDs; web tabs retain and forward server-provided conversation IDs unchanged. Gateways and owners must run the same child ID encoding."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal upgrade."},
+  "manual": {"status": "changed", "detail": "Upgrade gateways and owners together and reopen parent conversations to regenerate child links, as required by main's routing change."},
+  "recovery": {"status": "none", "detail": "No persisted data recovery is required. Reopen parent conversations to regenerate volatile child links after upgrade or rollback."}
+}

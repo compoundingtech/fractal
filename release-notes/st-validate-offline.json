@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Add st validate FILE... to validate KDL files offline and print declared subjects and mission revisions. This is not a deployment preview.",
+  "summary": "Add fractal validate FILE... to validate KDL files offline and print declared subjects and mission revisions. This is not a deployment preview.",
   "replay": {
     "status": "none",
     "detail": "Offline validation reads authored files without opening a store or changing stored history."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "New st validate FILE... command parses each file independently using the literal default host local, without configuration or a daemon. Text output lists subject kinds and IDs and mission id@revision values; --json returns subjects and missions arrays. Validation does not run gates, resolve live graph references, authorize publication or preview deployment. Existing commands and daemon protocols are unchanged."
+    "detail": "New fractal validate FILE... command parses each file independently using the literal default host local, without configuration or a daemon. Text output lists subject kinds and IDs and mission id@revision values; --json returns subjects and missions arrays. Validation does not run gates, resolve live graph references, authorize publication or preview deployment. Existing commands and daemon protocols are unchanged."
   },
   "downtime": {
     "status": "none",
@@ -23,7 +23,7 @@
   },
   "manual": {
     "status": "none",
-    "detail": "No required steps. Optionally run st validate FILE... before publishing authored KDL."
+    "detail": "No required steps. Optionally run fractal validate FILE... before publishing authored KDL."
   },
   "recovery": {
     "status": "none",

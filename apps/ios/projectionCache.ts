@@ -1,5 +1,5 @@
-import type { Agent, Arrangement, Attention, Device, Glass, Launch, Mission } from '../../clients/typescript/st3-client';
-import type { KeptAttention, SessionView } from '@smalltalk/st3-views';
+import type { Agent, Arrangement, Attention, Device, Glass, Launch, Mission } from '../../clients/typescript/fractal-client';
+import type { KeptAttention, SessionView } from '@fractal/views';
 
 export type MachineView = { id: string; kind: 'machine'; name: string; state: string; occupancy: { running_runtimes: number }; capacity: { state: string }; transports: Array<{ protocol: string; status: string }> };
 // The three windows the collections socket holds, and the lists a tab loads when it opens.

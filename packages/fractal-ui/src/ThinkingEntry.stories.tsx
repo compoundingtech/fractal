@@ -10,10 +10,20 @@ import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t 
 function ThinkingStory({ scheme = 'dark', streaming = false }: { scheme?: Scheme; streaming?: boolean }) {
   return <main data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme)}><ThinkingEntry text="Compare **reported rows** with the input, then ask a second worker to *review* the change." streaming={streaming} /></main>
 }
-const meta = { title: 'Fractal UI/Thinking Entry', component: ThinkingStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', streaming: false }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThinkingStory>
+const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Thinking Entry', component: ThinkingStory, parameters: { scenario: { _tag: 'contract-fixture', reason: 'ThinkingEntry renders one collapsed reasoning row. The catalog has settled reasoning in transcript-families, but it is an early row that no tail-only mounted window isolates, and collapsed prose exposes no slice markers. The catalog has no in-progress reasoning entry. Local text exercises expand, collapse, aria-controls, keyboard and the streaming tail.' }, layout: 'fullscreen' }, args: { scheme: 'dark', streaming: false }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<typeof ThinkingStory>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'AllStates:contract-fixture',
+  'AllStatesLight:contract-fixture',
+  'Settled:contract-fixture',
+  'SettledLight:contract-fixture',
+  'Streaming:contract-fixture',
+  'StreamingLight:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
-export const Settled: Story = { play: async ({ canvasElement }) => {
+export const Settled: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const thinking = canvas.getByRole('button', { name: 'Thinking' })
   await expect(thinking).toHaveAttribute('aria-expanded', 'false')
@@ -30,7 +40,7 @@ export const Settled: Story = { play: async ({ canvasElement }) => {
   await expect(thinking).toHaveAttribute('aria-expanded', 'false')
   await expect(canvasElement.querySelector('[data-testid="markdown"]')).toBeNull()
 } }
-export const Streaming: Story = { args: { streaming: true }, play: async ({ canvasElement }) => {
+export const Streaming: Story = { tags: ['critical'], args: { streaming: true }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   const thinking = canvas.getByRole('button', { name: 'Thinking' })
   await expect(thinking).toHaveAttribute('aria-expanded', 'false')

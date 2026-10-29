@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Align public documentation with Fractal naming, correct README installation and CI claims, and remove internal operator runbooks from the public documentation tree.",
+  "replay": { "status": "none", "detail": "Documentation only; no replay, backfill or stored-data changes." },
+  "schema": { "status": "none", "detail": "No database, wire schema or operation changes." },
+  "rules": { "status": "none", "detail": "No checkpoint, authority, admission or fleet coordination changes." },
+  "compatibility": { "status": "none", "detail": "No executable, protocol, client or harness behavior changes; existing literal engineering identifiers are preserved." },
+  "downtime": { "status": "none", "detail": "Documentation only; no service restart or deployment required." },
+  "manual": { "status": "none", "detail": "Existing installations require no upgrade action." },
+  "recovery": { "status": "none", "detail": "No state conversion or recovery behavior changes; existing recovery warnings remain documented." }
+}

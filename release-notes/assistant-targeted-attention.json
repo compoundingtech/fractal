@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Select published actionable owner alerts for one known canonical agent without unrelated fleet output pagination",
+  "replay": {"status": "none", "detail": "No claim replay or recovery changes."},
+  "schema": {"status": "none", "detail": "No stored schema, index, or data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or digest rule changes."},
+  "compatibility": {"status": "none", "detail": "Existing attention and attention-rich reads and st_alerts_list accept optional exact agent_id. Matching reuses the already disclosed row association. Filtering precedes paging and whole-response byte packing; continuations bind the selector. Existing unfiltered requests and actionable row shapes remain unchanged. An empty page means no matching published alerts, not no work. No routes, scopes, grants or disclosure authority are added."},
+  "downtime": {"status": "none", "detail": "No added startup work or expected interruption."},
+  "manual": {"status": "none", "detail": "No operator action required; clients may refresh tool discovery to use the optional selector."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or new rollback restrictions."}
+}

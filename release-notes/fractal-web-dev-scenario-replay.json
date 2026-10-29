@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Add opt-in Fractal web development scenario replay over the real SDK and live data layer, preserving the URL-selected world across navigation and replay folder transports across HMR. No production or deployment upgrade impact.",
+  "replay": {
+    "status": "none",
+    "detail": "Scenario replay is opt-in development tooling only; no replay or rebuild of deployed runtime state is required."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database, claim, or persisted browser-state schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rule or fleet coordination change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No production protocol, harness, or CLI change. Replay code and scenario worlds are excluded from production builds; live startup remains the default."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No deployed service change or interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No installation, deployment, or operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No production recovery or rollback behavior change."
+  }
+}

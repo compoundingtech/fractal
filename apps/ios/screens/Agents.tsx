@@ -9,7 +9,7 @@ import { AGENT_LEGEND, agentGlyph, agentRows, OLDER_ST_NOTE, agentSections, agen
 import { Banners, Empty, StatusLine, useDebugScroll, useListsOnFocus, useMissionsOnFocus, useRefresh } from '../chrome';
 import { ContextMenu, type MenuAction } from '../menu';
 import type { RootParams } from '../navigation';
-import { sessionDetail } from '@smalltalk/st3-views';
+import { sessionDetail } from '@fractal/views';
 import { useStore } from '../store';
 import { theme } from '../theme';
 import { Button, Legend, ListRow, Note, Screen, SectionHeader, T } from '../ui';
@@ -20,7 +20,7 @@ function Right({ row }: { row: AgentRowView }) {
   return <><T color={harnessColor(row.harness)}>{row.harness}</T><T dim>{row.activity.padStart(4)}</T></>;
 }
 
-// Agents: every seat, grouped and sorted as stui's Agents tab, or as a tree of their paths. The
+// Agents: every seat, grouped and sorted as the Fractal terminal UI's Agents tab, or as a tree of their paths. The
 // navigation bar's native search field filters both.
 export function AgentsScreen() {
   const { data, gatewayHost, truncated, hasSynced, loadErrors, treeView, setTreeView, status, actions } = useStore();
@@ -43,7 +43,7 @@ export function AgentsScreen() {
       },
     });
   }, [navigation]);
-  // Typed text also searches what was said in conversations, as stui's Ctrl+K does.
+  // Typed text also searches what was said in conversations, as the Fractal terminal UI's Ctrl+K does.
   const [said, setSaid] = useState<{ query: string; rows: SaidRow[]; note: string } | null>(null);
   const query = filter.trim();
   useEffect(() => {

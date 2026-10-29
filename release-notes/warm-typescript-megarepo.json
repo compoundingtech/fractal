@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Main upkeep's warm-typescript materializes the megarepo members before pnpm, as Workspace CI's typescript-client does",
+  "replay": {"status": "none", "detail": "CI only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Main upkeep is not a required check; the pnpm cache key is unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

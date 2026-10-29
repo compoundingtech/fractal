@@ -97,5 +97,13 @@ export function assertDiffTint(canvas: HTMLElement) {
   // Canvas unpremultiplication of a 9% wash can round by up to 6/255.
   if (addWash.slice(0, 3).some((channel, index) => Math.abs(channel - marker[index]!) > 6 / 255)) throw new Error('Added wash and gutter do not share addition ink')
   if (deleteDelta === 0 || Math.abs(addDelta / deleteDelta - 1) > 0.2) throw new Error(`Addition/deletion luminance delta mismatch: ${addDelta} / ${deleteDelta}`)
-  return { pane, addWash, deleteWash, marker, washToken, gutterToken, addComposite, deleteComposite, paneLuminance: luminance(pane), addLuminance: luminance(addComposite), deleteLuminance: luminance(deleteComposite), addDelta, deleteDelta, deltaRatio: addDelta / deleteDelta, chroma, hue: addHue }
+  const contrast = (element: Element) => {
+    const backdrop = background(element)
+    const ink = over(color(getComputedStyle(element).color), backdrop)
+    const [lighter, darker] = [luminance(ink), luminance(backdrop)].sort((a, b) => b - a)
+    return (lighter! + 0.05) / (darker! + 0.05)
+  }
+  const minimumTextContrast = Math.min(...rows.flatMap(row => [...row.querySelectorAll('code, [data-syntax-token]')].map(contrast)))
+  const minimumGutterContrast = Math.min(...rows.map(row => contrast(row.children[0]!)))
+  return { pane, addWash, deleteWash, marker, washToken, gutterToken, addComposite, deleteComposite, paneLuminance: luminance(pane), addLuminance: luminance(addComposite), deleteLuminance: luminance(deleteComposite), addDelta, deleteDelta, deltaRatio: addDelta / deleteDelta, chroma, hue: addHue, minimumTextContrast, minimumGutterContrast }
 }

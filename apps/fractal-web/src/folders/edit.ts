@@ -1,6 +1,6 @@
-import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@smalltalk/st3-client'
-import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@smalltalk/st3-client/schema'
-import type { ActionFailure, ArrangementActionPort } from '@st3/sdk/effect'
+import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
+import { ArrangementEditParameters, ErrorCode, decodeUnknownSync } from '@fractal/client/schema'
+import type { ActionFailure, ArrangementActionPort } from '@fractal/sdk/effect'
 import { Effect, Schema } from 'effect'
 import { reservedSidebarSubject, sidebarCandidates, sidebarWinner, type ArrangementInventory } from '../data/arrangements.ts'
 
@@ -302,6 +302,7 @@ export const createArrangementEditor = ({ owner, actions, read, onState }: {
             fail(job, unknown('The edit does not match the generated arrangement operation contract.', job))
             return
           }
+          // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
           job.request = { api_version: 'st3.client.v0', type: 'arrangement.edit', id: job.id, idempotency_key: job.key, parameters, fence: { snapshot_id: fresh.success, subject_revisions: winner === undefined ? {} : { [winner.id]: winner.revision } } }
         } else {
           // Unknown delivery retries must replay exactly the original identity and parameters.

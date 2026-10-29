@@ -1,6 +1,6 @@
 import type { ConversationItem, Role, Sender, TextItem } from './model.ts'
 
-/** The media type used by st's wire-compatible omp custom-message projection. */
+/** The media type used by Fractal's wire-compatible omp custom-message projection. */
 export const ompEventMediaType = 'application/vnd.omp.event+json'
 
 /** Read object fields without assuming a producer-specific shape. */
@@ -33,7 +33,7 @@ export const roleSender = ({
       ? { kind: 'human', label: 'You', via: 'harness' }
       : { kind: 'system', label: 'System' }
 
-/** Small Talk subjects carry provenance in their explicit subject prefix. */
+/** Fractal subjects carry provenance in their explicit subject prefix. */
 export const deliverySender = (from: string | undefined): Sender =>
   from?.startsWith('agent/') === true
     ? { kind: 'st-agent', label: from.slice('agent/'.length), via: 'st' }
@@ -41,9 +41,9 @@ export const deliverySender = (from: string | undefined): Sender =>
         from?.startsWith('user/') === true ||
         from?.startsWith('person/') === true
       ? { kind: 'human', label: from.slice(from.indexOf('/') + 1), via: 'wf / st' }
-      : { kind: 'system', label: from ?? 'Small Talk', via: 'st' }
+      : { kind: 'system', label: from ?? 'Fractal', via: 'st' }
 
-/** st's native injection is an explicit envelope, not a human message merely because role=user. */
+/** Fractal's native injection is an explicit envelope, not a human message merely because role=user. */
 export const proseItem = (item: TextItem): TextItem => {
   if (item.role !== 'user' && item.role !== 'system') return item
   const envelope = /^<smalltalk-message\b([^>]*)>\s*([\s\S]*?)\s*<\/smalltalk-message>/.exec(
@@ -177,7 +177,7 @@ export const structuredEvent = ({
       ...base,
       kind: 'resource-observed',
       title: 'Resource observed',
-      sender: { kind: 'system', label: 'Small Talk', via: 'daemon' },
+      sender: { kind: 'system', label: 'Fractal', via: 'daemon' },
       text: ref ?? 'Resource observation received',
       data,
     }
@@ -257,6 +257,7 @@ export const senderOf = ({
       return { kind: 'system', label: 'Run' }
     case 'Notice':
     case 'UnknownEvent':
+    case 'Unsupported':
       return { kind: 'system', label: 'System' }
     case 'Event':
       return item.sender

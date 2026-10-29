@@ -1,3 +1,4 @@
+import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
 import { buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
@@ -10,7 +11,7 @@ import { buildEnv, macosRunner, saveMainDependencyCaches, workspacePreparationSt
 
 // Optional on PRs and never required. A separate workflow lets label changes start macOS without
 // restarting the required Linux gate.
-export default githubWorkflow(readyPRJobs(auditCaches({
+export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
   name: 'macOS CI',
   on: {
     pull_request: { types: [...readyPullRequestTypes, 'labeled'] },
@@ -44,4 +45,4 @@ export default githubWorkflow(readyPRJobs(auditCaches({
       ],
     },
   },
-}, {})))
+}, {}))))

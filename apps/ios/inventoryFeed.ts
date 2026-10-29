@@ -1,5 +1,5 @@
-import { applyWindow, plainMessage, type CollectionFrame, type CollectionStream, type CollectionWindow, type Snapshot } from '../../clients/typescript/st3-client';
-import { inventoryRows, type InventoryLists, type InventoryName } from '@smalltalk/st3-views';
+import { applyWindow, plainMessage, type CollectionFrame, type CollectionStream, type CollectionWindow, type Snapshot } from '../../clients/typescript/fractal-client';
+import { inventoryRows, type InventoryLists, type InventoryName } from '@fractal/views';
 
 export type InventoryHandlers<K extends InventoryName> = {
   onRows: (rows: InventoryLists[K], hasMore: boolean, snapshot: Snapshot) => void;

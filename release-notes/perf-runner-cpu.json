@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The Linux load lanes and the daily cost lane log the runner's CPU model, so the slower Namespace host class can be told apart",
+  "replay": {"status": "none", "detail": "CI only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "One log-only step per job; no required check changes."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

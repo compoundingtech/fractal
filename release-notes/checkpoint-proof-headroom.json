@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Checkpoint proof admission reserves the SQLite snapshot copy, journal and schema minimum; a schema-derived VACUUM cap and device envelopes guard later growth.",
+  "replay": {
+    "status": "none",
+    "detail": "The same sealed set, drop plan, replay and proof comparisons run after admission."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No durable table or stored format changes. Proof owner markers and a lock are local scratch files."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "RULES_VERSION, retention, other-claims validation and checkpoint agreement are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Peers read published checkpoint verification claims and digests, not the local scratch files; successful proof output is unchanged."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "A member without the derived scratch minimum, SQLite temp and live-writer reserve refuses before allocation. VACUUM can grow to the guarded schema/WAL cap only while the actual per-device remainder E permits it; for a 4 KiB-page store under 8 GiB the WAL term alone is 2,084,935 pages. Canonical sealed-claims ordering now uses one explicit transaction, whose journal is covered by J(Q)."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Before merge, Ops records source SQLite page size/count, main and WAL length/allocation, and available live, scratch and resolved SQLite temp bytes. The gate reports the controlling deficit. Host verdicts from the prior formula require a new census. No production database copy or config change is required."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "A later checkpoint pass sweeps marked proof orphans under the proof lock. Unknown or unremovable files keep proof refused and report their paths until cleared."
+  }
+}

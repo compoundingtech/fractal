@@ -62,11 +62,11 @@ target_loader = importlib.machinery.SourceFileLoader('targets', str(ROOT / 'scri
 target_spec = importlib.util.spec_from_loader(target_loader.name, target_loader)
 targets_module = importlib.util.module_from_spec(target_spec)
 target_loader.exec_module(targets_module)
-legacy = dict(id='legacy', name='st2', targets=[
+legacy = dict(id='legacy', name='fractal-legacy-runner', targets=[
     dict(name=name, kind=['test']) for name in ('integration', 'agent_resource', 'driver_expansion')])
-assert 'package(=st2)' in targets_module.selection(dict(workspace_members=['legacy'], packages=[legacy]))
+assert 'package(=fractal-legacy-runner)' in targets_module.selection(dict(workspace_members=['legacy'], packages=[legacy]))
 assert targets_module.selection(dict(workspace_members=['shared'], packages=[
-    dict(id='shared', name='st-drivers', targets=[])])) == 'all()'
+    dict(id='shared', name='fractal-drivers', targets=[])])) == 'all()'
 # A same-named dependency outside the workspace must not impose legacy test selection.
 assert targets_module.selection(dict(workspace_members=['shared'], packages=[legacy])) == 'all()'
 try:
@@ -95,7 +95,7 @@ with open(os.environ['CALLS'], 'a') as stream: stream.write(json.dumps(args) + '
 if args == ['nextest', '--version']:
     print('cargo-nextest fixture')
 elif args[:1] == ['metadata']:
-    print(json.dumps({'workspace_members': ['st2'], 'packages': [{'id': 'st2', 'name': 'st2', 'targets': [{'name': name, 'kind': ['test']} for name in ('integration', 'agent_resource', 'driver_expansion')]}]}))
+    print(json.dumps({'workspace_members': ['fractal-legacy-runner'], 'packages': [{'id': 'fractal-legacy-runner', 'name': 'fractal-legacy-runner', 'targets': [{'name': name, 'kind': ['test']} for name in ('integration', 'agent_resource', 'driver_expansion')]}]}))
 elif args[:2] == ['nextest', 'archive']:
     Path(args[args.index('--archive-file') + 1]).write_bytes(json.dumps(args).encode())
 elif args[:1] == ['test']:
@@ -136,8 +136,8 @@ else:
     groups = [command for command in commands if 'archive' in command]
     assert ['bash', 'scripts/ci-linux', 'conversation-model'] in commands
     assert len(groups) == 1 and '--workspace' in groups[0] and '--exclude' not in groups[0]
-    assert groups[0][groups[0].index('-E') + 1] == 'not package(=st2) or (kind(test) and (binary(=integration) or binary(=agent_resource) or binary(=driver_expansion)))'
-    assert not any('-p' in command and 'st2' in command for command in commands)
+    assert groups[0][groups[0].index('-E') + 1] == 'not package(=fractal-legacy-runner) or (kind(test) and (binary(=integration) or binary(=agent_resource) or binary(=driver_expansion)))'
+    assert not any('-p' in command and 'fractal-legacy-runner' in command for command in commands)
     produced = dict(line.split('=', 1) for line in outputs.read_text().splitlines())
     produced_manifest = json.loads((scratch / 'ci-test-archives/manifest.json').read_text())
     assert produced_manifest['byte_sizes'] == {name: (scratch / 'ci-test-archives' / name).stat().st_size for name in module.FILES}
@@ -179,8 +179,8 @@ class DownloadControls(unittest.TestCase):
                                              for name, data in self.files.items()}}).encode()
         self.manifest_hash = hashlib.sha256(self.manifest).hexdigest()
         self.zip_bytes = self.make_zip()
-        self.environment = dict(GITHUB_REPOSITORY='owner/repo', GITHUB_RUN_ID='123',
-                                GITHUB_RUN_ATTEMPT='2', GITHUB_SHA='a' * 40,
+        self.environment = dict(GITHUB_REPOSITORY='owner/old-name', GITHUB_REPOSITORY_ID='789',
+                                GITHUB_RUN_ID='123', GITHUB_RUN_ATTEMPT='2', GITHUB_SHA='a' * 40,
                                 CI_TEST_ARCHIVE_ARTIFACT_ID='456',
                                 CI_TEST_ARCHIVE_PRODUCER_ATTEMPT='1',
                                 CI_TEST_ARCHIVE_MANIFEST_SHA256=self.manifest_hash,
@@ -276,6 +276,24 @@ class DownloadControls(unittest.TestCase):
         for name, data in self.files.items():
             self.assertEqual((self.destination / name).read_bytes(), data)
         self.assertFalse(list(self.root.glob('ci-test-transfer-*')))
+
+    def test_repository_id_survives_rename_without_name_lookup(self):
+        self.download(self.fake_gh([self.zip_bytes]))
+        self.assertEqual(self.calls, [
+            ['gh', 'api', 'repositories/789/actions/artifacts/456'],
+            ['transport', 'repositories/789/actions/artifacts/456/zip'],
+        ])
+
+    def test_missing_repository_id_resolved_once_before_transfer_retries(self):
+        del self.environment['GITHUB_REPOSITORY_ID']
+        with patch.object(module, 'output', return_value='789') as resolve:
+            self.download(self.fake_gh([b'partial', self.zip_bytes]))
+        resolve.assert_called_once_with('gh', 'api', 'repos/owner/old-name', '--jq', '.id')
+        self.assertEqual(self.calls, [
+            ['gh', 'api', 'repositories/789/actions/artifacts/456'],
+            ['transport', 'repositories/789/actions/artifacts/456/zip'],
+            ['transport', 'repositories/789/actions/artifacts/456/zip'],
+        ])
 
     def test_truncated_transfer_recovers_before_any_consumer(self):
         self.download(self.fake_gh([self.zip_bytes[:80], self.zip_bytes]))
@@ -558,22 +576,23 @@ class StreamingControls(unittest.TestCase):
                 raise urllib.error.HTTPError(request.full_url, 302, 'redirect',
                     {'Location': 'https://storage.invalid/?signed-secret'}, None)
         with patch.dict(os.environ, self.environment, clear=True), patch.object(module.urllib.request, 'build_opener', return_value=Opener()):
-            url = module.signed_artifact_url('repos/owner/repo/actions/artifacts/456', 1)
+            url = module.signed_artifact_url('repositories/789/actions/artifacts/456', 1)
         self.assertEqual(url, 'https://storage.invalid/?signed-secret')
         self.assertEqual(captured[0].get_header('Authorization'), 'Bearer test-token-never-in-argv')
         self.assertEqual(captured[0].host, 'api.github.com')
+        self.assertEqual(captured[0].full_url, 'https://api.github.com/repositories/789/actions/artifacts/456/zip')
         handler = module.NoRedirect()
         self.assertIsNone(handler.redirect_request(None, None, 302, '', {}, url))
 
     def test_invalid_redirect_refused_and_http_error_is_redacted(self):
         import urllib.error
-        for status, location in [(302, 'http://storage.invalid/secret'), (403, 'signed-secret')]:
+        for status, location in [(302, 'http://storage.invalid/secret'), (301, 'https://api.github.com/secret'), (403, 'signed-secret')]:
             class Opener:
                 def open(inner, request, **kwargs):
                     raise urllib.error.HTTPError('https://signed-secret', status, 'secret body',
                         {'Location': location}, None)
             with patch.dict(os.environ, self.environment, clear=True), patch.object(module.urllib.request, 'build_opener', return_value=Opener()), self.assertRaises(module.TransferError) as raised:
-                module.signed_artifact_url('repos/owner/repo/actions/artifacts/456', 1)
+                module.signed_artifact_url('repositories/789/actions/artifacts/456', 1)
             self.assertNotIn('signed-secret', str(raised.exception))
 
 

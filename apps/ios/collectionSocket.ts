@@ -1,4 +1,4 @@
-import type { CollectionSocket } from '../../clients/typescript/st3-client';
+import type { CollectionSocket } from '../../clients/typescript/fractal-client';
 
 export type HeartbeatSocket = CollectionSocket & { onping: (() => void) | null };
 export type HeartbeatSocketFactory = (url: string, protocols: string[], headers: Record<string, string>) => HeartbeatSocket;

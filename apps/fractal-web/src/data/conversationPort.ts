@@ -1,5 +1,5 @@
-import { ClientError } from '@smalltalk/st3-client'
-import type { Capabilities } from '@smalltalk/st3-client/schema'
+import { ClientError } from '@fractal/client'
+import type { Capabilities } from '@fractal/client/schema'
 
 import type { ConversationPortResult } from './source.ts'
 

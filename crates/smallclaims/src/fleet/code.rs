@@ -11,7 +11,18 @@ use sha2::{Digest as _, Sha256};
 
 pub const PREFIX: &str = "stj1-";
 const VERSION: u8 = 1;
+const PAIRING_VERSION: u8 = 2;
 const FLAG_MIGRATE: u8 = 1;
+const FLAG_PAIRING: u8 = 2;
+
+/// Restricted bootstrap transport credentials, interpreted only by the external adapter.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PairingData {
+    pub gateway: String,
+    pub attempt: String,
+    pub secret: String,
+}
 
 /// Where the sponsor listens.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +45,7 @@ pub struct JoinCode {
     /// A migration code admits an existing config-peer node and carries no secret.
     pub migrate: bool,
     pub endpoints: Vec<CodeEndpoint>,
+    pub pairing: Option<PairingData>,
 }
 
 /// The fingerprint of a base64url member public key.
@@ -84,7 +96,10 @@ impl<'a> Reader<'a> {
 
 impl JoinCode {
     pub fn encode(&self) -> Result<String> {
-        let mut record = vec![VERSION, if self.migrate { FLAG_MIGRATE } else { 0 }];
+        let flags = if self.migrate { FLAG_MIGRATE } else { 0 }
+            | if self.pairing.is_some() { FLAG_PAIRING } else { 0 };
+        let version = if self.pairing.is_some() { PAIRING_VERSION } else { VERSION };
+        let mut record = vec![version, flags];
         record.extend(self.fleet_id.as_bytes());
         record.extend(self.invite);
         record.extend(self.token);
@@ -119,6 +134,11 @@ impl JoinCode {
                 }
             }
         }
+        if let Some(pairing) = &self.pairing {
+            put_text(&mut record, &pairing.gateway)?;
+            put_text(&mut record, &pairing.attempt)?;
+            put_text(&mut record, &pairing.secret)?;
+        }
         let checksum = Sha256::digest(&record);
         record.extend(&checksum[..4]);
         Ok(format!(
@@ -149,10 +169,15 @@ impl JoinCode {
         let mut reader = Reader { bytes: record };
         let version = reader.byte()?;
         anyhow::ensure!(
-            version == VERSION,
+            version == VERSION || version == PAIRING_VERSION,
             "this join code needs a newer st (code version {version})"
         );
         let flags = reader.byte()?;
+        anyhow::ensure!(flags & !(FLAG_MIGRATE | FLAG_PAIRING) == 0, "this join code needs a newer st");
+        anyhow::ensure!(
+            (version == PAIRING_VERSION) == (flags & FLAG_PAIRING != 0),
+            "this join code has inconsistent pairing data"
+        );
         let fleet_id = uuid::Uuid::from_bytes(reader.array()?);
         let invite = reader.array()?;
         let token = reader.array()?;
@@ -178,6 +203,15 @@ impl JoinCode {
                 other => anyhow::bail!("this join code has an unknown endpoint kind {other}"),
             });
         }
+        let pairing = if flags & FLAG_PAIRING != 0 {
+            Some(PairingData {
+                gateway: reader.text()?,
+                attempt: reader.text()?,
+                secret: reader.text()?,
+            })
+        } else {
+            None
+        };
         anyhow::ensure!(reader.bytes.is_empty(), "this join code is damaged");
         Ok(Self {
             fleet_id,
@@ -188,6 +222,7 @@ impl JoinCode {
             name,
             migrate: flags & FLAG_MIGRATE != 0,
             endpoints,
+            pairing,
         })
     }
 
@@ -209,6 +244,7 @@ mod tests {
             expires_at: 1_790_000_000,
             name: Some("laptop".into()),
             migrate: false,
+            pairing: None,
             endpoints: vec![
                 CodeEndpoint::Tailscale("100.101.102.103:31313".into()),
                 CodeEndpoint::Fabric {
@@ -243,6 +279,21 @@ mod tests {
             JoinCode::decode(&migrate.encode().unwrap()).unwrap(),
             migrate
         );
+    }
+
+    #[test]
+    fn pairing_code_round_trips_without_changing_legacy_codes() {
+        let legacy = sample();
+        assert_eq!(JoinCode::decode(&legacy.encode().unwrap()).unwrap().pairing, None);
+        let paired = JoinCode {
+            pairing: Some(PairingData {
+                gateway: "a".repeat(64),
+                attempt: "attempt-id".into(),
+                secret: "bootstrap-secret".into(),
+            }),
+            ..legacy
+        };
+        assert_eq!(JoinCode::decode(&paired.encode().unwrap()).unwrap(), paired);
     }
 
     #[test]

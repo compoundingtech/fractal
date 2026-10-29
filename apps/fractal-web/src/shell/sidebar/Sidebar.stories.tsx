@@ -1,5 +1,5 @@
 import { useAtom } from '@effect/atom-react'
-import { Agent, Attention, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema'
 import type { Meta, StoryObj } from '@storybook/react'
 import * as stylex from '@stylexjs/stylex'
 import { Schema } from 'effect'
@@ -160,7 +160,7 @@ export default meta
 type Story = StoryObj<typeof meta>
 export const RealFolderTree: Story = {}
 export const NarrowFolderTree: Story = { args: { narrow: true } }
-export const NeedsMe: Story = { args: { filters: { ...defaultFilters, needsMe: true } } }
+export const WaitingForAnswer: Story = { args: { filters: { ...defaultFilters, query: 'is:asking' } } }
 export const FuzzySearch: Story = { args: { filters: { ...defaultFilters, query: 'web' } } }
 export const EmptyResults: Story = {
   args: { filters: { ...defaultFilters, query: 'no-such-agent' } },

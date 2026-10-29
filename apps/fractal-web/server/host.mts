@@ -5,14 +5,14 @@ import { Tracer } from 'effect'
 import { createFractalWebServer, type FractalWebServer } from './core.mts'
 
 /**
- * A runnable host for one person's web app on a tailnet: a loopback listener that `tailscale serve`
+ * An opt-in host for one person's web app on a tailnet: a loopback listener that `tailscale serve`
  * publishes over HTTPS. The paired bearer is injected for every admitted request, so admission is
  * the whole authorization: the tailnet login `tailscale serve` attaches must be one of the allowed
  * logins, and any browser Origin must be exactly the published origin. Never publish it with Funnel,
  * which carries no tailnet identity.
  */
 export interface TailnetAdmissionOptions {
-  /** The exact published origin, such as `https://atlas.example.ts.net:8443`. */
+  /** The exact published HTTPS origin. */
   readonly origin: string
   /** Tailnet login names allowed to act as the paired person. */
   readonly logins: readonly string[]

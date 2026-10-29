@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The evidence-note-linux-gate job publishes the stage notes (linux tests and shards, clippy, fleet-compat, mail canaries, isolation-vm, genie-freshness, typescript-client) whenever its key is configured, even when another lane skipped and the linux-gate aggregate refused; the aggregate no longer records genie-freshness and typescript-client, and their gates' skips no longer stop it.",
+  "replay": {
+    "status": "none",
+    "detail": "No record, signature or verifier rule changes; stage notes are signed and verified as before."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "The linux-gate aggregate note's command, needs and stage_results leave out genie-freshness and typescript-client, like the gate jobs and fractal-web-*; .st/evidence-skip-policy.json's linux-gate wrapper command drops the same two names."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "The aggregate refuses only when a gate of a linux-gate member (evidence-gate-linux-gate, -mail-redelivery-canaries, -isolation-vm) said skip or a member reports skipped. A skipped job still never produces a success note: each stage producer refuses when its own gate skipped, and only notes that verify are published."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "One-time coverage restart for linux-gate: the policy is read from the accepted base, so after this merges, linux-gate notes signed with the old command stop matching and linux-gate runs until new notes accumulate (it is shadow-only today, so no run gets slower). Other checks' notes are unaffected."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "CI workflow and scripts only."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit; linux-gate coverage restarts once more, since the old command comes back."
+  }
+}

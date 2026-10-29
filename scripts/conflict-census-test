@@ -78,11 +78,11 @@ class ConflictCensus(unittest.TestCase):
 
     def test_generated_patterns_follow_gitattributes_globs(self):
         rx = CENSUS['glob_regex']
-        self.assertTrue(rx('clients/typescript/st3-client/*.generated.ts')
-                        .match('clients/typescript/st3-client/Models.generated.ts'))
+        self.assertTrue(rx('clients/typescript/fractal-client/*.generated.ts')
+                        .match('clients/typescript/fractal-client/Models.generated.ts'))
         self.assertTrue(rx('fixtures/scenarios/**').match('fixtures/scenarios/huge/a.json'))
         self.assertTrue(rx('*.generated.ts').match('deep/dir/x.generated.ts'))
-        self.assertFalse(rx('crates/st3-client/src/lib.rs').match('crates/st3/src/lib.rs'))
+        self.assertFalse(rx('crates/fractal-client/src/lib.rs').match('crates/fractal/src/lib.rs'))
 
 
 if __name__ == '__main__':

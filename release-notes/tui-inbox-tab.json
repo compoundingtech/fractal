@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The terminal UI's Now view is now Inbox: Ctrl+H and open in Inbox focus a regular tab beside agent tabs, instead of opening a modal. Switch, close, move or split it like other tabs; Esc no longer closes it.",
+  "replay": {"status": "none", "detail": "Client presentation only; no claim replay changes."},
+  "schema": {"status": "none", "detail": "No database or schema-version changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or digest changes; no coordinated upgrade required."},
+  "compatibility": {"status": "none", "detail": "Attention APIs and existing list:home pane keys are unchanged. Inbox uses the existing workspace tab representation. iOS and web naming are unchanged."},
+  "downtime": {"status": "none", "detail": "No expected interruption or startup work."},
+  "manual": {"status": "none", "detail": "No configuration changes or re-pairing required."},
+  "recovery": {"status": "none", "detail": "Inbox layouts use existing workspace persistence; no recovery changes."}
+}

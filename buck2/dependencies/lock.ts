@@ -14,7 +14,7 @@ import {
  * Workspace members Buck builds. The Expo app keeps its own pnpm/Metro flow, so its native and
  * bundler closure never enters the Buck graph.
  */
-export const buckImporters = ['clients/typescript/st3-client', 'clients/typescript/st3-views'] as const
+export const buckImporters = ['clients/typescript/fractal-client', 'clients/typescript/fractal-views'] as const
 
 const root = new URL('../../', import.meta.url)
 const read = (path: string): string => readFileSync(new URL(path, root), 'utf8')

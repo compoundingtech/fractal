@@ -1,10 +1,10 @@
 /** Clean-room adapters authored from application call sites and the original Fractal kit API. */
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
-import * as Kit from '@smalltalk/fractal-ui'
+import * as Kit from '@fractal/ui'
 import * as stylex from '@stylexjs/stylex'
 
-export { CheckIcon, CopyIcon, XCircleIcon } from '@smalltalk/fractal-ui'
+export { CheckIcon, CopyIcon, XCircleIcon } from '@fractal/ui'
 export { Tabs, TabList, Tab, TabPanel, MenuTrigger, TooltipTrigger } from 'react-aria-components'
 export type Language = string
 export type PillVariant = 'gray' | 'blue' | 'green' | 'amber' | 'red' | 'purple'

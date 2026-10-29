@@ -13,7 +13,7 @@ The existing `/v1/performance` meter records two fixed labels:
 The second label includes every ordinary peer-summary export served by this handler. It is
 a visible addition to the report, not a new route. The CLI renderer prints arbitrary kinds;
 the cost tests measure their declared route workloads rather than rejecting unknown meter
-kinds. stui has no consumer of the performance report's request-kind table.
+kinds. Fractal TUI has no consumer of the performance report's request-kind table.
 
 Each label records count and elapsed wall time of the synchronous store call. These times
 overlap the enclosing export request; never add them to the route's wall time. The recorder

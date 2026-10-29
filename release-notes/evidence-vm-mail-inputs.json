@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Declare the inputs of the isolation-vm and mail-redelivery-canaries evidence checks, the same list as linux-gate (shadow only: enforce stays false), so a note signed for one tree also covers a later tree whose declared inputs are identical",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes; this changes the evidence skip policy (read from the accepted base), a test and the gate-evidence documentation."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digests change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No client, wire or harness contract change. With enforce false nothing is skipped: the two jobs sign their input key, their records are indexed under refs/notes/evidence-input/, the gate records match=inputs lines for them, and the real jobs still run."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No upgrade downtime."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No recovery procedure; reverting the policy hunk restores exact-tree matching for isolation-vm and mail-redelivery-canaries."
+  }
+}

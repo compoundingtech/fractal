@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The daily long-lane report times a job that just finished by its last step when the API has not yet set its end time",
+  "replay": {"status": "none", "detail": "CI only."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Report script only; no workflow, check or ruleset change."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "None."},
+  "recovery": {"status": "none", "detail": "Revert the commit."}
+}

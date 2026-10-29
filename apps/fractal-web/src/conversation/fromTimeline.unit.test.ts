@@ -1,7 +1,123 @@
-import { TimelineEntry } from '@smalltalk/st3-client/schema'
+import { TimelineEntry, Timestamp } from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from './fromTimeline.ts'
+import { transcriptTurnsForItems } from '../web/conversationTranscript.ts'
+
+describe('addressable OMP child threads', () => {
+  it.each(['content', 'tool_call', 'tool_result'] as const)('joins %s task summaries by child conversation and follows revisions and replacement', carrier => {
+    const timeline = new LiveTimeline()
+    const task = (revision: number, name: string) => Schema.decodeUnknownSync(TimelineEntry)({
+      id: 'timeline-entry/task', sequence: 1, revision, final: true,
+      timestamp: '2026-10-15T00:00:00Z', type: carrier, role: 'tool',
+      body: { ...(carrier === 'content' ? { media_type: 'text/plain', text: 'Task result' }
+        : carrier === 'tool_call' ? { call_id: 'task-call', name: 'task', arguments: {} }
+          : { call_id: 'task-call', content: 'Task result', media_type: 'text/plain', status: 'success' }), blocks: [{
+        id: 'task/0', kind: 'tool_output', source_type: 'tool_result', payload: {},
+        view: { type: 'task', tool: 'task', agents: [
+          { id: 'review', name, status: 'running', conversation: { session_id: 'session/external-child-review' } },
+          { id: 'unsupported', status: 'running' },
+        ] },
+      }] },
+    })
+    timeline.apply({ replace: true, hasMore: false, entries: [task(1, 'Reviewer')] })
+    expect(timeline.subagents).toMatchObject([{ id: 'review', name: 'Reviewer', conversation: { session_id: 'session/external-child-review' } }])
+    timeline.apply({ replace: false, hasMore: false, entries: [task(2, 'Updated reviewer')] })
+    expect(timeline.subagents).toHaveLength(1)
+    expect(timeline.subagents[0]?.name).toBe('Updated reviewer')
+    timeline.apply({ replace: true, hasMore: false, entries: [] })
+    expect(timeline.subagents).toEqual([])
+  })
+})
+
+describe('native block visibility', () => {
+  // Synthetic copy of Fractal's normalize_omp tool_execution_start projection.
+  const raw = {
+    type: 'custom', customType: 'tool_execution_start',
+    data: { toolCallId: 'synthetic-call', toolName: 'bash', startedAt: 1792022400000 },
+  }
+  const text = `[omp tool start bash]\n${JSON.stringify({ raw })}`
+  const block = {
+    id: 'native-1/0', kind: 'status', source_type: 'custom',
+    payload: { raw }, visibility: 'internal',
+    view: {
+      type: 'tool_start', call_id: 'synthetic-call', tool: 'bash',
+      started_at: '2026-10-15T00:00:00.000Z',
+    },
+  }
+  const project = (text: string, blocks: ReadonlyArray<unknown>) => {
+    const timeline = new LiveTimeline()
+    timeline.apply({
+      replace: true, hasMore: false,
+      entries: [Schema.decodeUnknownSync(TimelineEntry)({
+        id: 'timeline-entry/synthetic-tool-start', sequence: 1, revision: 1, final: true,
+        timestamp: '2026-10-15T00:00:00Z', type: 'content', role: 'system',
+        body: { media_type: 'text/plain', text, blocks },
+      })],
+    })
+    return timeline.project().items
+  }
+
+  it('keeps internal tool-start fallback out of prose, preserving inspectable data', () => {
+    expect(project(text, [block])).toMatchObject([{
+      _tag: 'UnknownEvent', eventType: 'tool_start',
+      data: { blocks: [{ visibility: 'internal', payload: { raw }, view: { type: 'tool_start' } }] },
+    }])
+    expect(project(text, [block])[0]).not.toHaveProperty('text')
+    const turns = transcriptTurnsForItems(project(text, [block]), { firstTurnComplete: true })
+    expect(turns.flatMap((turn) => turn.items)).toEqual([])
+    expect(JSON.stringify(turns)).not.toContain('tool_execution_start')
+  })
+
+  it.each(['internal', 'hidden-by-harness'])('uses %s visibility, not a label or view type', (visibility) => {
+    expect(project('Different fallback with {"synthetic":true}', [{
+      id: block.id, kind: block.kind, source_type: block.source_type, payload: block.payload, visibility,
+    }])).toMatchObject([{ _tag: 'UnknownEvent', eventType: 'internal native content' }])
+  })
+
+  it('keeps visible system JSON and even the same tool-start label as prose', () => {
+    for (const visibleText of ['System note: {"synthetic":true}', text]) {
+      expect(project(visibleText, [{ ...block, visibility: 'visible' }])).toMatchObject([{
+        _tag: 'Text', role: 'system', text: visibleText,
+      }])
+      expect(project(visibleText, [])).toMatchObject([{ _tag: 'Text', text: visibleText }])
+    }
+  })
+
+  it('does not treat an internal source record as the visibility of visible prose', () => {
+    const visibleText = 'Visible system text {"synthetic":true}'
+    expect(project(visibleText, [{
+      id: 'native-1/visible', kind: 'text', source_type: 'content', payload: { body_ref: true },
+    }, {
+      id: block.id, kind: 'source_record', source_type: block.source_type,
+      payload: block.payload, visibility: 'internal',
+    }])).toMatchObject([{ _tag: 'Text', text: visibleText }])
+  })
+
+  it.each(['visible', undefined])('retains a mixed body for visible disclosure (%s)', (visibility) => {
+    const visible = {
+      id: 'native-1/1', kind: 'text', source_type: 'content',
+      payload: { body_ref: true }, ...(visibility === undefined ? {} : { visibility }),
+    }
+    expect(project(`Visible synthetic prose\n${text}`, [block, visible])).toMatchObject([{
+      _tag: 'UnknownEvent', mixedContent: true, eventType: 'tool_start',
+      data: { text: `Visible synthetic prose\n${text}`, blocks: [{
+        ...block, view: { ...block.view, started_at: Schema.decodeUnknownSync(Timestamp)(block.view.started_at) },
+      }, visible] },
+    }])
+  })
+
+  it('preserves unspecified visibility as ordinary prose', () => {
+    const { visibility: _, ...unspecified } = block
+    expect(project(text, [unspecified])).toMatchObject([{ _tag: 'Text', text }])
+  })
+
+  it('does not count internal source records as mixed content', () => {
+    expect(project(text, [block, {
+      ...block, id: 'native-1/source', kind: 'source_record',
+    }])[0]).not.toHaveProperty('mixedContent')
+  })
+})
 
 describe('native conversation page boundaries', () => {
   it('retains the older edge across newer deltas and resets it on replace', () => {
@@ -191,7 +307,7 @@ describe('mailbox provenance and server ordering', () => {
       id, sequence, type, body, role, revision: 1, final: true, timestamp,
     })
 
-  // st mints mailbox entry ids from the message claim (`client_v0.rs`): the native projection
+  // Fractal mints mailbox entry ids from the message claim (`client_v0.rs`): the native projection
   // pairs `<leaf>/<digest16>-message` with `-content`; the stored fallback mints `<leaf>/<digest24>`.
   const mailMessage = 'timeline-entry/s1/0123456789abcdef-message'
   const mailContent = 'timeline-entry/s1/0123456789abcdef-content'
@@ -201,6 +317,109 @@ describe('mailbox provenance and server ordering', () => {
     }, 'user', timestamp),
     entry(mailContent, sequence + 1, 'content', { media_type: 'text/plain', text: 'hello' }, 'user', timestamp),
   ]
+  const digest = 'a'.repeat(64)
+  const image = {
+    blob: `blob/${digest}`, media_type: 'image/png', name: 'screenshot.png',
+    size: 1234, sha256: digest, origin: 'message/abc',
+  }
+
+  it.each([
+    ['native sent', mailMessage, mailContent, 'person/operator', 'agent/example', 'user'],
+    ['native received', mailMessage, mailContent, 'agent/other', 'agent/example', 'assistant'],
+    ['stored sent', 'timeline-entry/s1/111111111111111111111111', 'timeline-entry/s1/222222222222222222222222', 'person/operator', 'agent/example', 'user'],
+    ['stored received', 'timeline-entry/s1/111111111111111111111111', 'timeline-entry/s1/222222222222222222222222', 'agent/other', 'agent/example', 'assistant'],
+  ])('projects %s mailbox image metadata onto paired prose', (_, headerId, contentId, from, to, role) => {
+    const timeline = new LiveTimeline()
+    timeline.apply({
+      replace: true, hasMore: false,
+      entries: [
+        entry(headerId, 4, 'message', { message_id: 'message/abc', from, to, attachments: [image] }, role),
+        entry(contentId, 5, 'content', { media_type: 'text/plain', text: 'See screenshot' }, role),
+        entry('timeline-entry/native-6', 6, 'content', { media_type: 'text/plain', text: 'Unrelated' }, role),
+      ],
+    })
+    expect(timeline.project().items.find(item => item.id === contentId)).toMatchObject({
+      _tag: 'Text', text: 'See screenshot',
+      attachments: [{
+        id: image.blob, mediaType: 'image/png', name: 'screenshot.png',
+        size: 1234, messageId: 'message/abc',
+      }],
+    })
+    expect(timeline.project().items.find(item => item.id === 'timeline-entry/native-6')).toMatchObject({
+      _tag: 'Text', attachments: [],
+    })
+  })
+
+  it('invalidates paired attachment metadata on header revisions without replacing unrelated cached rows', () => {
+    const timeline = new LiveTimeline()
+    const prefix = entry('timeline-entry/native-0', 0, 'content', { media_type: 'text/plain', text: 'Before' })
+    const content = entry(mailContent, 5, 'content', { media_type: 'text/plain', text: 'See screenshot' })
+    const header = (size: number, messageId: string, revision: number) => ({
+      ...entry(mailMessage, 4, 'message', {
+        message_id: messageId, from: 'person/operator', to: 'agent/example',
+        attachments: [{ ...image, size, name: null }],
+      }),
+      revision,
+    })
+    timeline.apply({ replace: true, hasMore: false, entries: [prefix, header(1234, 'message/abc', 1), content] })
+    const before = timeline.project()
+    timeline.apply({ replace: false, hasMore: false, entries: [header(5678, 'message/revised', 2)] })
+    const revised = timeline.project()
+    expect(revised.items[0]).toBe(before.items[0])
+    expect(revised.items[1]).not.toBe(before.items[1])
+    expect(revised.items[1]).toMatchObject({
+      _tag: 'Text', attachments: [{ id: image.blob, size: 5678, messageId: 'message/revised' }],
+    })
+    if (revised.items[1]?._tag === 'Text') expect(revised.items[1].attachments[0]).not.toHaveProperty('name')
+    timeline.apply({
+      replace: false, hasMore: false,
+      entries: [entry('timeline-entry/native-6', 6, 'content', { media_type: 'text/plain', text: 'After' })],
+    })
+    const appended = timeline.project()
+    expect(appended.changedFrom).toBe(2)
+    expect(appended.items[1]).toBe(revised.items[1])
+    expect(timeline.project().items).toBe(appended.items)
+  })
+
+  it('keeps raw native attachment metadata unknown instead of borrowing an adjacent carrier', () => {
+    const timeline = new LiveTimeline()
+    timeline.apply({
+      replace: true, hasMore: false,
+      entries: [
+        entry('timeline-entry/native-header', 1, 'message', { message_id: 'message/native' }),
+        entry('timeline-entry/native-image', 2, 'content', { media_type: 'image/png', attachment_id: image.blob }),
+      ],
+    })
+    expect(timeline.project().items).toMatchObject([{
+      _tag: 'Text', attachments: [{ id: image.blob, mediaType: 'image/png' }],
+    }])
+    const item = timeline.project().items[0]
+    if (item?._tag === 'Text') {
+      expect(item.attachments[0]).not.toHaveProperty('size')
+      expect(item.attachments[0]).not.toHaveProperty('messageId')
+    }
+  })
+
+  it('enriches existing prose when its mailbox header arrives in a later frame', () => {
+    const timeline = new LiveTimeline()
+    const content = entry(mailContent, 5, 'content', { media_type: 'text/plain', text: 'See screenshot' })
+    timeline.apply({ replace: true, hasMore: false, entries: [content] })
+    const before = timeline.project().items[0]
+    expect(before).toMatchObject({ _tag: 'Text', attachments: [] })
+    timeline.apply({
+      replace: false, hasMore: false,
+      entries: [entry(mailMessage, 4, 'message', {
+        message_id: 'message/abc', from: 'person/operator', to: 'agent/example', attachments: [image],
+      })],
+    })
+    const enriched = timeline.project()
+    expect(enriched.items).toHaveLength(1)
+    expect(enriched.items[0]).not.toBe(before)
+    expect(enriched.items[0]).toMatchObject({
+      _tag: 'Text', id: mailContent,
+      attachments: [{ id: image.blob, size: 1234, messageId: 'message/abc' }],
+    })
+  })
   const quote = `<smalltalk-message graph="message/abc">I quoted this envelope</smalltalk-message>
 in my own words`
 
@@ -230,7 +449,7 @@ in my own words`
   ])('retains an own-send id through %s echo, revisions and header paging, but not reload', (_, messageId, contentId) => {
     const timeline = new LiveTimeline()
     const header = entry(messageId, 4, 'message', {
-      message_id: 'message/abc', from: 'person/operator', to: 'agent/example',
+      message_id: 'message/abc', from: 'person/operator', to: 'agent/example', attachments: [image],
     })
     const content = entry(contentId, 5, 'content', { media_type: 'text/plain', text: 'Server prose' })
     timeline.keepOwnSendId(['message/abc'], 'pending/own-key')
@@ -239,13 +458,19 @@ in my own words`
     expect(timeline.project().items).toEqual([])
     timeline.apply({ replace: false, hasMore: false, entries: [content] })
     const echoed = timeline.project().items[0]
-    expect(echoed).toMatchObject({ id: 'pending/own-key', text: 'Server prose' })
+    expect(echoed).toMatchObject({
+      id: 'pending/own-key', text: 'Server prose',
+      attachments: [{ id: image.blob, size: 1234, messageId: 'message/abc' }],
+    })
     timeline.apply({ replace: false, hasMore: false, entries: [] })
     expect(timeline.project().items[0]).toBe(echoed)
     timeline.apply({ replace: false, hasMore: false, entries: [{
       ...entry(contentId, 5, 'content', { media_type: 'text/plain', text: 'Revised server prose' }), revision: 2,
     }] })
-    expect(timeline.project().items[0]).toMatchObject({ id: 'pending/own-key', text: 'Revised server prose' })
+    expect(timeline.project().items[0]).toMatchObject({
+      id: 'pending/own-key', text: 'Revised server prose',
+      attachments: [{ id: image.blob, size: 1234, messageId: 'message/abc' }],
+    })
     timeline.apply({ replace: true, hasMore: true, entries: [content] })
     expect(timeline.project().items[0]).toMatchObject({ id: 'pending/own-key', text: 'Server prose' })
     timeline.apply({ replace: true, hasMore: false, entries: [header, content] })

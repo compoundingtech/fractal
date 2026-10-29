@@ -2,7 +2,7 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync } from '@smalltalk/st3-client/schema'
+import { Agent, decodeUnknownSync } from '@fractal/client/schema'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -40,14 +40,16 @@ const mount = async (agents: Feed<readonly Agent[]>, terminal: Feed<typeof scree
 const toggle = () => host.querySelector<HTMLButtonElement>('[data-testid="thread-header"] button[aria-label="Toggle terminal drawer"]')
 const toggleDescription = () => (toggle()?.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean)
   .map(id => document.getElementById(id)?.textContent?.trim()).filter(Boolean).join(' | ')
+// A control with a reason stays focusable: aria-disabled, never the native attribute, and the kit tooltip instead of a title.
+const toggleDisabled = () => toggle()?.getAttribute('aria-disabled') === 'true' && toggle()?.disabled === false
 const waitingReason = 'Waiting for the live agent roster to find this agent’s terminal.'
 const grid = () => host.querySelector(`[data-testid="terminal-pane"] [aria-label="Terminal: ${screen.title}"]`)
 
 describe('agent roster notice', () => {
   it.each([
-    ['ungranted', 'Read access to the agent roster has not been granted.'],
-    ['unsupported', 'This connection does not support the agent roster.'],
-    ['failed', 'The agent roster could not be loaded; reconnect and try again.'],
+    ['ungranted', 'No access to the agent rosterRead access has not been granted.'],
+    ['unsupported', 'Agent roster not supportedThis connection does not offer it.'],
+    ['failed', 'Couldn’t load agentsThe agent list did not load. Open conversations keep working.'],
   ] as const)('states %s with fixed copy and keeps the read detail out of the page', async (reason, copy) => {
     await mount(unavailable({ reason, detail: 'gateway said EACCES at /private/socket' }))
     const notice = host.querySelector(`[data-wf-roster-reason="${reason}"]`)
@@ -66,9 +68,9 @@ describe('terminal navigation toggle', () => {
     await mount(waiting)
     expect(host.querySelectorAll('button[aria-label="Toggle terminal drawer"]')).toHaveLength(1)
     expect(terminalSubjectForAgent(id)).toBe(terminal)
-    expect(toggle()?.disabled).toBe(true)
+    expect(toggleDisabled()).toBe(true)
     expect(toggleDescription()).toBe(waitingReason)
-    expect(toggle()?.closest('[title]')?.getAttribute('title')).toBe(waitingReason)
+    expect(toggle()?.closest('[title]')).toBeNull()
     await act(async () => toggle()!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
     expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
@@ -80,11 +82,12 @@ describe('terminal navigation toggle', () => {
   })
   it('enables the same named control only after the roster proves a runtime is present', async () => {
     await mount(waiting)
-    expect(host.textContent).toContain('Waiting for the agent roster.')
-    expect(toggle()?.disabled).toBe(true)
+    expect(host.querySelector('[data-system-state="loading"]')?.textContent).toBe('Loading agents…')
+    expect(toggleDisabled()).toBe(true)
     expect(toggleDescription()).toBe(waitingReason)
     await mount(observed({ value: [agent] }))
     expect(host.querySelectorAll('button[aria-label="Toggle terminal drawer"]')).toHaveLength(1)
+    expect(toggle()?.hasAttribute('aria-disabled')).toBe(false)
     expect(toggle()?.disabled).toBe(false)
     expect(toggleDescription()).toBe('')
     await act(async () => toggle()!.click())
@@ -138,15 +141,15 @@ describe('terminal failure stays local to the drawer', () => {
     window.history.replaceState(null, '', '/w/agent/example/no-terminal?open=thread')
     await mount(waiting)
     expect(host.querySelectorAll('button[aria-label="Toggle terminal drawer"]')).toHaveLength(1)
-    expect(toggle()?.disabled).toBe(true)
+    expect(toggleDisabled()).toBe(true)
     expect(toggleDescription()).toBe(waitingReason)
     await act(async () => toggle()!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
     await mount(observed({ value: [agent] }))
     const reason = 'This agent is not in the live agent roster, so it has no terminal.'
-    expect(toggle()?.disabled).toBe(true)
+    expect(toggleDisabled()).toBe(true)
     expect(toggleDescription()).toBe(reason)
-    expect(toggle()?.closest('[title]')?.getAttribute('title')).toBe(reason)
+    expect(toggle()?.closest('[title]')).toBeNull()
     await act(async () => toggle()!.click())
     expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
     expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
@@ -156,8 +159,9 @@ describe('terminal failure stays local to the drawer', () => {
     await mount(observed({ value: [{ ...agent, runtime_ids: [] }] }))
     await waitForThread()
     const before = retained()
-    expect(toggle()?.disabled).toBe(true)
-    expect(host.querySelector('[data-testid="terminal-toggle-disabled"]')?.getAttribute('title')).toBe('This agent has no terminal.')
+    expect(toggleDisabled()).toBe(true)
+    expect(toggleDescription()).toBe('This agent has no terminal.')
+    expect(toggle()?.closest('[title]')).toBeNull()
     await act(async () => toggle()!.click())
     expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
     expectThreadRetained(before)

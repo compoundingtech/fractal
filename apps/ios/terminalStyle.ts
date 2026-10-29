@@ -1,4 +1,4 @@
-import type { TerminalColor, TerminalRun } from '../../clients/typescript/st3-client/Models.generated';
+import type { TerminalColor, TerminalRun } from '../../clients/typescript/fractal-client/Models.generated';
 
 // The first 16 entries are the theme's ANSI colors; 16-231 are the xterm color cube and
 // 232-255 its gray ramp.

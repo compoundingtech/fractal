@@ -3,7 +3,7 @@ import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
-import { ClientError, type St3Client } from '@smalltalk/st3-client'
+import { ClientError, type FractalClient } from '@fractal/client'
 
 // One source object, as the app's data source is: the pane reads again only when it changes.
 const data = vi.hoisted(() => { const read = vi.fn(); return { read, source: { documents: { read } } } })
@@ -25,7 +25,7 @@ const hash = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2'
 const bytes = (text: string) => [...new TextEncoder().encode(text)]
 
 describe('document references', () => {
-  it('recognizes st document names and exact references, and nothing else', () => {
+  it('recognizes Fractal document names and exact references, and nothing else', () => {
     expect(['doc/garden-notes', 'doc/example/web/checklist', `doc/garden-notes@${hash}`].every((ref) => DOCUMENT_REF.test(ref))).toBe(true)
     expect(['doc/', 'docs/readme.md', 'doc/a b', 'https://example.com/doc/x', 'doc/x@nothex'].some((ref) => DOCUMENT_REF.test(ref))).toBe(false)
     expect(documentVersion(`doc/garden-notes@${hash}`)).toEqual({ name: 'doc/garden-notes', version: 'a1b2c3d4e5f6' })
@@ -50,7 +50,7 @@ describe('gatewayDocuments', () => {
       .mockResolvedValueOnce({ value: { reference: `doc/photo@${hash}`, bytes: [0xff, 0xd8, 0xff] } })
       .mockRejectedValueOnce(new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'not-found', message: 'no document', retryable: false, details: {} }, 404))
       .mockRejectedValueOnce(new TypeError('network down'))
-    const port = gatewayDocuments({ documentGet } as unknown as St3Client)
+    const port = gatewayDocuments({ documentGet } as unknown as FractalClient)
     expect(await port.read('doc/garden-notes')).toEqual({ _tag: 'Text', reference: `doc/garden-notes@${hash}`, text: '# Garden\n' })
     expect(documentGet).toHaveBeenCalledWith('doc/garden-notes')
     expect(await port.read('doc/photo')).toEqual({ _tag: 'Binary', reference: `doc/photo@${hash}`, size: 3 })
@@ -86,6 +86,18 @@ describe('DocumentPane', () => {
     await act(async () => ([...pane.querySelectorAll('button')].find((button) => button.textContent === 'Read the newest') as HTMLElement).click())
     expect(data.read).toHaveBeenCalledTimes(2)
     expect(container.querySelector('[role="status"]')?.textContent).toBe('There is no document doc/garden-notes.')
+    act(() => root.unmount())
+    container.remove()
+  })
+
+  it('names the fractal command when a document is not text, and keeps the reference', async () => {
+    vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+    data.read.mockResolvedValue({ _tag: 'Binary', reference: `doc/photo@${hash}`, size: 3 })
+    const container = document.createElement('div')
+    document.body.append(container)
+    const root = createRoot(container)
+    await act(async () => root.render(<DocumentPane name="doc/photo" onOpen={() => {}} />))
+    expect(container.textContent).toContain(`This document is not text (3 bytes). Read it with fractal documents get doc/photo@${hash}.`)
     act(() => root.unmount())
     container.remove()
   })

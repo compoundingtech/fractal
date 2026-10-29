@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-// Regenerates the committed browser bootstrap asset from Smalltalk's native Ghostty pin.
+// Regenerates the committed browser bootstrap asset from Fractal's native Ghostty pin.
 // Usage: node src/terminal/generateGhosttyEncoder.mjs <ghostty-source> <zig-0.15.2> <zig-system-deps> <bulk-scratch>
 import { createHash } from 'node:crypto'
 import { readFile, writeFile, chmod } from 'node:fs/promises'
@@ -13,7 +13,7 @@ if (execFileSync(zig, ['version'], { encoding: 'utf8' }).trim() !== '0.15.2')
   throw new Error('Ghostty requires Zig 0.15.2')
 const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex')
 const header = await readFile(resolve(source, 'include/ghostty/vt/key/event.h'), 'utf8')
-// This fingerprint binds the enum to the native Smalltalk pin, not whichever source is nearby.
+// This fingerprint binds the enum to the native Fractal pin, not whichever source is nearby.
 if (sha256(header) !== '0eb11bfab67b887f4b409557b396a5da6ea17e9e62d92b97a38e723b46db635d')
   throw new Error('Source is not the pinned Ghostty key API')
 execFileSync(

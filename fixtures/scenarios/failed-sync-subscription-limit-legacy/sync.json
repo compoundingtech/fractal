@@ -30,6 +30,16 @@
           "id": "control.messages",
           "state": "granted",
           "version": 0
+        },
+        {
+          "id": "read.arrangements",
+          "state": "granted",
+          "version": 0
+        },
+        {
+          "id": "arrangements",
+          "state": "granted",
+          "version": 1
         }
       ],
       "event_cursor": "event-cursor/scenario-fleet-mid-refactor/1",

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show the installed release tag in fractal --version when the download installer's release receipt matches the binary's embedded commit",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "No runtime or replication rule changes."},
+  "compatibility": {"status": "changed", "detail": "Human --version displays the installed release tag and commit when a matching RELEASE.json is present; machine-readable --version --json is unchanged. Nix/Home Manager and missing or invalid receipts retain the baked version and commit."},
+  "downtime": {"status": "none", "detail": "No additional downtime."},
+  "manual": {"status": "none", "detail": "The download installer writes the receipt automatically after checksum verification, outside the signed app bundle on macOS."},
+  "recovery": {"status": "none", "detail": "Old binaries ignore the receipt; replacing a binary with a different commit causes version display to fall back automatically."}
+}

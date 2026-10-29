@@ -31,6 +31,36 @@ assert.equal(fabricTargetFromQuery('node=zz&service=s'), null);
 assert.equal(buildFabricDefault(undefined), null);
 assert.equal(buildFabricDefault(`node=${node}&service=st3-client%2Fdemo`)?.service, 'st3-client/demo');
 
+// arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — exercise the build's literal Expo lookups.
+{
+  const names = ['EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT', 'EXPO_PUBLIC_ST3_FABRIC_DEFAULT'];
+  const saved = names.map(name => process.env[name]);
+  const preferred = `node=${node}&service=preferred`;
+  const legacy = `node=${node}&service=legacy`;
+  try {
+    for (const [current, old, expected] of [
+      [undefined, undefined, undefined],
+      [undefined, legacy, 'legacy'],
+      [preferred, undefined, 'preferred'],
+      [preferred, legacy, 'preferred'],
+      [preferred, preferred, 'preferred'],
+      ['', legacy, undefined],
+    ]) {
+      // These intentionally distinct inputs prove migration precedence, not production dual writes.
+      for (const [index, value] of [current, old].entries()) {
+        if (value === undefined) delete process.env[names[index]];
+        else process.env[names[index]] = value;
+      }
+      assert.equal(buildFabricDefault()?.service, expected);
+    }
+  } finally {
+    for (const [index, value] of saved.entries()) {
+      if (value === undefined) delete process.env[names[index]];
+      else process.env[names[index]] = value;
+    }
+  }
+}
+
 // Stored and read back; a damaged or no longer valid record reads as none.
 const target = { node: lower, service: 'st3-client/demo', address: '{"a":1}' };
 assert.deepEqual(decodeFabricTarget(encodeFabricTarget(target)), target);

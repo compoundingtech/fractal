@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Avoid decoding each queued signature claim twice during judgment",
+  "replay": {"status": "none", "detail": "Judgment uses the same claim row from the same writer transaction."},
+  "schema": {"status": "none", "detail": "No storage or migration format changes."},
+  "rules": {"status": "none", "detail": "Signature validation, dependency tracking and candidate selection are unchanged."},
+  "compatibility": {"status": "none", "detail": "No wire, client or stored record changes."},
+  "downtime": {"status": "none", "detail": "No additional startup work or migration is introduced."},
+  "manual": {"status": "none", "detail": "No manual action is required."},
+  "recovery": {"status": "none", "detail": "Recovery behavior is unchanged."}
+}

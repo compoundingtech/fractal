@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Keep every retired claim and envelope identity in a ledger that only grows",
+  "replay": {
+    "status": "none",
+    "detail": "No replay. A background job unions existing checkpoint tombstones into the ledger: one page of 4,096 rows per background writer loan (the writer queue's maintenance class) with a committed cursor, resting outside the loan for max(100 ms, 4 x the page's hold), capped at 5 s. It resumes after a restart. Later checkpoint recordings and deletions reach the ledger by trigger."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds WITHOUT ROWID tables retired_claim_ids, retired_envelopes, retired_claim_withdrawals and retired_envelope_withdrawals, plus six triggers on checkpoint_claims and checkpoint_envelopes (AFTER INSERT, AFTER UPDATE, BEFORE DELETE). Storage version stays 20. The ledger grows permanently: no cap and no reclamation, by design. Measured with crates/smallclaims/examples/retired_ledger_bench.rs (release build, file-backed store, bundled SQLite, 1,000,000 claim and 1,000,000 envelope tombstones): 103,387,136 B of ledger pages, 103.4 B per claim+envelope pair; withdrawal rows are added only for tombstones adoption deletes. A member with N million tombstone pairs should expect about 103 MB per million. The local member held 1,136,087 claim tombstones on 2026-10-18. Rollback leaves the tables and triggers in place; an earlier binary keeps firing the triggers, which is harmless."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Admission, evidence, checkpoint planning, manifests and digests still read checkpoint_claims and checkpoint_envelopes; nothing reads the ledger yet. Adoption still withdraws tombstones from those tables exactly as before."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or backup format change. A restore rebuilds the ledger from the restored tombstones through the triggers; withdrawal labels are local and not part of backups."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal restart; the tables and triggers are created empty at open. Measured costs on the same bench: recording 1,000,000 tombstone pairs in 10,000-row transactions took 26.9 s without the triggers and 38.1 s with them (+42%, about 11 us per pair); adoption's keep-only deleting 100,000 pairs in its one transaction took 0.87 s without and 1.30 s with. The import used 492 background loans with writer hold p50 15.5 ms, p99 39.7 ms, max 46.1 ms, 8.7 s of writer work in total, plus the rests between loans. These are synthetic measurements on a loaded build host, not production bounds."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No configuration or manual steps."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Swapping back to an earlier binary is supported; the ledger and triggers remain and are harmless. Nothing reads the ledger yet, so no behavior depends on it."
+  }
+}

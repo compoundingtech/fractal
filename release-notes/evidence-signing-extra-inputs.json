@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The CI evidence signing helper lets a step-based job record extra named inputs (a shard, a test set), and the linux-gate aggregate note ignores the jobs of the separate fractal-web lane",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change; one CI helper script and its test."},
+  "schema": {"status": "none", "detail": "No schema change. Extra inputs are named strings in the existing open inputs map of a note."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change. Nothing is skipped; no workflow uses the new input yet."},
+  "compatibility": {"status": "none", "detail": "No client, wire or harness contract change. A job that sets no STEP_INPUTS behaves as before; a malformed STEP_INPUTS or one that replaces a fixed input makes no note, like every other refusal."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change; notes already signed stay valid."}
+}

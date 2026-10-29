@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The tag release workflow ignores tags under evidence/, so evidence records stored as tags can never start a release",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Release tags are unaffected: only names under evidence/ are excluded, and none exist yet."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change while no evidence tags exist."}
+}

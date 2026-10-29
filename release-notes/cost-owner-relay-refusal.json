@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Model unreachable relay targets in the daemon cost fixture",
+  "replay": {"status": "none", "detail": "Test fixture only; no replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Production forwarding and direct-owner assertions remain unchanged."},
+  "compatibility": {"status": "none", "detail": "The cost fixture returns an authenticated remote-unavailable response when used as a fallback toward another owner, instead of panicking as though every request targeted itself."},
+  "downtime": {"status": "none", "detail": "No runtime change."},
+  "manual": {"status": "none", "detail": "No operator action."},
+  "recovery": {"status": "none", "detail": "No state changes."}
+}

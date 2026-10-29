@@ -76,7 +76,7 @@
       "name": "unstaffed"
     },
     {
-      "explain": "a step is ready; st has not said which agent takes it",
+      "explain": "a step is ready; Fractal has not said which agent takes it",
       "glyph": "◇",
       "id": "unclaimed",
       "name": "unclaimed"
@@ -94,7 +94,7 @@
       "name": "working"
     },
     {
-      "explain": "st keeps this open and starts other missions when something happens",
+      "explain": "Fractal keeps this open and starts other missions when something happens",
       "glyph": "◉",
       "id": "watching",
       "name": "watching"
@@ -134,6 +134,12 @@
       "glyph": "○",
       "id": "not_started",
       "name": "not started"
+    },
+    {
+      "explain": "Fractal does not say: an older Fractal, or one that has not read its agents yet",
+      "glyph": "?",
+      "id": "unknown",
+      "name": "unknown"
     }
   ],
   "tabs": [

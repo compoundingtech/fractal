@@ -10,7 +10,7 @@ import {
   decodeUnknownSync,
   type AgentEncoded,
   type AttentionEncoded,
-} from '@smalltalk/st3-client/schema'
+} from '@fractal/client/schema'
 
 import { agentConversations } from '../conversation/fixtures.ts'
 import type { FixtureProjections } from '../data/fixtureSource.ts'

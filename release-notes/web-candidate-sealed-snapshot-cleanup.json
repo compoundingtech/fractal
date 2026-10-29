@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reclaim sandbox build snapshots with sealed source-input directories without modifying immutable dependency hardlinks or following symlinks.",
+  "replay": { "status": "none", "detail": "No data replay." },
+  "schema": { "status": "none", "detail": "No schema changes." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "Finish and stale snapshot cleanup restore owner directory access only within the locked snapshot namespace." },
+  "downtime": { "status": "none", "detail": "No deployment." },
+  "manual": { "status": "none", "detail": "No manual step." },
+  "recovery": { "status": "none", "detail": "Existing orphan snapshots can be reclaimed by the normal stale cleanup path." }
+}

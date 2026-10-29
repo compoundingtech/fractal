@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The daemon cost check measures a checkpoint trim with its pacing rests turned off, so work other tasks do during the rests is no longer billed to the trim. Test-only change.",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only change to crates/st3/tests/daemon_cost.rs; no product code, protocol, schema or CLI output changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Test-only change to crates/st3/tests/daemon_cost.rs; no product code, protocol, schema or CLI output changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Test-only change to crates/st3/tests/daemon_cost.rs; no product code, protocol, schema or CLI output changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Test-only change to crates/st3/tests/daemon_cost.rs; no product code, protocol, schema or CLI output changes."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Test-only change to crates/st3/tests/daemon_cost.rs; no product code, protocol, schema or CLI output changes."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "Test-only change to crates/st3/tests/daemon_cost.rs; no product code, protocol, schema or CLI output changes."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Test-only change to crates/st3/tests/daemon_cost.rs; no product code, protocol, schema or CLI output changes."
+  }
+}

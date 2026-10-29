@@ -3,7 +3,7 @@ import { Alert, InputAccessoryView, KeyboardAvoidingView, PanResponder, Platform
 import { quality } from '../qualityNative';
 import { useFocusEffect } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
-import type { TerminalScreen as Screen } from '../../../clients/typescript/st3-client';
+import type { TerminalScreen as Screen } from '../../../clients/typescript/fractal-client';
 import { Banners } from '../chrome';
 import type { RootScreen } from '../navigation';
 import { errorText, useStore } from '../store';
@@ -82,7 +82,8 @@ export function TerminalScreen({ route, navigation }: RootScreen<'Terminal'>) {
         if (!incarnation.current) {
           incarnation.current = next.runtime_incarnation;
           // Debug builds type these once, for headless checks: the simulator has no keyboard to drive.
-          const keys = __DEV__ ? process.env.EXPO_PUBLIC_ST3_TEST_TERMINAL_KEYS : undefined;
+          // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+          const keys = __DEV__ ? (process.env.EXPO_PUBLIC_FRACTAL_TEST_TERMINAL_KEYS ?? process.env.EXPO_PUBLIC_ST3_TEST_TERMINAL_KEYS) : undefined;
           if (keys) setTimeout(() => queue.push(JSON.parse(`"${keys}"`)), 1500);
         }
         setScreen(next);

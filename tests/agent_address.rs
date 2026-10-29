@@ -554,10 +554,10 @@ fn a_parents_address_cutover_keeps_the_org_chart_and_its_notifications() {
         ("h.child-agent", "child", "h.root"),
         ("h.bare-agent", "bare", "root"),
     ] {
-        st2::run::surface_crash_loop(
+        fractal_legacy_runner::run::surface_crash_loop(
             root,
             "h",
-            &st2::run::CrashLoop {
+            &fractal_legacy_runner::run::CrashLoop {
                 pty_id: task.to_owned(),
                 identity: identity.to_owned(),
                 host: Some("h".to_owned()),
@@ -566,7 +566,7 @@ fn a_parents_address_cutover_keeps_the_org_chart_and_its_notifications() {
         );
     }
 
-    let parent = st2::message::list_dir(&st2::message::inbox_dir(&root.join("h/root"))).unwrap();
+    let parent = fractal_legacy_runner::message::list_dir(&fractal_legacy_runner::message::inbox_dir(&root.join("h/root"))).unwrap();
     assert_eq!(
         parent.len(),
         3,
@@ -581,7 +581,7 @@ fn a_parents_address_cutover_keeps_the_org_chart_and_its_notifications() {
         "both supervisor spellings notified the renamed parent: {parent:?}"
     );
     let impostor =
-        st2::message::list_dir(&st2::message::inbox_dir(&root.join("h/impostor"))).unwrap();
+        fractal_legacy_runner::message::list_dir(&fractal_legacy_runner::message::inbox_dir(&root.join("h/impostor"))).unwrap();
     assert!(
         impostor.is_empty(),
         "the address book must not answer a supervisor edge: {impostor:?}"
@@ -732,13 +732,13 @@ fn a_bare_address_declared_on_two_hosts_resolves_to_the_local_subject() {
         String::from_utf8_lossy(&sent.stderr)
     );
     assert_eq!(
-        st2::message::list_dir(&st2::message::inbox_dir(&root.join("h/local")))
+        fractal_legacy_runner::message::list_dir(&fractal_legacy_runner::message::inbox_dir(&root.join("h/local")))
             .unwrap()
             .len(),
         1
     );
     assert!(
-        st2::message::list_dir(&st2::message::inbox_dir(&root.join("g/remote")))
+        fractal_legacy_runner::message::list_dir(&fractal_legacy_runner::message::inbox_dir(&root.join("g/remote")))
             .unwrap()
             .is_empty(),
         "the foreign host's subject must not receive a locally pinned reference"

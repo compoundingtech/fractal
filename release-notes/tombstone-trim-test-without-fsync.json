@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The test that a checkpoint trim never makes a write wait long no longer waits on the disk. It runs its fixture store without fsync, so a slow shared disk cannot add its commit latency to the writer wait it measures, and it takes about 20 seconds instead of 50 to 90. Its 500 ms bound is unchanged. No shipped code changes",
+  "replay": {"status": "none", "detail": "Test-only change; projection and replay are unchanged."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged; members may upgrade in any order."},
+  "compatibility": {"status": "none", "detail": "No API or wire changes."},
+  "downtime": {"status": "none", "detail": "No shipped code changes; nothing to install."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Nothing new is persisted."}
+}

@@ -1,10 +1,10 @@
-import type { TerminalModes } from '@smalltalk/st3-client/schema'
+import type { TerminalModes } from '@fractal/client/schema'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { describe, expect, it } from 'vitest'
 
 import { makeGhosttyKeyboard, type BrowserTerminalKey } from './ghosttyKeyboard.ts'
-import { keyboardTestModes } from './terminalInputFixture.ts'
+import { keyboardTestModes } from './fixtures.ts'
 
 const asset = (name: string) => readFile(new URL(`./assets/${name}`, import.meta.url))
 

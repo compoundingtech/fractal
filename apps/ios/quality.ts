@@ -1,4 +1,4 @@
-import { SloCounters, isQualityHour, mergeQualityHour, retainQualityHours, sloHour, type QualityHour } from '../../clients/typescript/st3-views/slo';
+import { SloCounters, isQualityHour, mergeQualityHour, retainQualityHours, sloHour, type QualityHour } from '../../clients/typescript/fractal-views/slo';
 
 export const QUALITY_HISTORY_KEY = 'st3.quality.hours.v1';
 export const QUALITY_RUN_KEY = 'st3.quality.run.v1';

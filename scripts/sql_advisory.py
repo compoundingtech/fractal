@@ -6,7 +6,7 @@ job summary when one is given, and exits 0 whatever it finds. See
 doc/fleet/smalltalk/sql-audit/2026-10-07/advisory-sql-ci-design for the three detectors; this
 file holds the N+1 detector and the report and budget machinery the others plug into.
 
-The cost check (crates/st3/tests/daemon_cost.rs) writes the report when ST_COST_REPORT names a
+The cost check (crates/fractal/tests/daemon_cost.rs) writes the report when ST_COST_REPORT names a
 file: per route, at a smaller and a ten-times-larger generated store, its statements, VM steps,
 the number of items the answer returned and the most times one statement text ran.
 

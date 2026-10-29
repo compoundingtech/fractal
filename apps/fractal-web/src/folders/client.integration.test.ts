@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest'
-import type { CollectionSocket } from '@smalltalk/st3-client'
+import type { CollectionSocket } from '@fractal/client'
 import { createTestGateway, testSelection, testSnapshot } from './testGateway.ts'
 import { selectionParts } from './client.ts'
 import { followArrangementInventory, type InventoryEvent } from '../data/arrangements.ts'

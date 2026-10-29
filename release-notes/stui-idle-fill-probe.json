@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Idle st ui no longer re-processes the whole conversation many times per second to assess automatic history filling",
+  "replay": { "status": "none", "detail": "No replay is required." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "Automatic history filling still stops at 200 display rows or seven pages; assessments now run only after timeline or display-name changes." },
+  "compatibility": { "status": "none", "detail": "No wire-format or daemon changes; session replacement resets automatic filling." },
+  "downtime": { "status": "none", "detail": "No daemon restart is required." },
+  "manual": { "status": "none", "detail": "No configuration changes are required." },
+  "recovery": { "status": "none", "detail": "No migration or recovery procedure is required." }
+}
