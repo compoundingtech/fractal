@@ -1,4 +1,4 @@
-//! Native stop ordering through st3-fixture's real driver entrypoints.
+//! Native stop ordering through fractal-fixture's real driver entrypoints.
 //!
 //! The daemon is an already-admitted protocol fixture with an invented incarnation. It does
 //! not prove physical seat admission, scope ownership or recovery. The wrapper, provider,

@@ -225,6 +225,12 @@ snapshots open past the target now. `waiting` counts callers waiting for the wri
 waiting for admission, and `threads` counts this process's threads, in all and by name. `st
 doctor` prints it as `slo/writer-hold`.
 
+A writer hold over 1 s also logs one WARN line when it ends, "a write held the store's writer
+over 1 s", so a stall can be attributed from the daemon's log after the hour has passed. It
+names the same holder (`holder`, `client`, `at`), with `kind`, `held_ms`, `writes`, `stages`
+(a staged lend's time by stage, or `-`) and `waited_ms`, how long that holder waited for the
+writer before its hold began.
+
 Three more fields show what keeps the WAL from recycling:
 - `read_loans` lists every read loan now, grouped by the route label of the read budget it works
   under (`(no budget)` for background work). Each route gives `checkouts`,
@@ -985,6 +991,13 @@ can take time on slow storage, but does not acquire the writer lock. Open failur
 caught panics reopen the connection after a one-minute cooldown. Worker error logs are
 limited to one per minute. The detached thread is not a Tokio blocking task, so runtime
 shutdown does not wait for a long backfill.
+
+`TRUNCATE` takes its turn in the writer queue, and the `WAL checkpoint` log line's report gives
+that wait as `writer_wait_ms`. When the wait reaches 100 ms, the same wait that makes the
+attempt abnormal, the report also gives `blocked_by`: the longest writer hold that ended while
+the checkpoint waited. It is named as the `writer-hold` row names a holder (`holder`, `client`,
+`at`), with its `kind`, `held_ms` and `holds`, the number of holds that ended during the wait.
+Otherwise `blocked_by` is null.
 
 `st doctor` reports open, idle and active reader counts, peak open readers, total connections
 opened since startup, the configured cache target, and summed current reader targets without

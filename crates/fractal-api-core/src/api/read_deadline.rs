@@ -944,7 +944,7 @@ use super::*;
         let loan = store.readers.get();
         let mut report = smallclaims::sqlite::WalCheckpointReport {
             frames: 10, backfilled: 4, passive_ms: 0, writer_wait_ms: 0,
-            truncate_ms: None, recycled: false,
+            truncate_ms: None, recycled: false, blocked_by: None,
         };
         telemetry::wal_checkpoint_observed(&store.readers, Some(&report));
         provider.force_flush().unwrap();

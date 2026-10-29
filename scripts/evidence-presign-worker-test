@@ -109,7 +109,7 @@ class Worker(unittest.TestCase):
         self.gh_answer.write_text(json.dumps({'data': {'repository': {'pullRequests': {'nodes': self.prs}}}}))
         environment = dict(CLEAN, HOME=self.tmp.name, EVIDENCE_PRESIGN_CONFIG=str(self.config), EVIDENCE_PRESIGN_STATE=str(self.state),
                            EVIDENCE_PRESIGN_GH=str(self.gh), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
-                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
+                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo), EVIDENCE_PRESIGN_FREE_GIB='1000',
                            EVIDENCE_PRESIGN_ADMISSION=str(self.admission), STUB_LOG=str(self.log),
                            EVIDENCE_PRESIGN_TARGET=str(self.target), STUB_COVERED=json.dumps(self.covered), **env)
         return subprocess.run([sys.executable, str(WORKER), 'tick', '--class', kind, '--repo', str(self.state / 'repo'),
@@ -284,7 +284,7 @@ class Worker(unittest.TestCase):
         self.gh_answer.write_text(json.dumps({'data': {'repository': {'pullRequests': {'nodes': self.prs}}}}))
         environment = dict(CLEAN, HOME=self.tmp.name, EVIDENCE_PRESIGN_CONFIG=str(self.config), EVIDENCE_PRESIGN_STATE=str(self.state),
                            EVIDENCE_PRESIGN_GH=str(self.gh), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
-                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
+                           EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo), EVIDENCE_PRESIGN_FREE_GIB='1000',
                            EVIDENCE_PRESIGN_ADMISSION=str(self.admission), STUB_LOG=str(self.log), STUB_SLEEP='30')
         process = worker([sys.executable, str(WORKER), 'tick', '--class', 'heavy', '--repo', str(self.state / 'repo'),
                           '--repository', 'example/repo'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environment)

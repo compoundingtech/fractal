@@ -242,7 +242,7 @@ Older members read inventories when their relevant view opens or its period
 changes; Fleet says these inventories are read, not followed. Read errors and
 partial windows stay visible. Connection generations fence legacy results, so a
 late read cannot replace a newer member's streamed rows. The actual-binary idle
-transport test runs `scripts/stui-test-client` with `STUI_TIMING_LOG` on a private
+transport test runs `scripts/fractal-ui-test-client` with `STUI_TIMING_LOG` on a private
 daemon, opening the Fleet list and Usage from Ctrl+K and holding them idle beyond every old
 read interval.
 

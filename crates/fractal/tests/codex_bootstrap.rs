@@ -288,7 +288,7 @@ async fn delivery_recovery_control(
     until(|| socket.exists(), "the isolated API did not start").await;
     let provider = root.join("provider");
     let stub = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/st3-boot-canaries/stub-codex.py");
+        .join("../../scripts/fractal-boot-canaries/stub-codex.py");
     std::fs::write(
         &provider,
         format!(
@@ -310,8 +310,8 @@ async fn delivery_recovery_control(
         .prefix("delivery-control-binary-")
         .tempdir_in(test_env!("CARGO_TARGET_TMPDIR"))
         .unwrap();
-    let binary = binary_dir.path().join("st3-fixture");
-    std::fs::copy(test_env!("CARGO_BIN_EXE_st3-fixture"), &binary).unwrap();
+    let binary = binary_dir.path().join("fractal-fixture");
+    std::fs::copy(test_env!("CARGO_BIN_EXE_fractal-fixture"), &binary).unwrap();
     let mut environment = BTreeMap::from([
         ("HOME", root.to_string_lossy().into_owned()),
         ("PATH", path.to_string_lossy().into_owned()),
@@ -987,7 +987,7 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
     std::fs::set_permissions(&provider, std::fs::Permissions::from_mode(0o700)).unwrap();
     let binary = std::env::var_os("ST3_BOOTSTRAP_TEST_BINARY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(test_env!("CARGO_BIN_EXE_st3-fixture")));
+        .unwrap_or_else(|| PathBuf::from(test_env!("CARGO_BIN_EXE_fractal-fixture")));
     let binary_path = binary.to_string_lossy().into_owned();
     let environment = BTreeMap::from([
         ("HOME", root.path().to_string_lossy().into_owned()),

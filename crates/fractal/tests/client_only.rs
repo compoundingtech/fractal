@@ -690,7 +690,7 @@ async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_
     let events = device.path().join("events.jsonl");
     let mut command = Command::new("python3");
     command
-        .arg(repo.join("scripts/stui-test-client"))
+        .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
             test_env!("CARGO_BIN_EXE_st3"),
@@ -852,7 +852,7 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut command = Command::new("python3");
     command
-        .arg(repo.join("scripts/stui-test-client"))
+        .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
             test_env!("CARGO_BIN_EXE_st3"),

@@ -4,7 +4,7 @@
 //! command do under `codex sandbox`. A seat launched by the daemon runs through an app server and
 //! a remote TUI, which resolves the profile differently (it drops the profile's network table, so
 //! the driver also passes `sandbox_workspace_write.network_access`); the live eval
-//! `evals/st3/codex-minimal-access` proves that path with a real seat. They need a `codex` that supports `sandbox -P` and `python3`, and skip loudly without them
+//! `evals/fractal/codex-minimal-access` proves that path with a real seat. They need a `codex` that supports `sandbox -P` and `python3`, and skip loudly without them
 //! unless `ST_REQUIRE_CODEX_SANDBOX=1`, which the hetz2 run sets.
 
 use std::fs;
