@@ -102,6 +102,7 @@ mod replication_cli;
 mod schedules_cli;
 mod terminals_cli;
 mod uninstall_cli;
+mod validate_cli;
 mod work_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
@@ -113,6 +114,7 @@ use launch_cli::{run_launch, run_mission_view};
 use replication_cli::run_replication;
 use terminals_cli::run_pty;
 use uninstall_cli::run_uninstall;
+use validate_cli::{ValidateArgs, run_validate};
 use work_cli::{run_wait, run_work};
 
 use presentation::{
@@ -298,6 +300,9 @@ enum Command {
     /// Use --dry-run to preview, or --set with source flags to publish a complete owned set.
     /// Gate checks run mission and step scripts; loop until scripts run after each round.
     Apply(ApplyArgs),
+    /// Validate KDL files offline using default host "local", without contacting a daemon.
+    /// This is not an authorization or deployment preview.
+    Validate(ValidateArgs),
     /// Inspect owned sets and their source publication receipts.
     Sets {
         #[command(subcommand)]
@@ -3890,6 +3895,15 @@ struct WorkAskArgs {
     step: Option<String>,
     #[arg(long, conflicts_with = "step")]
     new_run: Option<String>,
+    /// How long the person has to answer, such as `4h` or `2d`. At the deadline the ask
+    /// resolves by itself with --default, and the asking step resumes. Without it the fleet's
+    /// default deadline applies: 24h unless `[asks] default_deadline` says otherwise.
+    #[arg(long, value_name = "DURATION")]
+    deadline: Option<String>,
+    /// The answer id of the --request that applies at the deadline. Without it an unanswered
+    /// ask resolves as timed out, with no answer.
+    #[arg(long = "default", value_name = "ANSWER", requires = "request")]
+    default_answer: Option<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
     #[arg(long = "as", env = "ST_AGENT")]
     actor: String,
@@ -4828,6 +4842,16 @@ fn cli_main() -> ExitCode {
     reject_web_global_flags(&mut command, &matches)
         .unwrap_or_else(|error| exit_usage_error(error));
     let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| exit_usage_error(error));
+    // Validation must precede identity lookup, configuration loading and client construction.
+    if let Command::Validate(args) = &cli.command {
+        return match run_validate(args, cli.json) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{}: {}", ClientMessage::for_output(false).diagnostic_prefix("st"), plain_error(&error));
+                ExitCode::from(2)
+            }
+        };
+    }
     if let Command::ActorContract { effective } = &cli.command {
         return match actor_contract::print(*effective) {
             Ok(()) => ExitCode::SUCCESS,
@@ -5465,6 +5489,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::ActorContract { .. } => unreachable!("the actor contract runs before the CLI runtime"),
         Command::Setup(_) => unreachable!(),
+        Command::Validate(_) => unreachable!("validation runs before the CLI runtime"),
         Command::Apply(args) => run_apply(&client, args, cli.json).await,
         Command::Deploy(args) => deploy_cli::run(&endpoint, args, cli.json).await,
         Command::Sets { command } => run_owned_sets(&endpoint, command, cli.json).await,
@@ -6559,6 +6584,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     )?.with_access_mode(config.active_access_mode()).with_claude_primary_ownership(config.claude_primary_ownership_enabled()).with_seat_priority(config.active_seat_priority()).with_codex_asks(config.codex_work_without_asking == Some(false)).with_schedule_peers(state.configured_peers.clone()).with_client_relay(state.client_relay.clone()).with_person(config.person.clone()));
     reconciler.set_max_passes_per_minute(config.reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))?;
     reconciler.set_idle_nudge(config.reconcile.idle_nudge()?);
+    store.set_default_ask_deadline_ms(config.asks.default_deadline_ms()?);
+    store.set_ask_deadlines(config.asks.deadlines);
     startup_phases.reconciler_ms = phase_elapsed_ms();
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
@@ -18860,11 +18887,13 @@ async fn enforce_account_limits(store: Arc<Store>, started_with: fractal_daemon:
             .ok()
             .flatten();
         match reloaded {
-            Some(Ok((reloaded, reconcile))) => {
+            Some(Ok((reloaded, reconcile, asks))) => {
                 // Validation already passed; preserve last-start history while changing the rate.
                 reconciler.set_max_passes_per_minute(reconcile.max_passes_per_minute_or(default_max_passes_per_minute()))
                     .expect("validated reconcile cap");
                 reconciler.set_idle_nudge(reconcile.idle_nudge().expect("validated idle nudge"));
+                store.set_default_ask_deadline_ms(asks.default_deadline_ms().expect("validated ask deadline"));
+                store.set_ask_deadlines(asks.deadlines);
                 limits = reloaded;
                 last_error = None;
             }

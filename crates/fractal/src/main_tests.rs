@@ -3102,6 +3102,8 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const DEPLOY_SOURCE: &str = include_str!("deploy_cli.rs");
     #[cfg(test)]
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
+    #[cfg(test)]
+    const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
@@ -3119,6 +3121,7 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
         ("schedules", SCHEDULES_SOURCE),
         ("terminals", /* sqlite-large-value: allow-for-now lv-h3310e09e50b9 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("terminals_cli.rs")),
         ("uninstall", /* sqlite-large-value: allow-for-now lv-hb0d024a9c61b owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("uninstall_cli.rs")),
+        ("validate", VALIDATE_SOURCE),
         ("waiting_on", WAITING_ON_SOURCE),
         ("work", /* sqlite-large-value: allow-for-now lv-h8e3d229837a8 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("work_cli.rs")),
     ];

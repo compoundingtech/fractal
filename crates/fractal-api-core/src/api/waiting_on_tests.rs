@@ -177,6 +177,8 @@ mission "garden/review" state="ready" {
             new_run: None,
             incarnation: Some(format!("{ash}-1")),
             request: None,
+            deadline_ms: None,
+            default_answer: None,
             idempotency_key: "ask-beds".into(),
         })
         .unwrap();
