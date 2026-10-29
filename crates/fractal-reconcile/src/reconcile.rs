@@ -3728,7 +3728,7 @@ impl<R: RuntimeControl> Reconciler<R> {
                 crate::incremental::thread_cpu().saturating_sub(cpu_started),
             );
             if !needed {
-                let wrote = smallclaims::touched::wrote_since(wrote_mark);
+                let wrote = self.missed_by_skipping(&item, wrote_mark, due);
                 if !wrote.is_empty() {
                     self.incremental_correction("member", &item, &reads, &wrote);
                 }
@@ -5723,7 +5723,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction(section, item, &reads, &wrote);
             }
@@ -6278,7 +6278,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(item, wrote_mark, due);
             if !wrote.is_empty() {
                 self.incremental_correction("stop", item, &reads, &wrote);
             }
@@ -10087,7 +10087,7 @@ impl<R: RuntimeControl> Reconciler<R> {
             crate::incremental::thread_cpu().saturating_sub(cpu_started),
         );
         if !needed {
-            let wrote = smallclaims::touched::wrote_since(wrote_mark);
+            let wrote = self.missed_by_skipping(&subject, wrote_mark, due);
             // Rows that are not claims or observations (caches, capabilities) change no
             // graph state a later pass would have to catch up with.
             if !wrote.is_empty() {
@@ -10169,8 +10169,23 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
     }
 
-    /// An evaluation of `subject` wrote although nothing it read had changed and nothing was due:
-    /// an incremental pass would have missed this write. Counted, and in tests a failure.
+    /// What an evaluation of `item` that nothing marked and nothing made due did, which an
+    /// incremental pass would have missed: the claims it wrote since `wrote_mark`, and a due time
+    /// earlier than the one its last evaluation recorded, such as a timer it armed or a time
+    /// limit it found, which no skipping pass would have woken for.
+    fn missed_by_skipping(&self, item: &str, wrote_mark: usize, due: Option<u128>) -> Vec<String> {
+        let mut missed = smallclaims::touched::wrote_since(wrote_mark);
+        if let Some(due) = due
+            && self.incremental.due_of(item).is_none_or(|recorded| due < recorded)
+        {
+            missed.push(format!("due {item} at {due}"));
+        }
+        missed
+    }
+
+    /// An evaluation of `subject` wrote or found an earlier due time although nothing it read
+    /// had changed and nothing was due: an incremental pass would have missed it. Counted by
+    /// cause (`write` or `due`), and in tests a failure.
     fn incremental_correction(
         &self,
         item: &str,
@@ -10178,15 +10193,21 @@ impl<R: RuntimeControl> Reconciler<R> {
         reads: &BTreeSet<String>,
         wrote: &[String],
     ) {
-        crate::performance::record_correction(item);
+        let causes = wrote
+            .iter()
+            .map(|entry| if entry.starts_with("due ") { "due" } else { "write" })
+            .collect::<BTreeSet<_>>();
+        for cause in causes {
+            crate::performance::record_correction(&format!("{item} · {cause}"));
+        }
         smallclaims::profile::note("reconcile incremental correction");
         eprintln!(
-            "st3: incremental correction: {subject} wrote {wrote:?} with no change among {} reads",
+            "st3: incremental correction: {subject} missed {wrote:?} with no change among {} reads",
             reads.len()
         );
         assert!(
             !self.strict_incremental,
-            "an incremental pass would have missed a write by {subject}: it wrote {wrote:?}; its reads: {reads:?}"
+            "an incremental pass would have missed a write or due time by {subject}: {wrote:?}; its reads: {reads:?}"
         );
     }
 

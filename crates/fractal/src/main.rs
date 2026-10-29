@@ -6556,6 +6556,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let _contention_retry = retry_projection_contention(Arc::downgrade(&store), notify.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_candidates", migrate_signature_candidates(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.envelope_payloads", convert_envelope_payloads(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.signature_backfill", backfill_envelope_signatures(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.retired_identities", import_retired_identities(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.claim_ranges", fold_claim_ranges(store.clone(), event_notify.subscribe())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.event_payloads", migrate_event_payloads(store.clone())));
@@ -10831,7 +10832,7 @@ fn render_performance(view: &Value) -> String {
     {
         let _ = writeln!(
             out,
-            "INCREMENTAL CORRECTIONS  count · item (writes an incremental pass would have missed; each is a bug)"
+            "INCREMENTAL CORRECTIONS  count · item · cause (a write or a due time an incremental pass would have missed; each is a bug)"
         );
         for row in corrections {
             let _ = writeln!(
@@ -19314,6 +19315,21 @@ async fn convert_envelope_payloads(store: Arc<Store>) {
                 tokio::time::sleep(Duration::from_secs(60)).await;
             }
         }
+    }
+}
+
+/// Find signatures missing on admitted envelopes, one bounded scan at a time, off every request
+/// path: exchanges only take what a scan found. A stopped scan restarts after a membership change.
+async fn backfill_envelope_signatures(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            fractal_daemon::task_cpu::blocking("maintenance.signature_backfill", || worker.advance_signature_backfill())
+        }).await;
+        if !matches!(result, Ok(Ok(_))) {
+            stderr_message("st3", format_args!("signature backfill scan failed: {result:?}"));
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
