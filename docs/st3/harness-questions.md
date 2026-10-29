@@ -79,9 +79,10 @@ question before and after compaction. Resolved questions never become pending ag
 same native call is refused even after history expiry or checkpoint trimming, including when
 the resolution status is `expired`. Its original resolution and receipt remain authoritative.
 
-A question stays pending until the harness writes its end. The harness adapter writes `expired`
-or `cancelled` when the harness gives up on or withdraws a question; Fractal does not end a pending
-question by itself.
+A question stays pending until its native lifetime ends. The harness adapter writes `expired`
+or `cancelled` when the harness gives up on or withdraws a question. The owner also durably
+records `cancelled` when its admitted native question generation definitively ends; merely
+failing to read that generation is not evidence of its end.
 
 ## Live OMP observations
 
@@ -109,8 +110,11 @@ are idempotent. A reused call identity with different descriptors is refused.
 
 Native successful completion records `answered_elsewhere`, a structured native timeout
 records `expired`, and error completion records `cancelled`. O1a records closure status
-only: resolution answers are empty and no person receipt is created. Disconnection,
-session switching, absence from a snapshot and elapsed time do not invent a closure.
+only: resolution answers are empty and no person receipt is created. A true native session
+switch, session shutdown or final agent end cancels remaining observed calls before the
+extension discards its observation set. An agent end that will continue preserves them.
+Same-session recreation, transport disconnection, absence from a snapshot and elapsed
+time do not invent a closure.
 The durable outbox retains opens/closes across channel/daemon interruption; the
 extension also replays retained observations after a pipe reconnect. Retention is
 bounded at 256 observed calls per native session; once full, the extension stops
@@ -118,6 +122,23 @@ observing new calls but retains the existing calls and their closes. A true nati
 session switch starts a new observation set.
 Observations refused for a disabled receiver or a superseded runtime/session binding
 are retired without inventing a close, so they cannot block unrelated native events.
+
+Before publishing each open the owner persists a local generation lease containing the
+admitted wrapper, terminal and daemon kernel PID/birth witnesses, provider ownership
+generation and native session. A startup/periodic bounded sweep checks those witnesses
+under the same provider record lock used for ingestion. Definitive process death or PID
+reuse, provider replacement/end, or a successor native session durably appends the
+existing `cancelled` resolution. It never records answer positions or a person receipt,
+and preserves any prior native resolution. The lease is deleted only after resolution
+is durable; a crash therefore replays retirement, not an answer. No lease expires by
+wall-clock age, and unavailable process/provider evidence leaves the question pending.
+This cleanup continues with the opt-in off. The sweep runs every two seconds between
+bounded passes; readers do not synthesize resolutions.
+
+An upgrade also retires unresolved locally ingested OMP observations predating these
+leases: their exact admitted wrapper generation cannot be recovered, so the upgrade
+revokes that old observation authority with `cancelled`. Foreign observations and
+observations that have since acquired a generation are not retired by this recovery.
 
 Observation metadata is not a proof that a web selection can be executed. In particular,
 the current typed timeline lacks native preview/required presentation semantics.
