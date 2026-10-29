@@ -77,6 +77,10 @@ pub struct Config {
     /// Background reconciliation start cap, reloaded with daemon policies.
     #[serde(skip_serializing_if = "ReconcileConfig::is_default")]
     pub reconcile: ReconcileConfig,
+    /// How long a person has to answer an ask that names no deadline. Written only when it
+    /// differs from the default.
+    #[serde(skip_serializing_if = "AsksConfig::is_default")]
+    pub asks: AsksConfig,
     /// The setup screen's "Let Codex work without asking" box. Unset and `true` give Codex the
     /// install's access mode; `false` makes Codex ask. Written only by the setup screen when Codex
     /// is found. A build that does not know the key rejects a config that has it, so a config
@@ -354,6 +358,47 @@ impl ReconcileConfig {
     }
 }
 
+/// The deadline an ask gets when it names none and `[asks] default_deadline` is not set.
+pub const DEFAULT_ASK_DEADLINE: &str = "24h";
+
+/// `[asks]`: with `deadlines` on, every ask a person gets has a deadline, at which it resolves
+/// by itself with its default answer. `default_deadline` is the deadline of an ask that names
+/// none.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AsksConfig {
+    /// Off by default. Deadlines add fields to replicated ask claims that a member on an older
+    /// build keeps as retryable and does not show, so they are turned on once every member runs
+    /// a build that reads them. While off, no ask records a deadline and none resolves by one.
+    pub deadlines: bool,
+    /// A duration such as `24h` or `3d`, at least `1m` and at most `30d`.
+    pub default_deadline: String,
+}
+
+impl Default for AsksConfig {
+    fn default() -> Self {
+        Self { deadlines: false, default_deadline: DEFAULT_ASK_DEADLINE.into() }
+    }
+}
+
+impl AsksConfig {
+    pub fn is_default(&self) -> bool { self == &Self::default() }
+
+    pub fn validate(&self) -> Result<()> {
+        self.default_deadline_ms().map(drop)
+    }
+
+    /// The default deadline in milliseconds.
+    pub fn default_deadline_ms(&self) -> Result<u64> {
+        let ms = parse_duration_ms(&self.default_deadline, "asks.default_deadline")?;
+        anyhow::ensure!(
+            (60_000..=30 * 24 * 60 * 60_000).contains(&ms),
+            "asks.default_deadline must be between 1m and 30d"
+        );
+        Ok(ms)
+    }
+}
+
 /// The default idle time before a nudge.
 pub const IDLE_NUDGE_AFTER_MS: u64 = 30 * 60_000;
 /// The default time a wait holds after it last woke its seat.
@@ -390,18 +435,19 @@ pub fn reload_daemon_limits() -> Option<Result<LimitsConfig>> {
 }
 
 /// Read both policies once on the existing two-minute reload loop, outside database work.
-pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig)>> {
+pub fn reload_daemon_policies() -> Option<Result<(LimitsConfig, ReconcileConfig, AsksConfig)>> {
     let path = DAEMON_CONFIG.get()?;
     Some(read_daemon_policies(path.as_deref()))
 }
 
-fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig)> {
+fn read_daemon_policies(path: Option<&Path>) -> Result<(LimitsConfig, ReconcileConfig, AsksConfig)> {
     let selected = path.map(Path::to_path_buf).unwrap_or_else(Config::default_path);
     anyhow::ensure!(selected.exists(), "st config {} is missing", selected.display());
     let config = Config::load_unvalidated(Some(&selected))?;
     config.limits.validate()?;
     config.reconcile.validate()?;
-    Ok((config.limits, config.reconcile))
+    config.asks.validate()?;
+    Ok((config.limits, config.reconcile, config.asks))
 }
 
 /// `[limits]` from a config file that must exist: a file that is missing for a moment must not
@@ -543,6 +589,7 @@ impl Default for Config {
             trim: TrimConfig::default(),
             limits: LimitsConfig::default(),
             reconcile: ReconcileConfig::default(),
+            asks: AsksConfig::default(),
             codex_work_without_asking: None,
             fleet: None,
         }
@@ -733,6 +780,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<()> {
         self.reconcile.validate()?;
+        self.asks.validate()?;
         self.github.validate()?;
         anyhow::ensure!(
             self.private_notes_catalogs.iter().all(|path| path.is_absolute()
@@ -1186,7 +1234,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.toml");
         std::fs::write(&path, "").unwrap();
-        let (_, mut effective) = read_daemon_policies(Some(&path)).unwrap();
+        let (_, mut effective, _) = read_daemon_policies(Some(&path)).unwrap();
         assert_eq!(effective.max_passes_per_minute, None);
         assert_eq!(effective.max_passes_per_minute_or(DEFAULT_MAX_PASSES_PER_MINUTE), 30);
         std::fs::write(&path, "[reconcile]\nmax_passes_per_minute=60\n").unwrap();

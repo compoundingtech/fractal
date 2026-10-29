@@ -503,6 +503,47 @@ impl StructuredRequest {
         Ok(answer)
     }
 
+    /// Checks that `id` can stand in for the person at the deadline: one of this request's
+    /// named answers that needs no words of theirs.
+    pub fn check_default(&self, id: &str) -> Result<(), St3Error> {
+        let invalid_default = |message: String| St3Error::new("invalid-default-answer", message);
+        if matches!(self.request_type, RequestType::Feedback | RequestType::Update) {
+            return Err(invalid_default(format!(
+                "a {} has no named answers to default to",
+                self.request_type.as_str()
+            )));
+        }
+        let option = self
+            .answers
+            .iter()
+            .find(|option| option.id == id)
+            .ok_or_else(|| {
+                invalid_default(format!(
+                    "`{id}` is not one of this request's answers: {}",
+                    self.answer_ids()
+                ))
+            })?;
+        if option.outcome == Some(DecisionOutcome::RequestChanges) {
+            return Err(invalid_default(format!(
+                "`{id}` requests changes, which needs the person's words, so it cannot apply by itself"
+            )));
+        }
+        Ok(())
+    }
+
+    /// The answer an ask records when its deadline passes unanswered: its default answer, exactly
+    /// as if the person had chosen it, or none. The response's `resolved_by` says the deadline
+    /// gave it, so the outcome stays one that every client already reads.
+    pub fn at_deadline(&self, default: Option<&str>) -> Option<Value> {
+        let id = default?;
+        self.check_default(id).ok()?;
+        let input = AnswerInput {
+            id: Some(id.to_owned()),
+            text: None,
+        };
+        self.answer(Some(&input), "").ok()
+    }
+
     fn answer_ids(&self) -> String {
         let mut ids = self
             .answers
@@ -518,6 +559,15 @@ impl StructuredRequest {
 
 /// The answer id by which a person sets a request aside; the asker reads it as a dismissal.
 pub const DISMISS: &str = "dismiss";
+
+/// The human-readable history line for an ask its deadline resolved, with the default answer
+/// that applied, if any.
+pub fn deadline_summary(answer: Option<&Value>) -> String {
+    match answer.and_then(|answer| Some((answer["label"].as_str()?, answer["id"].as_str()?))) {
+        Some((label, id)) => format!("Timed out without an answer; the default applied: {label} ({id})"),
+        None => "Timed out without an answer".to_owned(),
+    }
+}
 
 /// The human-readable history line for a typed answer.
 pub fn answer_summary(answer: &Value) -> String {
@@ -606,6 +656,38 @@ mod tests {
             request.answer(Some(&unknown), "").unwrap_err().code,
             "invalid-person-answer"
         );
+    }
+
+    #[test]
+    fn a_default_is_a_named_answer_that_needs_no_words_and_applies_as_itself() {
+        let (request, _) = StructuredRequest::parse(&decision()).unwrap();
+        request.check_default("land").unwrap();
+        request.check_default("keep-open").unwrap();
+        assert_eq!(request.check_default("revise-auth").unwrap_err().code, "invalid-default-answer");
+        assert_eq!(request.check_default("yes").unwrap_err().code, "invalid-default-answer");
+        assert_eq!(request.check_default(DISMISS).unwrap_err().code, "invalid-default-answer");
+        // The default applies as the person's own choice of it would: an outcome every client
+        // already reads, never a new one.
+        let answer = request.at_deadline(Some("keep-open")).unwrap();
+        assert_eq!(
+            answer,
+            json!({"type": "decision", "outcome": "decline", "id": "keep-open", "label": "Keep it open"})
+        );
+        let chosen = AnswerInput { id: Some("keep-open".into()), text: None };
+        assert_eq!(answer, request.answer(Some(&chosen), "").unwrap());
+        assert_eq!(
+            deadline_summary(Some(&answer)),
+            "Timed out without an answer; the default applied: Keep it open (keep-open)"
+        );
+        assert_eq!(request.at_deadline(None), None);
+        assert_eq!(request.at_deadline(Some("revise-auth")), None);
+        assert_eq!(deadline_summary(None), "Timed out without an answer");
+        let mut feedback = decision();
+        feedback["type"] = json!("feedback");
+        feedback.as_object_mut().unwrap().remove("answers");
+        feedback.as_object_mut().unwrap().remove("recommendation");
+        let (request, _) = StructuredRequest::parse(&feedback).unwrap();
+        assert_eq!(request.check_default("land").unwrap_err().code, "invalid-default-answer");
     }
 
     #[test]

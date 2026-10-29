@@ -72,6 +72,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "claim_range_digests",
         "claim_range_import",
         "claim_range_pending",
+        "retired_range_import",
+        "retired_range_pending",
         "retired_operation_receipts",
         "retired_claim_ancestry",
         "writer_heads",
@@ -866,6 +868,8 @@ message "audit-declared" {
     source.replay_replication_graph().unwrap();
     source
         .ask_person(&crate::model::PersonAskRequest {
+            deadline_ms: None,
+            default_answer: None,
             legacy_request: None,
             person: "person/avery".into(),
             title: "Choose the release date".into(),
