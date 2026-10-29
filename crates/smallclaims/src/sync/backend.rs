@@ -108,7 +108,9 @@ pub trait Backend: Clone + Send + Sync + 'static {
     ) -> impl Future<Output = Result<()>> + Send;
 
     /// This node's answers per claim kind (see [`crate::answers`]), or `None` when it keeps
-    /// none, which a peer reads as a build without them.
+    /// none, which a peer reads as a build without them. A store this process holds itself keeps
+    /// none: a pass over every claim on request is what a daemon's answers cache avoids. A member
+    /// without answers asks no peer for theirs.
     fn answers(
         &self,
         _request: &AnswersRequest,
@@ -264,27 +266,6 @@ where
         request: &CheckpointManifestRequest,
     ) -> Result<CheckpointManifestPage> {
         self.store().checkpoint_manifest_page(request)
-    }
-
-    /// Computed on request, which only a small store a test holds can afford; a daemon keeps
-    /// its answers in an [`crate::answers::AnswersCache`].
-    async fn answers(&self, request: &AnswersRequest) -> Result<Option<AnswersReply>> {
-        let backend = self.clone();
-        let request = request.clone();
-        tokio::task::spawn_blocking(move || {
-            let store = backend.store();
-            Ok(Some(match &request.kind {
-                None => AnswersReply {
-                    summary: Some(store.answers_summary(request.cut_unix_ms)?),
-                    ..AnswersReply::default()
-                },
-                Some(kind) => AnswersReply {
-                    buckets: Some(store.answer_buckets(kind, request.cut_unix_ms, &request.buckets)?),
-                    ..AnswersReply::default()
-                },
-            }))
-        })
-        .await?
     }
 
     async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {

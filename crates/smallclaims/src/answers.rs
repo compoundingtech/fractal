@@ -323,6 +323,18 @@ impl Store {
         Ok(summary)
     }
 
+    /// Answer `request` at once, computing what it asks. Only a small store can afford this;
+    /// a daemon answers through an [`AnswersCache`].
+    pub fn answer(&self, request: &AnswersRequest) -> Result<AnswersReply> {
+        Ok(match &request.kind {
+            None => AnswersReply { summary: Some(self.answers_summary(request.cut_unix_ms)?), ..AnswersReply::default() },
+            Some(kind) => AnswersReply {
+                buckets: Some(self.answer_buckets(kind, request.cut_unix_ms, &request.buckets)?),
+                ..AnswersReply::default()
+            },
+        })
+    }
+
     /// One kind's bucket digests at a cut, with the keys of `wanted` buckets.
     pub fn answer_buckets(
         &self,
