@@ -4016,7 +4016,7 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha4f521b72fe3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h6fff3783c9f8 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
             "{LOCAL_OBSERVATION_COLUMNS} WHERE id > ?1 AND after_store_index <= ?3 ORDER BY id LIMIT ?2"
         ))?;
         let rows = statement.query_map(
@@ -4075,7 +4075,7 @@ impl Store {
     /// The newest local observations that follow a claim at or before `through`, oldest first.
     pub fn local_observations_tail_through(&self, through: u64, limit: usize) -> Result<Vec<ClaimRecord>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hbe0f6965fe14 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd1501a4b8d3a owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
             "SELECT * FROM ({LOCAL_OBSERVATION_COLUMNS} WHERE after_store_index <= ?2 ORDER BY id DESC LIMIT ?1) ORDER BY id"
         ))?;
         let rows = statement.query_map(
