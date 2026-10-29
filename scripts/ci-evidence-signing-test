@@ -150,7 +150,11 @@ with tempfile.TemporaryDirectory() as directory:
     assert refused.returncode == 1 and 'Traceback' not in refused.stderr + refused.stdout and 'nonempty strings' in refused.stdout, refused.stdout + refused.stderr
 # the address matcher itself, on forms a commit cannot carry or that look close to a listed one
 import importlib.machinery  # noqa: E402
-signing = importlib.machinery.SourceFileLoader('ci_evidence_signing', str(HELPER)).load_module()
+import importlib.util  # noqa: E402
+loader = importlib.machinery.SourceFileLoader('ci_evidence_signing', str(HELPER))
+spec = importlib.util.spec_from_file_location(loader.name, loader.path, loader=loader)
+signing = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(signing)
 import re as _re  # noqa: E402
 _noreply = [_re.compile(r'(?:[0-9]+\+)?myobie@users\.noreply\.github\.com', _re.IGNORECASE)]
 _emails = {'me@nathanherald.com'}
