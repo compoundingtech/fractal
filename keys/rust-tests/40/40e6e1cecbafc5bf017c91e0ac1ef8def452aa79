@@ -16,3 +16,6 @@ record f008350a626a97441a30158e79a5604c16c7d220 rust-tests 0 fleet/ci 2026-10-29
 record 775d3d1a775b88fd7ad50f0f37d0135ed7b044eb rust-tests 0 fleet/ci 2026-10-29T15:41:33Z
 record f91171c5a03dd8d75ae2a1c58ba96d140d94ff39 rust-tests 0 host/forge 2026-10-29T15:46:09Z
 record 7fbf43e24137ecd6fb512e2e5f79888f91320323 rust-tests 0 fleet/ci 2026-10-29T16:10:46Z
+record 4d9b11cddcd9ffb9026ebd410bba59e09b7ec8fd rust-tests 0 host/forge 2026-10-29T16:19:14Z
+record b33dc76cdf4f2bdc73f76e0e0b17ca2d493b483f rust-tests 0 fleet/ci 2026-10-29T16:18:46Z
+record d24f826fa3d3b00107a90d05a5dfa541cc0036be rust-tests 0 fleet/ci 2026-10-29T16:19:32Z
