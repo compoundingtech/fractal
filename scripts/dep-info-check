@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every file a keyed stage's compiles read must be inside its check's input key (docs/keyed-clippy.md).
 
-  python3 scripts/dep-info-check --logs DIR [--check NAME] [--jsonl GLOB] [--policy FILE] [--root DIR]
+  python3 scripts/dep-info-check --logs DIR --policy FILE [--check NAME] [--jsonl GLOB] [--root DIR]
 
 A note for a keyed check (linux-clippy, linux-fleet-compat) covers every tree with the same key, the projection of the policy's
 `inputs`. A file the compiler reads that the key leaves out (an include_str! of a doc, a proc macro's wit file) would let one tree's
@@ -10,6 +10,10 @@ reported in their JSON messages (DIR/GLOB, default clippy-*.jsonl; a unit fresh 
 describes this tree's inputs), keeps the dependencies inside the repository and outside the target directory, and fails on any that no
 input of --check (default linux-clippy) covers (equal, or a parent directory). The last line is always
 `dep-info: check=NAME units=N files=M uncovered=K`, which the daily report counts.
+
+The skip policy is named by the caller (--policy), never by this script: scripts/ci-linux runs it only when CI_KEYED_CLIPPY_POLICY
+names the policy, which linux-clippy's own run sets (scripts/ci-clippy-keyed, CI's linux-clippy job). linux-gate runs the same clippy
+stage without it, so linux-gate never depends on the policy file (lane-definition-closure --check holds it to that).
 """
 import argparse
 import json
@@ -18,7 +22,6 @@ from pathlib import Path
 import posixpath
 import sys
 
-POLICY = '.st/evidence-skip-policy.json'
 CHECK = 'linux-clippy'
 JSONL = 'clippy-*.jsonl'
 
@@ -78,11 +81,11 @@ def main(argv):
     parser.add_argument('--logs', required=True, help="the stage's log directory (scripts/ci-linux's $logs)")
     parser.add_argument('--check', default=CHECK, help=f'the check whose input key must cover what was read (default {CHECK})')
     parser.add_argument('--jsonl', default=JSONL, help=f'the cargo JSON message logs in --logs to read (default {JSONL})')
-    parser.add_argument('--policy', help=f'the skip policy (default: ROOT/{POLICY})')
+    parser.add_argument('--policy', required=True, help='the skip policy whose --check inputs make the key')
     parser.add_argument('--root', default=os.getcwd())
     args = parser.parse_args(argv)
     root = Path(posixpath.normpath(os.path.abspath(args.root)))
-    inputs = declared(Path(args.policy or root / POLICY).read_text(), args.check)
+    inputs = declared(Path(args.policy).read_text(), args.check)
     metadata = Path(args.logs) / 'clippy-metadata.json'
     target = Path(json.loads(metadata.read_text())['target_directory']) if metadata.exists() else root / 'target'
     target = Path(posixpath.normpath(os.path.abspath(target)))
@@ -93,7 +96,7 @@ def main(argv):
     uncovered = sorted(path for path in files if not covered(path, inputs))
     for path in uncovered:
         print(f'::error::{args.check} read {path}, which its input key does not cover: add it (or a parent) to the inputs of '
-              f'{args.check} in {POLICY} and the tree_inputs of its lane in .st/required-lanes.json')
+              f'{args.check} in {args.policy} and the tree_inputs of its lane')
     if not units:
         print(f'::error::no dep-info found for this stage\'s units ({args.jsonl}): nothing shows what {args.check} read')
     print(f'dep-info: check={args.check} units={len(units)} files={len(files)} uncovered={len(uncovered)}')

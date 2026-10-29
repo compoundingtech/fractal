@@ -61,7 +61,7 @@ publishing already allows it. The change:
   already accepts a member that its own gate skipped. `scripts/evidence-flip-ready`'s `skipped_members` learns the new skip.
 - **st-test.** In shadow, the notes come from CI's clippy job, which the merge queue runs on every merge. PR 1 adds
   `linux-clippy` as an opt-in local check (`scripts/st-test --check linux-clippy`; not in `--all`, so a default run never runs
-  clippy twice), which records the base inputs the base's verifier reports. With the linux-gate shrink (PR 2) it becomes a default check (`LOCAL['linux-clippy'] = nix develop -c bash scripts/ci-local clippy`). When
+  clippy twice), which records the base inputs the base's verifier reports. With the linux-gate shrink (PR 2) it becomes a default check (`LOCAL['linux-clippy'] = nix develop -c bash scripts/ci-clippy-keyed`, the clippy stage with linux-clippy's dep-info check). When
   it is already signed for its key, linux-gate's local command drops the `clippy` stage. This is the "shrink" `scripts/st-test`
   already describes but does not do. Either way the caller's command stays `scripts/st-test --all --push origin`: the keys are
   computed inside st-test and CI, never by the caller. Until linux-gate itself is split (a later step of this mission), a run that
@@ -101,8 +101,11 @@ A key that leaves out an input lets a note cover a tree it never measured. Three
 2. **The executed set is declared.** `scripts/lane-definition-closure` already computes what a lane executes. A test asserts
    that the clippy stage's executed files are a subset of `linux-clippy`'s inputs, so a new script the stage starts to run fails the
    test until it is declared.
-3. **What cargo read is declared.** `scripts/dep-info-check` runs inside the clippy stage (`scripts/ci-linux`), so it fails
-   the stage in CI and in a local run alike. It reads the dep-info file (`.d`, every file rustc opened) of each unit the stage's
+3. **What cargo read is declared.** `scripts/dep-info-check` runs inside the clippy stage (`scripts/ci-linux`) when linux-clippy
+   itself runs it: `scripts/ci-clippy-keyed` (linux-clippy's lane) and CI's linux-clippy job set `CI_KEYED_CLIPPY_POLICY` to the skip
+   policy, and the check reads linux-clippy's inputs from it, so it fails the stage in CI and in a local run alike. linux-gate runs the
+   same stage without that variable: its result never depends on the policy file, so a policy change on main does not void its
+   signature (`lane-definition-closure --check` fails a lane that reads a protected file its `ci_inputs` leave out). It reads the dep-info file (`.d`, every file rustc opened) of each unit the stage's
    cargo clippy runs reported, keeps the repository files outside the target directory, and fails with an `::error::` line per
    file the key does not cover. Its last line, `dep-info: check=linux-clippy units=N files=M uncovered=K`, is counted in the daily report.
    Only units the stage reported are read, so a stale `.d` file in a restored cache cannot fail it. The first measurement (a warm

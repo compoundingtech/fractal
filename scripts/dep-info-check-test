@@ -16,6 +16,8 @@ check = importlib.util.module_from_spec(spec)
 loader.exec_module(check)
 
 
+POLICY = '.st/evidence-skip-policy.json'
+
 class DepInfo(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -46,7 +48,7 @@ class DepInfo(unittest.TestCase):
     def run_check(self, *extra):
         out = io.StringIO()
         with redirect_stdout(out):
-            code = check.main(['--logs', str(self.logs), '--root', str(self.root), *extra])
+            code = check.main(['--logs', str(self.logs), '--root', str(self.root), '--policy', str(self.root / POLICY), *extra])
         return code, out.getvalue()
 
     def test_a_unit_that_reads_only_declared_files_passes_and_the_summary_counts_them(self):
@@ -99,7 +101,7 @@ class DepInfo(unittest.TestCase):
 
     def test_the_committed_policy_declares_the_check_and_its_lane_lists_the_same_tree_inputs(self):
         root = HERE.parent
-        inputs = check.declared((root / check.POLICY).read_text())
+        inputs = check.declared((root / POLICY).read_text())
         lane = json.loads((root / '.st/required-lanes.json').read_text())['lanes'][check.CHECK]
         for path in lane['definition_paths'] + lane['tree_inputs']:
             self.assertTrue(check.covered(path, inputs), f'{path} is in the lane but not in the input key')

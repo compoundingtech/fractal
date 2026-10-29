@@ -3048,6 +3048,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CLIPPY_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
       BASE_INPUTS_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+      CI_KEYED_CLIPPY_POLICY: .st/evidence-skip-policy.json
       CI_CACHE_DEV_SHELL: default
     steps:
       - uses: actions/checkout@v4

@@ -116,7 +116,7 @@ LOCAL = {
     'rust-tests': ['python3', 'scripts/ci-rust-test-result'],
     # The clippy stage alone, keyed by what it reads (docs/keyed-clippy.md). Opt-in while linux-gate's own run still includes clippy,
     # so a default run never runs it twice: `--check linux-clippy` signs it.
-    'linux-clippy': ['nix', 'develop', '-c', 'bash', 'scripts/ci-local', 'clippy'],
+    'linux-clippy': ['nix', 'develop', '-c', 'bash', 'scripts/ci-clippy-keyed'],
 }
 RUST_TESTS = 'rust-tests'
 RUST_TESTS_COMMAND = LOCAL[RUST_TESTS]

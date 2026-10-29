@@ -1854,7 +1854,7 @@ class WorkflowStructure(unittest.TestCase):
             for event, rt in itertools.product(('pull_request', 'merge_group'), (False, True)):
                 with self.subTest(stage=job, event=event, rust_tests=rt):
                     condition = self.job_condition(blocks[job])
-                    self.assertFalse(self.truth(condition, {'linux-gate': False, 'rust-tests': rt}, event, refused=('linux-gate',)))
+                    self.assertFalse(self.truth(condition, {'linux-gate': False, 'linux-clippy': False, 'rust-tests': rt}, event, refused=('linux-gate',)))
         self.assertEqual(self.steps_of('linux-gate')[0], (self.REFUSED_STEP, "needs.evidence-gate-linux-gate.outputs.refuse == 'true'"))
         # fractal-web: execution does not start, and the check carries the refusal to its verdict.
         execution = re.search(r'^    if: (.*)$', self.job_text('fractal-web-execution'), re.M).group(1)

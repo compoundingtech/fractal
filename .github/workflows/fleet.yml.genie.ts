@@ -643,6 +643,9 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
       env: {
         CLIPPY_BASE_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
         BASE_INPUTS_SHA: '${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}',
+        // linux-clippy's own run checks what its compiles read against its input key (scripts/dep-info-check); linux-gate's local run
+        // of the same stage does not, so linux-gate never depends on the policy file.
+        CI_KEYED_CLIPPY_POLICY: '.st/evidence-skip-policy.json',
       },
     }),
     'linux-fleet-compat': linuxStageJob({
