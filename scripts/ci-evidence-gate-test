@@ -637,6 +637,41 @@ class EndToEnd(unittest.TestCase):
                               head_files={'.st/evidence-signed-only.json': json.dumps({'about': 'test', 'openers': []})})
         self.assertRefused(s['base'], 'the head\'s copy of the list decides nothing', **self.pr_env(s))
 
+    def sideways(self, s):
+        """A commit on the base that main's history does not hold: a payload base outside the merge's first parent."""
+        return self.f.git('commit-tree', s['base'] + '^{tree}', '-p', s['base'], '-m', 'a base main never had')
+
+    def test_a_signed_only_run_whose_payload_base_is_outside_the_merges_history_is_refused_even_when_signed(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        self.note(s['head'], s['head_tree'], seconds=1)
+        outside = self.sideways(s)
+        fields, outputs = self.run_gate(s['tip'], **self.pr_env(s, EVENT_BASE_SHA=outside))
+        self.assertEqual((fields['decision'], fields['reason'], fields['event_base'], outputs['skip'], outputs['refuse']),
+                         ('refuse', 'payload_base_outside_the_merge', outside, 'false', 'true'), fields)
+        self.assertEqual(outputs['refusal'], f"linux-gate: the payload base {outside[:12]} is not in the history of the base the merge was "
+                                             f"made on ({s['tip'][:12]}). Our pull requests are judged against the base GitHub merged them "
+                                             'into: push again so GitHub records the current base, then re-run all jobs')
+
+    def test_a_stale_payload_base_in_mains_history_decides_nothing_the_run_is_judged_at_the_merges_base(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        # A reopen or ready_for_review carries the base.sha of the last open or push: an older main commit.
+        fields, outputs = self.assertRefused(s['tip'], **self.pr_env(s, EVENT_BASE_SHA=s['base']))
+        self.assertEqual((fields['outcome'], fields['base'], fields['event_base']), ('no_note', s['tip'], s['base']))
+        self.assertTrue(outputs['refusal'].startswith('linux-gate: no signature for tree'), outputs['refusal'])
+        record = self.note(s['head'], s['head_tree'], seconds=1)
+        fields, outputs = self.run_gate(s['tip'], **self.pr_env(s, EVENT_BASE_SHA=s['base']))
+        self.assertEqual((fields['decision'], outputs['record'], outputs['refuse']), ('skip', record, 'false'), fields)
+
+    def test_a_payload_base_outside_the_merge_changes_nothing_for_another_opener_a_draft_or_the_queue(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        outside = self.sideways(s)
+        for why, env in (('another opener', self.pr_env(s, PR_USER='bob', ACTOR='bob', TRIGGERING_ACTOR='bob', EVENT_BASE_SHA=outside)),
+                         ('a draft', self.pr_env(s, PR_DRAFT='true', EVENT_BASE_SHA=outside)),
+                         ('the merge queue', dict(EVENT_NAME='merge_group', HEAD_SHA=s['merge'], EVENT_BASE_SHA=outside))):
+            with self.subTest(why):
+                fields, outputs = self.run_gate(s['tip'], **env)
+                self.assertEqual((fields['decision'], outputs['refuse']), ('run', 'false'), fields)
+
     def test_a_note_for_the_merge_tree_alone_does_not_cover_a_pull_request_head(self):
         s = self.pull_request()
         self.note(s['merge'], s['merge_tree'], seconds=1)
@@ -1628,6 +1663,34 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual((outputs['skip'], outputs['outcome']), ('true', 'satisfied'))
         self.assertIn('decision=skip', printed)
 
+    def test_a_reopen_or_ready_for_review_with_a_stale_base_sha_is_judged_by_the_gate_at_the_merges_base(self):
+        # #4144, 2026-10-28: the PR was reopened and its payload's base.sha was still main from its opening, before the signed-only
+        # list existed, so the gate taken from there ran every check. The step now takes the gate and its base from the merge's
+        # first parent. Both events carry the same step environment; only the payload's age differs from a push.
+        for action in ('reopened', 'ready_for_review'):
+            with self.subTest(action):
+                self.f = fixtures.Fixture()
+                self.addCleanup(self.f.tmp.cleanup)
+                self.ci = self.f.key('ci', 'fleet/ci')
+                s = self.pull_request(main_files={'moved.txt': 'main moved', **self.SIGNED_ONLY})
+                env = self.pr_env(s, HEAD_REPOSITORY=REPOSITORY)
+                outputs, printed = self.run_step(s['base'], **env)  # the stale payload base.sha
+                fields = decision(printed)
+                self.assertEqual((fields['decision'], fields['base'], fields['event_base'], outputs['refuse']),
+                                 ('refuse', s['tip'], s['base'], 'true'), printed)
+                self.assertTrue(outputs['refusal'].startswith('linux-gate: no signature for tree'), outputs['refusal'])
+                record = self.note(s['head'], s['head_tree'], seconds=1)
+                outputs, printed = self.run_step(s['base'], **env)
+                self.assertEqual((outputs['skip'], outputs['record']), ('true', record), printed)
+
+    def test_a_merge_group_run_takes_the_gate_from_its_payload_base_as_before(self):
+        base = self.commit_base()
+        commit, tree = self.head()
+        self.note(commit, tree)
+        outputs, printed = self.run_step(base)
+        fields = decision(printed)
+        self.assertEqual((outputs['skip'], fields['base'], fields['event_base']), ('true', base, base), printed)
+
     def test_without_a_working_gate_at_the_base_the_step_reports_unavailable_and_runs_the_check(self):
         for name, gate_text in {'gate missing': None, 'gate crashes': 'raise SystemExit(3)\n',
                                 'gate has a syntax error': 'def (\n'}.items():
@@ -1707,7 +1770,7 @@ class EndToEnd(unittest.TestCase):
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
             'head_tree', 'behind', 'ci_inputs', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'log', 'log_head', 'log_age_s', 'log_missing',
             'log_fetch', 'log_unlogged', 'log_unlogged_crates', 'log_unlogged_observed_at', 'members', 'missing', 'manifests_fetch',
-            'members_fetch', 'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
+            'members_fetch', 'head', 'base', 'event_base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         # The per-crate fields are '-' for a check that is not per crate.
         self.assertEqual([fields[k] for k in ('members', 'missing', 'manifests_fetch', 'members_fetch')], ['-'] * 4)
         self.assertEqual((fields['pr'], fields['repo'], fields['run'], fields['attempt'], fields['fork']),
