@@ -825,3 +825,41 @@ test('optional author and recipients retain closed legacy scalar types', async (
         assert.throws(()=>decode({...items[0],body:{...items[0].body,...patch}}));
     }
 });
+
+test('an ask resolved at its deadline decodes, and what the decoder from before deadlines refuses', async () => {
+    const [{ Schema }, Rich] = await modules;
+    // The answer record before deadlines: no resolved_by, and a respondent that is a sender only.
+    const { resolved_by, ...before } = Rich.PersonAnswerRecord.fields;
+    assert.ok(resolved_by);
+    const previous = Schema.Struct({ ...before, respondent: Rich.SenderRef });
+    const record = {
+        ask: 'step-run/run-generation-1/ask-1', status: 'completed', respondent: 'daemon/runtime',
+        answered_at_unix_ms: 1, resolved_by: 'deadline',
+    };
+    const withDefault = {
+        ...record, summary: 'Timed out without an answer; the default applied: Keep it open (keep-open)',
+        answer: { type: 'decision', outcome: 'decline', id: 'keep-open', label: 'Keep it open' },
+    };
+    const withoutAnswer = { ...record, summary: 'Timed out without an answer' };
+    for (const wire of [withDefault, withoutAnswer]) {
+        for (const mode of ['strict', 'tolerant']) {
+            const current = Rich.decodeUnknownSync(Rich.PersonAnswerRecord, mode)(wire);
+            assert.equal(current.respondent, 'daemon/runtime');
+            assert.equal(current.resolved_by, 'deadline');
+            assert.deepEqual(current.answer, wire.answer);
+        }
+        // An older client reads the answer itself as it always did: its outcome is one it knows
+        // and it ignores resolved_by. It refuses daemon/runtime as a respondent, as it already
+        // does for an ask its requester's end cancelled, so [asks] deadlines comes on only once
+        // the web clients run this build.
+        const old = Rich.decodeUnknownSync(previous, 'tolerant');
+        assert.throws(() => old(wire));
+        const read = old({ ...wire, respondent: 'person/avery' });
+        assert.deepEqual(read.answer, wire.answer);
+        assert.equal('resolved_by' in read, false);
+    }
+    // No outcome was added: the one a deadline would otherwise have needed is still refused.
+    assert.throws(() => Rich.decodeUnknownSync(Rich.PersonAnswerRecord, 'strict')({
+        ...withDefault, answer: { ...withDefault.answer, outcome: 'timed_out' },
+    }));
+});

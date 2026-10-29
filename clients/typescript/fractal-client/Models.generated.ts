@@ -2384,13 +2384,16 @@ export type PersonAnswerRecord = {
   assistant_owner?: PersonId;
   assistant_session_actor?: string;
   evidence?: Array<Id>;
-  respondent: SenderRef;
+  resolved_by?: "deadline";
+  respondent: RespondentRef;
   sender_class?: string;
   status: "completed" | "cancelled";
   summary: string;
 };
 
 export type PersonAskParameters = {
+  deadline_ms?: number;
+  default_answer?: string;
   new_run?: string;
   person_id: Id;
   reason: string;
@@ -2641,6 +2644,8 @@ export type ResourcesPage = {
   page: PageInfo;
   sync?: SyncNotice;
 };
+
+export type RespondentRef = string;
 
 export type Revision = string;
 

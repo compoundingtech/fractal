@@ -3860,6 +3860,12 @@ pub struct PersonAskParameters {
     pub new_run: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<StructuredRequest>,
+    /// How long the person has to answer; absent, the fleet's default deadline applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
+    /// The request's answer id that applies at the deadline; absent, the ask times out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_answer: Option<String>,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PersonStepParameters {
@@ -3953,7 +3959,8 @@ pub struct PersonAnswerInput {
 pub struct PersonAnswer {
     #[serde(rename = "type")]
     pub entry_type: String,
-    /// `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback` or `read`.
+    /// `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback`, `read` or
+    /// `dismissed`. A default applied at a deadline reads as the answer it stands for.
     pub outcome: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
@@ -3985,6 +3992,9 @@ pub struct PersonAnswerRecord {
     pub answered_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub answer: Option<PersonAnswer>,
+    /// `deadline` when the ask resolved by itself at its deadline, not by the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_by: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence: Vec<String>,
 }
