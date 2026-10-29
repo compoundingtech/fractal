@@ -48,7 +48,7 @@ impl Fixture {
     }
 
     fn cli(&self) -> Command {
-        self.command(Path::new(test_env!("CARGO_BIN_EXE_st3-fixture")))
+        self.command(Path::new(test_env!("CARGO_BIN_EXE_fractal-fixture")))
     }
 
     fn setup_config_only(&self, extra: &[&str]) -> Output {
@@ -85,7 +85,7 @@ impl Fixture {
                 .find(|p| p.is_file())
                 .unwrap_or_else(|| panic!("test needs {name}"))
         };
-        fs::copy(test_env!("CARGO_BIN_EXE_st3-fixture"), self.path("archive/st3")).unwrap();
+        fs::copy(test_env!("CARGO_BIN_EXE_fractal-fixture"), self.path("archive/st3")).unwrap();
         fs::set_permissions(self.path("archive/st3"), fs::Permissions::from_mode(0o755)).unwrap();
         symlink(search("pty"), self.path("archive/pty")).unwrap();
         symlink("st3", self.path("archive/st")).unwrap();

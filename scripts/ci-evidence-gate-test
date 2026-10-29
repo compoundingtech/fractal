@@ -69,8 +69,8 @@ EXPECTED_PROTECTED = (
     '.github/workflows/fleet.yml', '.github/workflows/fleet.yml.genie.ts', '.github/workflows/workspace-ci.ts',
     'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
     '.st/evidence-authors.json', 'scripts/ci-evidence-signing', '.st/required-lanes.json',
-    'scripts/rust-test-keys', '.st/rust-test-inputs.json', 'scripts/ci-rust-test-result',
-    '.st/evidence-log-key',
+    'scripts/rust-test-keys', 'scripts/ci-rust-test-result',
+    '.st/evidence-log-key', '.st/evidence-signed-only.json',
 )
 
 
@@ -574,6 +574,68 @@ class EndToEnd(unittest.TestCase):
                     self.assertTrue(fields['head_tree'].startswith('fallback:the_branch_is_'), fields['head_tree'])
                     self.assertEqual((fields['decision'], fields['outcome']), ('run', 'no_note'))
 
+    # ---- a signed-only opener's pull request is refused, never run (.st/evidence-signed-only.json) ---------------------------
+
+    SIGNED_ONLY = {'.st/evidence-signed-only.json': json.dumps({'about': 'test', 'openers': ['alice']})}
+
+    def assertRefused(self, base, why='', **kwargs):
+        fields, outputs = self.run_gate(base, **kwargs)
+        self.assertEqual((fields['decision'], outputs['skip'], outputs['record'], outputs['refuse']), ('refuse', 'false', '-', 'true'), why)
+        self.assertRegex(outputs['refusal'], r'sign it (on our own host )?with scripts/st-test --all (--rerun )?--push origin$')
+        return fields, outputs
+
+    def test_an_unsigned_pull_request_of_a_signed_only_opener_is_refused_and_a_signed_one_skips(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        fields, outputs = self.assertRefused(s['base'], **self.pr_env(s))
+        self.assertEqual(fields['outcome'], 'no_note')
+        self.assertEqual(outputs['refusal'], f"linux-gate: no signature for tree {s['head_tree'][:12]}. Our pull requests do not run CI: "
+                                             'sign it with scripts/st-test --all --push origin')
+        record = self.note(s['head'], s['head_tree'], seconds=1)
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((fields['decision'], outputs['record'], outputs['refuse'], outputs['refusal']), ('skip', record, 'false', ''))
+
+    def test_a_signed_only_pull_request_whose_note_is_refused_is_refused_too_and_says_why(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        self.note(s['head'], s['head_tree'], key=self.stranger, seconds=1)
+        fields, outputs = self.assertRefused(s['base'], **self.pr_env(s))
+        self.assertEqual(fields['outcome'], 'rejected')
+        self.assertIn('was not accepted (rejected:', outputs['refusal'])
+
+    def test_a_signed_only_change_to_a_protected_file_covered_only_by_another_signer_is_refused_with_rerun(self):
+        files = dict(self.SIGNED_ONLY)
+        s = self.pull_request(base_files=files, head_files={'.st/required-lanes.json': '{"version": 1, "lanes": {}}'})
+        self.note(s['head'], s['head_tree'], seconds=1)  # the CI key: a note, but not one of our hosts'
+        fields, outputs = self.assertRefused(s['base'], **self.pr_env(s))
+        self.assertEqual(fields['outcome'], 'satisfied')
+        self.assertIn('signed, but not usable here', outputs['refusal'])
+        self.assertTrue(outputs['refusal'].endswith('sign it on our own host with scripts/st-test --all --rerun --push origin'), outputs['refusal'])
+
+    def test_every_other_opener_and_every_other_run_is_decided_as_before(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY)
+        for why, env in (('another opener', self.pr_env(s, PR_USER='bob', ACTOR='bob', TRIGGERING_ACTOR='bob')),
+                         ('a draft', self.pr_env(s, PR_DRAFT='true')),
+                         ('a fork', self.pr_env(s, HEAD_REPOSITORY='someone/fork')),
+                         ('the merge queue', dict(EVENT_NAME='merge_group', HEAD_SHA=s['merge'])),
+                         ('a push', dict(EVENT_NAME='push', HEAD_SHA=s['merge']))):
+            with self.subTest(why):
+                _, outputs = self.run_gate(s['base'], **env)
+                self.assertEqual((outputs['skip'], outputs['refuse'], outputs['refusal']), ('false', 'false', ''))
+
+    def test_with_no_list_at_the_base_nobody_is_signed_only(self):
+        s = self.pull_request()
+        _, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((outputs['skip'], outputs['refuse']), ('false', 'false'))
+
+    def test_a_check_whose_skipping_is_off_runs_since_no_signature_can_cover_it(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY, policy=skip_policy(enforce=False))
+        _, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((outputs['skip'], outputs['refuse']), ('false', 'false'))
+
+    def test_the_list_is_read_at_the_base_so_a_pull_request_cannot_take_itself_off_it(self):
+        s = self.pull_request(base_files=self.SIGNED_ONLY,
+                              head_files={'.st/evidence-signed-only.json': json.dumps({'about': 'test', 'openers': []})})
+        self.assertRefused(s['base'], 'the head\'s copy of the list decides nothing', **self.pr_env(s))
+
     def test_a_note_for_the_merge_tree_alone_does_not_cover_a_pull_request_head(self):
         s = self.pull_request()
         self.note(s['merge'], s['merge_tree'], seconds=1)
@@ -773,7 +835,7 @@ class EndToEnd(unittest.TestCase):
 
     def test_a_branch_that_edits_a_protected_file_skips_on_a_host_note_for_its_head_and_runs_on_any_other(self):
         for path in ('scripts/ci-evidence-gate', 'scripts/evidence-verify', '.st/evidence-skip-policy.json', '.st/evidence-keys',
-                     '.st/required-lanes.json', '.st/rust-test-inputs.json', '.github/workflows/fleet.yml'):
+                     '.st/required-lanes.json', '.github/workflows/fleet.yml'):
             with self.subTest(path):
                 self.tmp_reset()
                 self.host = self.f.key('host', 'host/box')
@@ -791,6 +853,19 @@ class EndToEnd(unittest.TestCase):
                 self.note(s['merge'], s['merge_tree'], key=self.host, signer='host/box', seconds=3)
                 fields = self.assertRuns(s['base'], 'merge group ' + path, HEAD_SHA=s['merge'])
                 self.assertEqual((fields['event'], fields['outcome']), ('merge_group', 'satisfied'))
+
+    def test_a_newer_ci_pass_does_not_hide_our_hosts_note_on_a_branch_that_edits_a_protected_file(self):
+        self.host = self.f.key('host', 'host/box')
+        s = self.pull_request(head_files={'scripts/ci-evidence-gate': (ROOT / 'scripts/ci-evidence-gate').read_text() + '\n# edited\n'},
+                              policy=skip_policy(trust_levels=['fleet', 'host']))
+        mine = self.note(s['head'], s['head_tree'], key=self.host, signer='host/box', seconds=1)
+        self.note(s['head'], s['head_tree'], seconds=600)  # CI signed the same tree later (a run on another pull request's inputs)
+        fields, outputs = self.run_gate(s['base'], **self.pr_env(s))
+        self.assertEqual((fields['decision'], fields['trust_level'], outputs['record']), ('skip', 'host', mine), fields)
+        # A failure after our host's pass still decides: the check runs.
+        self.note(s['head'], s['head_tree'], seconds=900, exit_code=1)
+        fields = self.assertRuns(s['base'], 'a failure after the host pass', **self.pr_env(s))
+        self.assertEqual(fields['outcome'], 'rejected')
 
     def test_main_changing_a_protected_file_after_the_branch_point_falls_back(self):
         s = self.pull_request(main_files={'.st/evidence-skip-policy.json': skip_policy(trust_levels=['fleet']) + '\n'})
@@ -812,6 +887,73 @@ class EndToEnd(unittest.TestCase):
                 record = self.note(s['head'], s['head_tree'], seconds=1)
                 fields, outputs = self.run_gate(s['tip'], **self.pr_env(s))
                 self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], outputs['record']), ('skip', 'head', 'used', record))
+
+    CI_WORKFLOW = ('name: W\n\non:\n  pull_request: {}\n\nenv:\n  LEVEL: "1"\n\njobs:\n'
+                   '  linux-gate:\n    runs-on: box\n    needs: [build]\n  build:\n    runs-on: box\n  other:\n    runs-on: box\n')
+    CI_LANES = {'version': 1, 'lanes': {
+        'linux-gate': {'argv': ['bash', 'scripts/ci-local'], 'definition_paths': ['scripts/ci-local'],
+                       'ci_inputs': ['.github/workflows/fleet.yml::jobs.linux-gate', '.st/required-lanes.json::lanes.linux-gate',
+                                     '.st/evidence-skip-policy.json::checks.linux-gate']},
+        'ci-script-tests': {'argv': ['bash', 'scripts/ci-script-tests'], 'definition_paths': ['scripts/ci-script-tests']}}}
+
+    def ci_inputs_pull_request(self, main_files, lanes=None):
+        """A pull request whose base declares linux-gate's CI inputs (and none for ci-script-tests), with main moving `main_files`."""
+        (self.f.repo / '.github/workflows').mkdir(parents=True, exist_ok=True)
+        (self.f.repo / '.st').mkdir(exist_ok=True)
+        base_files = {'.github/workflows/fleet.yml': self.CI_WORKFLOW, '.st/required-lanes.json': json.dumps(lanes or self.CI_LANES, indent=2)}
+        return self.pull_request(base_files=base_files, main_files=main_files)
+
+    def workflow(self, old, new):
+        self.assertIn(old, self.CI_WORKFLOW)
+        return self.CI_WORKFLOW.replace(old, new, 1)
+
+    def test_main_changing_the_gate_or_the_verifier_keeps_the_head_tree_for_a_check_that_does_not_read_them(self):
+        # The signing system can change without voiding the expensive checks' signatures: only a check whose own tests read the gate
+        # and the verifier (ci-script-tests, which declares no CI inputs here) falls back.
+        for path in ('scripts/ci-evidence-gate', 'scripts/evidence-verify'):
+            with self.subTest(path):
+                self.tmp_reset()
+                s = self.ci_inputs_pull_request({path: (ROOT / path).read_text() + '\n# main moved this\n'})  # the base has ROOT's copy
+                record = self.note(s['head'], s['head_tree'], seconds=1)
+                fields, outputs = self.run_gate(s['tip'], **self.pr_env(s))
+                self.assertEqual((fields['decision'], fields['tree_of'], fields['head_tree'], fields['ci_inputs'], outputs['record']),
+                                 ('skip', 'head', 'used', 'kept', record))
+                self.note(s['head'], s['head_tree'], check='ci-script-tests', seconds=1)
+                fields = self.assertRuns(s['tip'], 'ci-script-tests reads the gate', check='ci-script-tests', **self.pr_env(s))
+                self.assertEqual((fields['tree_of'], fields['head_tree']), ('merge', 'fallback:protected_files_differ_from_the_branch_point'))
+
+    def test_main_changing_another_job_or_another_lane_keeps_the_head_tree_and_the_check_s_own_part_does_not(self):
+        lanes = json.loads(json.dumps(self.CI_LANES))
+        lanes['lanes']['ci-script-tests']['argv'] = ['bash', 'scripts/ci-script-tests', '--more']
+        kept = {'another job': {'.github/workflows/fleet.yml': self.workflow('  other:\n    runs-on: box', '  other:\n    runs-on: elsewhere')},
+                'another lane': {'.st/required-lanes.json': json.dumps(lanes, indent=2)}}
+        moved = {'a top-level env': {'.github/workflows/fleet.yml': self.workflow('LEVEL: "1"', 'LEVEL: "2"')},
+                 'a job it needs': {'.github/workflows/fleet.yml': self.workflow('  build:\n    runs-on: box', '  build:\n    runs-on: elsewhere')},
+                 'its own job': {'.github/workflows/fleet.yml': self.workflow('needs: [build]', 'needs: [build, other]')}}
+        for name, files in [*((n, f) for n, f in kept.items()), *((n, f) for n, f in moved.items())]:
+            with self.subTest(name):
+                self.tmp_reset()
+                s = self.ci_inputs_pull_request(files)
+                self.note(s['head'], s['head_tree'], seconds=1)
+                fields, _ = self.run_gate(s['tip'], **self.pr_env(s))
+                if name in kept:
+                    self.assertEqual((fields['tree_of'], fields['head_tree'], fields['ci_inputs']), ('head', 'used', 'kept'))
+                else:
+                    self.assertEqual((fields['tree_of'], fields['head_tree'], fields['ci_inputs']),
+                                     ('merge', 'fallback:protected_files_differ_from_the_branch_point', 'changed'))
+
+    def test_a_ci_input_that_names_nothing_falls_back_however_the_job_it_meant_changes(self):
+        # A typo, or a job main renamed: the entry projects to nothing at every revision, which must not read as "unchanged".
+        lanes = json.loads(json.dumps(self.CI_LANES))
+        lanes['lanes']['linux-gate']['ci_inputs'][0] = '.github/workflows/fleet.yml::jobs.linux-gaet'
+        s = self.ci_inputs_pull_request({'.github/workflows/fleet.yml': self.workflow('needs: [build]', 'needs: [build, other]')}, lanes)
+        self.note(s['head'], s['head_tree'], seconds=1)
+        fields, _ = self.run_gate(s['tip'], **self.pr_env(s))
+        self.assertEqual((fields['tree_of'], fields['head_tree'], fields['ci_inputs']),
+                         ('merge', 'fallback:protected_files_differ_from_the_branch_point', 'changed'))
+
+    def test_the_rust_test_inputs_file_is_not_protected(self):
+        self.assertNotIn('.st/rust-test-inputs.json', gate.PROTECTED)
 
     def test_main_changing_the_required_lanes_after_the_branch_point_still_falls_back(self):
         s = self.pull_request(main_files={'.st/required-lanes.json': '{}\n'})
@@ -1043,9 +1185,9 @@ class EndToEnd(unittest.TestCase):
 
     def test_the_repository_policy_turns_skipping_on_only_for_the_checks_listed_here(self):
         # Written out here, so turning a check on is a deliberate change to the policy AND to this list.
-        enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
+        enforced = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests', 'rust-tests')
         policy = json.loads((ROOT / '.st/evidence-skip-policy.json').read_text())
-        # rust-tests (per crate, scripts/fractal-test) has a policy entry and a gate job of its own, in shadow (enforce false).
+        # rust-tests (per crate, scripts/fractal-test) has a policy entry and a gate job of its own, enforced since 2026-10-28.
         self.assertEqual(sorted(policy['checks']), sorted(POLICY_CHECKS + ('rust-tests',)))
         self.assertEqual(sorted(c for c, entry in policy['checks'].items() if entry.get('enforce') is True), sorted(enforced))
         for check, entry in policy['checks'].items():
@@ -1533,7 +1675,7 @@ class EndToEnd(unittest.TestCase):
                 for name in ('.github/workflows/workspace-ci.ts', 'scripts/ci-evidence-gate-test', 'scripts/evidence-verify-test',
                              '.st/evidence-authors.json', 'scripts/ci-evidence-signing', '.st/required-lanes.json',
                              'scripts/rust-test-keys', '.st/rust-test-inputs.json', 'scripts/ci-rust-test-result',
-                             '.st/evidence-log-key'):
+                             '.st/evidence-log-key', '.st/evidence-signed-only.json'):
                     (self.f.repo / name).parent.mkdir(parents=True, exist_ok=True)
                     (self.f.repo / name).write_text('placeholder\n')
                 base = self.commit_base()
@@ -1561,7 +1703,7 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(list(fields), [
             'check', 'decision', 'outcome', 'reason', 'record', 'signer', 'trust_level', 'kind', 'tier',
             'observed_at', 'age_s', 'max_age_s', 'attempts', 'enforce', 'match', 'source_inputs', 'tree', 'tree_of', 'pr_head', 'merge_tree',
-            'head_tree', 'behind', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'log', 'log_head', 'log_age_s', 'log_missing',
+            'head_tree', 'behind', 'ci_inputs', 'notes_fetch', 'policy_sha256', 'keys_sha256', 'log', 'log_head', 'log_age_s', 'log_missing',
             'log_fetch', 'log_unlogged', 'log_unlogged_crates', 'log_unlogged_observed_at', 'members', 'missing', 'manifests_fetch',
             'members_fetch', 'head', 'base', 'event', 'pr', 'repo', 'run', 'attempt', 'fork', 'verifier_sha256', 'gate_sha256'])
         # The per-crate fields are '-' for a check that is not per crate.
@@ -1672,6 +1814,8 @@ class WorkflowStructure(unittest.TestCase):
                         self.assertEqual(condition, 'always()')  # the job still reports; it is not gated
                     elif name == 'evidence covered by a trusted note':
                         self.assertEqual(condition, f"needs.evidence-gate-{check}.outputs.skip == 'true'")
+                    elif name == self.REFUSED_STEP:
+                        self.assertEqual(condition, f"needs.evidence-gate-{check}.outputs.refuse == 'true'")
                     else:
                         self.assertIsNotNone(condition, f'{name} would run on a skip')
                         self.assertIn(covered, condition, name)
@@ -1682,6 +1826,39 @@ class WorkflowStructure(unittest.TestCase):
         for check in self.WIRED + self.NOT_YET_WIRED + self.LANE_WIRED:
             self.assertIn('      skip: ${{ steps.taken.outputs.skip }}\n      record: ${{ steps.taken.outputs.record }}\n',
                           self.job_text(f'evidence-gate-{check}'))
+
+    REFUSED_STEP = '"evidence refused: sign it with scripts/st-test --all --push origin"'
+
+    def test_a_refused_check_runs_no_heavy_work_and_fails_with_what_to_do(self):
+        # The gate jobs publish the refusal only from their marker step, the last thing it writes.
+        for check in self.WIRED + self.NOT_YET_WIRED + self.LANE_WIRED:
+            with self.subTest(gate=check):
+                job = self.job_text(f'evidence-gate-{check}')
+                self.assertIn('      refuse: ${{ steps.refused.outputs.refuse }}\n      refusal: ${{ steps.refused.outputs.refusal }}\n', job)
+                self.assertIn(('"evidence refused: not signed"', "steps.gate.outputs.refuse == 'true' && steps.gate.outputs.skip != 'true'"),
+                              self.steps_of(f'evidence-gate-{check}'))
+        # A wired check: every step but the checkout and the reports is off on a refusal, and the last word is the failing refusal step.
+        for check in self.WIRED:
+            with self.subTest(wired=check):
+                refused = f"needs.evidence-gate-{check}.outputs.refuse != 'true'"
+                for name, condition in self.steps_of(check)[1:]:
+                    if name not in ('Report job cache coverage', 'evidence covered by a trusted note', self.REFUSED_STEP):
+                        self.assertIn(refused, condition, name)
+                self.assertIn((self.REFUSED_STEP, f"needs.evidence-gate-{check}.outputs.refuse == 'true'"), self.steps_of(check))
+                self.assertIn('exit 1', self.job_text(check).split(self.REFUSED_STEP, 1)[1].split('      - ', 1)[0])
+        # The Linux stages do not start on linux-gate's refusal, whatever the other gates say, and the aggregate fails first thing with it.
+        blocks = self.blocks()
+        for job in self.LINUX_JOB_LEVEL:
+            for event, rt in itertools.product(('pull_request', 'merge_group'), (False, True)):
+                with self.subTest(stage=job, event=event, rust_tests=rt):
+                    condition = self.job_condition(blocks[job])
+                    self.assertFalse(self.truth(condition, {'linux-gate': False, 'rust-tests': rt}, event, refused=('linux-gate',)))
+        self.assertEqual(self.steps_of('linux-gate')[0], (self.REFUSED_STEP, "needs.evidence-gate-linux-gate.outputs.refuse == 'true'"))
+        # fractal-web: execution does not start, and the check carries the refusal to its verdict.
+        execution = re.search(r'^    if: (.*)$', self.job_text('fractal-web-execution'), re.M).group(1)
+        self.assertIn("needs.evidence-gate-fractal-web.outputs.refuse == 'true'", execution)
+        self.assertIn("EVIDENCE_REFUSAL: ${{ needs.evidence-gate-fractal-web.outputs.refuse == 'true' && needs.evidence-gate-fractal-web.outputs.refusal || '' }}",
+                      self.job_text('fractal-web'))
 
     LINUX_JOB_LEVEL = ('linux-test-build', 'linux-tests', 'linux-tests-shard-2', 'linux-tests-shard-3',
                        'linux-tests-shard-4', 'linux-clippy', 'linux-fleet-compat')
@@ -1696,8 +1873,8 @@ class WorkflowStructure(unittest.TestCase):
         return set(re.findall(r'[A-Za-z][A-Za-z0-9_-]*', found.group(1))) if found else set()
 
     @staticmethod
-    def truth(expression, gates, event):
-        """Evaluate a generated job or step condition for the given gate decisions and event."""
+    def truth(expression, gates, event, refused=()):
+        """Evaluate a generated job or step condition for the given gate decisions and event (and gates that refused)."""
         expression = expression.strip()
         if expression.startswith('"'):
             expression = json.loads(expression)
@@ -1705,6 +1882,8 @@ class WorkflowStructure(unittest.TestCase):
             expression = expression[3:-2].strip()
         for gate, value in gates.items():
             expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.skip == 'true'", str(value))
+        for gate in ('linux-gate', 'rust-tests', 'typescript-client', 'genie-freshness', 'ci-script-tests', 'fractal-web'):
+            expression = expression.replace(f"needs.evidence-gate-{gate}.outputs.refuse == 'true'", str(gate in refused))
         expression = expression.replace("github.event_name != 'pull_request' || github.event.pull_request.draft == false", 'True')
         expression = expression.replace('!cancelled()', 'True')
         expression = expression.replace("github.event_name == 'merge_group'", str(event == 'merge_group'))
