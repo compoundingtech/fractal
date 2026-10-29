@@ -1177,9 +1177,11 @@ mission "person-work" state="ready" {{
     }
 
     /// Past an ask's deadline a person's answer is refused on a member that does not hold the
-    /// default yet, so a late answer never stands beside it.
+    /// default yet, so a late answer never stands beside it. The time the answer is stored at
+    /// decides, not when it was sent: one sent just before the deadline but written at it is
+    /// refused, and nothing of it is kept.
     #[test]
-    fn an_answer_after_the_deadline_is_refused_on_another_member() {
+    fn an_answer_stored_at_the_deadline_is_refused_on_another_member() {
         const ASKED: u128 = 1_800_000_000_000;
         let (owner, _, mut input) = fixture();
         owner.set_ask_deadlines(true);
@@ -1192,7 +1194,9 @@ mission "person-work" state="ready" {{
         other.set_ask_deadlines(true);
         other.project_replication_backlog().unwrap();
         receive(&owner, &other);
-        smallclaims::store::set_thread_clock(Some(ASKED + 3_600_000));
+        // Sent a moment before the deadline, and stored at it behind a queue of writes.
+        smallclaims::store::set_thread_clock(Some(ASKED + 3_600_000 - 1));
+        other.set_write_clock_at(ASKED + 3_600_000).unwrap();
         let late = PersonStepResponse {
             delegation: None,
             subject: ask.subject.clone(),
@@ -1204,6 +1208,10 @@ mission "person-work" state="ready" {{
             answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
         };
         assert_eq!(other.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
+        assert_eq!(other.step_run(&ask.subject).unwrap().unwrap().status, "ready");
+        let answers: i64 = other.readers.get().query_row("SELECT COUNT(*) FROM claims WHERE subject=?1 AND kind='work.person-done'",
+            [&ask.subject], |row| row.get(0)).unwrap();
+        assert_eq!(answers, 0, "the refused answer's write rolled back");
         // With deadlines off on that member nothing would apply the default there, so it accepts.
         other.set_ask_deadlines(false);
         other.finish_person_step(&late, false).unwrap();

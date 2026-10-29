@@ -1057,16 +1057,21 @@ entry as `timed_out`. A retry with the same idempotency key must name the same d
 `idempotency-conflict`. The reconciler arms one wake for the earliest deadline among the asks it
 resolves, so nothing polls for them.
 
-Only the ask's own member applies the default, but the person may answer on any member. With
-deadlines on, every member refuses a person's answer at or after the ask's `deadline_unix_ms` with
-`stale-fence`. An answer made before it can still reach the ask's member after the default was
-applied there. Then the person's answer stands and the default does not: every member keeps, of an
-ask's responses, a person's answer accepted before the deadline (or, for an ask made without one,
-before the default was applied) over the default, and drops a person's answer accepted after it.
-Members hold the same claims with the same accept times, so they agree. The asking step's
-`person_answers` then lists only the person's answer, its constraints say the answer replaces the
-default, and when the answer reaches the ask's member, it sends the asker one "Answered before its
-deadline" message, because the step may already have resumed on the default.
+Only the ask's own member applies the default, but the person may answer on any member. A member
+with deadlines on refuses a person's answer stored at or after the ask's `deadline_unix_ms` with
+`stale-fence`: the time the answer's claim is written decides, not when it was sent, and the
+refusal rolls that write back. A member with deadlines off accepts it, so the refusal holds
+everywhere only once deadlines are on on every member; such a late answer is then dropped as below.
+An answer made before the deadline can still reach the ask's member after the default was applied
+there. Then the person's answer stands and the default does not: every member keeps, of an ask's
+responses, a person's answer accepted before the deadline (or, for an ask made without one, before
+the default was applied) over the default, and drops a person's answer accepted after it. Members
+hold the same claims with the same accept times, so they agree. The asking step's `person_answers`
+then lists only the person's answer, its constraints say the answer replaces the default, and when
+the answer reaches the ask's member, it sends the asker one "Answered before its deadline" message,
+because the step may already have resumed on the default. A `--new-run` asker, which hears of
+answers by message, then has three: "Timed out" from the ask's member, the person's answer from
+the member they answered on, and that notice, which says the answer replaced the default.
 
 An ask made by a build without deadlines, or while they were off, carries none. Its deadline is
 the fleet default counted from the first reconcile pass on this member that saw deadlines on (the

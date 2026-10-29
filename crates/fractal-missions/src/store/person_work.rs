@@ -533,7 +533,6 @@ impl PersonWorkStore for Store {
             Some(authorization) => super::assistant_write_gate::pause(&authorization.grant_subject)?,
             None => None,
         };
-        let answered_at = now_ms();
         let deadlines = self.ask_deadlines();
         self.connection.batched(|tx| {
             let mut stable_input;
@@ -601,12 +600,6 @@ impl PersonWorkStore for Store {
                 || ask.as_ref().map(|a| current(tx, a, now_ms())).transpose().map_err(internal)?.is_some_and(|live| !live) {
                 return Err(St3Error::new("stale-fence", "this person step is no longer waiting in that episode"));
             }
-            // Past its deadline the ask's own member applies the default, which a later answer on
-            // another member must not race; answers before it win (`standing_responses`).
-            if !cancel && deadlines
-                && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| answered_at >= u128::from(deadline)) {
-                return Err(St3Error::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
-            }
             if ask.is_none() && input.episode.as_ref().is_some_and(|episode| episode != &format!("{}:{}:{}", view.generation, view.attempt, view.readiness_epoch)) {
                 return Err(St3Error::new("stale-fence", "this authored person step has moved to another episode"));
             }
@@ -644,6 +637,13 @@ impl PersonWorkStore for Store {
                 body["evidence"] = json!(response_evidence);
             }
             let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(response_actor), &body, &evidence, None).map_err(claim_append_error)?;
+            // Past its deadline the ask's own member applies the default, which a later answer on
+            // another member must not race; answers before it win (`standing_responses`). The
+            // stored time decides, so it is checked here, and refusing rolls this write back.
+            if !cancel && deadlines
+                && ask.as_ref().and_then(|a| a.body["fields"]["deadline_unix_ms"].as_u64()).is_some_and(|deadline| claim.accepted_at_unix_ms >= u128::from(deadline)) {
+                return Err(St3Error::new("stale-fence", "this ask's deadline has passed, so its default answer applies"));
+            }
             project(tx, &claim)?;
             if let Some(ask) = ask.as_ref().filter(|a| !cancel && a.body["fields"]["origin_step"].is_null() && !is_update(a)) {
                 send_answer_tx(tx, &self.origin, ask, &claim, &summary, answer.as_ref(), authorization)?;
@@ -693,7 +693,9 @@ impl PersonWorkStore for Store {
         if !deadlines && ask_deadlines_since(&self.readers.get())? != 0 {
             self.connection.batched(|tx| stop_counting_ask_deadlines(tx)).map_err(anyhow::Error::msg)??;
         }
-        let overridden = self.tell_overridden_defaults()?;
+        // Off, nothing applies a default, so there is none to override; the check resumes from
+        // where it stopped when deadlines are on again.
+        let overridden = deadlines && self.tell_overridden_defaults()?;
         // Drop this read connection before submitting any cancellation transaction.
         let has_asks: bool = {
             let connection = self.readers.get();
