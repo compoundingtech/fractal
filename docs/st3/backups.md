@@ -48,6 +48,45 @@ build and the schema of that migrated snapshot. A pinned old daemon writes the c
 fixture; the current exporter archives a copy of that graph and the current restorer verifies
 that its envelope inventory, claim sources and all graph table digests match.
 
+## Preserve suspected unsigned history before maintenance
+
+A populated v0.3.4 store can contain sealed delegation grants without claim
+signatures. Preserve raw state and keys **before** doctor, restart, checkpoint,
+or offline export: those operations can seal pending work or migrate their input.
+A claim archive does not preserve private keys or all pending unsealed work.
+
+Keep the original database, keys, configuration and exact binary together with
+checksums and capture times. A consistent SQLite copy must include committed WAL
+state; copying only the live database file is insufficient. Use SQLite's read-only
+source connection and backup API, or a consistent filesystem snapshot that also
+accounts for keys and configuration. Retain an untouched original and inspect a copy.
+
+From a clean checkout, use Python 3 to run the bounded stored-evidence audit:
+
+```sh
+python3 scripts/audit-claim-signatures /path/to/preserved/claims.sqlite3 > audit.json
+```
+
+The path is an invented example. The script opens SQLite with `mode=ro`,
+`query_only` and one read transaction; it never opens the store through Fractal,
+seals claims or changes verdicts. A missing database fails without creating one.
+Its `--help` lists query, row and payload caps. Optional `cbor2` enables inspection
+of original sealed payload maps; without it, payload inspection is incomplete.
+Install dependencies away from the specimen or inspect a preserved copy elsewhere.
+
+Exit 0 means the bounded audit completed, including when it found unsigned grants;
+exit 2 means incomplete evidence. Read `complete` and `limitations` along with the
+stored-signature, sealed-payload and cached-invalid counts. This tool does not
+recompute cryptographic validity, and retained history on one replica does not
+establish the state of its peers. Keep raw results private.
+
+Preserved unsealed work needs an isolated upgrade rehearsal with its original keys
+and a verified build before any rollout. Already-sealed unsigned delegations remain
+affected: restoring their envelopes, signing an outer wrapper or issuing a child
+grant cannot supply the missing inner signature. Do not rewrite envelopes, insert
+signature rows, delete verdicts or reset identities to clear warnings. Preserve the
+evidence and obtain an operator's recovery decision for the affected authority chain.
+
 ## Rehearse a restore
 
 Use a healthy current daemon and a separate empty directory. These commands neither start a
