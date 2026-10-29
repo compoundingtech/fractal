@@ -91,6 +91,12 @@
         "scripts/ci-web-shell",
         "scripts/ci-web-shell-inputs.jq",
         "scripts/ci-web-shell-test"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml",
+        ".github/workflows/workspace-ci.ts",
+        ".st/evidence-skip-policy.json::checks.fractal-web",
+        ".st/required-lanes.json::lanes.fractal-web"
       ]
     },
     "genie-freshness": {
@@ -191,8 +197,8 @@
         "flake.lock",
         "flake.nix",
         "scripts/build-stamp-watch-test",
-        "scripts/check-st-boundary",
-        "scripts/check-st-boundary-test",
+        "scripts/check-fractal-boundary",
+        "scripts/check-fractal-boundary-test",
         "scripts/ci-build-snapshot",
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
@@ -226,21 +232,21 @@
         "scripts/script-test-supervisor",
         "scripts/script_process.py",
         "scripts/sqlite_large_values.py",
-        "scripts/st3-boot-canaries-offers-test",
-        "scripts/st3-boot-canaries/admission-omp.mjs",
-        "scripts/st3-boot-canaries/codex-schemas",
-        "scripts/st3-boot-canaries/deny-socket-connect.py",
-        "scripts/st3-boot-canaries/run",
-        "scripts/st3-boot-canaries/stub-claude.py",
-        "scripts/st3-boot-canaries/stub-codex.py",
-        "scripts/st3-boot-canaries/stub-opencode.py",
-        "scripts/st3-boot-canaries/stub-pi-family.mjs",
-        "scripts/st3-boot-canaries/stubmodel.py",
-        "scripts/st3-no-st2-eval/claude",
-        "scripts/st3-no-st2-eval/run",
-        "scripts/st3-subagents-eval/claude",
-        "scripts/st3-subagents-eval/run",
-        "scripts/st_boundary.py"
+        "scripts/fractal-boot-canaries-offers-test",
+        "scripts/fractal-boot-canaries/admission-omp.mjs",
+        "scripts/fractal-boot-canaries/codex-schemas",
+        "scripts/fractal-boot-canaries/deny-socket-connect.py",
+        "scripts/fractal-boot-canaries/run",
+        "scripts/fractal-boot-canaries/stub-claude.py",
+        "scripts/fractal-boot-canaries/stub-codex.py",
+        "scripts/fractal-boot-canaries/stub-opencode.py",
+        "scripts/fractal-boot-canaries/stub-pi-family.mjs",
+        "scripts/fractal-boot-canaries/stubmodel.py",
+        "scripts/fractal-no-st2-eval/claude",
+        "scripts/fractal-no-st2-eval/run",
+        "scripts/fractal-subagents-eval/claude",
+        "scripts/fractal-subagents-eval/run",
+        "scripts/fractal_boundary.py"
       ],
       "tree_inputs": [
         ".cargo",
@@ -270,6 +276,11 @@
         "tests",
         "vendor",
         "wit"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.linux-gate",
+        ".st/evidence-skip-policy.json::checks.linux-gate",
+        ".st/required-lanes.json::lanes.linux-gate"
       ]
     },
     "rust-tests": {
@@ -285,8 +296,8 @@
         "flake.lock",
         "flake.nix",
         "scripts/build-stamp-watch-test",
-        "scripts/check-st-boundary",
-        "scripts/check-st-boundary-test",
+        "scripts/check-fractal-boundary",
+        "scripts/check-fractal-boundary-test",
         "scripts/ci-build-snapshot",
         "scripts/ci-build-snapshot-test",
         "scripts/ci-cargo-tools-env",
@@ -321,21 +332,21 @@
         "scripts/script-test-supervisor",
         "scripts/script_process.py",
         "scripts/sqlite_large_values.py",
-        "scripts/st3-boot-canaries-offers-test",
-        "scripts/st3-boot-canaries/admission-omp.mjs",
-        "scripts/st3-boot-canaries/codex-schemas",
-        "scripts/st3-boot-canaries/deny-socket-connect.py",
-        "scripts/st3-boot-canaries/run",
-        "scripts/st3-boot-canaries/stub-claude.py",
-        "scripts/st3-boot-canaries/stub-codex.py",
-        "scripts/st3-boot-canaries/stub-opencode.py",
-        "scripts/st3-boot-canaries/stub-pi-family.mjs",
-        "scripts/st3-boot-canaries/stubmodel.py",
-        "scripts/st3-no-st2-eval/claude",
-        "scripts/st3-no-st2-eval/run",
-        "scripts/st3-subagents-eval/claude",
-        "scripts/st3-subagents-eval/run",
-        "scripts/st_boundary.py"
+        "scripts/fractal-boot-canaries-offers-test",
+        "scripts/fractal-boot-canaries/admission-omp.mjs",
+        "scripts/fractal-boot-canaries/codex-schemas",
+        "scripts/fractal-boot-canaries/deny-socket-connect.py",
+        "scripts/fractal-boot-canaries/run",
+        "scripts/fractal-boot-canaries/stub-claude.py",
+        "scripts/fractal-boot-canaries/stub-codex.py",
+        "scripts/fractal-boot-canaries/stub-opencode.py",
+        "scripts/fractal-boot-canaries/stub-pi-family.mjs",
+        "scripts/fractal-boot-canaries/stubmodel.py",
+        "scripts/fractal-no-st2-eval/claude",
+        "scripts/fractal-no-st2-eval/run",
+        "scripts/fractal-subagents-eval/claude",
+        "scripts/fractal-subagents-eval/run",
+        "scripts/fractal_boundary.py"
       ],
       "tree_inputs": [
         ".cargo",
@@ -365,6 +376,14 @@
         "tests",
         "vendor",
         "wit"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.evidence-gate-rust-tests",
+        ".github/workflows/fleet.yml::jobs.evidence-note-rust-tests",
+        ".st/evidence-skip-policy.json::checks.rust-tests",
+        ".st/required-lanes.json::lanes.rust-tests",
+        "scripts/ci-rust-test-result",
+        "scripts/rust-test-keys"
       ]
     },
     "typescript-client": {
@@ -435,6 +454,11 @@
         "packages/fractal-ui/package.json5",
         "packages/fractal-ui/package.yaml",
         "packages/fractal-ui/pnpm-workspace.yaml"
+      ],
+      "ci_inputs": [
+        ".github/workflows/fleet.yml::jobs.typescript-client",
+        ".st/evidence-skip-policy.json::checks.typescript-client",
+        ".st/required-lanes.json::lanes.typescript-client"
       ]
     }
   }

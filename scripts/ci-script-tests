@@ -24,11 +24,11 @@ parallel_tests \
   ci-mail-redelivery-canaries-test ci-test-partitions-test ci-test-archive-test ci-build-memory-test ci-evidence-source-test \
   ci-queue-watch-test check-main-ci-test ci-perf-cache-test ci-perf-slot-test ci-perf-scope-test \
   ci-cache-audit-test ci-genie-cache-cleanup-test web-skip-proof-test ci-evidence-observe-test evidence-lane-trace-test \
-  evidence-gc-test evidence-log-test ci-signed-tree-test ci-evidence-slo-test evidence-keygen-test \
+  evidence-gc-test evidence-log-test evidence-log-watch-test ci-signed-tree-test ci-evidence-slo-test evidence-keygen-test \
   fractal-test-test fractal-test-report-test ci-local-test evidence-prepush-test evidence-presign-worker-test evidence-queue-signer-test \
   evidence-wrap-test ci-evidence-signing-test evidence-publish-test ci-evidence-shadow-test nix-check-facts-test \
   ci-evidence-gate-test evidence-flip-ready-test evidence-skip-report-test ci-evidence-presign-notice-test evidence-sign-hardening-test ci-daily-long-report-test \
-  ci-nextest-flaky-test nix-typescript-client-test ci-nix-fixed-outputs-test nix-evidence-job-test ci-nextest-test ci-local-web-test ci-sparse-tree-test \
+  ci-nextest-flaky-test ci-parallel-tests-test nix-typescript-client-test ci-nix-fixed-outputs-test nix-evidence-job-test ci-nextest-test ci-local-web-test ci-sparse-tree-test \
   ci-rust-test-notes-test lane-definition-closure-test review-risk-test review-validate-test \
   classify-risk-test \
-  check-pty-boot-identities-test
+  check-pty-boot-identities-test review-test

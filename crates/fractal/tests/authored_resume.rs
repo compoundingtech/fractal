@@ -40,7 +40,7 @@ async fn authored_omp_resume_publishes_binding_from_an_empty_managed_directory()
         .find(|candidate| candidate.is_file())
         .expect("the OMP admission stand-in needs Node on the fixture PATH");
     let admission_host = PathBuf::from(test_env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/st3-boot-canaries/stub-pi-family.mjs");
+        .join("../../scripts/fractal-boot-canaries/stub-pi-family.mjs");
     // The fake provider uses the actual spawned channel, not a direct API binding request.
     // Its admission mode loads the actual adapter against the loopback model fixture.
     std::fs::write(&provider, format!(r#"#!{bash}
@@ -142,7 +142,7 @@ agent "garden/worker" {{
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let hooks = fractal_daemon::hooks::ensure_installed(&root.path().join("hooks")).unwrap();
-    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     let stop = root.path().join("provider-stop");
     command
         .env_clear()

@@ -3088,6 +3088,49 @@ fn the_actual_cache_follows_each_subjects_newest_claim() {
 }
 
 #[test]
+fn the_actual_cache_key_seeks_rather_than_reading_the_subjects_history() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/run/busy";
+    let append = |kind: &str| {
+        let field = if kind == "harness.observed" { "state" } else { "status" };
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: Some(subject.into()),
+                fields: BTreeMap::from([(field.into(), Value::String("idle".into()))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let key_steps = |store: &Store| {
+        let connection = store.readers.get();
+        let mut key = connection.prepare(/* sqlite-large-value: allow-for-now lv-hfe69cd49bb6b owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ &ACTUAL_STATE_NEWEST).unwrap();
+        key.reset_status(rusqlite::StatementStatus::VmStep);
+        let newest: u64 = key.query_row(/* sqlite-large-value: allow-for-now lv-h82fa95c68afa owner=fractal_store::store::tests TODO=trace-statement-and-value-representation */ [subject], |row| row.get(0)).unwrap();
+        (newest, key.get_status(rusqlite::StatementStatus::VmStep))
+    };
+    append("runtime.observed");
+    append("harness.observed");
+    let (_, short) = key_steps(&store);
+
+    let mut newest = 0;
+    for _ in 0..400 {
+        newest = append("runtime.observed").store_index;
+        append("harness.observed");
+    }
+    append("harness.observed");
+    let (key, long) = key_steps(&store);
+    assert_eq!(key, newest, "the key is the newest actual-state claim, not a harness report");
+    assert_eq!(
+        long, short,
+        "the key read costs the same at 800 claims as at two: {long} VM steps against {short}"
+    );
+}
+
+#[test]
 fn declaration_restart_observation_waits_on_an_older_registry() {
     let store = Store::open_memory("node").unwrap();
     let record = store.append_claim(&ClaimInput {
@@ -11339,6 +11382,38 @@ fn a_live_seat_without_a_quiet_observation_of_its_incarnation_is_never_quiet() {
     assert!(check(2));
     runtime("exited", None);
     assert!(!check(2));
+}
+
+#[test]
+fn a_claims_acceptance_time_is_read_from_the_store_once() {
+    let store = Store::open_memory("node").unwrap();
+    let observe = |n: usize| {
+        store
+            .append_claim(&ClaimInput {
+                subject: format!("agent/node.worker-{n}"),
+                kind: "runtime.observed".into(),
+                actor: None,
+                fields: serde_json::from_value(json!({"status": "running"})).unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap()
+    };
+    let first = observe(0);
+    let second = observe(1);
+    let read = || CLAIM_ACCEPTANCE_TIMES_READ.with(std::cell::Cell::get);
+    let before = read();
+    let times = store.kept_claim_acceptance_times(&[&first.id, &second.id]).unwrap();
+    assert_eq!(times.get(&first.id), Some(&first.accepted_at_unix_ms));
+    assert_eq!(times.get(&second.id), Some(&second.accepted_at_unix_ms));
+    assert_eq!(read(), before + 2);
+    // A later fold that shows the same claims reads none of them again; a new one only itself.
+    let third = observe(2);
+    let times = store.kept_claim_acceptance_times(&[&first.id, &second.id, &third.id]).unwrap();
+    assert_eq!(times.get(&third.id), Some(&third.accepted_at_unix_ms));
+    assert_eq!(times, store.claim_acceptance_times(&[&first.id, &second.id, &third.id]).unwrap());
+    assert_eq!(read(), before + 3, "kept acceptance times were read again");
 }
 
 #[test]

@@ -48,8 +48,8 @@ pub fn input(subject: &str, kind: &str, actor: &str, fields: Value) -> ClaimInpu
 }
 
 pub fn custom(store: &Store, subject: &str, person: &str) {
-    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h9cf5f74c21f6 owner=fractal_store::store::attention_ivm::tests_shared_seats TODO=trace-statement-and-value-representation */ include_str!(
-        "../../../../../examples/st3/custom-review.json"
+    let manifest = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h5650237ff33b owner=fractal_store::store::attention_ivm::tests_shared_seats TODO=trace-statement-and-value-representation */ include_str!(
+        "../../../../../examples/fractal/custom-review.json"
     ))
     .unwrap();
     store

@@ -105,7 +105,7 @@
                 person = "person/ada";
                 socket = "/tmp/fractal-test.sock";
                 ptyPackage = ptyPackage;
-                declarations.seats = [ ./examples/st3/seats/claude.kdl ];
+                declarations.seats = [ ./examples/fractal/seats/claude.kdl ];
               } // builtins.removeAttrs extraConfig [ "fractalBinary" "forceLegacyConfig" "homeFiles" "configFiles" ];
             })
           ];

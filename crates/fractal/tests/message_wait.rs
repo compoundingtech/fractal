@@ -97,7 +97,7 @@ async fn wait_for(socket: &Path) {
 /// Run the st CLI against `socket` with none of this process's st environment, so a harness
 /// running the suite lends it no seat identity, projection root or incarnation.
 async fn st(socket: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let env = env
         .iter()

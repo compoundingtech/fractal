@@ -134,6 +134,9 @@ if [ -x "$account_home/.local/bin/build-admission" ]; then
   export BUILD_ADMISSION_BIN="${BUILD_ADMISSION_BIN:-$account_home/.local/bin/build-admission}"
   export BUILD_ADMISSION_CONFIG="${BUILD_ADMISSION_CONFIG:-$account_home/.config/build-admission}"
   export BUILD_ADMISSION_STATE="${BUILD_ADMISSION_STATE:-$account_home/.local/state/st3/operations}"
+  # The cargo shim writes its slot waits to the admission log, which it finds under $HOME unless this names it: under the stages' HOME
+  # every write failed (No such file or directory), and a day's waits inside ci-local went unrecorded (2026-10-27).
+  export BUILD_ADMISSION_LOG="${BUILD_ADMISSION_LOG:-$BUILD_ADMISSION_STATE/build-admission.log}"
   export BUILD_ADMISSION_FALLBACK_LOCK="${BUILD_ADMISSION_FALLBACK_LOCK:-$account_home/.local/state/st3/operations/build-admission-fallback.lock}"
 fi
 [ -r "$account_home/.config/cargo-priority" ] && export CARGO_PRIORITY_FILE="${CARGO_PRIORITY_FILE:-$account_home/.config/cargo-priority}"

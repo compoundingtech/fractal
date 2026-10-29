@@ -40,7 +40,7 @@ impl Daemon {
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
         std::fs::write(&config, "[reconcile]\nmax_passes_per_minute = 600\n").unwrap();
         let log = File::create(root.join("daemon.log")).unwrap();
-        let child = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        let child = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .env_clear()
             .env("HOME", root)
             .env(
@@ -109,7 +109,7 @@ impl Daemon {
     }
 
     fn run_cli_format(&self, args: &[&str], json: bool) -> std::process::Output {
-        let mut command = fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
         command
             .env_clear()
             .env("HOME", &self.root)
@@ -820,7 +820,7 @@ mission "orchid/replay" state="ready" {
         health["message"].as_str().unwrap().contains(stuck),
         "{health}"
     );
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .env_clear()
         .env("HOME", root.path())
         .env("ST3_DAEMON_WAIT", "0")

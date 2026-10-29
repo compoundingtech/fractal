@@ -231,10 +231,10 @@ New test files and paths are checked automatically by `genie-freshness` on each 
 merge group. A guard failure names each file and line and points its author to `test_env!`
 and these repair instructions; it does not allow the raw path through.
 If `genie-freshness` reports `unrelocated test paths: FILE:LINE`, replace the raw test path
-at that location with `test_env!("CARGO_BIN_EXE_st3-fixture")`,
+at that location with `test_env!("CARGO_BIN_EXE_fractal-fixture")`,
 `test_env!("CARGO_MANIFEST_DIR")` or `test_env!("CARGO_TARGET_TMPDIR")`, as appropriate.
 Use `test_env!("CARGO_MANIFEST_DIR", "/relative/fixture")` instead of a `concat!` fixture
-path, and `test_bin!("st3-fixture")` instead of `cargo_bin!`. The integration test root and
+path, and `test_bin!("fractal-fixture")` instead of `cargo_bin!`. The integration test root and
 test-enabled libraries already import `scripts/ci-test-paths.rs`; a separate test target
 must import that helper with `#[macro_use]` and a `#[path = "..."]` relative to its source
 file. Keep the original fixture, executable, arguments and assertions. Run
@@ -311,7 +311,7 @@ not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, hold
 lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
-Fractal integration fixtures use the separate `st3-fixture` executable, built automatically by
+Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by
 the test-only `test-support` dev dependency. It captures an isolated Bash environment,
 reads only the fixture HOME's `.bash_profile`, preserves the fixture PATH, and ignores the
 launching seat's process ancestry. The production `st3` target has no runtime flag or
@@ -329,7 +329,7 @@ host's temporary-filesystem quota when debug binaries are copied by parallel cas
 
 On Linux, tests that launch isolated daemons, drivers, PTYs or long-lived CLI children call
 `fractal_daemon::test_support::supervise_test()` before creating their fixtures. It runs that exact test
-under `scripts/st3_test_process.py`, a detached subreaper watching pidfds for the Rust runner
+under `scripts/fractal_test_process.py`, a detached subreaper watching pidfds for the Rust runner
 and its launcher. Success, failure, panic, timeout, SIGTERM and SIGKILL of the runner all
 end the owned process tree. Each test has its own process group; detached children are
 adopted and killed and reaped before the supervisor returns the test's status. Exited adopted
@@ -350,7 +350,7 @@ their tasks end with their test runtime. New process-spawning fixtures should us
 The workspace suite still covers the token-free two-node messaging fault matrix. Its
 previous-release channel archive is pinned in `.github/messaging-compat-baseline.json`. Its
 provider stand-in runs the omp channel hook's TypeScript with Node 24's built-in type stripping;
-the default devShell supplies that `node`. See [the eval contract](../evals/st3/messaging-faults/README.md).
+the default devShell supplies that `node`. See [the eval contract](../evals/fractal/messaging-faults/README.md).
 
 ### Rolling compatibility baselines
 
@@ -417,7 +417,7 @@ workflows in the ordinary final validation.
 
 `boot_canaries::*` in `linux-tests` boots real seats of every harness Fractal drives (Claude, Codex, pi,
 omp, OpenCode) against a real Fractal daemon and real `pty` sessions, with a token-free stand-in for
-the provider (`scripts/st3-boot-canaries`; see its README). Five scenarios per harness: a fresh
+the provider (`scripts/fractal-boot-canaries`; see its README). Five scenarios per harness: a fresh
 seat, a restarted seat, a daemon restart while the predecessor is still the latest runtime
 observation, a driver re-exec into a replaced binary, and five seats launching at once. Each seat
 must claim its step with its current incarnation and read a Fractal message within the time bound, and
@@ -534,8 +534,8 @@ existing scope.
 
 ### Current-product boundary
 
-Every required Linux stage runs `scripts/check-st-boundary-test` and
-`scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
+Every required Linux stage runs `scripts/check-fractal-boundary-test` and
+`scripts/check-fractal-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
 in st3/Fractal TUI, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 
@@ -1540,11 +1540,10 @@ branch deletion after merge. Check the live settings against the file with `gh-c
 nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
 ```
 
-A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
-no force push, an empty bypass list, creation open (CI and agents create records). Its enforcement is turned off only by
-`scripts/evidence-gc --lock-config`, around its own tag deletions, logged and relocked in a `finally`; see
-[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace). `gh-check-settings` reports it
-as drifted during that window.
+A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no update and no force push,
+an empty bypass list, creation open (CI and agents create records) and deletion open, so `scripts/evidence-gc` deletes
+dead trees with its host's own login; see
+[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace).
 
 `st/ci` is no longer required. Its producer on the fleet's machines is retired after the first
 pull request has merged through the queue.

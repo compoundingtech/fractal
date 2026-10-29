@@ -14,7 +14,7 @@
   "scripts/ci-nextest-targets",
   "scripts/ci-rustc-wrapper",
   "scripts/rust-test-keys",
-  "scripts/st3_test_process.py"
+  "scripts/fractal_test_process.py"
  ],
  "crates": {
   "agent-spec": {
@@ -42,7 +42,7 @@
     "docs/st3/operational-state/screens.json",
     "evals",
     "examples/demos",
-    "examples/st3",
+    "examples/fractal",
     "fixtures",
     "scripts",
     "slo",
@@ -57,7 +57,7 @@
     "crates/fractal-daemon/fixtures/native-records/schema-conformance.jsonl",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
-    "examples/st3/custom-review.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -91,6 +91,7 @@
     "docs/st3/client-v0/schemas/operations.json",
     "fixtures/clients/device-signing-v1.json",
     "fixtures/clients/plain-errors-v1.json",
+    "fixtures/clients/stream-sync/frames.json",
     "fixtures/scenarios",
     "scripts/ci-test-paths.rs"
    ]
@@ -140,7 +141,7 @@
     "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
     "docs/st3/client-v0/fixtures/timeline-relay-omission.json",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
-    "examples/st3/custom-review.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -165,7 +166,7 @@
     "plugins/claude/st-channel/.claude-plugin/plugin.json",
     "plugins/claude/st-channel/.mcp.json",
     "scripts/ci-test-paths.rs",
-    "scripts/st3-boot-canaries/codex-schemas"
+    "scripts/fractal-boot-canaries/codex-schemas"
    ]
   },
   "fractal-e2e": {
@@ -248,7 +249,7 @@
   "fractal-missions": {
    "extra": [
     "crates/fractal-daemon/tests/fixtures/pre-diet-store.sqlite3.gz",
-    "examples/st3/custom-review.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -298,8 +299,8 @@
   "fractal-schema": {
    "extra": [
     "docs/st3/schema.md",
-    "examples/st3/custom-review.json",
-    "examples/st3/decision-tree.json"
+    "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree.json"
    ]
   },
   "fractal-seats": {
@@ -310,7 +311,7 @@
     "crates/fractal-daemon/fixtures/native-records/codex.jsonl",
     "crates/fractal-daemon/fixtures/omp-resume/run4-08-after-retry.jsonl",
     "crates/fractal-daemon/fixtures/omp-tool-results.jsonl",
-    "examples/st3/custom-review.json",
+    "examples/fractal/custom-review.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -337,10 +338,10 @@
     "crates/fractal-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl",
     "crates/fractal-daemon/fixtures/omp-tool-results.jsonl",
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
-    "evals/st3",
-    "examples/st3/custom-review.json",
-    "examples/st3/decision-tree.json",
-    "examples/st3/human-feedback.kdl",
+    "evals/fractal",
+    "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree.json",
+    "examples/fractal/human-feedback.kdl",
     "scripts/ci-test-paths.rs",
     "slo"
    ]

@@ -571,7 +571,7 @@ async fn a_refused_connection_is_a_connect_error() {
     );
 }
 
-/// The messaging-faults link while disabled (`scripts/st3-messaging-faults-eval/run`,
+/// The messaging-faults link while disabled (`scripts/fractal-messaging-faults-eval/run`,
 /// `Link.listen`): it accepts the connection and closes it without forwarding a byte. The held
 /// link_minutes failures were this, not a refused connection.
 #[tokio::test]

@@ -123,8 +123,11 @@ Identity readings that share no seat with a declared account are never assigned 
 
 A seat that sets no login variable runs on the harness's default login (`~/.claude` for Claude Code,
 `~/.codex` for Codex), so when a declared account's login on that host is that directory the seat
-runs on the account too. A seat for a harness that reads a key file instead (`omp`) runs on the one
-`api-key` account that names its `harness` and has a login on the host.
+runs on the account too. A seat for a harness that reads a key file instead (`omp`) runs on the
+`api-key` account whose `login` is the key file its environment names (`ST_OMP_API_KEY_FILE`); with
+none named it reads `~/.config/anthropic/api-key`, so it runs on the account that declares that
+file, or on the only `api-key` account that names its `harness` and has a login on the host. A seat
+that names a key file no account declares runs on no account.
 
 ### Every panel lists the declared accounts
 
@@ -165,8 +168,9 @@ account "ada/api-key" {
 These readings are made when the report is read, from today's declarations, so they are a view of
 spend and not an invoice. Declaring a second account for a harness on a host (or removing one)
 changes which account the past unlabelled rows there are read as, because "exactly one" no longer
-holds or now does. An `omp` row is read as the one `api-key` account that names `omp` on its host,
-whichever key that seat really used; credits used is therefore the spend of those seats at API list
+holds or now does. An unlabelled `omp` row is read as the only `api-key` account that names `omp` on
+its host, or, where two keys have a login there, as the one that declares the default key file
+(`~/.config/anthropic/api-key`); a seat launched with another key file recorded its account; credits used is therefore the spend of those seats at API list
 prices, not what the provider billed. A report reads its rows, limits and the month's rows in
 separate snapshots, which is harmless for a display.
 

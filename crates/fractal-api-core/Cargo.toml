@@ -53,6 +53,9 @@ tower = { version = "0.5", features = ["util"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4", "v7"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+inotify = "0.11"
+
 [dev-dependencies]
 fractal_api_core_self = { package = "fractal-api-core", path = ".", features = ["test-support"] }
 smallclaims = { path = "../smallclaims", features = ["test-support"] }

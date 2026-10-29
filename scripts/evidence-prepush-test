@@ -582,6 +582,14 @@ class Hook(unittest.TestCase):
         self.assertIn({'done': True}, self.entries())  # and it finished by itself afterwards
         self.assertTrue(list((self.home / '.local/state/st3/evidence-prepush').glob('*.log')))
 
+    def test_the_status_questions_time_counts_against_an_agents_wait(self):
+        started = time.monotonic()
+        done = self.push(STUB_STATUS='3', STUB_STATUS_SLEEP='6', STUB_SLEEP='60', ST_EVIDENCE_AGENT_LIMIT='8')  # a script
+        self.assertLess(time.monotonic() - started, 12)  # about 8 s in all, not 6 + 8
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn('still signing in the background', done.stderr)
+        self.assertTrue(self.remote_has('refs/heads/feature'))
+
     def receipts(self):
         path = self.home / '.local/state/st3/evidence-prepush/receipts.jsonl'
         return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
@@ -667,6 +675,13 @@ class Hook(unittest.TestCase):
         self.assertEqual({k: v for k, v in self.receipts()[-1].items() if k != 'time'},
                          {'tree': tree, 'branch': 'feature', 'agent': 'agent/some/seat', 'outcome': 'refused', 'uncovered': ['genie-freshness']})
         self.assertEqual({c['argv'][0] for c in self.calls()}, {'--status'})  # nothing is signed for an agent
+
+    def test_an_agents_push_waits_for_a_status_that_takes_over_a_minute(self):
+        # On a loaded build host the question takes about two minutes: under the old 60 s default every agent's push was refused.
+        done = self.push(STUB_STATUS='0', STUB_STATUS_SLEEP='65', ST_AGENT='agent/some/seat')
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(self.remote_has('refs/heads/feature'))
+        self.assertEqual(self.receipts()[-1]['outcome'], 'covered')
 
     def test_an_agents_push_is_refused_when_the_status_cannot_be_read(self):
         for name, env in (('error', {'STUB_STATUS': '7'}), ('timeout', {'STUB_STATUS_SLEEP': '3', 'ST_EVIDENCE_STATUS_TIMEOUT': '1'})):

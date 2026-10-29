@@ -243,6 +243,9 @@ def wait_calm(rules):
 
 
 def free_gib(path):
+    given = os.environ.get('EVIDENCE_PRESIGN_FREE_GIB')  # a stand-in for the disk, as EVIDENCE_PRESIGN_MEMINFO is for memory
+    if given:
+        return float(given)
     stat = os.statvfs(path)
     return stat.f_bavail * stat.f_frsize / 2**30
 
