@@ -5125,6 +5125,25 @@ mod tests {
     }
 
     #[test]
+    fn a_retryable_code_this_client_does_not_know_stays_retryable() {
+        // An older client meets a newer daemon's code (as clients before agent-roster-not-ready
+        // meet the agents roster's 503): it reads the code as unknown and still retries.
+        let envelope: ErrorEnvelope = serde_json::from_value(serde_json::json!({
+            "api_version": "st3.client.v0",
+            "error_version": "st3.client.error.v0",
+            "request_id": "request/test",
+            "code": "a-code-from-a-newer-daemon",
+            "message": "the agents roster is still being prepared; retry shortly",
+            "retryable": true,
+            "details": {}
+        }))
+        .unwrap();
+        assert_eq!(envelope.code, ErrorCode::Unknown);
+        let error = ClientError::Api(envelope.code.clone(), envelope.message.clone(), Box::new(envelope));
+        assert!(error.is_transient());
+    }
+
+    #[test]
     fn server_fence_round_trip_preserves_action_preconditions() {
         let wire = serde_json::json!({
             "snapshot_id": "snapshot/owner/7",
