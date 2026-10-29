@@ -111,8 +111,13 @@ def unpack(archive, dest):
     for name, path in zip(names, paths):
         if not path.parts or name.startswith('/') or '..' in path.parts:
             raise ValueError('unexpected snapshot archive path')
-    if 'fractal-ci-cache' not in {path.parts[0] for path in paths}:
-        raise source.IncompatibleSnapshot('snapshot lacks the current cache directory')
+    legacy = '-'.join(('st', 'ci', 'cache'))
+    roots = {path.parts[0] for path in paths}
+    directories = {name.rstrip('/') for name in names if name.endswith('/')}
+    if (legacy in roots and 'fractal-ci-cache' not in roots
+            and roots <= {'target', 'cargo-home', legacy, 'cost-stores', 'zig-tool'}
+            and {'target', 'cargo-home/registry', 'cargo-home/git', legacy} <= directories):
+        raise source.IncompatibleSnapshot('snapshot uses the previous cache directory')
     for path in paths:
         if path.parts[0] not in ('target', 'cargo-home', 'fractal-ci-cache', 'cost-stores', 'zig-tool'):
             raise ValueError('unexpected snapshot archive path')

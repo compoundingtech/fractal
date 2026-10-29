@@ -165,8 +165,13 @@ def unpack(archive, destination, names):
     for path in paths:
         if path.is_absolute() or '..' in path.parts or not path.parts:
             raise ValueError('unexpected snapshot path')
-    if 'fractal-ci-cache' in names and 'fractal-ci-cache' not in {path.parts[0] for path in paths}:
-        raise IncompatibleSnapshot('snapshot lacks the current cache directory')
+    legacy = '-'.join(('st', 'ci', 'cache'))
+    roots = {path.parts[0] for path in paths}
+    directories = {name.rstrip('/') for name in listing.splitlines() if name.endswith('/')}
+    if ('fractal-ci-cache' in names and legacy in roots and 'fractal-ci-cache' not in roots
+            and roots <= (set(names) - {'fractal-ci-cache'}) | {legacy}
+            and {'target', 'cargo-home/registry', 'cargo-home/git', 'perf-sccache', legacy} <= directories):
+        raise IncompatibleSnapshot('snapshot uses the previous cache directory')
     for path in paths:
         if path.parts[0] not in names:
             raise ValueError('unexpected snapshot path')

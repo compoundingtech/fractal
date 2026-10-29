@@ -264,8 +264,9 @@ backend) holding Cargo's registry and the workspace `target/` directory, keyed o
 copies reference-free downloads and sources fetched by the run, plus the closures of the
 previous-release messaging package and provider components. It leaves the installer-managed
 `/nix` directory intact. Cache failures emit a warning and let the job build normally.
-Build and performance snapshots lacking the current cache directory are clean cache misses:
-the reader skips them without extracting or installing outputs and builds from dependency caches.
+Complete build and performance snapshots using only the known previous cache-directory layout
+are clean cache misses: the reader skips them without extracting or installing outputs.
+Unexpected roots, mixed directory generations and incomplete archives remain hard validation errors.
 New signing keys use the name `fractal-ci-cache-1`; restored keys retain their identity, and trust
 is derived from the restored secret rather than a hardcoded signing-name prefix.
 

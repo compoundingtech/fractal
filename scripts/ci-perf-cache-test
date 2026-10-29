@@ -202,10 +202,13 @@ with tempfile.TemporaryDirectory() as tmp:
     # Previous cache-directory layouts are misses, never extracted or installed.
     legacy = temp / 'legacy'
     legacy.mkdir()
-    for name in ('target', 'cargo-home/registry', 'cargo-home/git', '-'.join(('st', 'ci', 'cache'))):
+    for name in ('target', 'cargo-home/registry', 'cargo-home/git', 'perf-sccache', '-'.join(('st', 'ci', 'cache'))):
         (legacy / name).mkdir(parents=True, exist_ok=True)
     archive = temp / 'legacy.tar.zst'
     module.subprocess.run(['tar', '--zstd', '-cf', str(archive), '-C', str(legacy),
+                           'target', 'cargo-home', 'perf-sccache', '-'.join(('st', 'ci', 'cache'))], check=True)
+    build_archive = temp / 'legacy-build.tar.zst'
+    module.subprocess.run(['tar', '--zstd', '-cf', str(build_archive), '-C', str(legacy),
                            'target', 'cargo-home', '-'.join(('st', 'ci', 'cache'))], check=True)
     untouched = temp / 'untouched'
     untouched.mkdir()
@@ -221,12 +224,45 @@ with tempfile.TemporaryDirectory() as tmp:
     snapshot = importlib.util.module_from_spec(snapshot_spec)
     snapshot_loader.exec_module(snapshot)
     try:
-        snapshot.unpack(archive, untouched)
+        snapshot.unpack(build_archive, untouched)
     except snapshot.source.IncompatibleSnapshot:
         pass
     else:
         raise AssertionError('previous build archive layout must be a cache miss')
     assert list(untouched.iterdir()) == []
+    # Only the complete known legacy layout is recoverable. Corrupt or mixed layouts remain fatal.
+    for reader, expected, legacy_roots in (
+            (module, ('target', 'cargo-home', 'perf-sccache', 'fractal-ci-cache'),
+             ['target', 'cargo-home', 'perf-sccache', '-'.join(('st', 'ci', 'cache'))]),
+            (snapshot, None, ['target', 'cargo-home', '-'.join(('st', 'ci', 'cache'))])):
+        (legacy / 'arbitrary').mkdir(exist_ok=True)
+        (legacy / 'fractal-ci-cache').mkdir(exist_ok=True)
+        cases = [
+            (['arbitrary'], 'unexpected snapshot'),
+            (legacy_roots + ['arbitrary'], 'unexpected snapshot'),
+            (legacy_roots + ['fractal-ci-cache'], 'unexpected snapshot'),
+            (['target', '-'.join(('st', 'ci', 'cache'))], 'unexpected snapshot'),
+            (['target', 'fractal-ci-cache'], 'incomplete build snapshot'),
+            (['target'], 'incomplete build snapshot'),
+        ]
+        for members, message in cases:
+            invalid = temp / 'invalid.tar.zst'
+            module.subprocess.run(['tar', '--zstd', '-cf', str(invalid), '-C', str(legacy), *members], check=True)
+            with tempfile.TemporaryDirectory(dir=temp) as destination:
+                try:
+                    if expected is None:
+                        reader.unpack(invalid, Path(destination))
+                    else:
+                        reader.unpack(invalid, Path(destination), expected)
+                        # The perf restore loop checks required directories after unpacking.
+                        for name in expected:
+                            if not (Path(destination) / name).is_dir():
+                                raise ValueError(f'incomplete build snapshot: missing {name}')
+                except ValueError as error:
+                    assert type(error) is ValueError, 'invalid archives must not become recoverable misses'
+                    assert message in str(error), str(error)
+                else:
+                    raise AssertionError(f'invalid archive accepted: {members}')
     event_path, github_output, github_env, summary = [temp / name for name in ('event.json', 'output', 'env', 'summary')]
     event_path.write_text('{}')
     artifact = dict(name='recipe', expired=False, workflow_run=dict(id=1))
@@ -234,7 +270,7 @@ with tempfile.TemporaryDirectory() as tmp:
         return dict(artifacts=[artifact]) if '/artifacts?' in path else dict(id=1)
     def snapshot_download(repo, run, name, dest):
         dest.mkdir()
-        module.shutil.copyfile(archive, dest / 'build.tar.zst')
+        module.shutil.copyfile(build_archive, dest / 'build.tar.zst')
     with patch.dict(os.environ, GITHUB_REPOSITORY='example/project', GITHUB_EVENT_PATH=str(event_path),
                     GITHUB_OUTPUT=str(github_output), GITHUB_ENV=str(github_env),
                     GITHUB_STEP_SUMMARY=str(summary), GITHUB_RUN_ID='2', GITHUB_RUN_ATTEMPT='1',
