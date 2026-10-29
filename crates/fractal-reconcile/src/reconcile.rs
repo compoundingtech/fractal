@@ -208,8 +208,9 @@ fn schedule_admission_peers(store: &Store, host: &str, configured: &[String]) ->
 }
 
 /// Moving a schedule (or removing its standby) must not turn an old missing-history
-/// comparison into permission to run on a second host. Conservatively retain the strict
-/// policy for the entire retained history after any role/owner change, not just a timeout.
+/// comparison into permission to run on a second host. Retain the strict policy after
+/// any role, owning run, or declaring step change. Revising the same owning run changes
+/// its generation, not its ownership, and does not require complete history.
 fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) -> Result<bool> {
     let Some(current) = owned_schedule_spec(store, schedule)? else { return Ok(true) };
     if current.standby.is_some() { return Ok(true); }
@@ -219,7 +220,6 @@ fn schedule_requires_complete_history(store: &Store, schedule: &DesiredSubject) 
         };
         if previous.host != current.host || previous.standby.is_some()
             || claim.body["owner_run"].as_str() != schedule.owner_run.as_deref()
-            || claim.body["owner_generation"].as_str() != schedule.owner_generation.as_deref()
             || claim.body["owner_step"].as_str() != schedule.owner_step.as_deref() {
             return Ok(true);
         }
