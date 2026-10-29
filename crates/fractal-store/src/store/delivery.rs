@@ -492,7 +492,12 @@ mod mailbox_metrics_tests {
     #[test]
     fn summarizes_states_without_delivery_batch_truncation() {
         let store = Store::open_memory("node").unwrap();
-        let pending = sent(&store, "message/pending", "example.worker", "agent/example.sender", &[]);
+        let pending = sent(&store, "message/pending", "agent/example.worker", "agent/example.sender", &[]);
+        // Current admission requires full references; retained legacy sends can be bare.
+        store.connection.write().execute(
+            "UPDATE claims SET body=json_set(body,'$.fields.to','example.worker') WHERE id=?1",
+            [&pending.id],
+        ).unwrap();
         let staged = sent(&store, "message/staged", "agent/example.worker", "agent/example.sender", &[]);
         append(&store, &staged.subject, "staged", json!({}));
         let delivered = sent(&store, "message/delivered", "agent/example.worker", "agent/example.sender", &["st3-silent"]);
