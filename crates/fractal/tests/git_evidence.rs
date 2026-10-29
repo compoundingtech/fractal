@@ -33,7 +33,7 @@ fn isolated(test: &str) -> bool {
             .filter(|path| {
                 !matches!(
                     path.file_name().and_then(|name| name.to_str()),
-                    Some("st3" | "st" | "st3-fixture")
+                    Some("st3" | "st" | "fractal-fixture")
                 )
             })
             .find(|path| {

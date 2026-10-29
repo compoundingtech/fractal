@@ -30,7 +30,7 @@ fn probe_with_temp(selectors: &[&str], temp: Option<&std::path::Path>) {
         .args(["-f", "env", "-u", "ST_AGENT", "python3"])
         .arg(repo.join("scripts/fractal-delivery-probe-test"))
         .arg("--binary")
-        .arg(test_env!("CARGO_BIN_EXE_st3-fixture"))
+        .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
         .arg("--scratch")
         .arg(scratch.path())
         .args(selectors)

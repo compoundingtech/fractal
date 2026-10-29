@@ -1383,8 +1383,8 @@ contains only stale-fence/rate-limited. Swift preserves unknown codes and `retry
 
 Legacy `custom.client.action-result` receipts cannot prove server authorship, even
 with a local origin and absent/null actor. A retry whose key has any such receipt
-fails closed with HTTP 409 `legacy-action-receipt-untrusted` before dispatch or
-side effects. This covers both actor-bearing old server receipts and old
+fails closed with HTTP 409 `legacy-action-receipt-untrusted` and `retryable: false`
+before dispatch or side effects. This covers both actor-bearing old server receipts and old
 client-forged receipts; neither is silently upgraded or replayed. Inspect the
 original outcome before choosing a new key. New typed receipts replay normally.
 No stored claims are rewritten and no migration is required.
@@ -2671,7 +2671,7 @@ cut-not-ready message/error as a barrier timeout if the publication is older. Th
 in-repo CLI mutation-following roster read; existing mutation commands' point-detail reads
 stay unchanged.
 
-Without an explicit cut, a read returns a retryable 503 (the stream sends `resync`) only before
+Without an explicit cut, a read returns a retryable 503 `agent-roster-not-ready` (the stream sends `resync`) only before
 a usable roster of the requested mode has been published, or after a full projection reset
 clears it. Current and history rosters remain separate: a history read never substitutes
 current-only membership.
@@ -2683,7 +2683,9 @@ continuation is already pinned to its first page's cut.
 A card-faults read that reaches its deadline does not stop publication. Other card fields
 are current; each affected card keeps its previous `fault`, including a known null value.
 A card with no previous value reports `"fault status unknown"` in that same field. The next
-refresh retries those faults even if no claim changed.
+refresh retries those faults even if no claim changed. The refresher's card-faults read is
+bounded by 25 ms of query CPU time, with a one-second wall backstop for a stalled page read,
+so a scheduling pause on a loaded host does not reach its deadline.
 
 ### Immutable current publications
 

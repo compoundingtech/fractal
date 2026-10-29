@@ -8,12 +8,15 @@ module.exports = () => {
   const variant = process.env.APP_VARIANT ?? 'dev';
   if (variant !== 'dev' && variant !== 'daily') throw new Error('APP_VARIANT must be dev or daily');
   const daily = variant === 'daily';
+  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+  const push = (process.env.FRACTAL_IOS_PUSH ?? process.env.ST_IOS_PUSH) === '1';
+  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
   return {
     ...base,
-    ...(process.env.ST_IOS_PUSH === '1' ? { extra: { ...base.extra, stIosPush: true } } : {}),
+    ...(push ? { extra: { ...base.extra, stIosPush: true } } : {}),
     plugins: [
       ...(base.plugins ?? []),
-      process.env.ST_IOS_PUSH === '1'
+      push
         ? ['expo-notifications', { mode: 'development' }]
         : './plugins/withoutPush',
     ],

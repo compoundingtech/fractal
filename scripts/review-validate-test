@@ -37,10 +37,14 @@ class ReviewValidate(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="review-validate-")
         self.addCleanup(self.temporary.cleanup)
 
-    def run_validate(self, verdict):
+    def run_validate(self, verdict, previous=None):
         path = Path(self.temporary.name) / "verdict.json"
         path.write_text(verdict if isinstance(verdict, str) else json.dumps(verdict))
-        return subprocess.run([sys.executable, str(HERE / "review-validate"), str(path)], text=True, capture_output=True)
+        extra = []
+        if previous is not None:
+            extra = ["--previous", str(Path(self.temporary.name) / "previous.json")]
+            Path(extra[1]).write_text(json.dumps(previous))
+        return subprocess.run([sys.executable, str(HERE / "review-validate"), str(path), *extra], text=True, capture_output=True)
 
     def refused(self, verdict, text):
         done = self.run_validate(verdict)
@@ -117,6 +121,19 @@ class ReviewValidate(unittest.TestCase):
         self.refused(verdict, "must say which change answers")
         verdict["answers"] = [{"finding": "docs/x.md:3", "change": SHA}]
         self.assertEqual(self.run_validate(verdict).returncode, 0)
+
+    def test_a_later_round_after_a_go_has_nothing_to_answer(self):
+        verdict = good()
+        verdict["round"] = 2
+        earlier = good()
+        earlier["round"] = 2
+        self.assertEqual(self.run_validate(verdict, previous=earlier).returncode, 0)
+        earlier["verdict"] = "CHANGES"
+        earlier["findings"][0]["severity"] = "blocking"
+        done = self.run_validate(verdict, previous=earlier)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("must say which change answers", done.stderr)
+        self.refused(verdict, "must say which change answers")
 
 
 if __name__ == "__main__":

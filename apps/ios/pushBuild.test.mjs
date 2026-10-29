@@ -8,26 +8,31 @@ const baseline = require('./app.json').expo;
 const withoutPush = require('./plugins/withoutPush.js');
 const withNotifications = require('expo-notifications/app.plugin.js').default;
 
-test('only ST_IOS_PUSH=1 selects notifications without changing either installed identity', () => {
+test('only a push flag of 1 selects notifications without changing either installed identity', () => {
   const saved = process.env.ST_IOS_PUSH;
+  const savedFractal = process.env.FRACTAL_IOS_PUSH;
   const savedVariant = process.env.APP_VARIANT;
   try {
-    for (const variant of ['dev', 'daily']) {
-      process.env.APP_VARIANT = variant;
-      delete process.env.ST_IOS_PUSH;
-      const expected = configure();
-      for (const flag of [undefined, '0', 'true', '1']) {
-        if (flag === undefined) delete process.env.ST_IOS_PUSH; else process.env.ST_IOS_PUSH = flag;
-        const configured = configure();
-        assert.deepEqual(configured.ios, expected.ios);
-        assert.equal(configured.icon, expected.icon);
-        assert.deepEqual(configured.plugins.slice(0, -1), baseline.plugins);
-        assert.equal(configured.extra?.stIosPush, flag === '1' ? true : undefined);
-        assert.deepEqual(configured.plugins.at(-1), flag === '1' ? ['expo-notifications', { mode: 'development' }] : './plugins/withoutPush');
+    for (const variable of ['ST_IOS_PUSH', 'FRACTAL_IOS_PUSH']) {
+      for (const variant of ['dev', 'daily']) {
+        process.env.APP_VARIANT = variant;
+        delete process.env.ST_IOS_PUSH;
+        delete process.env.FRACTAL_IOS_PUSH;
+        const expected = configure();
+        for (const flag of [undefined, '0', 'true', '1']) {
+          if (flag === undefined) delete process.env[variable]; else process.env[variable] = flag;
+          const configured = configure();
+          assert.deepEqual(configured.ios, expected.ios);
+          assert.equal(configured.icon, expected.icon);
+          assert.deepEqual(configured.plugins.slice(0, -1), baseline.plugins);
+          assert.equal(configured.extra?.stIosPush, flag === '1' ? true : undefined);
+          assert.deepEqual(configured.plugins.at(-1), flag === '1' ? ['expo-notifications', { mode: 'development' }] : './plugins/withoutPush');
+        }
       }
     }
   } finally {
     if (saved === undefined) delete process.env.ST_IOS_PUSH; else process.env.ST_IOS_PUSH = saved;
+    if (savedFractal === undefined) delete process.env.FRACTAL_IOS_PUSH; else process.env.FRACTAL_IOS_PUSH = savedFractal;
     if (savedVariant === undefined) delete process.env.APP_VARIANT; else process.env.APP_VARIANT = savedVariant;
   }
 });

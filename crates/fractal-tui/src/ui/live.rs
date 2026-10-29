@@ -402,14 +402,16 @@ enum Fetched {
         took: Duration,
     },
     Preview(String, Load<MissionPreview>),
-    /// A document's text, by the reference its pane names, or why it could not be read.
-    Document(String, Result<String, String>),
     /// The message behind an unread-message item: sender, title and text.
     Body(String, String, Option<String>, String),
     Notice(String),
     AlertOutcome(String, bool),
     /// Harness sessions st did not start, found on this machine.
     Session(String, Result<Box<fractal_client::Session>, String>),
+    /// A document's page, a page of the documents list, and the documents a mission or step names.
+    Document(String, Result<fractal_client::DocumentContent, fractal_ui_model::documents::Unavailable>),
+    DocumentList(Option<String>, Result<fractal_client::DocumentsPage, fractal_ui_model::documents::Unavailable>),
+    DocumentReferences(String, Result<fractal_client::DocumentReferences, String>),
     /// The Fleet tab's machines and paired devices.
     Observations { generation: u64, outcome: Result<(Vec<fractal_client::ResourceObservation>, bool), String> },
     Inventory { generation: u64, result: InventoryRead },
@@ -996,15 +998,6 @@ pub fn run(context: Context) -> Result<()> {
                     encoding.remove(&(key.clone(), width, height));
                     ui.content.install_protocol(key, width, height, protocol);
                 }
-                Fetched::Document(reference, result) => {
-                    ui.documents.insert(
-                        reference,
-                        match result {
-                            Ok(text) => Load::Ready(text),
-                            Err(why) => Load::Failed(why),
-                        },
-                    );
-                }
                 Fetched::Read(id, result) => {
                     read_receipts.completed(id, result, Instant::now());
                 }
@@ -1134,6 +1127,9 @@ pub fn run(context: Context) -> Result<()> {
                         Err((error, _)) => ui.flash(format!("Sidebar edit not done: {error}")),
                     }
                 }
+                Fetched::Document(reference, outcome) => ui.documents.got(&reference, outcome),
+                Fetched::DocumentList(prefix, outcome) => ui.documents.listed(prefix.as_deref(), outcome),
+                Fetched::DocumentReferences(subject, outcome) => ui.documents.referenced(&subject, outcome),
                 Fetched::Observations { generation, outcome } => {
                     resources_reading = false;
                     if generation == resources_generation { match outcome {
@@ -1270,21 +1266,50 @@ pub fn run(context: Context) -> Result<()> {
             });
         }
         resources_shown = showing_resources;
-        // A document is read once, when its pane is first shown.
-        if let Some(super::pane::Pane::Document(reference)) = ui.focused_pane()
-            && !ui.documents.contains_key(&reference)
+        // Documents on screen, the list, and the documents of a mission on screen: read once each
+        // through the client's document routes, the same ones web and the phone read.
         {
-            ui.documents.insert(reference.clone(), Load::Loading);
-            let reader = client.clone();
-            let tx = fetched_tx.clone();
-            runtime.spawn(async move {
-                let outcome = reader
-                    .document_get(&reference)
-                    .await
-                    .map(|document| String::from_utf8_lossy(&document.value.bytes).into_owned())
-                    .map_err(|error| error.human());
-                let _ = tx.send(Fetched::Document(reference, outcome));
-            });
+            let shown = ui.shown_panes().into_iter().map(|(_, pane)| pane).collect::<Vec<_>>();
+            let background = if ui.palette_asks_documents() { vec![super::pane::Pane::Documents(None)] } else { Vec::new() };
+            let subjects = shown
+                .iter()
+                .filter_map(|pane| match pane {
+                    super::pane::Pane::Mission(Some(id)) => Some(ui.document_subjects(id)),
+                    _ => None,
+                })
+                .flatten()
+                .map(|(subject, _)| subject)
+                .collect::<Vec<_>>();
+            if !extras.live {
+                ui.documents.offline(&shown);
+            } else {
+                for want in ui.documents.wanted(&shown, &background, &subjects) {
+                    let reader = client.clone();
+                    let tx = fetched_tx.clone();
+                    runtime.spawn(async move {
+                        use super::documents::{PAGE, Want, unavailable};
+                        let fetched = match want {
+                            Want::Get(reference) => {
+                                let outcome = reader.document_get(&reference).await.map(|envelope| envelope.value).map_err(|error| unavailable(&error));
+                                Fetched::Document(reference, outcome)
+                            }
+                            Want::List { prefix, cursor } => {
+                                let outcome = reader
+                                    .documents_list(prefix.as_deref(), false, cursor.as_deref(), Some(PAGE))
+                                    .await
+                                    .map(|envelope| envelope.value)
+                                    .map_err(|error| unavailable(&error));
+                                Fetched::DocumentList(prefix, outcome)
+                            }
+                            Want::References(subject) => {
+                                let outcome = reader.document_references_get(&subject).await.map(|envelope| envelope.value).map_err(|error| error.human());
+                                Fetched::DocumentReferences(subject, outcome)
+                            }
+                        };
+                        let _ = tx.send(fetched);
+                    });
+                }
+            }
         }
         if tab != shown_tab {
             // The terminal is followed only while it is on screen: leaving the Agents tab
