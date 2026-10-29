@@ -1005,6 +1005,113 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_owned_leader_exit_keeps_its_status_while_a_descendant_is_running() {
+        use std::io::BufRead as _;
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::ffi::OsStrExt as _;
+
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        let _kill = KillOnDrop(runtime.clone());
+        let descendant_release = root.path().join("descendant-release");
+        let descendant_pid = root.path().join("descendant-pid");
+        let leader_release = root.path().join("leader-release");
+        for path in [&descendant_release, &descendant_pid, &leader_release] {
+            let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        }
+        let generation = runtime
+                .spawn(
+                    "work",
+                    &crate::Launch::Argv(vec![
+                        "sh".into(),
+                        "-c".into(),
+                        "sh -c 'read release < \"$1\"' sh \"$1\" & printf '%s\\n' \"$!\" > \"$2\"; read release < \"$3\"; exit 7".into(),
+                        "sh".into(),
+                        descendant_release.to_str().unwrap().into(),
+                        descendant_pid.to_str().unwrap().into(),
+                        leader_release.to_str().unwrap().into(),
+                    ]),
+                    root.path(),
+                    &std::env::vars().collect(),
+                )
+                .unwrap();
+        let mut pid = String::new();
+        std::io::BufReader::new(fs::File::open(descendant_pid).unwrap())
+            .read_line(&mut pid)
+            .unwrap();
+        let descendant = pid.trim().parse::<u32>().unwrap();
+        let pidfd = |pid: u32| {
+            let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0, "pidfd_open: {}", std::io::Error::last_os_error());
+            unsafe { OwnedFd::from_raw_fd(fd as i32) }
+        };
+        let wait = |fd: &OwnedFd| {
+            let mut event = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert_eq!(unsafe { libc::poll(&mut event, 1, -1) }, 1);
+            assert_ne!(event.revents & libc::POLLIN, 0);
+        };
+        let leader_exited = pidfd(generation.pid);
+        let descendant_exited = pidfd(descendant);
+        // As in the no-descendant regression, the child exits between the first status
+        // probe and the process-identity probe. The descendant stays blocked on its FIFO.
+        assert!(
+            runtime
+                .owned_children
+                .lock()
+                .unwrap()
+                .get_mut(&generation.pid)
+                .unwrap()
+                .try_wait()
+                .unwrap()
+                .is_none()
+        );
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(leader_release)
+            .unwrap();
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        wait(&leader_exited);
+        assert_eq!(process_identity(generation.pid).unwrap().0, 'Z');
+
+        let observed = runtime.observe_exited_group("work", generation).unwrap();
+        let ExecObservation::Running(running) = observed else {
+            panic!("the live descendant must keep its group running: {observed:?}");
+        };
+        assert_eq!(running.exit_code, Some(7));
+        assert!(!running.group_exited);
+        assert!(runtime.owned_children.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime.observe("work").unwrap(),
+            Some(ExecObservation::Running(running))
+        );
+
+        let mut release = fs::OpenOptions::new()
+            .write(true)
+            .open(descendant_release)
+            .unwrap();
+        writeln!(release, "exit").unwrap();
+        drop(release);
+        wait(&descendant_exited);
+        let Some(ExecObservation::Exited(ended)) = runtime.observe("work").unwrap() else {
+            panic!("the group must stop running once its descendant exits");
+        };
+        assert_eq!(ended.exit_code, Some(7));
+        assert!(ended.group_exited);
+        let reopened = ExecRuntime::new(root.path().join("exec"), root.path().join("logs"));
+        assert_eq!(
+            reopened.observe("work").unwrap(),
+            Some(ExecObservation::Exited(ended))
+        );
+    }
+
     #[test]
     fn retains_the_current_and_previous_log_generations() {
         let root = tempfile::tempdir().unwrap();
