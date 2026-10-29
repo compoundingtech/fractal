@@ -112,3 +112,4 @@ A seat that sits idle holding a claimed step, with nothing set to wake it, gets 
 the step and what it waits on ([idle holders](mission-graph-runtime.md#idle-holders)).
 Fractal's only other text for agents is the skill that `st skill` prints, which describes how to use Fractal
 and sets no rules of conduct. Keep this rule when changing drivers, messages, or the skill.
+- [Manual onboarding test rig](onboarding-test-rig.md) documents release-archive fixtures and disposable Linux/macOS guest preparation.
