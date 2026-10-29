@@ -113,7 +113,7 @@ DISPLAY_RULES = (
     ("Release output", "scripts/release-fractal-daily", ("f'Smalltalk {tag}'",)),
     ("Release output", "scripts/release-fractal-edge", ("f'Smalltalk edge",)),
     ("Release output", "scripts/release_notes.py", ("f'Smalltalk {tag} at",)),
-    ("CLI", "scripts/st3-seat-queue-eval/report", ("## Small Talk\\n",)),
+    ("CLI", "scripts/fractal-seat-queue-eval/report", ("## Small Talk\\n",)),
     ("UI snapshot", "fixtures/clients/transcripts/noise.expected.json", ('"from": "Small Talk"',)),
     ("Release output", ".github/workflows/release-fractal.yml.genie.ts", ("Smalltalk $TAG",)),
     ("Release output", ".github/workflows/release-fractal.yml", ("Smalltalk $TAG",)),

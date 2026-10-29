@@ -1,4 +1,4 @@
-# st3 scenarios specification
+# Fractal scenarios specification
 
 This document specifies `@fractal/scenarios`: one package that holds the scenario kit
 (seeded factories, slices, worlds, replay, React and Storybook bindings) and the world catalog.
@@ -494,7 +494,7 @@ revision chains remain synthetic where native ingestion only emits revision 1/fi
 recordings/<name>.script.json        fake-harness script generated from the world's cast
         │
         ▼
-st3 scenario recorder (Rust test binary, run on demand)
+Fractal scenario recorder (Rust test binary, run on demand)
   ├─ starts a scratch daemon in a fresh temporary state directory
   ├─ declares the cast's agents with a scripted fake harness
   ├─ the harness writes native transcript turns and executes commands in a real PTY
@@ -536,7 +536,7 @@ cleanup, use the scratch environment; curl disables configuration loading with f
 
 The implementation composes three existing patterns, not a pre-existing recorder API:
 `crates/fractal/tests/terminal_binding.rs` supplies scratch ownership and teardown scaffolding;
-`crates/fractal/tests/no_st2_seat.rs` and `scripts/st3-no-st2-eval/{run,claude}` supply native
+`crates/fractal/tests/no_st2_seat.rs` and `scripts/fractal-no-st2-eval/{run,claude}` supply native
 Claude transcripts and real driver hooks; `terminal_actions_survive_unrelated_writes_but_reject_changed_screens`
 in `crates/fractal-daemon/src/api/client_v0.rs` supplies the real PTY/projector and terminal attach pattern.
 `terminal_binding` alone produces neither native transcripts nor styled screens.

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "List the public evidence signing key of a third trusted build host under an invented host name",
+  "replay": {
+    "status": "none",
+    "detail": "No claim replay or recovery behavior changes; this lists one public key in a trust file."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No tables, indexes, triggers, schema-version changes or data rewrites."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules or digest changes. The skip policy already admits the host level for the wrapper kind on pull_request runs; this key adds one signer it counts. The merge queue never skips on it."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No command, frame, scope or stored-format change in the product."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No startup work or expected interruption."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required by this change. The owner of the host keeps its signer configuration matching the listed name."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No persistent product state changes or new swap-back restrictions."
+  }
+}

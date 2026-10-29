@@ -213,4 +213,4 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
 The boot canaries cover single-host suspend and resume for every harness. The isolated two-node
 fleet test moves an omp seat with tracked and untracked changes and its prior conversation,
 checks occupied-target refusal, verifies the live native ID, and delivers mail after the move. See
-[scripts/st3-boot-canaries](../../scripts/st3-boot-canaries/README.md).
+[scripts/fractal-boot-canaries](../../scripts/fractal-boot-canaries/README.md).

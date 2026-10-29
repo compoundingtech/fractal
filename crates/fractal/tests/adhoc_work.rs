@@ -127,7 +127,7 @@ impl Daemon {
     }
     async fn cli_output(&self, args: &[&str], json: bool) -> std::process::Output {
         let mut command =
-            fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+            fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
         command
             .env("HOME", &self.root)
             .env("XDG_CONFIG_HOME", self.root.join("config"))

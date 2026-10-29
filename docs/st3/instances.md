@@ -123,7 +123,7 @@ uninstall-policy`).
 
 ## Proof
 
-`scripts/st3-instance-isolation/run ST3 PTY [OUT]` starts the default Fractal in a throwaway `HOME` with a
+`scripts/fractal-instance-isolation/run ST3 PTY [OUT]` starts the default Fractal in a throwaway `HOME` with a
 scrubbed environment and installs its skill, snapshots every path, mode, link target and file hash,
 then starts an instance, installs its skill, uninstalls it and snapshots again. The snapshots must be
 identical and `~/.st-instance` gone. It then removes the default install and requires no file to

@@ -2,17 +2,28 @@
 #
 # parallel_tests NAME...: runs `python3 scripts/NAME` for each NAME, GENIE_FRESHNESS_JOBS (default 6) at a time. The tests are independent
 # processes that each build their own fixtures; a failing test's last lines are printed after all have finished, in name order, and the
-# function returns 1 if any failed.
+# function returns 1 if any failed. A failing test's whole log is kept, and its path printed with it: a failure's cause is often further up
+# than its last lines. It goes to CI_PARALLEL_TESTS_KEEP (default ~/.cache/ci-parallel-tests) as run-TIME-PID/NAME.log, and the latest 10
+# runs stay.
 parallel_tests() {
-  local logs failed
+  local logs failed root kept
   logs=$(mktemp -d)
   printf '%s\n' "$@" | xargs -P "${GENIE_FRESHNESS_JOBS:-6}" -I{} bash -c 'python3 "scripts/$1" >"$2/$1.log" 2>&1 || echo "$1" >>"$2/failed"' _ {} "$logs"
   if [ -f "$logs/failed" ]; then
+    root=${CI_PARALLEL_TESTS_KEEP:-${XDG_CACHE_HOME:-$HOME/.cache}/ci-parallel-tests}
+    kept="$root/run-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+    mkdir -p "$kept" 2>/dev/null || kept=
     for failed in $(sort "$logs/failed"); do
       echo "::group::FAILED scripts/$failed"
+      if [ -n "$kept" ] && cp "$logs/$failed.log" "$kept/$failed.log" 2>/dev/null; then
+        echo "whole log: $kept/$failed.log"
+      fi
       tail -n 200 "$logs/$failed.log"
       echo "::endgroup::"
     done
+    if [ -n "$kept" ]; then
+      ls -1dt "$root"/run-* 2>/dev/null | tail -n +11 | while read -r old; do rm -rf -- "${old:?}"; done || true
+    fi
     rm -rf "$logs"
     return 1
   fi

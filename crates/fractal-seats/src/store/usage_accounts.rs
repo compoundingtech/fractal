@@ -92,7 +92,12 @@ impl<'a> Attribution<'a> {
             account.driver() == Some(driver.as_str()) && account.login_for(host).is_some()
         });
         let account = owners.next()?;
-        owners.next().is_none().then_some(account)
+        if owners.next().is_none() {
+            return Some(account);
+        }
+        // A harness that reads a key file with two accounts on this host: a seat that names no
+        // other file reads the default one, and one that names another recorded its account.
+        crate::accounts::default_key_file_account(self.accounts, &driver, host)
     }
 
     fn attribute(&mut self, connection: &Connection, rows: &mut [Value]) {
@@ -274,6 +279,33 @@ agent "keyed" { workspace "/tmp"; harness "omp" {}; }
         assert_eq!(key["credits"]["budget_microusd"], 200_000_000);
         assert!(key["credits"]["used_microusd"].as_u64().unwrap() > 0, "{key}");
         assert!(usage.accounts.iter().filter(|a| a["name"] != "ada/key").all(|a| a.get("credits").is_none()));
+    }
+
+    #[test]
+    fn two_key_accounts_on_a_host_read_an_unlabelled_omp_row_as_the_default_key() {
+        const KEYS: &str = r#"version 2
+account "ada/key" { provider "anthropic"; owner "person/ada"; auth-type "api-key"; harness "omp"; monthly-credits-usd 200; login "~/.config/anthropic/api-key" host="alder"; }
+account "ada/key-two" { provider "anthropic"; owner "person/ada"; auth-type "api-key"; harness "omp"; login "~/.config/anthropic/api-key-2" host="alder"; login "~/.config/anthropic/api-key-2" host="birch"; }
+agent "keyed" { workspace "/tmp"; harness "omp" {}; }
+"#;
+        let store = Store::open_memory("alder").unwrap();
+        let intent = crate::graph::parse_internal_intent(KEYS, "alder").unwrap();
+        store.apply_internal(&intent, "declare-keys").unwrap();
+        // The seat on this host named no key file, so it read the default key.
+        spend(&store, "agent/alder.keyed", "omp", None, "claude-sonnet-5-5", "k1");
+        let usage = store.attributed_usage(0, now_ms() as u64 + 1).unwrap();
+        let row = usage.rows.iter().find(|row| row["agent"] == "agent/alder.keyed").unwrap();
+        assert_eq!(row["account_ref"], "ada/key", "{row}");
+        // Only the second key has a login on the other host.
+        let mut other = row.clone();
+        other["host"] = json!("birch");
+        other["account"] = json!("");
+        other.as_object_mut().unwrap().remove("account_ref");
+        let mut rows = [other];
+        let connection = store.readers.get();
+        let declared = declared_accounts_at(&connection).unwrap();
+        Attribution::new(&declared).attribute(&connection, &mut rows);
+        assert_eq!(rows[0]["account_ref"], "ada/key-two", "{}", rows[0]);
     }
 
     #[test]

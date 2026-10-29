@@ -1,6 +1,6 @@
 # Token-free delivery probes
 
-`scripts/st3-delivery-probe` runs as a dedicated durable seat on each fleet node.
+`scripts/fractal-delivery-probe` runs as a dedicated durable seat on each fleet node.
 It sends a real message from its local daemon to every other configured node every
 three minutes. The recipient consumes the envelope from the installed binary's
 actual `omp-channel` driver and records `delivered`, `read`, and `closed` claims.
@@ -138,7 +138,7 @@ matrix exercises the actual omp extension without model calls.
 
 ## Proof
 
-`scripts/st3-delivery-probe-test --binary /path/to/st3` tests a lost send response,
+`scripts/fractal-delivery-probe-test --binary /path/to/st3` tests a lost send response,
 stable idempotency across retry, crash replay of pending receipts, a delivered
 claim without a read, a replay after a competing native acknowledgement, a closed
 message without a read, incorrect read actors, person asks and operations messages,

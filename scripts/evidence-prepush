@@ -31,10 +31,11 @@ machine we trust (cooperative trust, known defect 22); it is not something the b
     in one line and the push goes; `git push --no-verify` skips the hook entirely.
   * ST_EVIDENCE_TIME_LIMIT=SECONDS bounds the signing run (default 1200, must be a positive integer); past it the run
     is stopped (TERM, then KILL of the whole process group), that is printed, and the push goes. ST_EVIDENCE_STATUS_TIMEOUT
-    bounds the "is it covered" question (default 60 s).
+    bounds the "is it covered" question (default 300 s: on a loaded build host it takes two minutes, and an agent's push whose
+    question times out is refused).
   * A push with no terminal on stderr (a script, or an agent on a machine whose signer is not listed) runs inside a call with a
     short timeout, so there the hook waits at most ST_EVIDENCE_AGENT_LIMIT seconds (default 300, under the agents'
-    600 s tool timeout), prints that signing continues in the background with its log path, and lets the push go; the notes
+    600 s tool timeout, less the time the "is it covered" question took), prints that signing continues in the background with its log path, and lets the push go; the notes
     are pushed when the run finishes. Each note is pushed as soon as its check is signed, so a note signed within the wait is
     on the remote before git sends the branch: the first CI run sees it.
   * One signing run per tree: a push of a tree that is still being signed (in the background, or from another checkout of
@@ -58,7 +59,7 @@ import time
 sys.dont_write_bytecode = True
 LIMIT = 1200
 AGENT_LIMIT = 300
-STATUS_LIMIT = 60
+STATUS_LIMIT = 300
 REFUSED = 3  # the installed stub turns this, and only this, into git's refusal (exit 1): a crash never blocks a push
 BASE = 'main'
 CHILD = None
@@ -273,6 +274,7 @@ def hook(argv):
         return outcome('not_signing:signer_unlisted',
                        'this machine\'s signer is not listed in .st/evidence-keys on main yet, so its notes would not count; not signing '
                        '(list the line scripts/evidence-keygen prints by pull request). The pull request will run in CI')
+    asked = time.monotonic()
     try:
         status = subprocess.run([sys.executable, str(script), '--status', '--base', base], capture_output=True, text=True,
                                 cwd=top, env=clean_environment(), timeout=positive('ST_EVIDENCE_STATUS_TIMEOUT', STATUS_LIMIT))
@@ -290,7 +292,8 @@ def hook(argv):
                        '(its notes are pushed when that run finishes)')
     limit = positive('ST_EVIDENCE_TIME_LIMIT', LIMIT)
     agent = bool(os.environ.get('ST_AGENT')) or not sys.stderr.isatty()
-    wait = min(limit, positive('ST_EVIDENCE_AGENT_LIMIT', AGENT_LIMIT)) if agent else limit
+    # The question's time counts against an agent's wait, so the whole hook still ends inside the agent's tool timeout.
+    wait = max(1, min(limit, positive('ST_EVIDENCE_AGENT_LIMIT', AGENT_LIMIT)) - int(time.monotonic() - asked)) if agent else limit
     log = None
     if agent or hurry:
         STATE.mkdir(parents=True, exist_ok=True)

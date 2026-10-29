@@ -25,7 +25,7 @@ fn closed_pipe() -> Stdio {
 
 async fn run(socket: Option<&Path>, args: &[&str], closed: bool) -> Output {
     let scratch = tempfile::tempdir().unwrap();
-    let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+    let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
     command
         .env("NO_COLOR", "1")
         .env("TMPDIR", scratch.path())
@@ -74,7 +74,7 @@ async fn shared_cli_output_exits_cleanly_with_a_closed_pipe() {
 #[tokio::test]
 async fn shared_cli_output_reports_errors_other_than_a_closed_pipe() {
     let scratch = tempfile::tempdir().unwrap();
-    let output = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"))
         .env("TMPDIR", scratch.path())
         .arg("skill")
         .stdout(
@@ -186,7 +186,7 @@ async fn closed_pipe_preserves_later_mutations_and_their_failure_status() {
             .await
         });
         started.await.unwrap();
-        let child = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"))
+        let child = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"))
             .env("HOME", root.path())
             .env("XDG_CONFIG_HOME", root.path().join("config"))
             .env("TMPDIR", root.path())

@@ -36,7 +36,7 @@
     {
       "name": "trust-files",
       "level": "high",
-      "globs": [".st/evidence-keys", ".st/evidence-keys/**", ".st/evidence-log-key", ".st/evidence-authors.json", ".st/evidence-skip-policy.json", ".st/evidence-policy.json", ".st/required-lanes.json", ".st/review-risk.json", ".st/risky-classes.json", ".st/review-verdict.schema.json", ".st/review-harness.json"]
+      "globs": [".st/evidence-keys", ".st/evidence-keys/**", ".st/evidence-log-key", ".st/evidence-authors.json", ".st/evidence-skip-policy.json", ".st/evidence-policy.json", ".st/required-lanes.json", ".st/review-risk.json", ".st/risky-classes.json", ".st/review-verdict.schema.json", ".st/review-harness.json", "scripts/review-risk", "scripts/review-validate", "scripts/classify-risk", "scripts/review"]
     },
     {
       "name": "skip-and-signing-machinery",

@@ -98,10 +98,10 @@ class SignalOwnershipTests(unittest.TestCase):
                 'echo "Linux only: fixture signalling requires /proc and pidfds" >&2\nexit 2\n')
             python.chmod(0o700)
             output = directory / 'must-not-exist'
-            for name in ('omp-parity-e2e/run', 'st3-instance-isolation/run',
-                         'st3-work-root-trace/run', 'conversation-images-audit/run',
-                         'st3-no-boot-eval/run', 'st3-graceful-messaging-eval/run',
-                         'st3-seat-queue-perf/startup'):
+            for name in ('omp-parity-e2e/run', 'fractal-instance-isolation/run',
+                         'fractal-work-root-trace/run', 'conversation-images-audit/run',
+                         'fractal-no-boot-eval/run', 'fractal-graceful-messaging-eval/run',
+                         'fractal-seat-queue-perf/startup'):
                 with self.subTest(entrypoint=name):
                     result = subprocess.run(['bash', str(HERE / name), 'unused', 'unused', str(output)],
                         env={**os.environ, 'PATH': str(tools) + os.pathsep + os.environ['PATH']},
@@ -114,7 +114,7 @@ class SignalOwnershipTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             fixture = Path(tmp) / 'suite'
             fixture.write_text(f'set -e\n. {str(HERE / "script-test-supervisor")!r}\n'
-                               f'python3 {str(HERE / "st3_test_process.py")!r} --is-supervised\n'
+                               f'python3 {str(HERE / "fractal_test_process.py")!r} --is-supervised\n'
                                'exit 17\n')
             result = subprocess.run(['bash', str(fixture)], timeout=5,
                 env={**os.environ, 'FRACTAL_TEST_SUPERVISOR': 'stale-marker'})

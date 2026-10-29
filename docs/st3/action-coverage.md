@@ -96,7 +96,7 @@ Unix daemon: all six windows, typed client/usage adaptation, period replacement,
 unsubscription and authoritative reconnect snapshots.
 `crates/fractal/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
 and `…::the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
-drive the actual binary with `scripts/stui-test-client` and `STUI_TIMING_LOG`.
+drive the actual binary with `scripts/fractal-ui-test-client` and `STUI_TIMING_LOG`.
 Fleet and Usage each remain idle for 72 seconds; their first snapshots must occur
 once, every inventory HTTP read is forbidden, and no request follows ready frames
 for longer than the old 60-second interval.

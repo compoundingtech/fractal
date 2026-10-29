@@ -21,7 +21,7 @@ impl Drop for Daemon {
 }
 
 fn command(root: &Path) -> Command {
-    let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_st3-fixture"));
+    let mut command = fractal_daemon::test_support::command(test_env!("CARGO_BIN_EXE_fractal-fixture"));
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap_or_default())

@@ -3540,7 +3540,7 @@ fn client_agent_cards_presented(
     let mut card_reads = store.agent_card_reads(&agent_subjects, snapshot_index, &actual_claims)?;
     // Cards without a harness need only their actual claim's acceptance time, not its body.
     // Keep the existing per-claim fallback if the bulk metadata read cannot be completed.
-    let actual_claim_times = store.claim_acceptance_times(
+    let actual_claim_times = store.kept_claim_acceptance_times(
         &status
             .subjects
             .iter()
@@ -6488,7 +6488,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
         None => app,
     };
     let listener = socket.listen(1024)?;
-    // Only st3-fixture initializes this process-local state. Disable host ancestry while
+    // Only fractal-fixture initializes this process-local state. Disable host ancestry while
     // retaining native-driver identification, which mailbox subscriptions require.
     #[cfg(feature = "test-support")]
     let bind_ancestry = bind_harness && crate::test_support::login_shell().is_none();

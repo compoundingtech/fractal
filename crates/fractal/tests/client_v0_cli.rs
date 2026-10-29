@@ -69,7 +69,7 @@ async fn ordinary_agent_list_and_tree_cli_send_no_freshness_barrier() {
                 response.len(), response).as_bytes()).await.unwrap();
             String::from_utf8(request).unwrap().lines().next().unwrap().to_owned()
         });
-        let mut command = fractal_daemon::test_support::async_command(test_bin!("st3-fixture"));
+        let mut command = fractal_daemon::test_support::async_command(test_bin!("fractal-fixture"));
         command.kill_on_drop(true).env_remove("ST_AGENT").env_remove("ST_MISSION_RUN")
             .args(["--endpoint", socket.to_str().unwrap(), "--daemon-wait", "0", "--json"])
             .args(args);
@@ -126,7 +126,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
         let config = config.clone();
         tokio::task::spawn_blocking(move || {
             let mut command =
-                fractal_daemon::test_support::command(test_bin!("st3-fixture"));
+                fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
             let mut child = command
                 .env("XDG_CONFIG_HOME", config)
                 .args(args)
@@ -345,7 +345,7 @@ async fn run_cli_human(socket: &Path, args: &[&str]) -> Output {
 }
 
 async fn run_cli_mode(socket: &Path, json: bool, args: &[&str]) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
     tokio::task::spawn_blocking(move || {
@@ -366,7 +366,7 @@ async fn run_cli_mode(socket: &Path, json: bool, args: &[&str]) -> Output {
 }
 
 async fn run_cli_with_agent_env(socket: &Path, agent: &str, args: &[&str]) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let agent = agent.to_owned();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -1339,7 +1339,7 @@ async fn operational_cli_lists_outcomes_summarizes_runs_and_reports_performance(
             .unwrap()
             .iter()
             .any(
-                |row| row["client"].as_str().unwrap().contains("st3-fixture missions")
+                |row| row["client"].as_str().unwrap().contains("fractal-fixture missions")
                     && row["count"].as_u64().unwrap() > 0
             ),
         "{report:#}"
@@ -1424,7 +1424,7 @@ async fn agent_declaration_cli_redacts_environment_unless_explicitly_requested()
 
 #[test]
 fn service_permissions_honors_global_json_flag() {
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .args(["--json", "service", "permissions"])
         .output()
         .unwrap();
@@ -2589,7 +2589,7 @@ mission "cli/child" state="ready" {
 }
 
 async fn run_queue_cli(socket: &Path, config_home: &Path, json: bool, args: &[&str]) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let config_home = config_home.to_path_buf();
     let args = args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
@@ -3234,7 +3234,7 @@ async fn run_lane_cli(
     json: bool,
     args: &[&str],
 ) -> Output {
-    let binary = test_bin!("st3-fixture").to_path_buf();
+    let binary = test_bin!("fractal-fixture").to_path_buf();
     let socket = socket.to_path_buf();
     let config_home = config_home.to_path_buf();
     let agent = agent.map(str::to_owned);
@@ -3630,7 +3630,7 @@ mission "example/merge-train" state="ready" {
 #[test]
 fn help_starts_with_examples_and_keeps_plumbing_reachable() {
     let help = |args: &[&str]| {
-        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
             .args(args)
             .output()
             .unwrap();
@@ -3669,7 +3669,7 @@ fn help_starts_with_examples_and_keeps_plumbing_reachable() {
         nested.insert(1, "help");
         assert_eq!(help(&flag), help(&nested));
     }
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture"))
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture"))
         .args(["help", "missing-command"])
         .output()
         .unwrap();
@@ -4799,7 +4799,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
     std::fs::create_dir_all(config_root.join("st3")).unwrap();
     std::fs::write(config_root.join("st3/config.toml"),
         "node = 'fixture'\nseat_priority = 'normal'\nfuture_root = 'never-print-this'\n[github]\nfuture_nested = 'also-private'\n").unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4840,7 +4840,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         assert!(!text.contains("never-print-this"));
         assert!(!text.contains("also-private"));
     }
-    let strict = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let strict = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4867,7 +4867,7 @@ fn client_config_warns_once_on_stderr_and_doctor_lists_unknown_without_polluting
         "node = 'fixture'\nseat_priority = 'normal'\n",
     )
     .unwrap();
-    let valid = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let valid = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", &config_root)
@@ -4895,7 +4895,7 @@ fn setup_rejects_unknown_config_before_any_rewrite() {
     let path = root.path().join("config.toml");
     let original = b"# retain this text\nnode = 'fixture'\nfuture_root = 'fixture-secret'\n[github]\nfuture_nested = true\n";
     std::fs::write(&path, original).unwrap();
-    let output = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+    let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
         .env_remove("ST_MISSION_RUN")
         .env("HOME", root.path())
         .env("XDG_CONFIG_HOME", root.path().join("config"))
@@ -4956,7 +4956,7 @@ fn local_state_commands_reject_unknown_config_before_using_default_state() {
         vec!["service", "status"],
     ];
     for args in cases {
-        let output = fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
+        let output = fractal_daemon::test_support::command(test_bin!("fractal-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
             .env("HOME", root.path())
             .env("XDG_CONFIG_HOME", &config_root)

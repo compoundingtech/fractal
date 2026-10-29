@@ -2777,7 +2777,7 @@ fn every_cli_command_has_a_valid_help_surface() {
             // These describe real executable filenames, not the product identity.
             if line.contains("Install Fractal (st3 and the st link) and pty")
                 || line.contains(
-                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty)",
+                    "Keep the installed Fractal executables (fractal, st3, st, fractal-migrate, and pty)",
                 )
             {
                 continue;

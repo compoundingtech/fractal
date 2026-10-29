@@ -1545,10 +1545,15 @@ impl Ui {
                     ));
                 }
             }
-            Link::Connecting => self.flash(format!(
-                "Connecting to {}: Fractal has not answered yet",
-                self.world.host
-            )),
+            Link::Connecting => {
+                let replacing = self.world.stale.iter().find_map(|why| {
+                    why.strip_prefix("live stream: ").map(|why| why.trim_end_matches(" · Fractal answers, reconnecting"))
+                });
+                self.flash(match replacing {
+                    Some(why) => format!("Reconnecting the live stream to {}: {why}", self.world.host),
+                    None => format!("Connecting to {}: Fractal has not answered yet", self.world.host),
+                })
+            }
             Link::Offline(reason) => self.flash(reason),
         }
     }
@@ -8472,11 +8477,31 @@ mod tests {
         let mut ui = Ui::new(world);
         ui.live = true;
         let top = frame(&ui, 140, 50)[0].clone();
-        assert!(top.contains("stale") && !top.contains("live"), "{top}");
+        // The word names the list, so the person need not hunt for what is stale.
+        assert!(top.contains("◐ stale · Agents") && !top.contains("live"), "{top}");
         // Clicking the connection word says why, and the rows stay.
         ui.show_connection();
         assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("collection source is unavailable")));
         assert!(!ui.world.agents.items().is_empty());
+        ui.world.stale.push("machines: harbor cannot be reached right now".into());
+        let top = frame(&ui, 140, 50)[0].clone();
+        assert!(top.contains("◐ stale · Agents +1"), "{top}");
+    }
+
+    #[test]
+    fn a_live_stream_being_replaced_is_not_flashed_and_clicking_connecting_says_why() {
+        let mut world = demo::world();
+        world.link = Link::Connecting;
+        world.stale = vec!["live stream: the member stopped answering · Fractal answers, reconnecting".into()];
+        let mut ui = Ui::new(world);
+        assert!(ui.flash.is_none());
+        ui.show_connection();
+        let flash = ui.flash.as_ref().map(|(text, _)| text.clone()).unwrap_or_default();
+        assert!(flash.contains("Reconnecting the live stream") && flash.ends_with("the member stopped answering"), "{flash}");
+        // Without a stream being replaced it is still Fractal that has not answered.
+        ui.world.stale.clear();
+        ui.show_connection();
+        assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("Fractal has not answered yet")));
     }
 
     #[test]

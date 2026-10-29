@@ -514,7 +514,7 @@ fn compare_shared(expected: &Store, actual: &Store, phase: &str, mismatches: &mu
 
 fn write_audit_history(source: &Store) {
     source.register_custom_kind(&custom::RegistrationRequest {
-        manifest: serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h515c67869859 owner=fractal_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/st3/custom-review.json")).unwrap(),
+        manifest: serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hdbd17e987993 owner=fractal_seats::store::canonical_audit TODO=trace-statement-and-value-representation */ include_str!("../../../../examples/fractal/custom-review.json")).unwrap(),
         actor: "agent/garden/seed".into(),
     }).unwrap();
     source.put_document("doc/garden/audit", b"Immutable audit context", &None, "garden-audit-context").unwrap();

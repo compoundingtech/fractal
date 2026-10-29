@@ -461,14 +461,14 @@ fn write_fake_codex(
     path
 }
 
-/// The boot canaries' stand-in `codex` (scripts/st3-boot-canaries/stub-codex.py) answers
+/// The boot canaries' stand-in `codex` (scripts/fractal-boot-canaries/stub-codex.py) answers
 /// `generate-json-schema` with these files. They must stay what this gate admits, so a change to
 /// the required methods fails here, with the command that rewrites them.
 #[test]
 fn the_boot_canary_codex_stub_schemas_are_what_the_protocol_gate_admits() {
     let schemas = compatible_protocol_schemas();
     let directory =
-        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/st3-boot-canaries/codex-schemas");
+        Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../../scripts/fractal-boot-canaries/codex-schemas");
     for (filename, schema) in [
         (
             "codex_app_server_protocol.v2.schemas.json",
@@ -494,7 +494,7 @@ fn the_boot_canary_codex_stub_schemas_are_what_the_protocol_gate_admits() {
             stored.as_ref(),
             Some(schema),
             "{filename} is stale: run `ST_REGENERATE_CODEX_STUB_SCHEMAS=1 cargo test -p fractal-drivers \
-             the_boot_canary_codex_stub_schemas` and commit scripts/st3-boot-canaries/codex-schemas"
+             the_boot_canary_codex_stub_schemas` and commit scripts/fractal-boot-canaries/codex-schemas"
         );
     }
 }
@@ -1593,7 +1593,7 @@ fn offer_round(delivery: &mut CodexInboxDelivery, state: &CodexControlState) -> 
     offers
 }
 
-/// Per-PR contract for the `idle-hold` boot canary (scripts/st3-boot-canaries/run,
+/// Per-PR contract for the `idle-hold` boot canary (scripts/fractal-boot-canaries/run,
 /// `idle_delivery_control`): after an idle period, under a hold, at its release and at its expiry,
 /// the native pump admits exactly one offer for each message and replays none. The gate is fed
 /// what the daemon's hold view reports at each instant of a test clock (`active` is
@@ -9270,7 +9270,7 @@ fn managed_codex_requires_an_endpoint_only_for_the_default_auto_profile() {
 }
 
 /// Per-PR contract for the `access-auto` and `access-bypass` boot canaries
-/// (scripts/st3-boot-canaries/run, the `access-` block after `scenario`): every managed provider
+/// (scripts/fractal-boot-canaries/run, the `access-` block after `scenario`): every managed provider
 /// launch, fresh and restarted on its saved thread, carries exactly the access-mode flags the
 /// canary reads from the stub providers' `started` receipts. The Codex argv is composed as a
 /// controlled launch composes it: install defaults, the app-server/TUI split, then the TUI's own

@@ -4388,7 +4388,7 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
     let mut manifest: fractal_schema::custom::Manifest = serde_json::from_str(include_str!(
-        "../../../examples/st3/custom-review.json"
+        "../../../examples/fractal/custom-review.json"
     )).unwrap();
     manifest.attention.as_mut().unwrap().episode = fractal_schema::custom::Expr::Constant {
         value: serde_json::json!("garden question; keep"),

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reading a subject's actual-state cache key seeks each claim kind instead of reading every claim the subject has, which had made each roster, terminal, now and refresh read grow with that history",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change; the query uses the existing subject and kind index."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged."},
+  "compatibility": {"status": "none", "detail": "The key names the same newest actual-state claim, so the cached value and when it is recomputed are unchanged."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores the previous key query; nothing is stored."}
+}

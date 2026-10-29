@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A WAL checkpoint that waits 100 ms or more for the writer names the longest writer hold that held it up",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes; the accounting is in memory."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Checkpoint scheduling, TRUNCATE and its writer turn are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, client or stored-format change. The daemon's WAL checkpoint log line gains report.blocked_by (holder, client, at, kind, held_ms, holds) or null; WalCheckpointReport gains the matching optional field."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back removes the field from the log line; nothing else changes."
+  }
+}

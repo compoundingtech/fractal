@@ -31,7 +31,7 @@ pkgs.testers.runNixOSTest {
     assert control[1] == manager, control
 
     machine.fail(user("systemd-run --user --wait --pipe --collect --quiet -p ExitType=cgroup -- "
-                      + "python3 ${../scripts}/st3_test_process.py -- "
+                      + "python3 ${../scripts}/fractal_test_process.py -- "
                       + fixture + " signal /tmp/signal-proof/guarded " + manager))
     guarded = machine.succeed("cat /tmp/signal-proof/guarded").split()
     assert guarded[1] != manager, guarded

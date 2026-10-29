@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Run the evidence GC once, as main has it (scripts/evidence-gc.service, daily from scripts/evidence-gc.timer). Never a checkout's
 # copy: the script and the verifier it loads are read from origin/main in a bare repository this host keeps, so a branch cannot
-# change what deletes. With a lock config (~/.config/evidence-gc/lock.json, see scripts/evidence-gc-lock.example.json) the tag
-# protection is off only around the tag deletions. Each run's summary is kept under the state directory and stored as a new
+# change what deletes. It deletes with this host's own git login: the evidence-tags ruleset refuses moving a tag, not deleting
+# one. Every open pull request's head, read from the GitHub API without a login, keeps its records however old it is; if that list
+# cannot be read, nothing runs. Each run's summary is kept under the state directory and stored as a new
 # version of one st document, so the graph holds the log. When this host runs the evidence log (evidence-log-timer installed and
 # ~/.config/evidence-log/signer.json present), GC's lines go into it before anything is deleted, and the new head is published:
 # a pull then neither reports what GC deleted as missing nor restores it, and if that step fails nothing is deleted.
 #
 #   evidence-gc-timer                 one run (the unit's ExecStart)
-#   evidence-gc-timer --relock-only   turn the protection back on and check it (the unit's ExecStopPost)
 set -euo pipefail
 state=${EVIDENCE_GC_STATE:-$HOME/.local/state/evidence-gc}
 remote=${EVIDENCE_GC_REMOTE:-https://github.com/compoundingtech/fractal.git}
-lock=${EVIDENCE_GC_LOCK:-$HOME/.config/evidence-gc/lock.json}
+repository=${EVIDENCE_GC_REPOSITORY:-compoundingtech/fractal}
+api=${EVIDENCE_GC_API:-https://api.github.com}
 document=${EVIDENCE_GC_DOCUMENT:-doc/fleet/factory/evidence-gc/runs}
 log_timer=${EVIDENCE_GC_LOG_TIMER:-$HOME/.local/bin/evidence-log-timer}
 log_config=${EVIDENCE_LOG_CONFIG:-$HOME/.config/evidence-log}
@@ -29,19 +30,27 @@ trap 'rm -rf "$tools"' EXIT
 for tool in evidence-gc evidence-verify; do
   git -C "$repo" show "origin/main:scripts/$tool" > "$tools/$tool"
 done
-lock_args=()
-[ -f "$lock" ] && lock_args=(--lock-config "$lock")
-if [ "${1:-}" = --relock-only ]; then
-  [ -f "$lock" ] || exit 0
-  exec python3 -I "$tools/evidence-gc" --relock-only "${lock_args[@]}"
-fi
+stamp=$(date -u +%Y%m%dT%H%M%SZ)
+open_heads=$state/runs/$stamp.open-heads
+python3 -I - "$api/repos/$repository/pulls?state=open&per_page=100" > "$open_heads" <<'PY'
+import json, subprocess, sys
+page = 1
+while True:  # curl fails on an HTTP error, and then so does this run: without the list nothing is deleted
+    reply = subprocess.run(['curl', '-fsS', '--max-time', '60', '-H', 'Accept: application/vnd.github+json', f'{sys.argv[1]}&page={page}'],
+                           stdout=subprocess.PIPE, check=True)
+    pulls = json.loads(reply.stdout)
+    for pull in pulls:
+        print(pull['head']['sha'])
+    if len(pulls) < 100:
+        break
+    page += 1
+PY
 before_args=()
 if [ -f "$log_timer" ] && [ -f "$log_config/signer.json" ]; then
   before_args=(--before-delete "$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' bash "$log_timer" gc --publish --plan)")
 fi
-stamp=$(date -u +%Y%m%dT%H%M%SZ)
 status=0
-python3 -I "$tools/evidence-gc" --repo "$repo" --remote origin --main origin/main --fetch --apply "${lock_args[@]}" "${before_args[@]}" \
+python3 -I "$tools/evidence-gc" --repo "$repo" --remote origin --main origin/main --fetch --apply --open-heads-from "$open_heads" "${before_args[@]}" \
   --plan-out "$state/runs/$stamp.plan.json" > "$state/runs/$stamp.json" 2> "$state/runs/$stamp.log" || status=$?
 cat "$state/runs/$stamp.log" >&2
 if [ -s "$state/runs/$stamp.json" ]; then

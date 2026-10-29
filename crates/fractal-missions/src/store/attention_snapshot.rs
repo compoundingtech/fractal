@@ -22,7 +22,7 @@ pub use crate::store::attention_snapshot_tests_shared_seats::{parity, step_back_
     fn registered_custom_attention_has_no_future_change_once_active() {
         let store = Store::open_memory("garden").unwrap();
         let manifest: fractal_schema::custom::Manifest = serde_json::from_str(include_str!(
-            "../../../../examples/st3/custom-review.json"
+            "../../../../examples/fractal/custom-review.json"
         ))
         .unwrap();
         store

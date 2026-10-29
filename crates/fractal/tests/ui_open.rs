@@ -145,7 +145,11 @@ impl Tui {
 }
 
 fn state(root: &Path, node: &str) -> AppState {
-    let store = Store::open_memory(node).unwrap();
+    // A file store, as the daemon has. In a shared-memory store a write that meets another
+    // connection's open read of the same table fails at once with SQLITE_LOCKED instead of waiting:
+    // a publisher reading claims while the seat asks gave `503 database-locked: database table is
+    // locked: claims` from `st work ask`.
+    let store = Store::open(&root.join("claims.sqlite3"), node).unwrap();
     AppState {
         owning_person: None,
         store: Arc::new(store),
@@ -166,7 +170,7 @@ fn state(root: &Path, node: &str) -> AppState {
     }
 }
 
-/// An in-memory store holding `sources`, served on a unix socket for `PERSON`.
+/// A store holding `sources`, served on a unix socket for `PERSON`.
 async fn serve(
     root: &Path,
     sources: &[&str],

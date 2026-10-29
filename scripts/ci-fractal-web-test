@@ -294,10 +294,15 @@ gate = [
     (("success", "true", "failure", "true", "pull_request"), False, "evidence never hides execution failure"),
     (("success", "true", "cancelled", "true", "pull_request"), False, "evidence never hides cancellation"),
     (("failure", "true", "skipped", "true", "pull_request"), False, "evidence never hides detection failure"),
+    (("success", "true", "skipped", "", "pull_request", "fractal-web: refused"), False, "a refused signed-only pull request fails"),
+    (("success", "false", "skipped", "", "pull_request", "fractal-web: refused"), True, "a refusal without web changes runs nothing and passes"),
 ]
 for args, passes, name in gate:
     assert (verdict(*args) is None) == passes, (name, verdict(*args))
     print("passed: gate,", name)
+refusal = "fractal-web: no signature for tree 0123456789ab. Our pull requests do not run CI: sign it with scripts/st-test --all --push origin"
+assert verdict("success", "true", "skipped", "", "pull_request", refusal) == refusal, "the refusal is the check's own message"
+print("passed: gate, the refusal is what the check says")
 
 workflow = (root / ".github/workflows/fleet.yml").read_text()
 header, jobs = workflow.split("\njobs:\n", 1)
