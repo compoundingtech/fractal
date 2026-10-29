@@ -231,10 +231,10 @@ New test files and paths are checked automatically by `genie-freshness` on each 
 merge group. A guard failure names each file and line and points its author to `test_env!`
 and these repair instructions; it does not allow the raw path through.
 If `genie-freshness` reports `unrelocated test paths: FILE:LINE`, replace the raw test path
-at that location with `test_env!("CARGO_BIN_EXE_st3-fixture")`,
+at that location with `test_env!("CARGO_BIN_EXE_fractal-fixture")`,
 `test_env!("CARGO_MANIFEST_DIR")` or `test_env!("CARGO_TARGET_TMPDIR")`, as appropriate.
 Use `test_env!("CARGO_MANIFEST_DIR", "/relative/fixture")` instead of a `concat!` fixture
-path, and `test_bin!("st3-fixture")` instead of `cargo_bin!`. The integration test root and
+path, and `test_bin!("fractal-fixture")` instead of `cargo_bin!`. The integration test root and
 test-enabled libraries already import `scripts/ci-test-paths.rs`; a separate test target
 must import that helper with `#[macro_use]` and a `#[path = "..."]` relative to its source
 file. Keep the original fixture, executable, arguments and assertions. Run
@@ -296,6 +296,14 @@ the recipient's local message arrival; channel readiness records an observation,
 `.config/nextest.toml` gives the messaging fault matrix and the fleet reconnect test, both with
 real multi-minute outages, first priority so their retries fit the CI test window. Failed tests
 retry twice with fixed 30-second delays; a retry pass is reported as flaky, not a gate failure.
+A test still running after 10 minutes (`slow-timeout = { period = "60s", terminate-after = 10 }`) is killed and
+fails as TIMEOUT, retried like any other failure, so a hung test fails its run within about 31 minutes instead of
+holding it until the job's timeout-minutes in CI, or forever in a local `scripts/st-test`. The longest tests take under
+2 minutes. `scripts/ci-linux`'s `nextest_timeout_check`, run before the tests on shard 1 and in every unpartitioned local
+run, refuses a ci profile or override without that bound or looser than it, then runs real nextest on a scratch crate whose
+test hangs: it must be killed, exit 100 and carry a `test timeout` failure in the JUnit report, which
+`scripts/ci-rust-test-result` counts as FAIL. It is a function in `ci-linux` rather than a script of its own because a new
+file the stage runs would have to join `.st/required-lanes.json`.
 The messaging fault cases need the pinned historical st3 (`.github/messaging-compat-baseline.json`).
 CI exports `ST3_MESSAGING_COMPAT_BIN`. Without that variable each case, a separate nextest process, runs
 `scripts/messaging-compat-binary`, which prints the checksum-verified previous-release executable from
@@ -311,7 +319,7 @@ not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, hold
 lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
-Fractal integration fixtures use the separate `st3-fixture` executable, built automatically by
+Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by
 the test-only `test-support` dev dependency. It captures an isolated Bash environment,
 reads only the fixture HOME's `.bash_profile`, preserves the fixture PATH, and ignores the
 launching seat's process ancestry. The production `st3` target has no runtime flag or

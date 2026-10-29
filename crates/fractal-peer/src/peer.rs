@@ -1862,6 +1862,21 @@ impl Backend for MainBackend {
             .await
     }
 
+    async fn answers(
+        &self,
+        request: &smallclaims::answers::AnswersRequest,
+    ) -> Result<Option<smallclaims::answers::AnswersReply>> {
+        self.client.post("/v1/internal/replication/answers", request).await
+    }
+
+    async fn record_answers_check(&self, check: &smallclaims::answers::AnswersCheck) -> Result<()> {
+        let _: Value = self
+            .client
+            .post("/v1/internal/replication/answers-check", check)
+            .await?;
+        Ok(())
+    }
+
     async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {
         self.client
             .post(
