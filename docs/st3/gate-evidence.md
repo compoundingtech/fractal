@@ -142,10 +142,16 @@ age, as the first version did, could remove a failure and keep the pass dated wi
 which the failure still shadowed: that tree then verified. `scripts/evidence-gc-test` checks these properties on 400
 random worlds against a model of the verifier, and end to end with the verifier on real records.
 
-**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is kept (a record written moments
-ago for a head the listing raced with) unless more than `soft_records` records remain: then dead groups go oldest
-first by their newest record. Records are counted, not refs, so a record filed as a tag and a note counts once. If the
-live set alone is over `cap_records`, nothing live is deleted, the set is printed and the exit status is 3.
+**Bounds.** A dead tree or key whose newest record is younger than `grace_hours` is always kept: a record written
+moments ago for a head the listing raced with, or the first records of a signing run, which pushes each record as its
+lane finishes and its branch only at the end. The summary's `grace_records` counts them. Records are counted, not refs,
+so a record filed as a tag and a note counts once. If the live set alone is over `cap_records`, nothing live is
+deleted, the set is printed and the exit status is 3.
+
+`soft_records` deletes nothing; it is still read and checked. Until 2026-10-29 dead groups in grace went oldest first
+while more than `soft_records` records remained. The live set alone has been over 3,000 records since about
+2026-10-23, so from then on every run deleted every dead group in grace: 20,836 refs on 2026-10-28 and 7,408 on
+2026-10-29, among them the first two records of a signing run whose branch was not pushed yet (#4186).
 
 **Measured 2026-10-21** (a dry run against the remote): 5,021 refs, 4,562 records; 960 branch tips within 30 days
 (their trees hold 434 refs) and 217 main trees within 3 days (2,593 refs); 155 dead trees and 22 dead keys are deleted

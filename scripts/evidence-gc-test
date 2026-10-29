@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """scripts/evidence-gc against real repositories and signed notes: the keep/delete matrix, migration of the first layout, the input-key
-index, the soft limit and the cap, fail-closed on an unresolved head, a remote, and idempotence. An open pull request head is never deleted.
+index, absolute grace and the cap, fail-closed on an unresolved head, a remote, and idempotence. An open pull request head is never deleted.
 gc_plan itself is checked as a pure function: random worlds, any input order, whole trees only, and no verdict of a kept tree changes."""
+import collections
 import importlib.machinery
 import importlib.util
 import json
@@ -294,15 +295,18 @@ class Gc(unittest.TestCase):
         self.assertEqual((report['trees'], report['unreadable']), (1, []))
         self.assertEqual(keys, {('rust-tests', self.crate_key(recent[1], 'a')), ('rust-tests', self.crate_key(recent[1], 'b'))})
 
-    def test_past_the_soft_limit_the_oldest_unprotected_notes_go_first_and_protected_ones_never(self):
+    def test_a_signing_run_s_first_records_survive_a_live_set_over_soft_records(self):
+        # #4186: a signing run pushes each record as its lane finishes and its branch only at the end, so for most of the run its tree
+        # is dead. The soft limit used to delete in-grace dead groups oldest first while more than soft_records records remained, and
+        # once the live set alone was over soft_records it deleted all of them: a run's first records, ten minutes old, went.
         old, recent, pr = self.world()
-        head = self.record(pr[0], pr[1], 29)
-        young = [self.record(old[0], f'{n}' * 40, 0.5 - n / 100) for n in range(1, 5)]  # all inside the grace period; 1 is the oldest
-        code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(soft_records=3), '--apply')
+        live = [self.record(pr[0], pr[1], 29 - n / 10) for n in range(3)]
+        young = [self.record(old[0], f'{n}' * 40, n * 10 / (24 * 60)) for n in range(1, 5)]  # 10 to 40 minutes old, no branch yet
+        code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(soft_records=2), '--apply')
         self.assertEqual(code, 0, result)
-        self.assertEqual(result['reasons']['deleted: over the soft limit (oldest first)'], 2)
-        left = {name.rsplit('/', 1)[1] for name in self.refs('refs/notes/evidence')}
-        self.assertEqual(left, {head, young[2], young[3]})
+        self.assertNotIn('deleted: over the soft limit (oldest first)', result['reasons'])
+        self.assertEqual((result['reasons']['kept: grace'], result['grace_records'], result['protected_records']), (4, 4, 3))
+        self.assertEqual({name.rsplit('/', 1)[1] for name in self.refs('refs/notes/evidence')}, set(live) | set(young))
 
     def test_a_protected_set_over_the_cap_is_reported_and_nothing_protected_is_deleted(self):
         old, recent, pr = self.world()
@@ -422,15 +426,15 @@ class Gc(unittest.TestCase):
         code, verified = self.f.verify(pr[1])
         self.assertEqual((code, verified['record']), (0, head), 'the open head still verifies from its tag')
 
-    def test_a_record_with_two_names_counts_once_against_the_soft_limit_and_the_cap(self):
+    def test_a_record_with_two_names_counts_once_in_grace_and_against_the_cap(self):
         old, recent, pr = self.world()
         head = self.both(pr[0], pr[1], 29)
         young = [self.both(old[0], f'{n}' * 40, 0.5 - n / 100) for n in range(1, 5)]  # all inside the grace period; 1 is the oldest
         code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(soft_records=3), '--apply')
         self.assertEqual(code, 0, result)
-        self.assertEqual(result['reasons']['deleted: over the soft limit (oldest first)'], 4, 'two records, both names of each')
+        self.assertEqual((result['reasons']['kept: grace'], result['grace_records']), (8, 4), 'four records, both names of each')
         for prefix in ('refs/tags/evidence', 'refs/notes/evidence'):
-            self.assertEqual({name.rsplit('/', 1)[1] for name in self.refs(prefix)}, {head, young[2], young[3]}, prefix)
+            self.assertEqual({name.rsplit('/', 1)[1] for name in self.refs(prefix)}, {head, *young}, prefix)
         # Five records under ten names: over a cap of 4 records, not over one of 5.
         for n in range(4):
             self.both(pr[0], pr[1], 28 - n / 10)
@@ -790,8 +794,10 @@ sys.exit({exit_code})
         self.assertEqual(result['reasons'].get('kept: grace'), 2, 'the newest record is in grace, so the whole tree is')
         self.assertEqual(self.f.verify(tree)[1]['reason'], 'check_failed', 'the verdict did not change')
         code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(soft_records=1), '--apply')
+        self.assertEqual((code, result['reasons'].get('kept: grace')), (0, 2), 'grace is absolute: soft_records deletes nothing')
+        code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(grace_hours=12), '--apply')
         self.assertEqual(code, 0, result)
-        self.assertEqual(result['reasons']['deleted: over the soft limit (oldest first)'], 2)
+        self.assertEqual(result['reasons']['deleted: dead tree'], 2)
         self.assertEqual(self.f.verify(tree)[1]['reason'], 'no_record', 'both went: the check runs')
         self.assertFalse({failure, passing} & {n.rsplit('/', 1)[1] for n in self.refs()})
 
@@ -809,7 +815,7 @@ sys.exit({exit_code})
         rules = evidence_verify.policy_rules(support.policy_text(inputs=['src']), 'unit', 'compoundingtech/fractal')
         verdicts = lambda: {name: self.f.verify(tree, rules=rules)[1].get('reason', 'satisfied') for name, (_, tree) in trees.items()}
         before = verdicts()
-        code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(soft_records=5), '--apply')
+        code, result, _ = self.run_gc('--head', pr[0], '--retention', self.retention(grace_hours=1), '--apply')
         self.assertEqual(code, 0, result)
         after = verdicts()
         live = {'pr', 'recent'}
@@ -901,10 +907,19 @@ class PurePlan(unittest.TestCase):
                 else:
                     fresh = self.verdict([], kept_i, None, key_of[t])
                     self.assertIn(after, (before, 'no_record', fresh), f'case {case}: dead tree {t} changed its verdict')
-            if plan['records_after'] > retention['soft_records']:
-                cutoff = as_of - retention['grace_hours'] * 3600
-                young_dead = [r for r in kept_r if r[3] not in live and r[4] < cutoff]
-                self.assertFalse(young_dead, f'case {case}: over the soft limit yet an old dead record remains')
+            cutoff = as_of - retention['grace_hours'] * 3600
+            newest = collections.defaultdict(int)
+            for r in records:
+                newest[('tree', r[3])] = max(newest[('tree', r[3])], r[4])
+            for i in index:
+                newest[('key', i[2])] = max(newest[('key', i[2])], i[4])
+            for r in records:
+                group = ('tree', r[3])
+                in_grace = newest[group] >= cutoff
+                self.assertEqual(r[0] in doomed, r[3] not in live and not in_grace, f'case {case}: {r[0]} (grace is absolute, whatever soft_records)')
+            for i in index:
+                in_grace = newest[('key', i[2])] >= cutoff
+                self.assertEqual(i[0] in doomed, ('unit', i[2]) not in live_keys and not in_grace, f'case {case}: {i[0]}')
 
 
 if __name__ == '__main__':
