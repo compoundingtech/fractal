@@ -1707,9 +1707,9 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn same_seat_forged_omp_descendant_cannot_open_or_close_questions() {
+    async fn legacy_daemon_start_token_does_not_relax_exact_omp_wrapper_custody() {
         use std::io::{Read as _, Write as _};
-        const TEST: &str = "api::mailbox::authority::tests::same_seat_forged_omp_descendant_cannot_open_or_close_questions";
+        const TEST: &str = "api::mailbox::authority::tests::legacy_daemon_start_token_does_not_relax_exact_omp_wrapper_custody";
         const SOCKET: &str = "ST_TEST_FORGED_OMP_QUESTION_SOCKET";
         if let Some(path) = std::env::var_os(SOCKET) {
             let mut socket = std::os::unix::net::UnixStream::connect(path).unwrap();
@@ -1719,6 +1719,8 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             return;
         }
         let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        std::fs::create_dir_all(&state.pty_root).unwrap();
         let path = root.path().join("peer.sock");
         let listener = tokio::net::UnixListener::bind(&path).unwrap();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1753,6 +1755,23 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             let wrapper = std::process::id();
             let terminal = if bound { runtime_parent(wrapper).unwrap() } else { wrapper };
             let daemon = runtime_parent(terminal).unwrap();
+            // Exercise #4147's real keyed registry lookup: no daemonBootId, but
+            // a matching live daemon start token. Compatibility at this outer
+            // boundary must not promote an arbitrary descendant into the wrapper.
+            let record = json!({
+                "daemonPid": daemon,
+                "daemonStartToken": pty_core::registry::read_process_start_token(daemon as i32).unwrap(),
+                "createdAt": "generation-1",
+                "tags": {"st3.subject": "agent/example/question"}
+            });
+            assert!(record.get("daemonBootId").is_none());
+            std::fs::write(state.pty_root.join("physical.json"), record.to_string()).unwrap();
+            let physical_runtime = PhysicalRuntime {
+                id: "physical".into(), incarnation: format!("{daemon}:generation-1"),
+                required_subject_tag: Some("agent/example/question".into()),
+            };
+            let admitted = observe_physical_runtime(&state, &physical_runtime).unwrap();
+            assert_eq!(admitted.pid, Some(daemon));
             let mut stats = serde_json::to_value(fixture_stats()).unwrap();
             stats["daemon"]["pid"] = daemon.into();
             stats["process"]["pid"] = terminal.into();
@@ -1762,8 +1781,14 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
                 terminal: (terminal, process_birth(terminal).unwrap()),
                 peer: (pid, process_birth(pid).unwrap()), bound,
             };
+            let mut exact = witness.clone();
+            exact.peer = (wrapper, process_birth(wrapper).unwrap());
+            exact.validate_with(
+                Ok(serde_json::from_value(stats.clone()).unwrap()), process_birth, runtime_parent,
+            ).unwrap();
             assert!(belongs_to_runtime(pid, daemon), "the old descendant gate admits it");
             super::super::questions::tests::assert_forged_binding_cannot_write(&peer, || {
+                observe_physical_runtime(&state, &physical_runtime)?;
                 connector.validate().map_err(|_| refused("connector unavailable"))?;
                 witness.validate_with(
                     Ok(serde_json::from_value(stats.clone()).unwrap()),
