@@ -4482,7 +4482,10 @@ async fn retention_event_timeout_rereads_a_new_unsignaled_floor() {
 #[tokio::test]
 async fn an_event_wait_ignores_a_wake_without_a_matching_event() {
     let root = tempfile::tempdir().unwrap();
-    let state = state(root.path());
+    let mut state = state(root.path());
+    // A file store, as the daemon runs: the waiter reads while this test appends, and in
+    // shared-cache memory that read fails at once with "database table is locked".
+    state.store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "node").unwrap());
     let waiter_state = state.clone();
     let waiter = tokio::spawn(async move {
         let response = events(
@@ -9190,6 +9193,11 @@ async fn roster_resilience_unpublished_mode_keeps_the_bounded_wait_and_503() {
             assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
             assert_eq!(error.code, "agent-roster-not-ready");
             assert_eq!(started.elapsed(), AGENT_ROSTER_READ_WAIT);
+            // A client sees this code and a retry, not `internal`.
+            let envelope = client_error_envelope(error.status,
+                &json!({"code": error.code, "message": error.message}), "request/test");
+            assert_eq!((envelope["code"].as_str(), envelope["retryable"].as_bool()),
+                (Some("agent-roster-not-ready"), Some(true)));
         }
     }
 }
@@ -12879,6 +12887,28 @@ mission "overview-renamed" state="ready" {
     }
 }
 
+#[tokio::test]
+async fn native_recipient_preflight_refuses_unknown_without_writing_and_accepts_runtime_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    let before = state.store.index().unwrap();
+    let (status, error) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "unknown-recipient");
+    assert_eq!(error["details"]["recipient"], "agent/ada/tester");
+    assert_eq!(state.store.index().unwrap(), before);
+    roster_fixture_append(&state.store, "agent/ada/tester", "runtime.observed", json!({
+        "status": "stopped", "runtime_id": "tester", "incarnation_id": "fixture",
+    }));
+    let (status, recipient) = get_request(app.clone(), "/v1/messages/recipient?to=agent%2Fada%2Ftester").await;
+    assert_eq!(status, StatusCode::OK, "{recipient}");
+    assert_eq!(recipient["recipient_identity"], "agent/ada/tester");
+    let (status, error) = get_request(app, "/v1/messages/recipient?to=person%2Fada").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "person-has-no-inbox");
+}
+
 #[test]
 fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() {
     let root = tempfile::tempdir().unwrap();
@@ -12953,7 +12983,7 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
         [json!({"call_id":"call-waiting","name":"shell","arguments":{"command":["make","release"]}})]
     );
     let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-waiting"}}});
-    let prompt = prompt_card::prompt_card(&row, Ok(calls));
+    let prompt = prompt_card::prompt_card(&row, || Ok(calls));
     assert_eq!(prompt["calls"][0]["input"], r#"{"command":["make","release"]}"#);
     assert_eq!(prompt["allow"], true);
 

@@ -275,10 +275,10 @@ pub enum AttentionKind {
         answers: Vec<String>,
         /// The harness observation that opened it, which an answer names.
         episode: String,
-        /// The exact call it asks about, as st names it: `Some(None)` when its harness named
-        /// none, `None` from a daemon that predates naming it. Allow is offered only beside it.
+        /// The exact call it asks about, as st names it; none when it names none. Allow is
+        /// offered only beside it.
         #[serde(skip)]
-        call: Option<Option<String>>,
+        call: Option<String>,
         /// The calls without a result st serves beside it, oldest first, or why it serves none:
         /// it cannot read the seat's conversation, or it is too old to serve them.
         #[serde(skip)]

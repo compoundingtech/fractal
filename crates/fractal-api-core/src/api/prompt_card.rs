@@ -1,12 +1,9 @@
-//! A harness-prompt card's prompt: the tool calls without a result in the seat's conversation,
-//! the answers st offers and whether a client may answer it, or why st cannot read the
-//! conversation (docs/clients/ui-contract.md, Attention row).
+//! A harness-prompt card's prompt: the call the harness asks about while it has no result in the
+//! seat's conversation, the answers st offers and whether a client may answer it, or why st
+//! cannot read the conversation (docs/clients/ui-contract.md, Attention row).
 
 use super::*;
 use std::collections::HashSet;
-
-/// The most calls a card names.
-const CALLS: usize = 5;
 
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
@@ -19,30 +16,28 @@ const TAIL: usize = 256;
 /// `{call_id, name, arguments}`, or says why st cannot.
 pub(crate) type PendingCalls<'a> = &'a dyn Fn(&str) -> Result<Vec<Value>, String>;
 
-/// The prompt on a harness-prompt row's presentation, from the seat's calls without a result.
-pub(crate) fn prompt_card(row: &Value, pending: Result<Vec<Value>, String>) -> Value {
+/// The prompt on a harness-prompt row's presentation. `pending` reads the seat's calls without a
+/// result, and only when the harness names the call it asks about.
+pub(crate) fn prompt_card(row: &Value, pending: impl FnOnce() -> Result<Vec<Value>, String>) -> Value {
     let respond = &row["action_parameters"]["prompt.respond"];
     let answers = respond["answers"].as_array().cloned().unwrap_or_default();
-    let calls = match pending {
+    // Only the call st names: any other call without a result (a parent's open Task call, or one
+    // whose result st has not read yet) may not be the one asked about. A prompt that names none
+    // shows no call and is answered in its terminal.
+    let Some(named) = respond["call_id"].as_str() else {
+        return json!({"calls": [], "answers": answers, "allow": false});
+    };
+    let calls = match pending() {
         Ok(calls) => calls,
         Err(reason) => {
             return json!({"calls": null, "answers": answers, "allow": false, "unknown_reason": reason});
         }
     };
-    // The newest calls, in the order the seat made them, and always the one the harness asks
-    // about when st knows it.
-    let named = respond["call_id"].as_str();
-    let asked = named.and_then(|id| calls.iter().position(|call| call["call_id"] == id));
-    let mut kept = calls.len().saturating_sub(CALLS);
-    // An older asked call takes the place of the oldest of the newest five.
-    if asked.is_some_and(|asked| asked < kept) {
-        kept += 1;
-    }
     let calls = calls
         .iter()
-        .enumerate()
-        .filter(|(index, _)| *index >= kept || Some(*index) == asked)
-        .map(|(_, call)| {
+        .filter(|call| call["call_id"] == named)
+        .take(1)
+        .map(|call| {
             let input = match &call["arguments"] {
                 Value::String(text) => text.clone(),
                 arguments => arguments.to_string(),
@@ -56,14 +51,8 @@ pub(crate) fn prompt_card(row: &Value, pending: Result<Vec<Value>, String>) -> V
             })
         })
         .collect::<Vec<_>>();
-    // The call the harness asks about, waiting and whole: a client answers only the exact call
-    // its person can read in full. A harness that names none is answered in its terminal.
-    let allow = !answers.is_empty()
-        && named.is_some_and(|id| {
-            calls
-                .iter()
-                .any(|call| call["call_id"] == id && call["input_complete"] == true)
-        });
+    // A client answers only the call its person can read in full.
+    let allow = !answers.is_empty() && calls.first().is_some_and(|call| call["input_complete"] == true);
     json!({"calls": calls, "answers": answers, "allow": allow})
 }
 
@@ -136,7 +125,7 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_names_the_calls_without_a_result_and_allows_an_answer_to_one_whole_call() {
+    fn a_prompt_names_the_call_st_names_and_allows_an_answer_to_it_whole() {
         // Newest first, as a slice reads them.
         let items = [
             entry(5, "tool_call", json!({"call_id": "call-c", "name": "Bash", "arguments": {"command": "make"}})),
@@ -147,7 +136,7 @@ mod tests {
         let calls = pending_calls(&items);
         assert_eq!(calls, [json!({"call_id": "call-c", "name": "Bash", "arguments": {"command": "make"}})]);
 
-        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-c")), Ok(calls.clone()));
+        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-c")), || Ok(calls.clone()));
         assert_eq!(
             prompt,
             json!({
@@ -159,41 +148,38 @@ mod tests {
         // The decoded card is the client's type.
         serde_json::from_value::<fractal_client::AttentionPrompt>(prompt).unwrap();
 
-        // A call other than the one the harness asks about, a harness that names none, or no
-        // answers: not answered here.
-        assert_eq!(prompt_card(&row(json!(["allow", "deny"]), json!("call-z")), Ok(calls.clone()))["allow"], false);
-        assert_eq!(prompt_card(&row(json!(["allow", "deny"]), Value::Null), Ok(calls.clone()))["allow"], false);
-        assert_eq!(prompt_card(&row(json!([]), json!("call-c")), Ok(calls.clone()))["allow"], false);
-
-        // Beside another call without a result (a parent's open Task call), the named call is
-        // still the one a client allows.
+        // Beside another call without a result (a parent's open Task call), the card names only
+        // the call st names.
         let task = json!({"call_id": "call-task", "name": "Task", "arguments": {"prompt": "build"}});
         let both = vec![task, calls[0].clone()];
-        assert_eq!(prompt_card(&row(json!(["allow", "deny"]), json!("call-c")), Ok(both))["allow"], true);
+        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-c")), || Ok(both.clone()));
+        assert_eq!(prompt["calls"].as_array().unwrap().len(), 1);
+        assert_eq!(prompt["calls"][0]["call_id"], "call-c");
+        assert_eq!(prompt["allow"], true);
+
+        // A named call that has a result, or no answers: not answered here.
+        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-b")), || Ok(both.clone()));
+        assert_eq!((prompt["calls"].clone(), prompt["allow"].clone()), (json!([]), json!(false)));
+        assert_eq!(prompt_card(&row(json!([]), json!("call-c")), || Ok(calls.clone()))["allow"], false);
     }
 
     #[test]
-    fn a_prompt_with_several_calls_or_a_cut_input_is_answered_in_the_terminal() {
-        let calls = (0..7)
-            .map(|n| json!({"call_id": format!("call-{n}"), "name": "Bash", "arguments": {"n": n}}))
-            .collect::<Vec<_>>();
-        let ids = |prompt: &Value| {
-            prompt["calls"].as_array().unwrap().iter().map(|call| call["call_id"].as_str().unwrap().to_owned()).collect::<Vec<_>>()
-        };
-        let prompt = prompt_card(&row(json!(["allow", "deny"]), Value::Null), Ok(calls.clone()));
-        // The newest five, in the order the seat made them; with no call named, none is allowed.
-        assert_eq!(ids(&prompt), ["call-2", "call-3", "call-4", "call-5", "call-6"]);
-        assert_eq!(prompt["allow"], false);
-        // The call the harness asks about is always among them, however old.
-        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-0")), Ok(calls));
-        assert_eq!(ids(&prompt), ["call-0", "call-3", "call-4", "call-5", "call-6"]);
-        assert_eq!(prompt["allow"], true);
+    fn a_prompt_that_names_no_call_shows_none_and_reads_no_conversation() {
+        for call in [Value::Null, json!(7)] {
+            let prompt = prompt_card(&row(json!(["allow", "deny"]), call), || unreachable!("read the conversation"));
+            assert_eq!(prompt, json!({"calls": [], "answers": ["allow", "deny"], "allow": false}));
+            serde_json::from_value::<fractal_client::AttentionPrompt>(prompt).unwrap();
+        }
+        let missing = json!({"action_parameters": {"prompt.respond": {"answers": ["allow", "deny"]}}});
+        assert_eq!(prompt_card(&missing, || unreachable!("read the conversation"))["calls"], json!([]));
+    }
 
+    #[test]
+    fn a_prompt_whose_call_input_was_cut_is_answered_in_the_terminal() {
         let long = "é".repeat(INPUT_BYTES);
-        let prompt = prompt_card(
-            &row(json!(["allow", "deny"]), json!("call-a")),
-            Ok(vec![json!({"call_id": "call-a", "name": "Write", "arguments": {"text": long}})]),
-        );
+        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-a")), || {
+            Ok(vec![json!({"call_id": "call-a", "name": "Write", "arguments": {"text": long}})])
+        });
         let input = prompt["calls"][0]["input"].as_str().unwrap();
         assert!(input.len() <= INPUT_BYTES && input.len() > INPUT_BYTES - 2, "{}", input.len());
         assert_eq!(prompt["calls"][0]["input_complete"], false);
@@ -202,7 +188,7 @@ mod tests {
 
     #[test]
     fn a_prompt_st_cannot_read_says_why_and_allows_no_answer() {
-        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-a")), Err("the seat runs elsewhere".into()));
+        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-a")), || Err("the seat runs elsewhere".into()));
         assert_eq!(
             prompt,
             json!({"calls": null, "answers": ["allow", "deny"], "allow": false, "unknown_reason": "the seat runs elsewhere"})
