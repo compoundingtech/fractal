@@ -1001,6 +1001,9 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        if fresh {
+            seed_empty_projection_health(&connection)?;
+        }
         if fresh && defer_fresh_durability {
             // Back to the member's setting before `from_connection` commits its first meta rows,
             // which a fresh store always writes: that commit fsyncs the WAL, and with it every
@@ -1043,6 +1046,7 @@ impl Store {
             transaction.commit()?;
         }
         runtime.finish_open_projections(&mut connection)?;
+        seed_empty_projection_health(&connection)?;
         let readers = ReadPool::new(&uri, true)?;
         Self::from_connection(connection, readers, origin, uri, true, runtime)
     }
@@ -9996,6 +10000,19 @@ thread_local! {
     static SIGNERS_SELECTED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// One-shot: `apply_replication_repairs` stops after its next page, as a crash there would.
     static STOP_BETWEEN_REPAIR_PAGES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A store created with no claims has projected every claim it holds. Record that, so a backlog
+/// it receives before its first projection pass is projected a chunk per writer hold from here,
+/// as on a store whose first pass found nothing, instead of replayed from nothing in one hold.
+/// Without this row a pass cannot tell what the projection holds, and replays it all.
+fn seed_empty_projection_health(connection: &Connection) -> Result<()> {
+    connection.execute(
+        /* sqlite-large-value: allow-for-now lv-hb2f39a52654d owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
+         VALUES ('graph', 'healthy', 0, ?1) ON CONFLICT(aggregate) DO NOTHING",
+        [now_ms().to_string()],
+    )?;
+    Ok(())
 }
 
 pub fn apply_replication_repair_tx(
