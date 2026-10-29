@@ -1224,6 +1224,7 @@ export type CollectionFrame = ({
   kind: "snapshot";
   order: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
 } | {
   collection: CollectionName;
   has_more: boolean;
@@ -1232,6 +1233,7 @@ export type CollectionFrame = ({
   order: Array<Id>;
   removes: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
   upserts: Array<Resource>;
 } | {
   collection: "terminal";
@@ -2833,6 +2835,11 @@ export type StatusTransition = {
 };
 
 export type StepRunId = string;
+
+export type StreamSync = {
+  peers?: Array<SyncPeer>;
+  state: ("level" | "catching-up" | "diverged" | string);
+};
 
 export type StructuredDiff = {
   changes: Array<{

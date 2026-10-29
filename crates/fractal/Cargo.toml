@@ -9,7 +9,7 @@ autotests = false
 
 [features]
 # Forwarded to the library; tests enable it through the dev-dependencies below, which also turn on this
-# package's own feature for build.rs and the st3-fixture binary.
+# package's own feature for build.rs and the fractal-fixture binary.
 test-support = ["fractal-daemon/test-support"]
 # Opt in only in Performance; ordinary workspace checks need not build a second test binary.
 perf-load = []
@@ -123,7 +123,7 @@ path = "src/main.rs"
 # LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-fractal-binary-aliases
 
 [[bin]]
-name = "st3-fixture"
+name = "fractal-fixture"
 path = "src/fixture.rs"
 required-features = ["test-support"]
 test = false

@@ -239,7 +239,7 @@ fn cli_command_with_bindings(
 /// supported cap, so integration tests check what converges without waiting out pass spacing;
 /// a test about spacing sets its cap in the config. The binary name is a compile-time value.
 fn default_max_passes_per_minute() -> u32 {
-    if env!("CARGO_BIN_NAME") == "st3-fixture" {
+    if env!("CARGO_BIN_NAME") == "fractal-fixture" {
         600
     } else {
         fractal_daemon::config::DEFAULT_MAX_PASSES_PER_MINUTE
@@ -681,8 +681,9 @@ struct FleetInviteArgs {
     /// A code that moves an existing config-peer machine to membership.
     #[arg(long)]
     migrate: bool,
-    /// Send the code to NAME's Fabric inbox instead of showing it.
-    #[arg(long)]
+    /// Send the code to NAME's Fabric inbox instead of showing it. NAME is the Fabric peer
+    /// name or NodeID; the command fails unless Fabric confirms the file arrived.
+    #[arg(long, conflicts_with_all = ["code_only", "code_file"])]
     send_fabric: bool,
     /// Print only the code.
     #[arg(long)]
@@ -702,7 +703,8 @@ struct FleetJoinArgs {
     /// Read the code from this file, and delete the file after a successful join.
     #[arg(long)]
     code_file: Option<PathBuf>,
-    /// Read the code that `fractal fleet invite --send-fabric` put in this machine's Fabric inbox.
+    /// Read the code that `fractal fleet invite --send-fabric` puts in this machine's Fabric inbox,
+    /// waiting up to ten minutes for it to arrive.
     #[arg(long)]
     fabric_inbox: bool,
     /// This machine's name in the fleet.
@@ -788,7 +790,7 @@ struct UninstallArgs {
     /// Leave the fleet without reaching any member first.
     #[arg(long)]
     offline: bool,
-    /// Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty).
+    /// Keep the installed Fractal executables (fractal, st3, st, fractal-migrate, and pty).
     #[arg(long)]
     keep_binaries: bool,
     /// Also required when this machine's graph exists nowhere else.
@@ -4765,7 +4767,7 @@ fn cli_main() -> ExitCode {
     // Cargo bakes the target name into each executable. The installed st3 binary cannot
     // enable this with an argument, environment variable, or a different filename.
     #[cfg(feature = "test-support")]
-    let _fixture_shell = (env!("CARGO_BIN_NAME") == "st3-fixture")
+    let _fixture_shell = (env!("CARGO_BIN_NAME") == "fractal-fixture")
         .then(fractal_daemon::test_support::initialize_fixture);
     // SAFETY: no other thread exists yet; the async runtime starts after this returns.
     unsafe { fractal_drivers::reexec::take_resume_environment() };
@@ -6545,6 +6547,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup.phase("start-services");
     startup_telemetry.phase("start-services");
     tokio::spawn(fractal_daemon::task_cpu::account("reconcile.supervise", reconciler.clone().supervise()));
+    tokio::spawn(fractal_daemon::task_cpu::account("reconcile.mission_reads", reconciler.clone().follow_mission_reads()));
     tokio::spawn(fractal_daemon::task_cpu::account("profile.runtime_lag", fractal_daemon::profile::watch_runtime_lag()));
     // The policy reads `[limits]` again on every pass, so an edit applies without a restart.
     fractal_daemon::config::set_daemon_config(args_config.as_deref());
@@ -18084,7 +18087,7 @@ impl NativeMailbox {
             }
             Some(fractal_daemon::mailbox::Frame::Seat { seat }) => {
                 #[cfg(feature = "test-support")]
-                if env!("CARGO_BIN_NAME") == "st3-fixture"
+                if env!("CARGO_BIN_NAME") == "fractal-fixture"
                     && let Some(root) = std::env::var_os("ST3_FIXTURE_TERMINAL_COMPLETION")
                 {
                     fs::write(PathBuf::from(root).join("title-stream-admitted"), b"seat")?;
@@ -19107,7 +19110,7 @@ fn recycle_idle_wal(path: PathBuf, store: std::sync::Weak<Store>) {
                             "outcome": if report.frames == 0 { "empty" } else if report.recycled { "recycled" } else { "deferred" },
                             "frames": report.frames, "backfilled": report.backfilled,
                             "passive_ms": report.passive_ms, "writer_wait_ms": report.writer_wait_ms,
-                            "truncate_ms": report.truncate_ms,
+                            "truncate_ms": report.truncate_ms, "blocked_by": report.blocked_by,
                         }),
                         None => json!({"outcome":"error", "phase_durations_available":false}),
                     };

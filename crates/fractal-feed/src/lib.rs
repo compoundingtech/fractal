@@ -55,19 +55,23 @@ const RETRY_DELAYS: [Duration; 5] = [
 /// How long a fresh request may take to prove st is answering after its stream dropped.
 const PROBE_WAIT: Duration = Duration::from_secs(3);
 
-/// `default`, or `STUI_FEED_TIMER_CAP_MS` when that is shorter: a cap on the quiet check, the
+/// `default`, or `FRACTAL_FEED_TIMER_CAP_MS` when that is shorter: a cap on the quiet check, the
 /// ping, the pong wait and the retry delays above. Only the end-to-end tests set it, so they need
 /// not wait 20 s to see a silent link dropped.
 fn timer(default: Duration) -> Duration {
     static CAP: std::sync::OnceLock<Option<Duration>> = std::sync::OnceLock::new();
-    let cap = *CAP.get_or_init(|| {
-        std::env::var("STUI_FEED_TIMER_CAP_MS")
-            .ok()
-            .and_then(|ms| ms.parse().ok())
-            .map(Duration::from_millis)
-    });
+    let cap = *CAP.get_or_init(|| timer_cap_with(&|name| std::env::var(name).ok()));
     cap.map_or(default, |cap| cap.min(default))
 }
+
+// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+fn timer_cap_with(get: &dyn Fn(&str) -> Option<String>) -> Option<Duration> {
+    get("FRACTAL_FEED_TIMER_CAP_MS")
+        .or_else(|| get("STUI_FEED_TIMER_CAP_MS"))
+        .and_then(|ms| ms.parse().ok())
+        .map(Duration::from_millis)
+}
+// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
 
 /// The wait before the attempt after `failures` failed ones.
 fn retry_delay(failures: usize) -> Duration {
@@ -655,7 +659,7 @@ async fn connected(
                 let received = std::time::Instant::now();
                 *failures = 0;
                 match event {
-                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more } => {
+                    CollectionEvent::Snapshot { id, snapshot, items, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         // A frame already on its way when the window was left: the socket was
                         // heard from, but nothing of the window comes back.
@@ -671,7 +675,7 @@ async fn connected(
                             return Ended::Closed;
                         }
                     }
-                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more } => {
+                    CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
                         if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
@@ -1394,6 +1398,26 @@ pub async fn detach(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timer_cap_prefers_fractal_and_masks_legacy_even_when_empty_or_invalid() {
+        for (legacy, fractal, expected) in [
+            (None, None, None),
+            (Some("10"), None, Some(10)),
+            (None, Some("20"), Some(20)),
+            (Some("10"), Some("20"), Some(20)),
+            (Some("10"), Some(""), None),
+            (Some("10"), Some("invalid"), None),
+            (Some("10"), Some("0"), Some(0)),
+        ] {
+            let cap = timer_cap_with(&|name| match name {
+                "STUI_FEED_TIMER_CAP_MS" => legacy.map(str::to_owned),
+                "FRACTAL_FEED_TIMER_CAP_MS" => fractal.map(str::to_owned),
+                _ => None,
+            });
+            assert_eq!(cap, expected.map(Duration::from_millis));
+        }
+    }
 
     #[test]
     fn a_window_failure_is_said_only_once_it_has_lasted_and_a_load_cancels_it() {

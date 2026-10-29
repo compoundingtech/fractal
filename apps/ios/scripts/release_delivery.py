@@ -14,6 +14,13 @@ import time
 
 BUNDLE_ID = "com.compoundingtech.fractal"
 
+# LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
+def ios_env(suffix, default=None, environment=os.environ):
+    """Prefer Fractal; an explicitly empty value masks the legacy spelling."""
+    return environment.get("FRACTAL_IOS_" + suffix, environment.get("ST_IOS_" + suffix, default))
+# LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
+
+
 
 def run(argv, *, cwd=None, capture=False, env=None, timeout=None):
     return subprocess.run(argv, cwd=cwd, env=env, check=True, text=True,
@@ -97,7 +104,7 @@ def load_state(path):
 
 
 # Failed builds of one content key back off exponentially from
-# ST_IOS_BUILD_BACKOFF seconds, capped at six hours; new content retries at once.
+# FRACTAL_IOS_BUILD_BACKOFF seconds, capped at six hours; new content retries at once.
 BUILD_BACKOFF_CAP = 6 * 3600
 
 
@@ -578,24 +585,24 @@ class Delivery:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, required=True)
-    parser.add_argument("--ref", default=os.environ.get("ST_IOS_REF", "origin/main"))
+    parser.add_argument("--ref", default=ios_env("REF", "origin/main"))
     parser.add_argument("--state", type=Path)
-    parser.add_argument("--expected-origin", default=os.environ.get("ST_IOS_EXPECTED_ORIGIN"),
+    parser.add_argument("--expected-origin", default=ios_env("EXPECTED_ORIGIN"),
                         help="Exact trusted origin URL, supplied by the operator")
-    parser.add_argument("--trusted-commit", default=os.environ.get("ST_IOS_TRUSTED_COMMIT"),
+    parser.add_argument("--trusted-commit", default=ios_env("TRUSTED_COMMIT"),
                         help="Reviewed full commit SHA used to bootstrap the ancestry boundary")
-    parser.add_argument("--device", default=os.environ.get("ST_IOS_DEVICE"))
-    parser.add_argument("--team", default=os.environ.get("ST_IOS_TEAM"))
+    parser.add_argument("--device", default=ios_env("DEVICE"))
+    parser.add_argument("--team", default=ios_env("TEAM"))
     parser.add_argument("--developer-dir", default=os.environ.get("DEVELOPER_DIR"))
-    parser.add_argument("--notify-from", default=os.environ.get("ST_IOS_NOTIFY_FROM"))
-    parser.add_argument("--notify-to", default=os.environ.get("ST_IOS_NOTIFY_TO"))
+    parser.add_argument("--notify-from", default=ios_env("NOTIFY_FROM"))
+    parser.add_argument("--notify-to", default=ios_env("NOTIFY_TO"))
     parser.add_argument("--max-deferral", type=int,
-                        default=int(os.environ.get("ST_IOS_MAX_DEFERRAL", "2400")))
+                        default=int(ios_env("MAX_DEFERRAL", "2400")))
     parser.add_argument("--build-backoff", type=int,
-                        default=int(os.environ.get("ST_IOS_BUILD_BACKOFF", "900")),
+                        default=int(ios_env("BUILD_BACKOFF", "900")),
                         help="Seconds before the first retry of a failed content key; doubles per failure")
     parser.add_argument("--build-only", action="store_true",
-                        default=os.environ.get("ST_IOS_BUILD_ONLY") == "1",
+                        default=ios_env("BUILD_ONLY") == "1",
                         help="Retain a signed artifact without touching the phone")
     parser.add_argument("--build-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, help=argparse.SUPPRESS)
@@ -605,12 +612,12 @@ def main():
     args = parser.parse_args()
     args.repo = args.repo.expanduser().resolve()
     if not args.team or not args.developer_dir:
-        parser.error("--team/ST_IOS_TEAM and --developer-dir/DEVELOPER_DIR are required")
+        parser.error("--team/FRACTAL_IOS_TEAM and --developer-dir/DEVELOPER_DIR are required")
     if args.build_worker:
         build_release(args)
         return
     if not args.device or not args.state:
-        parser.error("--device/ST_IOS_DEVICE and --state are required")
+        parser.error("--device/FRACTAL_IOS_DEVICE and --state are required")
     if not args.expected_origin or not args.trusted_commit:
         parser.error("--expected-origin and --trusted-commit are required trusted configuration")
     if len(args.trusted_commit) != 40 or any(c not in "0123456789abcdef" for c in args.trusted_commit):

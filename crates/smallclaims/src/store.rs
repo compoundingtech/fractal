@@ -4192,6 +4192,9 @@ const ADMISSION_WRITER_BUDGET: std::time::Duration = std::time::Duration::from_m
 /// Newly admitted claims projected per writer transaction. A catch-up page must not keep
 /// queued lease renewals and messages behind its entire incremental projection.
 pub const PROJECTION_CHUNK_CLAIMS: usize = 128;
+/// A checkpoint that waits this long for the writer names the hold that held it up. The daemon
+/// reports the same wait as an abnormal checkpoint.
+const CHECKPOINT_HELD_UP_MS: u128 = 100;
 
 /// Full-inventory answers since the daemon started: each lists every identity this node holds,
 /// which on a large store can pass `MAX_EXCHANGE_BYTES` and fail the peer's inflate.
@@ -7726,9 +7729,15 @@ impl Store {
             return Ok(report);
         }
         let waiting = std::time::Instant::now();
+        let queued_ahead = self.connection.writer_thread().map(crate::windows::holds::WaitWatch::start);
         {
             let _writer = self.connection.write();
             report.writer_wait_ms = waiting.elapsed().as_millis();
+            // Its own hold has begun but not ended, so only the holds ahead of it count.
+            let blocked_by = queued_ahead.and_then(crate::windows::holds::WaitWatch::blocked_by);
+            if report.writer_wait_ms >= CHECKPOINT_HELD_UP_MS {
+                report.blocked_by = blocked_by;
+            }
             let truncating = std::time::Instant::now();
             report.recycled = crate::sqlite::truncate_idle_wal(checkpoint)?;
             report.truncate_ms = Some(truncating.elapsed().as_millis());
