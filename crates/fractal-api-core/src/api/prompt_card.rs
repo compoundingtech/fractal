@@ -4,8 +4,12 @@
 
 use super::*;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+
+use notify::Watcher as _;
 
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
@@ -15,9 +19,8 @@ const INPUT_BYTES: usize = 4 * 1024;
 const TAIL: usize = 256;
 
 /// Reads the tool calls without a result in a seat's conversation, oldest first, each
-/// `{call_id, name, arguments, complete}`, with the transcript they were read from; or says why
-/// st cannot.
-pub(crate) type PendingCalls<'a> = &'a dyn Fn(&str) -> Result<(Vec<Value>, Option<PathBuf>), String>;
+/// `{call_id, name, arguments, complete}`, or says why st cannot.
+pub(crate) type PendingCalls<'a> = &'a dyn Fn(&str) -> Result<Vec<Value>, String>;
 
 /// The prompt on a harness-prompt row's presentation. `pending` reads the seat's calls without a
 /// result, and only when the harness names the call it asks about.
@@ -101,10 +104,15 @@ fn pending_calls(items: &[Value]) -> Vec<Value> {
     calls
 }
 
-/// The tool calls without a result in `seat`'s conversation on this node and the transcript
-/// they were read from, or why st cannot read it: the seat runs elsewhere, has no session yet,
-/// or its harness keeps none st reads.
-pub(crate) fn seat_pending_calls(state: &AppState, seat: &str) -> Result<(Vec<Value>, Option<PathBuf>), String> {
+/// The tool calls without a result in `seat`'s conversation on this node, or why st cannot
+/// read it: the seat runs elsewhere, has no session yet, or its harness keeps none st reads.
+/// `follow` is given the transcript before it is read, so a change after the read is never
+/// missed; when st cannot follow it, the card says so instead.
+pub(crate) fn seat_pending_calls(
+    state: &AppState,
+    seat: &str,
+    follow: impl FnOnce(&Path) -> Result<(), String>,
+) -> Result<Vec<Value>, String> {
     let unreadable = |error: ApiError| format!("st cannot read this seat's conversation: {}", error.message);
     let session = super::client_v0::conversation_session_id(state, seat).map_err(unreadable)?;
     let index = state.store.index().map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
@@ -112,40 +120,83 @@ pub(crate) fn seat_pending_calls(state: &AppState, seat: &str) -> Result<(Vec<Va
         .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
     let source = super::client_v0::conversation_blocks::source(state, &session, managed.as_ref())
         .map_err(unreadable)?;
+    follow(&source.transcript)?;
     let timeline = crate::external_sessions::LineTimeline::acquire(&source);
     let slice = timeline
         .hold()
         .slice(&source, crate::external_sessions::TimelineOrder::Sequence, None, TAIL)
         .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
-    Ok((pending_calls(&slice.items), Some(source.transcript.clone())))
+    Ok(pending_calls(&slice.items))
 }
 
-/// Wakes the attention refresher when a transcript a published prompt card read changes: a
-/// seat's conversation changes no claim attention reads, so without it a card would show a new
-/// call, or keep one that has its result, until the clock period ends. Without a file watcher
-/// (one could not be made) cards change only with the clock.
+/// Wakes the attention refresher when a conversation a published prompt card read changes: a
+/// seat's conversation changes no claim attention reads. It watches each transcript's
+/// directory, so a transcript created or replaced later, and a SQLite source's write-ahead log
+/// and journal beside it, are followed too. An event the watcher could not deliver in full (an
+/// error, or an overflow that asks for a rescan) counts as a change, so the prompts are read
+/// again. A transcript it cannot watch is not followed: its card says so and offers no answer.
 pub(crate) struct PromptWatch {
+    wake: Arc<tokio::sync::Notify>,
     watcher: Option<notify::RecommendedWatcher>,
-    watched: HashSet<PathBuf>,
+    /// The files whose changes wake the refresher: each followed transcript and its siblings.
+    files: Arc<Mutex<HashSet<PathBuf>>>,
+    /// The transcripts followed, and those the refresh in progress read.
+    followed: HashSet<PathBuf>,
+    read: HashSet<PathBuf>,
     changed: Arc<AtomicBool>,
+}
+
+/// A transcript and the files beside it a SQLite source commits through.
+fn change_files(transcript: &Path) -> [PathBuf; 3] {
+    let beside = |suffix: &str| {
+        let mut name = OsString::from(transcript.as_os_str());
+        name.push(suffix);
+        PathBuf::from(name)
+    };
+    [transcript.to_owned(), beside("-wal"), beside("-journal")]
 }
 
 impl PromptWatch {
     pub(crate) fn new(wake: Arc<tokio::sync::Notify>) -> Self {
-        let changed = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&changed);
-        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) {
-                flag.store(true, Ordering::Release);
-                wake.notify_one();
-            }
-        })
-        .inspect_err(|error| eprintln!("st3: prompt cards change only with the clock: {error}"))
-        .ok();
-        Self { watcher, watched: HashSet::new(), changed }
+        let mut watch = Self {
+            wake,
+            watcher: None,
+            files: Arc::default(),
+            followed: HashSet::new(),
+            read: HashSet::new(),
+            changed: Arc::new(AtomicBool::new(false)),
+        };
+        // A watcher that cannot be made now is made again when a card first follows a seat.
+        let _ = watch.watcher();
+        watch
     }
 
-    /// Whether a watched transcript changed since this was last asked.
+    fn watcher(&mut self) -> Result<&mut notify::RecommendedWatcher, String> {
+        if self.watcher.is_none() {
+            let (flag, wake, files) = (Arc::clone(&self.changed), Arc::clone(&self.wake), Arc::clone(&self.files));
+            let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                let relevant = match &event {
+                    Err(_) => true,
+                    Ok(event) if event.need_rescan() => true,
+                    Ok(event) => {
+                        !matches!(event.kind, notify::EventKind::Access(_)) && {
+                            let files = files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            event.paths.iter().any(|path| files.contains(path))
+                        }
+                    }
+                };
+                if relevant {
+                    flag.store(true, Ordering::Release);
+                    wake.notify_one();
+                }
+            })
+            .map_err(|error| format!("st cannot follow this seat's conversation: {error}"))?;
+            self.watcher = Some(watcher);
+        }
+        Ok(self.watcher.as_mut().expect("made above"))
+    }
+
+    /// Whether a followed conversation changed since this was last asked.
     pub(crate) fn take_changed(&self) -> bool {
         self.changed.swap(false, Ordering::AcqRel)
     }
@@ -155,24 +206,51 @@ impl PromptWatch {
         self.changed.store(true, Ordering::Release);
     }
 
-    /// Watch exactly `transcripts`, the ones the published prompt cards read.
-    pub(crate) fn watch(&mut self, transcripts: HashSet<PathBuf>) {
-        use notify::Watcher as _;
-        let Some(watcher) = self.watcher.as_mut() else {
-            return;
-        };
-        for gone in self.watched.difference(&transcripts) {
-            let _ = watcher.unwatch(gone);
+    /// A refresh is about to present the prompts.
+    pub(crate) fn begin(&mut self) {
+        self.read.clear();
+    }
+
+    /// Follow `transcript` from now on, before it is read.
+    pub(crate) fn follow(&mut self, transcript: &Path) -> Result<(), String> {
+        if !self.followed.contains(transcript) {
+            let directory = transcript
+                .parent()
+                .ok_or_else(|| format!("st cannot follow this seat's conversation: {} has no directory", transcript.display()))?
+                .to_owned();
+            let shared = self.followed.iter().any(|other| other.parent() == Some(directory.as_path()));
+            if !shared {
+                self.watcher()?
+                    .watch(&directory, notify::RecursiveMode::NonRecursive)
+                    .map_err(|error| format!("st cannot follow this seat's conversation: {error}"))?;
+            }
+            self.files
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend(change_files(transcript));
+            self.followed.insert(transcript.to_owned());
         }
-        let mut watched = HashSet::new();
-        for transcript in transcripts {
-            if self.watched.contains(&transcript)
-                || watcher.watch(&transcript, notify::RecursiveMode::NonRecursive).is_ok()
+        self.read.insert(transcript.to_owned());
+        Ok(())
+    }
+
+    /// The refresh presented the prompts: stop following what no card read.
+    pub(crate) fn finish(&mut self) {
+        let gone = self.followed.difference(&self.read).cloned().collect::<Vec<_>>();
+        for transcript in gone {
+            self.followed.remove(&transcript);
+            let mut files = self.files.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for file in change_files(&transcript) {
+                files.remove(&file);
+            }
+            drop(files);
+            let directory = transcript.parent();
+            if !self.followed.iter().any(|other| other.parent() == directory)
+                && let (Some(directory), Some(watcher)) = (directory, self.watcher.as_mut())
             {
-                watched.insert(transcript);
+                        let _ = watcher.unwatch(directory);
             }
         }
-        self.watched = watched;
     }
 }
 
@@ -266,33 +344,81 @@ mod tests {
         }
     }
 
-    /// A change to a watched transcript wakes the refresher once; one no longer watched does not.
+    /// Wait for a followed conversation to change, or say it did not within `within`.
+    async fn changed(watch: &PromptWatch, wake: &tokio::sync::Notify, within: Duration) -> bool {
+        let _ = tokio::time::timeout(within, wake.notified()).await;
+        watch.take_changed()
+    }
+
+    fn append(path: &Path) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(file, r#"{{"type":"response_item"}}"#).unwrap();
+    }
+
+    /// A change to a followed transcript wakes the refresher once. Another file in its directory
+    /// does not, nor does a transcript no card read any more.
     #[tokio::test]
-    async fn a_watched_transcript_that_changes_wakes_the_refresher() {
+    async fn a_followed_transcript_that_changes_wakes_the_refresher() {
         let root = tempfile::tempdir().unwrap();
-        let transcript = root.path().join("oak.jsonl");
-        std::fs::write(&transcript, "{}\n").unwrap();
+        let (oak, elm) = (root.path().join("oak.jsonl"), root.path().join("elm.jsonl"));
+        std::fs::write(&oak, "{}\n").unwrap();
         let wake = Arc::new(tokio::sync::Notify::new());
         let mut watch = PromptWatch::new(Arc::clone(&wake));
-        watch.watch(HashSet::from([transcript.clone()]));
+        watch.begin();
+        watch.follow(&oak).unwrap();
+        watch.finish();
         assert!(!watch.take_changed());
-        let append = || {
-            use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
-            writeln!(file, r#"{{"type":"response_item"}}"#).unwrap();
-        };
-        append();
-        tokio::time::timeout(Duration::from_secs(5), wake.notified()).await.expect("woken");
-        assert!(watch.take_changed());
+        append(&oak);
+        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
         assert!(!watch.take_changed(), "asked once");
 
-        watch.watch(HashSet::new());
-        // Let events from before the unwatch arrive, then forget them.
+        // Another seat's transcript beside it changes nothing here.
+        append(&elm);
+        assert!(!changed(&watch, &wake, Duration::from_millis(500)).await);
+
+        // No card read it at the last refresh: it is no longer followed.
+        watch.begin();
+        watch.finish();
         tokio::time::sleep(Duration::from_millis(200)).await;
         watch.take_changed();
-        append();
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(!watch.take_changed());
+        append(&oak);
+        assert!(!changed(&watch, &wake, Duration::from_millis(500)).await);
+    }
+
+    /// A SQLite source (OpenCode's) commits to its write-ahead log and leaves the database file
+    /// as it was until a checkpoint: a commit there wakes the refresher too.
+    #[tokio::test]
+    async fn a_commit_to_a_followed_databases_write_ahead_log_wakes_the_refresher() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("opencode.db");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.pragma_update(None, "journal_mode", "WAL").unwrap();
+        connection.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+        connection.execute_batch("CREATE TABLE part (id TEXT PRIMARY KEY, data TEXT)").unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut watch = PromptWatch::new(Arc::clone(&wake));
+        watch.begin();
+        watch.follow(&database).unwrap();
+        watch.finish();
+        let before = std::fs::metadata(&database).unwrap().len();
+        connection
+            .execute("INSERT INTO part VALUES ('call-a', '{\"type\":\"tool\"}')", [])
+            .unwrap();
+        assert_eq!(std::fs::metadata(&database).unwrap().len(), before, "the commit is in the log alone");
+        assert!(changed(&watch, &wake, Duration::from_secs(5)).await);
+    }
+
+    /// A transcript st cannot follow is not read as if it could: its card says why.
+    #[test]
+    fn a_transcript_st_cannot_follow_says_so() {
+        let mut watch = PromptWatch::new(Arc::new(tokio::sync::Notify::new()));
+        let error = watch.follow(Path::new("/no/such/directory/oak.jsonl")).unwrap_err();
+        assert!(error.starts_with("st cannot follow this seat's conversation"), "{error}");
+        let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-a")), || Err(error.clone()));
+        assert_eq!(prompt["calls"], Value::Null);
+        assert_eq!(prompt["unknown_reason"], json!(error));
+        assert_eq!(prompt["allow"], false);
     }
 
     #[test]

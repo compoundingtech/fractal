@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "none",
-    "detail": "No startup work or expected interruption. Each prompt card that names a call reads the newest 256 entries of its seat's conversation when the attention list folds, through the conversation cache client reads share; the refresher watches those transcripts and presents the prompts again when one changes."
+    "detail": "No startup work or expected interruption. Each prompt card that names a call reads the newest 256 entries of its seat's conversation when the attention list folds, through the conversation cache client reads share. The refresher follows each such conversation from before it reads it (a file watch on the transcript's directory, covering a SQLite source's write-ahead log) and presents the prompts again when one changes; a card whose conversation st cannot follow says so and offers no answer."
   },
   "manual": {
     "status": "none",
