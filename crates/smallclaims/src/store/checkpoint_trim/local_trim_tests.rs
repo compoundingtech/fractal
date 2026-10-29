@@ -51,7 +51,7 @@ fn a_member_that_trims_locally_seals_verifies_and_adopts_nothing() {
     assert_ne!(refused, Some("trim-is-local"));
 
     let local = Store::open_memory("writer", Arc::new(Plain)).unwrap();
-    local.trim_locally(true);
+    local.trim_locally(true).unwrap();
     assert!(local.trims_locally());
     for _ in 0..2 {
         assert!(local.checkpoint_step(&context(scratch.path())).unwrap().is_empty());
@@ -78,7 +78,7 @@ fn a_member_that_trims_locally_finishes_a_committed_trim_and_keeps_an_uncommitte
                         'checkpoint/uncommitted');",
         )
         .unwrap();
-    store.trim_locally(true);
+    store.trim_locally(true).unwrap();
     let actions = store.checkpoint_step(&context(scratch.path())).unwrap();
     assert!(actions.iter().any(|action| matches!(
         action,
