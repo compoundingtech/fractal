@@ -739,6 +739,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             post(records::withdraw_attention),
         )
         .route("/v1/messages", get(messages::list_messages).post(messages::send_message))
+        .route("/v1/messages/recipient", get(messages::recipient))
         .route("/v1/messages/page", get(messages::list_messages_page))
         .route("/v1/messages/cleanup", post(mail_backlog::cleanup))
         .route("/v1/harness-events", post(harness_events::publish))
@@ -790,6 +791,14 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route(
             "/v1/internal/replication/checkpoint-need",
             post(replication::replication_checkpoint_need),
+        )
+        .route(
+            "/v1/internal/replication/answers",
+            post(replication::replication_answers),
+        )
+        .route(
+            "/v1/internal/replication/answers-check",
+            post(replication::replication_answers_check),
         )
         .route(
             "/v1/internal/replication/checkpoint-adopt",
@@ -1886,6 +1895,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "projection-detail-invalid-source"
         | "cursor-gap"
         | "page-cursor-expired"
+        | "agent-roster-not-ready"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
@@ -2399,6 +2409,22 @@ where
     .await?;
     let page = client_page_read(state, &snapshot, collection, items, query, true)?;
     Ok((Extension(snapshot), Json(page)))
+}
+
+/// This host's replication as a stream frame states it (`sync`, docs/st3/client-v0/collections.md,
+/// Sync on the stream): a page's notice, or `level` said explicitly, since on the stream an
+/// absent `sync` is unknown.
+pub fn client_stream_sync(state: &AppState) -> Value {
+    match client_sync_notice(state) {
+        Some(notice) => json!({"state": notice.state, "peers": notice.peers}),
+        None => json!({"state": "level"}),
+    }
+}
+
+/// Whether this host is catching up with a peer and whether it has diverged from one: the two
+/// flags [`client_sync_notice`] reads before naming any peer, cheap enough to weigh on a commit.
+pub fn replication_flags(state: &AppState) -> (bool, bool) {
+    (state.store.replication_catching_up(), state.store.replication_diverged())
 }
 
 /// A host catching up with a peer can show early history as current, and a host whose graph

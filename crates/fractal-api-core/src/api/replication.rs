@@ -216,6 +216,28 @@ pub async fn replication_checkpoint_manifest(
         .map(Json)
 }
 
+/// This node's answers per claim kind, for its replication worker and the peers it serves. They
+/// are computed off the request path and kept, so a request answers at once, `pending` until
+/// they exist.
+pub async fn replication_answers(
+    State(state): State<AppState>,
+    Json(request): Json<smallclaims::answers::AnswersRequest>,
+) -> Json<Option<smallclaims::answers::AnswersReply>> {
+    let cache = state.store.extension::<smallclaims::answers::AnswersCache>();
+    Json(Some(cache.answer(&state.store, &request)))
+}
+
+/// Record what the replication worker's daily answers check found.
+pub async fn replication_answers_check(
+    State(state): State<AppState>,
+    Json(check): Json<smallclaims::answers::AnswersCheck>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || Ok(store.record_answers_check(&check)?))
+        .await
+        .map(|()| Json(serde_json::json!({})))
+}
+
 /// The newest stable checkpoint this node needs a peer's manifest for, if any.
 pub async fn replication_checkpoint_need(
     State(state): State<AppState>,
