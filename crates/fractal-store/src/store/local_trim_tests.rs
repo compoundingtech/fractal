@@ -155,10 +155,14 @@ fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
     for n in 0..40 {
         apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
     }
+    for n in 40..50 {
+        apply(&store, &Write::Resource { resource: 0, state: (n % 3) as u8 }, n);
+    }
     let before = answers(&store, context.now_unix_ms);
     assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
     assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
-    assert!(claims_of(&store, "observer.observed") < 40, "superseded claims are gone");
+    assert_eq!(claims_of(&store, "observer.observed"), 2, "the newest of each observer stays");
+    assert_eq!(claims_of(&store, "resource.observed"), 1, "the newest of the resource stays");
     let retired: i64 = store
         .readers
         .get()
