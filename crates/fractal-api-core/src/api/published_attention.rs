@@ -446,6 +446,19 @@ fn present_rows(
                         ),
                     }
                 }
+                // A launch card previews its newest variant's mission, or says why it cannot.
+                if facts.attention_kind == "launch-approval" {
+                    match super::launch_card::launch_card(store, row, |agent| {
+                        known.fleet.agent_label(agent)
+                    }) {
+                        Ok(Some(launch)) => presentation["launch"] = launch,
+                        Ok(None) => {}
+                        Err(error) => eprintln!(
+                            "st3: WARN attention {} has no launch preview: {error:#}",
+                            row["id"]
+                        ),
+                    }
+                }
                 row["presentation"] = presentation;
             }
             Err(error) => eprintln!(
