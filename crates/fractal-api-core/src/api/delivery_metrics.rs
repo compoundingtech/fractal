@@ -222,7 +222,13 @@ mod tests {
         let AggregatedMetrics::F64(MetricData::Gauge(gauge)) = metric.data() else { panic!("expected f64 gauge") };
         assert_eq!(gauge.data_points().count(), 4);
         for point in gauge.data_points() {
-            assert!(point.value() >= 700.);
+            let never_bound = point.attributes().any(|attribute|
+                *attribute == KeyValue::new("st.agent", agents[3].clone()));
+            if never_bound {
+                assert!(point.value() < 60., "an unbound seat starts its monotonic clock at first observation");
+            } else {
+                assert!(point.value() >= 700., "an API timestamp seeds the initial age");
+            }
             assert_eq!(point.attributes().count(), 3);
             assert!(point.attributes().any(|attribute| agents.iter().any(|agent| *attribute == KeyValue::new("st.agent", agent.clone()))));
         }
