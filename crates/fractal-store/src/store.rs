@@ -691,6 +691,10 @@ WHERE kind IN ('mission-run.state','step-run.state','work.failed')
 CREATE INDEX IF NOT EXISTS claims_terminal_capability_hash_index
 ON claims(json_extract(body, '$.fields.capability_hash'), store_index)
 WHERE kind='custom.client.terminal-attached';
+-- Shared action-key admission must seek one actor/key, never scan retained resolutions.
+CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
+ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
+WHERE kind='harness-question.resolved' AND actor IS NULL;
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
