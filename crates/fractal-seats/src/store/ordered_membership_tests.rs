@@ -1135,7 +1135,8 @@ fn every_lifecycle_registry_family_projects_membership_visibility_end_to_end() {
                 assert!(rows(&store).is_empty(), "{family}");
             }
             Document => {
-                store.put_document(member, b"new immutable registry version", &None, "registry-document-next").unwrap();
+                store.put_document(member, b"new immutable registry version",
+                    &store.latest_document_token(member).unwrap(), "registry-document-next").unwrap();
                 assert_eq!(members(&store), vec![member], "{family}: rebinding retains visibility");
             }
         }
