@@ -15335,6 +15335,36 @@ subscription "watch/source" {
         assert_eq!(envelope["details"]["idempotency_key"], "example-exact-key");
     }
 
+    #[test]
+    fn every_schema_error_code_is_preserved_by_client_normalization() {
+        let schema: Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/st3/client-v0/schemas/client-v0.schema.json",
+        ))).unwrap();
+        let codes = schema["$defs"]["ErrorCode"]["anyOf"][0]["enum"].as_array().unwrap();
+        assert!(!codes.is_empty());
+        // Every declared code is safe for clients; there are no intentional exclusions.
+        for code in codes {
+            let code = code.as_str().unwrap();
+            assert_eq!(client_error_code(Some(code)), code,
+                "schema error codes must not silently become internal");
+        }
+    }
+
+    #[test]
+    fn typed_identity_conflicts_preserve_client_wire_codes() {
+        for code in ["identity-cycle", "identity-occupied", "identity-retired-source"] {
+            let error = ApiError::bad(St3Error::new(code, "identity conflict"));
+            assert_eq!(error.status, StatusCode::CONFLICT);
+            let envelope = client_error_envelope(error.status,
+                &json!({"code":error.code,"message":error.message}), "request/identity");
+            assert_eq!(envelope["code"], code);
+            assert_eq!(envelope["retryable"], false);
+            let typed: fractal_client::ErrorEnvelope = serde_json::from_value(envelope).unwrap();
+            assert_ne!(typed.code, fractal_client::ErrorCode::Unknown);
+        }
+    }
+
     #[tokio::test]
     async fn forged_action_receipts_cannot_replay_launcher_attribution() {
         for (peer, null_actor) in [(false, false), (false, true), (true, true)] {
@@ -15488,14 +15518,19 @@ subscription "watch/source" {
             idempotency_key: None,
         }).unwrap();
         let before = state.store.status(None).unwrap().store_index;
-        let error = action(
-            State(state.clone()),
-            Extension(new_client_snapshot(&state)),
-            Extension(session),
-            Json(request),
-        ).await.unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "legacy-action-receipt-untrusted");
+        let response = super::super::router(state.clone()).oneshot(Request::builder()
+            .method("POST").uri("/v1/client/actions")
+            .header(LOCAL_PERSON_HEADER, "person/alex")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&request).unwrap()))
+            .unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let error: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(error["code"], "legacy-action-receipt-untrusted");
+        assert_eq!(error["retryable"], false);
+        let typed: fractal_client::ErrorEnvelope = serde_json::from_value(error).unwrap();
+        assert_eq!(typed.code, fractal_client::ErrorCode::LegacyActionReceiptUntrusted);
         assert_eq!(state.store.status(None).unwrap().store_index, before);
         assert!(state.store.claims_for_kind_at("message.sent", None, true, 100)
             .unwrap().claims.is_empty());
