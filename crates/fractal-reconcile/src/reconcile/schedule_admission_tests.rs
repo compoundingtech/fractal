@@ -156,6 +156,8 @@ mission "parent" state="ready" {{
     assert!(!schedule_requires_complete_history(&store, &schedule).unwrap(),
         "a revision of the same owner run is not an ownership change");
     assert!(ready(&store, &schedule, now));
+    // Materializing the revised declaration wakes the next reconciliation pass.
+    reconciler.reconcile_schedule(&schedule).unwrap();
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(59_999)).await;
     tokio::task::yield_now().await;
