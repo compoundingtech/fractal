@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serde_json::Value;
 
+use crate::answers::{AnswersCheck, AnswersReply, AnswersRequest};
 use crate::claim::ReplicaEnvelopeId;
 use crate::fleet::FleetView;
 use crate::fleet::handshake::JoinRequest;
@@ -105,6 +106,20 @@ pub trait Backend: Clone + Send + Sync + 'static {
         carrier: Option<crate::replication::ReplicationCarrier>,
         failure: Option<&crate::replication::ReplicationExchangeFailure>,
     ) -> impl Future<Output = Result<()>> + Send;
+
+    /// This node's answers per claim kind (see [`crate::answers`]), or `None` when it keeps
+    /// none, which a peer reads as a build without them.
+    fn answers(
+        &self,
+        _request: &AnswersRequest,
+    ) -> impl Future<Output = Result<Option<AnswersReply>>> + Send {
+        async { Ok(None) }
+    }
+
+    /// Record what a daily answers check found.
+    fn record_answers_check(&self, _check: &AnswersCheck) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
 
     /// Publish host-local worker progress without adding replicated claims.
     fn record_worker(
@@ -249,6 +264,27 @@ where
         request: &CheckpointManifestRequest,
     ) -> Result<CheckpointManifestPage> {
         self.store().checkpoint_manifest_page(request)
+    }
+
+    /// Computed on request, which only a small store a test holds can afford; a daemon keeps
+    /// its answers in an [`crate::answers::AnswersCache`].
+    async fn answers(&self, request: &AnswersRequest) -> Result<Option<AnswersReply>> {
+        let backend = self.clone();
+        let request = request.clone();
+        tokio::task::spawn_blocking(move || {
+            let store = backend.store();
+            Ok(Some(match &request.kind {
+                None => AnswersReply {
+                    summary: Some(store.answers_summary(request.cut_unix_ms)?),
+                    ..AnswersReply::default()
+                },
+                Some(kind) => AnswersReply {
+                    buckets: Some(store.answer_buckets(kind, request.cut_unix_ms, &request.buckets)?),
+                    ..AnswersReply::default()
+                },
+            }))
+        })
+        .await?
     }
 
     async fn checkpoint_need(&self) -> Result<Option<CheckpointManifestNeed>> {

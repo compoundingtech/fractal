@@ -348,6 +348,31 @@ class Review(unittest.TestCase):
         for name, settings in config["harnesses"].items():
             self.assertNotIn("Bash", " ".join(settings["command"]), name)
 
+    def test_a_harness_that_reads_through_a_shell_is_not_told_it_has_none(self):
+        config = json.loads(self.config.read_text())
+        config["harnesses"]["fake"]["reads"] = "shell"
+        self.config.write_text(json.dumps(config))
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        prompt = self.prompts()[0]
+        self.assertNotIn("no shell", prompt)
+        self.assertIn("read-only shell confined to this checkout", prompt)
+        config["harnesses"]["fake"]["reads"] = "magic"
+        self.config.write_text(json.dumps(config))
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("reads must be one of", done.stderr)
+
+    def test_the_default_harnesses_say_how_their_reviewer_reads_files(self):
+        harnesses = json.loads((ROOT / ".st" / "review-harness.json").read_text())["harnesses"]
+        self.assertEqual(harnesses["codex"]["reads"], "shell")
+        self.assertNotIn("reads", harnesses["claude"])
+
+    def test_without_a_reads_setting_the_reviewer_is_told_it_has_tools_and_no_shell(self):
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("read-only tools and no shell", self.prompts()[0])
+
     def test_the_reviewer_gets_the_diffs_as_files_in_its_checkout_instead_of_git(self):
         self.write("crates/a/src/lib.rs", "pub fn a() {}\n")
         self.commit("add a")
