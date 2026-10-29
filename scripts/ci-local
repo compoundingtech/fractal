@@ -283,17 +283,30 @@ if [ "${CI_LOCAL_SERIAL:-}" != 1 ] && [[ " $* " == *" tests "* ]]; then
   done
 fi
 in_lane() { local n; for n in "${lane[@]}"; do [ "$n" = "$1" ] && return 0; done; return 1; }
-# A process and everything under it, children first (read from /proc: a parent's PPid line), so a stage the lane started does not
+# A process and everything under it (read from /proc: a parent's PPid line), so a stage the lane started does not
 # outlive it. What detaches on purpose (the test guardian's setsid) is not under it and is not reached, as before.
+# /proc is read by the shell itself, without a sed per process: that took over 20 s on a loaded host, and the stopped run waited that
+# long to exit. Each process found is frozen (SIGSTOP) at once, so it cannot start another, and /proc is read again until a pass
+# finds no one new: a stage that forks while the tree is read is caught on the next pass. Then every frozen process is sent
+# SIGTERM and let go, so it ends. A process that ended before it was read has no status left and is skipped.
 stop_tree() {
-  local pid=$1 status child
-  for status in /proc/[0-9]*/status; do
-    if [ "$(sed -n 's/^PPid:[[:space:]]*//p' "$status" 2>/dev/null)" = "$pid" ]; then
-      child=${status#/proc/}; child=${child%/status}
-      stop_tree "$child"
-    fi
+  local found=" $1 " grew=1 status key value child pid
+  kill -STOP "$1" 2>/dev/null || true
+  while [ "$grew" = 1 ]; do
+    grew=0
+    for status in /proc/[0-9]*/status; do
+      { while read -r key value; do
+          if [ "$key" != PPid: ]; then continue; fi
+          child=${status//[!0-9]/}
+          if [[ $found == *" $value "* && $found != *" $child "* ]]; then
+            found+="$child "; kill -STOP "$child" 2>/dev/null || true; grew=1
+          fi
+          break
+        done < "$status"; } 2>/dev/null || true
+    done
   done
-  kill "$pid" 2>/dev/null || true
+  for pid in $found; do kill "$pid" 2>/dev/null || true; done
+  for pid in $found; do kill -CONT "$pid" 2>/dev/null || true; done
 }
 lane_pid=
 if [ "${#lane[@]}" -gt 0 ]; then
