@@ -28,8 +28,7 @@ The Fractal fleet protocol design, current implementation gaps, checkpoint and
 client boundaries, and required test matrix live in
 [the compatibility contract](../st3/compatibility.md). This extends the fleet
 requirements beyond the legacy st2 catalog implementation described below.
-R49 is accepted by Johannes in Axe Q22 (`window-n1-offline`), 2026-10-26;
-implementation is open in [#4002](https://github.com/compoundingtech/fractal/issues/4002).
+Implementation of R49 is open in [#4002](https://github.com/compoundingtech/fractal/issues/4002).
 This specification does not claim the window is already implemented.
 
 ## Decision citations

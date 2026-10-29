@@ -2,15 +2,14 @@
 
 ## Required rolling window
 
-[R49](../vrs/requirements.md#must-support-rolling-fleet-upgrades) records Johannes's
-decision, **Axe Q22 (`window-n1-offline`), 2026-10-26**: adjacent published releases
+[R49](../vrs/requirements.md#must-support-rolling-fleet-upgrades) requires this window: adjacent published releases
 **N and N-1 must coexist for at least 14 days** without lost work, duplicate
 schedule fires, or blocked schedules. Features that need all members activate
 only when every active member advertises support. An older-release member that
 returns within **30 days offline** must not block or corrupt the fleet.
 
 **Implementation status: open — [#4002](https://github.com/compoundingtech/fractal/issues/4002).**
-The Q22 window is a required target and design sketch, **not a current guarantee**.
+The adjacent-release window is a required target and design sketch, **not a current guarantee**.
 Hosts roll out independently today through
 [per-feature peer capability negotiation](replication.md#peer-protocol-capability-negotiation):
 every new peer operation and changed ID or wire format must be gated before dispatch

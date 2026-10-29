@@ -560,7 +560,6 @@ accepted.
   from every member activate only when all active members advertise support.
   An older-release member returning after being offline for up to 30 days must
   neither block nor corrupt the fleet. Downgrade is not required.
-  Authority: Johannes, Axe Q22 (`window-n1-offline`), 2026-10-26.
   Implementation remains open in [#4002](https://github.com/compoundingtech/fractal/issues/4002);
   the protocol design and acceptance evidence are in
   [the compatibility contract](../st3/compatibility.md).

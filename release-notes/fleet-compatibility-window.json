@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No checkpoint rules or digests change; the documented design retains exact digest verification."},
   "compatibility": {"status": "none", "detail": "No runtime protocol or client capability changes. The required rolling window, feature activation sketch and open implementation gaps are documented, not implemented. Issue #4002 separately tracks correcting the immutable owner_run fragment's known mixed-fleet impact from none to changed."},
   "downtime": {"status": "none", "detail": "Documentation only; no daemon restart or additional interruption."},
-  "manual": {"status": "none", "detail": "No new operator action; each host rolls out independently through per-feature capability negotiation. The full Q22 adjacent-release window is a required target, not a current guarantee."},
+  "manual": {"status": "none", "detail": "No new operator action; each host rolls out independently through per-feature capability negotiation. The full adjacent-release window is a required target, not a current guarantee."},
   "recovery": {"status": "none", "detail": "No recovery behavior changes; downgrade remains outside the required coexistence window."}
 }
