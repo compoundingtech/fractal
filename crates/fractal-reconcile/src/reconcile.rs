@@ -9614,6 +9614,12 @@ impl<R: RuntimeControl> Reconciler<R> {
                 Some("exited" | "vanished" | "stopped")
             )
         {
+            // The process exit that follows is not a claim. Watch the exec until it ends, so
+            // that exit wakes a pass whatever waits on it: an exit-code gate behind a pending
+            // gate is never evaluated, and cannot arm the watch itself.
+            if member.host == self.host {
+                self.arm_gate_poll(&member.runtime_id);
+            }
             return Ok(());
         }
         if subject.kind == "agent"
@@ -11439,12 +11445,20 @@ impl<R: RuntimeControl> Reconciler<R> {
                 ]),
             )?;
         }
-        let timed_out = if let Some(timeout) = loop_spec.timeout_ms {
-            self.loop_first_execution_at(run, view)?
-                .is_some_and(|started| now_ms().saturating_sub(started) >= timeout as u128)
-        } else {
-            false
+        let deadline = match loop_spec.timeout_ms {
+            Some(timeout) => self
+                .loop_first_execution_at(run, view)?
+                .map(|started| started.saturating_add(u128::from(timeout))),
+            None => None,
         };
+        let timed_out = deadline.is_some_and(|deadline| now_ms() >= deadline);
+        // A loop waiting on a blocked child or a person changes nothing a pass would notice
+        // when its timeout passes, so the run is due again then. A deadline already passed is
+        // not noted: the loop ends below, and a due time in the past would make every pass
+        // evaluate the run again while it stays exhausted.
+        if let Some(deadline) = deadline.filter(|_| !timed_out) {
+            smallclaims::touched::note_due(deadline);
+        }
         if timed_out {
             return self.finish_exhausted_loop(
                 run,
@@ -21222,6 +21236,109 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
             reconciler.evaluate_gate(&stage, &gate).unwrap(),
             GateOutcome::Fail(_)
         ));
+    }
+
+    /// The same late process exit, reached through a working step whose first gate is still
+    /// pending: the step never evaluates its exit-code gate, so the wake cannot come from it.
+    #[tokio::test(start_paused = true)]
+    async fn a_late_process_exit_wakes_a_step_whose_exit_code_gate_waits_behind_a_pending_gate() {
+        use serde_json::json;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        apply_source(
+            &store,
+            r#"
+version 2
+mission "orchid/replay" state="ready" {
+  goal "Explain an impossible predicate behind a pending gate."
+  step "prepare" {
+    agentless
+    exec "prepare" { host "node"; workspace "/tmp"; command "exit 2"; restart "never" }
+    gate "an external result exists" { exists "resource/orchid/result" }
+    gate "prepared" { field "exit_code" "exec/${ST_MISSION_RUN}/prepare" is 0 }
+  }
+}
+"#,
+            "late-exit-behind-pending-gate",
+        );
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "orchid/replay".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "late-exit-behind-pending-gate-run".into(),
+            })
+            .unwrap();
+        let runtime = Arc::new(FakeRuntime::default());
+        let notify = Arc::new(Notify::new());
+        let reconciler =
+            Reconciler::new(store.clone(), runtime.clone(), "node".into(), notify.clone());
+        let subject = format!("exec/{}/prepare", run.id);
+        let started = || {
+            store
+                .observations_for(&subject, "runtime.action.succeeded")
+                .unwrap()
+                .into_iter()
+                .find(|claim| claim.body["fields"]["action"] == "start")
+        };
+        // The first passes claim the step and declare its exec; a later one starts it.
+        for _ in 0..4 {
+            if started().is_some() {
+                break;
+            }
+            reconciler.reconcile_once().unwrap();
+        }
+        let incarnation = started()
+            .unwrap_or_else(|| panic!("{subject} was not started: {:?}", store.desired_subjects().unwrap().iter().map(|desired| &desired.subject).collect::<Vec<_>>()))
+            .body["fields"]["incarnation_id"]
+            .as_str().unwrap().to_owned();
+        let desired = store.desired_subject_with_writer(&subject).unwrap().unwrap().0;
+        let runtime_id = desired.member.as_ref().unwrap().runtime_id.clone();
+        let running = RuntimeObservation {
+            runtime_id: runtime_id.clone(),
+            terminal: false,
+            status: "running".into(),
+            exit_code: None,
+            incarnation_id: Some(incarnation),
+        };
+        runtime.execs.lock().unwrap().insert(runtime_id.clone(), running.clone());
+        reconciler.reconcile_once().unwrap();
+        // The driver reports its child's exit while its own process still runs.
+        store
+            .append_claim(&ClaimInput {
+                subject: subject.clone(),
+                kind: "runtime.observed".into(),
+                actor: Some(subject.clone()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("exited")),
+                    ("exit_code".into(), json!(2)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            })
+            .unwrap();
+        reconciler.reconcile_once().unwrap();
+        let stuck = || {
+            let view = store.mission_run(&run.subject).unwrap().unwrap();
+            let missions = store.mission_specs_for_runs(std::slice::from_ref(&run.subject)).unwrap();
+            stuck_field_gates(&store, &view, &missions[&run.subject]).unwrap()
+        };
+        assert_eq!(store.step_run(&run.steps[0].subject).unwrap().unwrap().status, "working");
+        assert!(stuck().is_empty(), "the wrapper's receipt alone proves no exit of this launch");
+        // Consume prior writes' wake, then exit with no new graph claim.
+        notify.notified().await;
+        runtime.execs.lock().unwrap().insert(
+            runtime_id,
+            RuntimeObservation { status: "exited".into(), exit_code: Some(2), ..running },
+        );
+        tokio::time::timeout(Duration::from_secs(11), notify.notified())
+            .await
+            .expect("the late process exit must wake a pass although the exit-code gate is not evaluated");
+        reconciler.reconcile_once().unwrap();
+        assert_eq!(stuck().len(), 1, "the exit of this launch makes the exit-code gate impossible");
     }
 
     /// An exec started by a pass, observed running as `incarnation`, whose `st3 driver exec`
@@ -32923,6 +33040,86 @@ mission "untimed-clock" state="ready" {
             !reads.contains(&format!("children:{}", run.root_mission_run))
                 && !reads.contains(&format!("children-of-step:{}", view.subject)),
             "an untimed loop must not load the root's round history: {reads:?}"
+        );
+    }
+
+    #[test]
+    fn a_timed_loop_is_due_again_when_its_timeout_passes() {
+        struct TestClock;
+        impl Drop for TestClock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
+        }
+        let _clock = TestClock;
+        const START: u128 = 1_800_000_000_000;
+        smallclaims::store::set_thread_clock(Some(START));
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.set_write_clock_at(START).unwrap();
+        // The round waits on a document nobody writes, so nothing marks the run again before
+        // the loop's hour is up.
+        let source = r#"version 2
+mission "timed-clock" state="ready" {
+  goal "Stop the loop when its hour is up, though nothing else changes."
+  loop "improve" timeout="1h" {
+    max-rounds 2
+    round {
+      completion { when "all-steps-exhausted" }
+      step "work" { agentless; gate "wait" { document "doc/invented-never" } }
+    }
+  }
+}
+"#;
+        apply_source(&store, source, "timed-clock-source");
+        let run = store
+            .create_mission_run(&MissionRunRequest {
+                mission: "timed-clock".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "timed-clock-run".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        for _ in 0..6 {
+            reconciler.reconcile_once().unwrap();
+        }
+        let run = store.mission_run(&run.id).unwrap().unwrap();
+        let mission = store
+            .mission_spec("timed-clock", Some(&run.revision))
+            .unwrap()
+            .unwrap();
+        let steps = flatten_mission_steps(&mission);
+        let (step, view) = (&steps[0], &run.steps[0]);
+        let loop_spec = step.spec.loop_spec.as_ref().unwrap();
+        let started = store
+            .loop_first_execution_at(&run.root_mission_run, &view.subject)
+            .unwrap()
+            .expect("the first round has started");
+        let (_, due) = smallclaims::touched::record_due(|| {
+            reconciler
+                .evaluate_loop_step(&run, step, view, loop_spec)
+                .unwrap()
+        });
+        assert_eq!(due, Some(started + 3_600_000), "the loop is due when its timeout passes");
+        // Once the timeout has passed the loop ends, and notes no due time in the past.
+        smallclaims::store::set_thread_clock(Some(started + 3_600_000));
+        store.set_write_clock_at(started + 3_600_000).unwrap();
+        let (_, due) = smallclaims::touched::record_due(|| {
+            reconciler
+                .evaluate_loop_step(&run, step, view, loop_spec)
+                .unwrap()
+        });
+        assert!(
+            due.is_none_or(|due| due > started + 3_600_000),
+            "a passed loop timeout is not a due time: {due:?}"
         );
     }
 
