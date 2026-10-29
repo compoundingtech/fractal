@@ -207,6 +207,23 @@ class Review(unittest.TestCase):
         self.assertIsNone(verdict)
         self.assertIn("answers", done.stderr)
 
+    def test_a_merged_changes_verdict_is_not_an_earlier_round_of_the_next_change(self):
+        self.git("checkout", "-q", "-b", "other", "main")
+        self.write("src/b.txt", "two\nother\n")
+        self.commit("other change")
+        self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/b.txt", "line": 2, "reason": "r", "fix": "f"}]))
+        done, other = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.git("checkout", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "--no-edit", "other")
+        self.git("checkout", "-q", "change")
+        self.git("rebase", "-q", "main")
+        self.say(answer())
+        done, verdict = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(verdict["round"], 1)
+        self.assertNotIn(other["head"], self.prompts()[1])
+
     def test_a_clean_merge_of_main_carries_the_verdict_without_asking_the_agent(self):
         done, first = self.review()
         self.assertEqual(done.returncode, 0, done.stderr)
@@ -257,6 +274,58 @@ class Review(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(first["round"], 1)
         self.assertIn("is incomplete and is not recorded", self.prompts()[0])
+
+    def go_in_round_two(self):
+        self.say(answer(verdict="CHANGES", findings=[{"severity": "blocking", "file": "src/a.txt", "line": 2, "reason": "r", "fix": "f"}]))
+        done, first = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.write("src/a.txt", "one\nchanged\nfixed\n")
+        self.commit("fix a")
+        self.say(answer(answers=[{"finding": "a needed a fix"}]))
+        done, second = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((second["round"], second["verdict"]), (2, "GO"))
+        return second
+
+    def test_a_merge_that_resolves_a_conflict_after_a_later_round_go_is_read_as_a_delta(self):
+        second = self.go_in_round_two()
+        self.git("checkout", "-q", "main")
+        self.write("src/a.txt", "one\nfrom main\n")
+        self.commit("main edits a")
+        self.git("checkout", "-q", "change")
+        subprocess.run(["git", "merge", "-q", "--no-edit", "main"], cwd=self.repo, capture_output=True)
+        self.write("src/a.txt", "one\nfrom main\nchanged\nfixed\n")
+        self.commit("resolve")
+        self.say(answer())
+        done, delta = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((delta["round"], delta["verdict"]), (2, "GO"))
+        self.assertNotIn("answers", delta)
+        self.assertNotEqual(delta["head"], second["head"])
+        prompt = self.prompts()[2]
+        self.assertIn(".review-input/remerge.patch", prompt)
+        self.assertIn("no earlier finding to answer", prompt)
+        self.assertNotIn("say which earlier finding each change", prompt)
+
+    def test_a_clean_merge_of_main_carries_a_later_round_go(self):
+        second = self.go_in_round_two()
+        self.git("checkout", "-q", "main")
+        self.write("src/b.txt", "two\nfrom main\n")
+        self.commit("main moves")
+        self.git("checkout", "-q", "change")
+        self.git("merge", "-q", "--no-edit", "main")
+        done, carried = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(len(self.prompts()), 2)
+        self.assertEqual((carried["round"], carried["verdict"]), (2, "GO"))
+        self.assertTrue(carried["text"].startswith(f"Carried from {second['head']}"))
+
+    def test_a_base_validator_that_takes_no_earlier_verdict_is_called_as_before(self):
+        self.git("checkout", "-q", "main")
+        self.write("scripts/review-validate", "def validate(verdict, schema):\n    return []\n")
+        self.commit("an older validator")
+        self.git("checkout", "-q", "change")
+        self.go_in_round_two()
 
     def test_a_reviewer_of_the_authors_family_is_refused(self):
         done, verdict = self.review("--author-family", "anthropic")
