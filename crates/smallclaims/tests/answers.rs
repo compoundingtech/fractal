@@ -256,3 +256,43 @@ proptest! {
         prop_assert_eq!(all_keys(&connection, "example.state", cut), full);
     }
 }
+
+/// Ask `cache` until it stops answering `pending`; it computes on a thread of its own.
+fn settled(cache: &Arc<AnswersCache>, store: &Arc<Store>, request: &AnswersRequest) -> AnswersReply {
+    for _ in 0..500 {
+        let reply = cache.answer(store, request);
+        if !reply.pending {
+            return reply;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("the cache never answered {request:?}");
+}
+
+#[test]
+fn the_cache_covers_fold_readers_and_narrows_them_by_subject() {
+    let store = Arc::new(node("alder"));
+    state(&store, "item/a", "one");
+    let cache = Arc::new(AnswersCache::default());
+    cache.set_readers(Arc::new(|_: &Connection, _: u128| {
+        Ok(BTreeMap::from([(
+            "status_history".to_owned(),
+            vec![AnswerKey { subject: "agent/alder.worker".into(), origin: String::new(), claim: "answer".into() }],
+        )]))
+    }));
+    let cut = cut();
+    let summary = AnswersRequest { cut_unix_ms: cut, ..AnswersRequest::default() };
+    let reply = settled(&cache, &store, &summary).summary.unwrap();
+    assert_eq!(reply.kinds["reader/status_history"].keys, 1);
+    assert_eq!(reply.kinds["example.state"].keys, 1);
+
+    let subject = BTreeSet::from([bucket("agent/alder.worker", "")]);
+    let ask = |kind: &str, buckets: BTreeSet<usize>| AnswersRequest { cut_unix_ms: cut, kind: Some(kind.into()), buckets };
+    let reader = settled(&cache, &store, &ask("reader/status_history", subject.clone())).buckets.unwrap();
+    assert_eq!(reader.keys.len(), 1);
+    assert_eq!(reader.keys[0].subject, "agent/alder.worker");
+    // A reader this member does not run answers with nothing, rather than pending forever.
+    let unknown = settled(&cache, &store, &ask("reader/unknown", subject)).buckets.unwrap();
+    assert!(unknown.keys.is_empty());
+    assert!(unknown.buckets.iter().all(String::is_empty));
+}
