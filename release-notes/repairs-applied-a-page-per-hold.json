@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Replication repairs are applied 64 to a writer hold, in the same id order as before, instead of all in one hold; a call that stops between pages finishes on the next call, and a call with no repairs takes no writer hold",
+  "summary": "Replication repairs are applied 16 to a writer hold, in the same id order as before, instead of all in one hold; a call that stops between pages finishes on the next call, and a call with no repairs takes no writer hold",
   "replay": {"status": "none", "detail": "No claim or projection replay. Every call still applies every recorded repair in id order; a repair already applied changes nothing."},
   "schema": {"status": "none", "detail": "No table, file or schema change."},
   "rules": {"status": "none", "detail": "No checkpoint, retention or digest change."},

@@ -1491,11 +1491,15 @@ fn repair_hold_benchmark() {
     for run in 0..5 {
         let started = std::time::Instant::now();
         let (changed, holds) = smallclaims::windows::holds::holds_during(|| {
-            store.apply_replication_repairs().unwrap()
+            let changed = store.apply_replication_repairs().unwrap();
+            // The writer thread ends the last hold after the connection comes back to it.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            changed
         });
         eprintln!("{}", json!({
             "run": run, "changed": changed, "pages": holds.pages_of("applied repairs"),
-            "longest_hold_us": holds.longest.as_micros(), "call_us": started.elapsed().as_micros(),
+            "longest_hold_us": holds.longest.as_micros(),
+            "call_us": started.elapsed().as_micros() - 100_000,
         }));
     }
 }

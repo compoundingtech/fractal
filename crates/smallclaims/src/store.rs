@@ -4194,8 +4194,9 @@ pub const REPLICATION_EXCHANGE_ENVELOPE_LIMIT: usize = 512;
 /// Maximum envelopes admitted per writer transaction. Admission can take several milliseconds
 /// per envelope on a populated store; leave room for queued write acknowledgements below 50 ms.
 pub const ADMISSION_CHUNK_ENVELOPES: usize = 8;
-/// Maximum repairs applied per writer transaction.
-pub const REPAIR_CHUNK_CLAIMS: usize = 64;
+/// Maximum repairs applied per writer transaction. On a populated store each repair costs a few
+/// milliseconds even when it is already applied, so a page stays near 50 ms.
+pub const REPAIR_CHUNK_CLAIMS: usize = 16;
 /// Payload bytes admission prepares ahead of its loans: a budget on payload, not a bound on
 /// resident memory. Decoded envelopes wait for the loan that admits them next to their payloads,
 /// so the set holds roughly twice this plus its structures, and one envelope larger than this is
