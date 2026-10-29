@@ -6482,6 +6482,7 @@ impl Store {
                 )?;
                 transaction.commit()?;
                 self.seeded_batch_rowid.store(prepared.through, Ordering::Release);
+                crate::windows::holds::covered("sealed batches", prepared.batches.len());
                 // The FIFO writer services already queued requests before the next bounded loan.
                 return Ok(true);
             }
@@ -6983,7 +6984,10 @@ impl Store {
         input: &ReplicationExchange,
         asks: bool,
     ) -> Result<ReplicationReceipt, St3Error> {
-        self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())
+        let receipt = self.receive_replication_exchange_via(relay, fleet_id, input, asks, Default::default())?;
+        // One exchange is received in one writer hold.
+        crate::windows::holds::covered("received envelopes", input.envelopes.len());
+        Ok(receipt)
     }
 
     pub /* sqlite-large-value-flow: allow-for-now flow-h7818827323a6 owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ fn receive_replication_exchange_via(
@@ -7635,6 +7639,7 @@ impl Store {
                         [current_index_tx(&pass)?.to_string()])?;
                 }
                 pass.commit()?;
+                crate::windows::holds::covered("admitted envelopes", next - first);
                 #[cfg(any(test, feature = "test-support"))]
                 ADMISSION_TRANSACTIONS.with(|count| count.set(count.get() + 1));
             }
@@ -8088,6 +8093,11 @@ impl Store {
                         )?;
                         stages.enter("commit");
                         transaction.commit_with_deferred_runtime()?;
+                        // A fallback replay folds the whole log in this one hold.
+                        crate::windows::holds::covered(
+                            "projected claims",
+                            usize::try_from(if replayed { through } else { count }).unwrap_or(usize::MAX),
+                        );
                     }
                     if !replayed {
                         processed += count;
@@ -8203,6 +8213,7 @@ impl Store {
             })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
+        let applying = repairs.len();
         let mut changed = 0;
         let mut operation_ids = BTreeSet::new();
         for (repair_claim, body) in repairs {
@@ -8239,6 +8250,7 @@ impl Store {
             repair_operations_tx(&transaction, &operation_ids.into_iter().collect::<Vec<_>>())?;
         }
         transaction.commit()?;
+        crate::windows::holds::covered("applied repairs", applying);
         drop(connection);
         if changed != 0 {
             self.runtime.forget_views();
