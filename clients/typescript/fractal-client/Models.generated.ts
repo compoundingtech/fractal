@@ -945,6 +945,44 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionLaunchAgent = {
+  harness: string | null;
+  host: string | null;
+  id: Id;
+  label: string;
+};
+
+export type AttentionLaunchAssignee = {
+  agent: (Id | null);
+  kind: string;
+  label: string;
+};
+
+export type AttentionLaunchPreview = {
+  agents: Array<AttentionLaunchAgent>;
+  asks_you: number;
+  goals: Array<string>;
+  steps: Array<AttentionLaunchStep>;
+  variant: string;
+};
+
+export type AttentionLaunchStep = {
+  after: Array<string>;
+  asks_you: boolean;
+  assignee: AttentionLaunchAssignee;
+  path: string;
+  title: string;
+};
+
+export type AttentionLaunchUnavailable = {
+  unavailable: AttentionLaunchUnavailableReason;
+};
+
+export type AttentionLaunchUnavailableReason = {
+  diagnostics: Array<string>;
+  reason: string;
+};
+
 export type AttentionPresentation = {
   agent: (AttentionActor | null);
   kind: 
@@ -959,10 +997,26 @@ export type AttentionPresentation = {
   | "fault"
   | null
 ;
+  launch?: (AttentionLaunchPreview | AttentionLaunchUnavailable);
+  prompt?: AttentionPrompt;
   raised_by: (AttentionActor | null);
   revision?: AttentionRevision;
   tier: "stopped" | "alert" | "today" | "later" | null;
   waiting: (AttentionWaiting | null);
+};
+
+export type AttentionPrompt = {
+  allow: boolean;
+  answers: Array<string>;
+  calls: (Array<AttentionPromptCall> | null);
+  unknown_reason?: string;
+};
+
+export type AttentionPromptCall = {
+  call_id: string;
+  input: string;
+  input_complete: boolean;
+  tool: string;
 };
 
 export type AttentionRevision = {
@@ -1558,6 +1612,7 @@ export type ErrorCode = (
   | "stale-fence"
   | "cursor-gap"
   | "page-cursor-expired"
+  | "agent-roster-not-ready"
   | "agent-roster-cut-not-ready"
   | "message-selectors-not-ready"
   | "rate-limited"
@@ -2383,13 +2438,16 @@ export type PersonAnswerRecord = {
   assistant_owner?: PersonId;
   assistant_session_actor?: string;
   evidence?: Array<Id>;
-  respondent: SenderRef;
+  resolved_by?: "deadline";
+  respondent: RespondentRef;
   sender_class?: string;
   status: "completed" | "cancelled";
   summary: string;
 };
 
 export type PersonAskParameters = {
+  deadline_ms?: number;
+  default_answer?: string;
   new_run?: string;
   person_id: Id;
   reason: string;
@@ -2640,6 +2698,8 @@ export type ResourcesPage = {
   page: PageInfo;
   sync?: SyncNotice;
 };
+
+export type RespondentRef = string;
 
 export type Revision = string;
 

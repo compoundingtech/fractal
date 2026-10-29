@@ -116,6 +116,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case cursorGap
     case pageCursorExpired
     case rateLimited
+    case agentRosterNotReady
     case agentRosterCutNotReady
     case messageSelectorsNotReady
     case projectionDetailTooLarge
@@ -192,6 +193,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "projection-detail-too-large": .projectionDetailTooLarge
         case "projection-detail-invalid-source": .projectionDetailInvalidSource
         case "rate-limited": .rateLimited
+        case "agent-roster-not-ready": .agentRosterNotReady
         case "agent-roster-cut-not-ready": .agentRosterCutNotReady
         case "message-selectors-not-ready": .messageSelectorsNotReady
         case "runtime-not-local": .runtimeNotLocal
@@ -268,6 +270,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .projectionDetailTooLarge: "projection-detail-too-large"
         case .projectionDetailInvalidSource: "projection-detail-invalid-source"
         case .rateLimited: "rate-limited"
+        case .agentRosterNotReady: "agent-roster-not-ready"
         case .agentRosterCutNotReady: "agent-roster-cut-not-ready"
         case .messageSelectorsNotReady: "message-selectors-not-ready"
         case .runtimeNotLocal: "runtime-not-local"
@@ -366,9 +369,18 @@ public struct UsageSummary: Codable, Sendable {
 }
 public struct AttentionResource: Codable, Sendable { public let customForm: JSONValue?; public let id, kind, revision, updatedAt, attentionKind, sourceID, personID, title, detail, priority, state, requestedAt: String; public let alert: Bool?; public let conversationIDs: [String]?; public let conversationID, requesterID, launchID, variantID, messageID, previewToken, what, because, reviewMode, missionID, missionRunID, stepRunID, episode, sourceKind: String?; public let actionParameters: JSONValue?; public let request: StructuredRequest?; public let update: PersonUpdate?; public let blocked: AttentionBlocked?; public let presentation: AttentionPresentation?; public let preview: LaunchPreview?; public let fix: JSONValue?; public let targets, actions: [String]; public let targetStates: [AttentionTargetState]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case customForm = "custom_form", id, kind, revision, updatedAt = "updated_at", attentionKind = "attention_kind", episode, sourceKind = "source_kind", actionParameters = "action_parameters", request, update, blocked, presentation, sourceID = "source_id", personID = "person_id", alert, conversationID = "conversation_id", conversationIDs = "conversation_ids", requesterID = "requester_id", launchID = "launch_id", variantID = "variant_id", messageID = "message_id", previewToken = "preview_token", preview, what, because, fix, reviewMode = "review_mode", missionID = "mission_id", missionRunID = "mission_run_id", stepRunID = "step_run_id", title, detail, priority, state, requestedAt = "requested_at", targets, targetStates = "target_states", actions, operational } }
 /// st's presentation of an attention row; words are fixtures/clients/words.json ids.
-public struct AttentionPresentation: Codable, Sendable { public let tier, kind: String?; public let agent: AttentionActor?; public let raisedBy: AttentionActor?; public let waiting: AttentionWaiting?; public let revision: AttentionRevision?; enum CodingKeys: String, CodingKey { case tier, kind, agent, raisedBy = "raised_by", waiting, revision } }
+public struct AttentionPresentation: Codable, Sendable { public let tier, kind: String?; public let agent: AttentionActor?; public let raisedBy: AttentionActor?; public let waiting: AttentionWaiting?; public let revision: AttentionRevision?; public let launch: AttentionLaunch?; public let prompt: AttentionPrompt?; enum CodingKeys: String, CodingKey { case tier, kind, agent, raisedBy = "raised_by", waiting, revision, launch, prompt } }
 public struct AttentionRevision: Codable, Sendable { public let fromRevision, toRevision, reason: String; public let lines: [AttentionRevisionLine]; public let truncated: Bool; enum CodingKeys: String, CodingKey { case fromRevision = "from_revision", toRevision = "to_revision", reason, lines, truncated } }
 public struct AttentionRevisionLine: Codable, Sendable { public let op, text: String }
+/// A launch card's preview: the newest variant's mission (`variant` set), or `unavailable` when st has none to show.
+public struct AttentionLaunch: Codable, Sendable { public let variant: String?; public let goals: [String]?; public let steps: [AttentionLaunchStep]?; public let agents: [AttentionLaunchAgent]?; public let asksYou: Int?; public let unavailable: AttentionLaunchUnavailableReason?; enum CodingKeys: String, CodingKey { case variant, goals, steps, agents, asksYou = "asks_you", unavailable } }
+public struct AttentionLaunchStep: Codable, Sendable { public let path, title: String; public let assignee: AttentionLaunchAssignee; public let after: [String]; public let asksYou: Bool; enum CodingKeys: String, CodingKey { case path, title, assignee, after, asksYou = "asks_you" } }
+public struct AttentionLaunchAssignee: Codable, Sendable { public let kind, label: String; public let agent: String? }
+public struct AttentionLaunchAgent: Codable, Sendable { public let id, label: String; public let harness, host: String? }
+public struct AttentionLaunchUnavailableReason: Codable, Sendable { public let reason: String; public let diagnostics: [String] }
+/// A harness prompt's pending calls; `calls` is nil when st cannot read the seat's timeline.
+public struct AttentionPrompt: Codable, Sendable { public let calls: [AttentionPromptCall]?; public let answers: [String]; public let allow: Bool; public let unknownReason: String?; enum CodingKeys: String, CodingKey { case calls, answers, allow, unknownReason = "unknown_reason" } }
+public struct AttentionPromptCall: Codable, Sendable { public let callID, tool, input: String; public let inputComplete: Bool; enum CodingKeys: String, CodingKey { case callID = "call_id", tool, input, inputComplete = "input_complete" } }
 public struct AttentionActor: Codable, Sendable { public let id, label: String }
 public struct AttentionWaiting: Codable, Sendable { public let step, path: String }
 public struct AttentionBlocked: Codable, Sendable { public let stepRunID, step, goal: String; public let attempt: Int; enum CodingKeys: String, CodingKey { case stepRunID = "step_run_id", step, goal, attempt } }
@@ -824,7 +836,7 @@ public struct ActionRequest: Codable, Sendable {
     enum CodingKeys: String, CodingKey { case apiVersion = "api_version", id, type, idempotencyKey = "idempotency_key", fence, parameters }
 }
 
-public struct PersonAskParameters: Codable, Sendable { public var personID, title, reason: String; public var stepID, newRun: String?; public var request: StructuredRequest?; public init(personID: String, title: String, reason: String, stepID: String? = nil, newRun: String? = nil, request: StructuredRequest? = nil) { self.personID = personID; self.title = title; self.reason = reason; self.stepID = stepID; self.newRun = newRun; self.request = request }; enum CodingKeys: String, CodingKey { case personID = "person_id", title, reason, stepID = "step_id", newRun = "new_run", request } }
+public struct PersonAskParameters: Codable, Sendable { public var personID, title, reason: String; public var stepID, newRun: String?; public var request: StructuredRequest?; public var deadlineMS: UInt64?; public var defaultAnswer: String?; public init(personID: String, title: String, reason: String, stepID: String? = nil, newRun: String? = nil, request: StructuredRequest? = nil, deadlineMS: UInt64? = nil, defaultAnswer: String? = nil) { self.personID = personID; self.title = title; self.reason = reason; self.stepID = stepID; self.newRun = newRun; self.request = request; self.deadlineMS = deadlineMS; self.defaultAnswer = defaultAnswer }; enum CodingKeys: String, CodingKey { case personID = "person_id", title, reason, stepID = "step_id", newRun = "new_run", request, deadlineMS = "deadline_ms", defaultAnswer = "default_answer" } }
 public struct PersonStepParameters: Codable, Sendable { public var targetID, summary, episode: String; public var evidence: [String]; public var answer: PersonAnswerInput?; public init(targetID: String, summary: String, episode: String, evidence: [String] = [], answer: PersonAnswerInput? = nil) { self.targetID = targetID; self.summary = summary; self.episode = episode; self.evidence = evidence; self.answer = answer }; enum CodingKeys: String, CodingKey { case targetID = "target_id", summary, episode, evidence, answer } }
 public struct StructuredRequest: Codable, Sendable { public var version: Int; public var type, question, whyPerson: String; public var summary: String?; public var reasons: [String]?; public var recommendation: RequestRecommendation?; public var subjects: [RequestSubject]?; public var answers: [RequestAnswerOption]?; public var custom: Bool?; public var attachments: [Attachment]?; enum CodingKeys: String, CodingKey { case version, type, question, whyPerson = "why_person", summary, reasons, recommendation, subjects, answers, custom, attachments } }
 public struct PersonUpdate: Codable, Sendable { public var version: Int; public var type, about: String; public var summary: String?; public var subjects: [RequestSubject]? }
@@ -833,7 +845,7 @@ public struct RequestSubject: Codable, Sendable { public var kind, label: String
 public struct RequestAnswerOption: Codable, Sendable { public var id, label, consequence: String; public var outcome: String?; public var conditions: [String]? }
 public struct PersonAnswerInput: Codable, Sendable { public var id, text: String?; public init(id: String? = nil, text: String? = nil) { self.id = id; self.text = text } }
 public struct PersonAnswer: Codable, Sendable { public let type, outcome: String; public let id, label, text: String? }
-public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
+public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor, resolvedBy: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", resolvedBy = "resolved_by", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
 public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public var successor: String?; public init(agent: String, reason: String, successor: String? = nil) { self.agent = agent; self.reason = reason; self.successor = successor } }
 public struct AgentStopParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
