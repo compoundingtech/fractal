@@ -55,6 +55,8 @@ mod prepared_envelope_tests;
 #[cfg(test)]
 mod membership_query_tests;
 #[cfg(test)]
+mod known_writers_tests;
+#[cfg(test)]
 mod sealed_view_cache_tests;
 #[cfg(test)]
 mod repair_operation_tests;
@@ -2946,18 +2948,27 @@ fn sealed_fleet_view_tx(
 // Payload bytes are immutable at this exact hash except the lossless TEXT-to-BLOB
 // conversion. Recheck the retained header and checkpoint exclusion without decoding or
 // copying a potentially large payload on the writer. Ordinary validation still hashes it.
-/// The row `envelope` names, unless a checkpoint has dropped it or it is gone.
+/// The row `envelope` names, unless admission refuses it (`retired::envelope_refused`) or it is
+/// gone.
 fn admission_envelope_row(
     connection: &Connection,
     envelope: &ReplicaEnvelope,
 ) -> Result<Option<prepared_envelope::EnvelopeRow>> {
-    Ok(connection.prepare_cached(
-        "SELECT rowid, received_at_unix_ms FROM replica_envelopes
-         WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
-           AND previous_hash IS ?4 AND accepted_at_unix_ms=?5
-           AND NOT EXISTS(SELECT 1 FROM checkpoint_envelopes
-                          WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)"
-    )?.query_row(/* sqlite-large-value: allow-for-now lv-hd2242bf43e71 owner=smallclaims::store TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash,
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!(
+            "SELECT rowid, received_at_unix_ms FROM replica_envelopes
+             WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3
+               AND previous_hash IS ?4 AND accepted_at_unix_ms=?5
+               AND NOT EXISTS(SELECT 1 FROM checkpoint_envelopes
+                              WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)
+               AND NOT (EXISTS(SELECT 1 FROM meta WHERE key='{}' AND value='1')
+                        AND EXISTS(SELECT 1 FROM retired_envelopes
+                                   WHERE writer=?1 AND sequence=?2 AND envelope_hash={}))",
+            retired::AUTHORITY,
+            retired::identity_sql("?3"),
+        )
+    });
+    Ok(connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h90007422fd50 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-hd2242bf43e71 owner=smallclaims::store TODO=trace-statement-and-value-representation */ params![envelope.writer, envelope.sequence, envelope.hash,
                         envelope.previous_hash, envelope.accepted_at_unix_ms.to_string()],
                  |row| Ok(prepared_envelope::EnvelopeRow {
                      rowid: row.get(0)?,
@@ -4156,8 +4167,7 @@ pub fn full_compact_replication_inventory(
 fn load_compact_replication_inventory(
     connection: &Connection,
 ) -> Result<(CompactReplicationInventory, i64, usize)> {
-    let mut statement = connection.prepare(
-        "SELECT rowid, writer, sequence, envelope_hash, 1 FROM replica_envelopes
+    static CHECKPOINTED: &str = "SELECT rowid, writer, sequence, envelope_hash, 1 FROM replica_envelopes
          UNION ALL
          SELECT 0, writer, sequence, envelope_hash, 0 FROM checkpoint_envelopes AS dropped
          WHERE NOT EXISTS (
@@ -4165,8 +4175,44 @@ fn load_compact_replication_inventory(
              WHERE held.writer=dropped.writer AND held.sequence=dropped.sequence
                AND held.envelope_hash=dropped.envelope_hash
          )
-         ORDER BY 2, 3, 4",
-    )?;
+         ORDER BY 2, 3, 4";
+    // Where the retired ledger is the authority, its identities are listed too, and an envelope
+    // it retired is listed without payload even while a copy is still held, so it is not served.
+    static RETIRED: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        let held_hash = retired::identity_sql("held.envelope_hash");
+        let retired_hash = retired_facts::identity_text_sql("dropped.envelope_hash");
+        format!(
+            "SELECT rowid, writer, sequence, envelope_hash,
+                    NOT EXISTS(SELECT 1 FROM retired_envelopes AS dropped
+                               WHERE dropped.writer=held.writer AND dropped.sequence=held.sequence
+                                 AND dropped.envelope_hash={held_hash})
+             FROM replica_envelopes AS held
+             UNION ALL
+             SELECT 0, writer, sequence, envelope_hash, 0 FROM checkpoint_envelopes AS dropped
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM replica_envelopes AS held
+                 WHERE held.writer=dropped.writer AND held.sequence=dropped.sequence
+                   AND held.envelope_hash=dropped.envelope_hash
+             )
+             UNION ALL
+             SELECT 0, writer, sequence, {retired_hash}, 0 FROM retired_envelopes AS dropped
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM replica_envelopes AS held
+                 WHERE held.writer=dropped.writer AND held.sequence=dropped.sequence
+                   AND held.envelope_hash={retired_hash}
+             ) AND NOT EXISTS (
+                 SELECT 1 FROM checkpoint_envelopes AS recorded
+                 WHERE recorded.writer=dropped.writer AND recorded.sequence=dropped.sequence
+                   AND recorded.envelope_hash={retired_hash}
+             )
+             ORDER BY 2, 3, 4"
+        )
+    });
+    let mut statement = if retired::authoritative(connection)? {
+        connection.prepare(/* sqlite-large-value: allow-for-now lv-hd42f35af3fd9 owner=smallclaims::store TODO=trace-statement-and-value-representation */ &RETIRED)?
+    } else {
+        connection.prepare(/* sqlite-large-value: allow-for-now lv-h7d0084b5fded owner=smallclaims::store TODO=trace-statement-and-value-representation */ CHECKPOINTED)?
+    };
     let mut rows = statement.query([])?;
     let mut inventory = CompactReplicationInventory::default();
     let mut max_rowid = 0;
@@ -6924,6 +6970,8 @@ impl Store {
             return Ok(Vec::new());
         }
         let connection = self.readers.get();
+        // An envelope this member retired is not served, even while a copy is still held.
+        let authoritative = retired::authoritative(&connection)?;
         // Reuse one preparation for the whole page, including its signature subqueries.
         let mut statement = connection.prepare_cached(
             "SELECT envelopes.previous_hash, envelopes.accepted_at_unix_ms, envelopes.payload,
@@ -6942,6 +6990,11 @@ impl Store {
         )?;
         let mut envelopes = Vec::with_capacity(missing.len());
         for identity in missing {
+            if authoritative
+                && retired::envelope_retired(&connection, &identity.writer, identity.sequence, &identity.hash)?
+            {
+                continue;
+            }
             // A trim can delete the payload after the snapshot listed the identity. The
             // tombstone stays in the inventory and the peer never needs the envelope.
             let envelope = statement.query_row(
@@ -7067,8 +7120,9 @@ impl Store {
                 let received_at = now_ms();
                 let now = received_at.to_string();
                 for (envelope, verified) in input.envelopes.iter().zip(&envelope_signatures) {
-                    // A checkpoint dropped this envelope here. Its tombstone already stands for it.
-                    if checkpoint::envelope_tombstoned(
+                    // A checkpoint dropped this envelope here, or this member deleted it. Its
+                    // tombstone or retired identity already stands for it.
+                    if retired::envelope_refused(
                         transaction,
                         &envelope.writer,
                         envelope.sequence,
@@ -7110,7 +7164,7 @@ impl Store {
                     }
                 }
                 for signature in &follow_up_signatures {
-                    if checkpoint::envelope_tombstoned(
+                    if retired::envelope_refused(
                         transaction,
                         signature.writer,
                         signature.sequence,
@@ -8715,9 +8769,11 @@ impl Store {
     /// choice, off by default. It then seals, verifies and applies no new checkpoint and adopts
     /// no peer's manifest, so a manifest never replaces its tombstones; a trim it had already
     /// committed still finishes. Checkpoints need every participant, so the old checkpoints stop
-    /// on the other members until a person excuses this one.
-    pub fn trim_locally(&self, on: bool) {
+    /// on the other members until a person excuses this one. While it is on, the retired ledger
+    /// is the authority for what this member deleted (`retired`).
+    pub fn trim_locally(&self, on: bool) -> Result<()> {
         self.trim_local.store(on, Ordering::Relaxed);
+        self.settle_retired_authority()
     }
 
     pub fn trims_locally(&self) -> bool {
