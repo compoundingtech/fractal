@@ -270,8 +270,13 @@ test('every HTTP API keeps cancellation in transport options, including all mani
                 return [{}, options];
         }
     };
+    const readMethods = {
+        'capabilities.get': 'capabilities',
+        'harness-questions.list': 'harnessQuestions',
+        'harness-questions.get': 'harnessQuestion',
+    };
     const cases = manifest.reads.map(read => [
-        read.id === 'capabilities.get' ? 'capabilities' : methodName(read.id),
+        readMethods[read.id] ?? methodName(read.id),
         options => readArguments(read.id, options),
     ]);
     cases.push(...Object.keys(manifest.actions).map(id => [methodName(id), options => [{}, options]]));

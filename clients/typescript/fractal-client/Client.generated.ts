@@ -5,7 +5,7 @@ import { API_VERSION } from './Models.generated.ts';
 import type {
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
-    ResourcesFilter, ResourcesPage, DirectiveNotes, SchedulesPage,
+    ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
@@ -641,6 +641,8 @@ export class FractalClient {
         return response;
     }
 
+    async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
+    async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
@@ -730,6 +732,7 @@ export class FractalClient {
     async arrangementEdit(input: Omit<ActionOf<'arrangement.edit'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'arrangement.edit' } as ActionOf<'arrangement.edit'>, requestOptions); }
     async attentionResolve(input: Omit<ActionOf<'attention.resolve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'attention.resolve' } as ActionOf<'attention.resolve'>, requestOptions); }
     async customReply(input: Omit<ActionOf<'custom.reply'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'custom.reply' } as ActionOf<'custom.reply'>, requestOptions); }
+    async harnessAnswer(input: Omit<ActionOf<'harness.answer'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'harness.answer' } as ActionOf<'harness.answer'>, requestOptions); }
     async laneApprove(input: Omit<ActionOf<'lane.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.approve' } as ActionOf<'lane.approve'>, requestOptions); }
     async laneJoin(input: Omit<ActionOf<'lane.join'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.join' } as ActionOf<'lane.join'>, requestOptions); }
     async laneLeave(input: Omit<ActionOf<'lane.leave'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'lane.leave' } as ActionOf<'lane.leave'>, requestOptions); }

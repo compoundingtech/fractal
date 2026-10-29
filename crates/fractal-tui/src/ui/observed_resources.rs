@@ -141,19 +141,24 @@ mod socket_tests {
         let store = Arc::new(
             fractal_daemon::store::Store::open(&root.path().join("graph.db"), "resource-read-test").unwrap(),
         );
-        let state = fractal_daemon::api::AppState { owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0_u64).0,
-        node: "resource-read-test".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
+        let state = fractal_daemon::api::AppState {
+            owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: "resource-read-test".into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         for (id, kind, facts) in [
             (
                 "resource/github/acme/garden/issue/9",
