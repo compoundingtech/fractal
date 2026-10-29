@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import time
 import tempfile
@@ -361,6 +362,10 @@ class CiLocal(unittest.TestCase):
                 'if [ "$1" = clippy ]; then echo $$ > "$CI_LOCAL_TEST_LOG.clippy"; sleep 60; fi\n'
                 'if [ "$1" = tests ]; then for i in $(seq 100); do [ -s "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; fi\n')
         (self.work / 'scripts/ci-linux').write_text(said)
+        # Every sed the run starts is counted. Stopping the lane once ran one per process on the host for each process of the
+        # lane's tree, which on a loaded host took longer than the 20 s this test waits for the run to exit.
+        (self.bin / 'sed').write_text(f'#!/bin/sh\necho sed >> "$CI_LOCAL_TEST_LOG.sed"\nexec {shutil.which("sed")} "$@"\n')
+        (self.bin / 'sed').chmod(0o755)
         env = {'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
                'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
         run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
@@ -380,6 +385,89 @@ class CiLocal(unittest.TestCase):
                 break
             time.sleep(0.05)
         self.assertFalse(Path(f'/proc/{clippy}').exists(), 'the lane\'s running stage outlived the run')
+        seds = Path(f'{self.log}.sed')
+        self.assertLess(len(seds.read_text().splitlines()) if seds.exists() else 0, 10, 'stopping the lane reads /proc without a sed per process')
+        self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
+
+    def test_a_worker_a_stage_starts_after_the_stop_has_listed_proc_is_stopped_too(self):
+        # clippy (in the lane) starts a worker when told to, and records it. The test tells it to once the stopped run has
+        # listed /proc (its first status file is open), with the run itself frozen, so the worker is new to that listing.
+        said = ('#!/usr/bin/env bash\n'
+                'if [ "$1" = clippy ]; then echo $$ > "$CI_LOCAL_TEST_LOG.clippy"\n'
+                '  until [ -e "$CI_LOCAL_TEST_LOG.go" ]; do sleep 0.01; done\n'
+                '  sleep 300 & echo $! >> "$CI_LOCAL_TEST_LOG.workers"; wait; fi\n'
+                'if [ "$1" = tests ]; then for i in $(seq 100); do [ -s "$CI_LOCAL_TEST_LOG.clippy" ] && break; sleep 0.05; done; fi\n')
+        (self.work / 'scripts/ci-linux').write_text(said)
+        env = {'PATH': f'{self.bin}:{self.devshell}:{os.environ["PATH"]}', 'HOME': str(self.home), 'CI_LOCAL_TEST_LOG': str(self.log),
+               'TMPDIR': self.tmp.name, 'CI_LOCAL_TMP_ROOT': str(self.tmp_root), 'CLIPPY_BASE_SHA': 'f' * 40}
+        run = subprocess.Popen(['bash', 'scripts/ci-local', 'tests', 'clippy'], cwd=self.work, env=env, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True)
+        self.addCleanup(lambda: run.poll() is None and (os.kill(run.pid, signal.SIGCONT), run.kill()))
+        workers = Path(f'{self.log}.workers')
+
+        def alive():
+            # This test's own workers only: each carries its CI_LOCAL_TEST_LOG.
+            pids = [int(line) for line in workers.read_text().split()] if workers.exists() else []
+            def ours(pid):
+                try:
+                    return f'CI_LOCAL_TEST_LOG={self.log}\0'.encode() in Path(f'/proc/{pid}/environ').read_bytes()
+                except OSError:
+                    return False
+            return [pid for pid in pids if ours(pid)]
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in alive()])
+
+        def state(pid):
+            try:
+                return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+            except (OSError, IndexError):
+                return None
+        marker = Path(f'{self.log}.clippy')
+        for _ in range(200):
+            if marker.exists() and marker.read_text().strip():
+                break
+            time.sleep(0.05)
+        clippy = int(marker.read_text())
+        time.sleep(0.5)  # the tests stage is done; the run is waiting for its lane
+        run.terminate()
+        listed = False
+        deadline = time.monotonic() + 20
+        while not listed and run.poll() is None and time.monotonic() < deadline:
+            try:
+                names = os.listdir(f'/proc/{run.pid}/fd')
+            except OSError:
+                continue
+            for name in names:
+                try:
+                    target = os.readlink(f'/proc/{run.pid}/fd/{name}')
+                except OSError:
+                    continue
+                if re.fullmatch(r'/proc/\d+/status', target):
+                    os.kill(run.pid, signal.SIGSTOP)
+                    listed = True
+                    break
+        self.assertTrue(listed, 'the test did not catch the stopped run reading /proc')
+        for _ in range(500):
+            if state(run.pid) == 'T':
+                break
+            time.sleep(0.01)
+        self.assertEqual(state(run.pid), 'T', 'the stopped run is frozen while its /proc listing is open')
+        # Frozen with that listing open, the run has not yet stopped clippy (it stops a process only after listing /proc).
+        self.assertNotIn(state(clippy), (None, 'Z'), 'the run was frozen before it stopped clippy')
+        Path(f'{self.log}.go').touch()
+        # Now clippy starts its worker, after the listing, unless the stop has already frozen clippy: only freezing does that.
+        for _ in range(500):
+            if alive() or state(clippy) == 'T':
+                break
+            time.sleep(0.01)
+        late, frozen = alive(), state(clippy) == 'T'
+        self.assertTrue(late or frozen, 'clippy neither started its worker nor was frozen by the stop')
+        os.kill(run.pid, signal.SIGCONT)
+        run.wait(timeout=20)
+        for _ in range(100):
+            if not alive():
+                break
+            time.sleep(0.05)
+        self.assertEqual(alive(), [], 'a worker the lane started after the stop listed /proc outlived the run')
         self.assertEqual(list((self.home / '.cache/ci-local').glob('run.*')), [], 'the scratch home is removed afterwards')
 
     def test_every_stage_runs_and_the_first_failure_is_the_exit_status(self):
