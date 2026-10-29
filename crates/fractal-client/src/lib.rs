@@ -1026,6 +1026,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
         | ErrorCode::SuspendAuthoredSessionSelection
+        | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
         | ErrorCode::PrivateNotesCarrierConflict
         | ErrorCode::PrivateNotesUnreachable
