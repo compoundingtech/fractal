@@ -1004,6 +1004,16 @@ A gate job that dies before it decides also leaves the check to run: the refusal
 fix a refused check, sign the head with `scripts/st-test --all --push origin` and push, or re-run the jobs once the notes are on the
 remote. A failed check never needs a new commit.
 
+**Which base a pull request run is judged at.** The gate and everything it reads at the accepted base (the signed-only list, the
+author list, the keys, the policy) come from the first parent of the checked-out merge, `refs/pull/N/merge`: the base tip GitHub
+merged the head into, the same merge the gate judges. They used to come from the payload's `pull_request.base.sha`, which GitHub moves
+only on an open or a push: a reopen or a `ready_for_review` keeps the old one. On 2026-10-28 a reopen of #4144 ran its gate from main
+as it was before this list existed, so every check ran (46.6 runner minutes). The payload's base reaches the gate as `EVENT_BASE_SHA`
+(`event_base` on the decision line). A stale one in main's history decides nothing. One outside the history of the merge's first
+parent (a retargeted or rewritten base) is a doubt, and for a signed-only opener's enforced check it is a refusal
+(`reason=payload_base_outside_the_merge`): push again so GitHub records the current base, then re-run all jobs. A merge group and a
+push take the gate from their payload base, as before.
+
 ### The Linux group
 
 `linux-gate` is an aggregate of jobs that are not themselves required checks, so those jobs skip at the **job**
@@ -1994,7 +2004,8 @@ A verifier that is missing, slow (30 seconds), crashes, prints invalid UTF-8 or 
 leaves `decision=run`.
 
 **The gate script comes from the accepted base, like the verifier.** The step runs
-`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy, and if the base has no
+`git show "$BASE_SHA:scripts/ci-evidence-gate"`, never the checked-out copy (for a `pull_request` run `BASE_SHA` is the merge's first
+parent, see "Which base a pull request run is judged at"), and if the base has no
 gate or it fails in any way the step reports `unavailable` and the check runs. A change that rewrites
 the gate therefore cannot make itself skip, and the protected-path rule above makes any such change
 run in full. What remains is the workflow file itself, which a same-repo change can edit; that is
