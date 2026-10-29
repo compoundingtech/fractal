@@ -5,18 +5,20 @@
 //! sequence 1 and signs its whole retained history when it joins. A member that admitted that
 //! history unsigned, before the migration claim counted, never asks for those signatures, so it
 //! cannot answer a fresh member that receives the claim first and holds the same envelopes as
-//! unsigned. Each exchange therefore also asks for the window-key signatures of admitted
-//! envelopes that lack one, and stores and serves what arrives. Nothing is admitted or revoked
-//! here; only signatures are added.
+//! unsigned. Exchanges therefore also ask for the window-key signatures of admitted envelopes
+//! that lack one, and store and serve what arrives. Nothing is admitted or revoked here; only
+//! signatures are added.
 //!
-//! The scan walks keyed writers' envelopes in `(writer, sequence, hash)` order from a cursor,
-//! a bounded number of rows per call, so every missing signature is asked for in turn even when
-//! some peers cannot answer. It reads only the two tables' primary-key indexes: an envelope row
-//! keeps its payload before its receipt state, so reading the state of every scanned row would
-//! walk every payload. The state is read only for rows that lack a window-key signature. A pass
-//! that finds nothing missing stops the scan, and so do passes that find no fewer than the pass
-//! before them for an hour: signatures no reachable peer holds. A membership change or a restart
-//! starts the scan again.
+//! The daemon's maintenance runs the scan, never a request: an export or summary only takes
+//! requests the scan already found. Each call walks keyed writers' envelopes in
+//! `(writer, sequence, hash)` order from a cursor, a bounded number of rows, so every missing
+//! signature is asked for in turn even when some peers cannot answer. The next call waits until
+//! exchanges have taken everything the last one found. It reads only the two tables'
+//! primary-key indexes: an envelope row keeps its payload before its receipt state, so reading
+//! the state of every scanned row would walk every payload. The state is read only for rows that
+//! lack a window-key signature. A pass that finds nothing missing stops the scan, and so do
+//! passes that find no fewer than the pass before them for an hour: signatures no reachable peer
+//! holds. A membership change or a restart starts the scan again.
 
 use super::*;
 
@@ -53,17 +55,19 @@ pub struct SignatureBackfill {
     /// When a complete pass first found no fewer than the one before it.
     stalled_since: Option<u128>,
     idle: bool,
+    /// Found by the last call and not yet taken by an exchange.
+    wanted: Vec<ReplicaEnvelopeId>,
 }
 
 impl Store {
-    /// Up to `room` admitted envelopes in a keyed window without a signature by a window key.
-    pub(super) fn signature_backfill_requests(&self, room: usize) -> Result<Vec<ReplicaEnvelopeId>> {
-        if room == 0 {
-            return Ok(Vec::new());
-        }
+    /// Scan the next envelope rows for missing window-key signatures and keep up to
+    /// `REPLICATION_SIGNATURE_LIMIT` of them for exchanges to ask for. Does nothing while
+    /// exchanges have not taken the last call's findings. Returns false once the scan stopped.
+    pub fn advance_signature_backfill(&self) -> Result<bool> {
+        let room = REPLICATION_SIGNATURE_LIMIT;
         let generation = fleet_generation(&self.readers.get())?;
-        // Take the cursor and let go: two exports may ask at once, and neither waits on the
-        // other's SQL. A call whose cursor moved meanwhile returns its requests unrecorded.
+        // Take the cursor and let go, so exchanges taking requests never wait on this SQL. A
+        // call whose cursor moved meanwhile records nothing.
         let start = {
             let mut state = self
                 .signature_backfill
@@ -76,7 +80,11 @@ impl Store {
                 };
             }
             if state.idle {
-                return Ok(Vec::new());
+                state.wanted.clear();
+                return Ok(false);
+            }
+            if !state.wanted.is_empty() {
+                return Ok(true);
             }
             state.after.clone()
         };
@@ -166,10 +174,11 @@ impl Store {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         if state.generation != Some(generation) || state.after != start {
-            return Ok(wanted);
+            return Ok(true);
         }
         state.found += found;
         state.after = after;
+        state.wanted = wanted;
         if finished {
             let found = std::mem::take(&mut state.found);
             if state.previous.is_some_and(|previous| found >= previous) {
@@ -183,7 +192,17 @@ impl Store {
             state.previous = Some(found);
             state.after = None;
         }
-        Ok(wanted)
+        Ok(!state.idle)
+    }
+
+    /// Up to `room` of the requests the scan found, each taken once. Reads no table.
+    pub(super) fn signature_backfill_requests(&self, room: usize) -> Vec<ReplicaEnvelopeId> {
+        let mut state = self
+            .signature_backfill
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let taken = room.min(state.wanted.len());
+        state.wanted.drain(..taken).collect()
     }
 }
 
