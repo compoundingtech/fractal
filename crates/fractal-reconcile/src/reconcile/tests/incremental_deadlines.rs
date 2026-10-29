@@ -1415,7 +1415,11 @@ fn a_skipped_item_that_finds_an_earlier_due_time_is_a_correction() {
     reconciler.incremental.evaluated(untimed, BTreeSet::new(), None);
     assert_eq!(reconciler.missed_by_skipping(untimed, mark, Some(START + 30_000)).len(), 1);
     // Corrections are counted by cause, so a missed timer shows apart from a missed write.
-    reconciler.incremental_correction("stop", timed, &BTreeSet::new(), &earlier);
+    // The count lands before the strict check that fails a test on any correction.
+    let strict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reconciler.incremental_correction("stop", timed, &BTreeSet::new(), &earlier)
+    }));
+    assert!(strict.is_err(), "a missed due time passed the strict check");
     let counted = crate::performance::snapshot()["incremental_corrections"].clone();
     assert!(
         counted
@@ -1425,4 +1429,25 @@ fn a_skipped_item_that_finds_an_earlier_due_time_is_a_correction() {
             .any(|row| row["item"] == "stop · due"),
         "{counted}"
     );
+}
+
+#[test]
+#[should_panic(expected = "an incremental pass would have missed a write or due time")]
+fn an_unneeded_evaluation_that_arms_an_earlier_timer_is_a_correction() {
+    let _clock = Clock::at(START);
+    let (_, _, reconciler, _) = stopping();
+    let item = "stop:invented-timer";
+    reconciler
+        .incremental
+        .evaluated(item, BTreeSet::new(), Some(START + 60_000));
+    // Nothing marked the item and it is not due, yet this evaluation arms a timer before the
+    // recorded due time: a skipping pass would have slept through it.
+    reconciler
+        .recording_writes(|| {
+            reconciler.reconcile_item("stop", item, false, || {
+                smallclaims::touched::note_due(START + 30_000);
+                Ok(())
+            })
+        })
+        .unwrap();
 }
