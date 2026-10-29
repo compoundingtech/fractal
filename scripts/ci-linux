@@ -42,8 +42,9 @@ clippy_and_codegen() {
   # Every file those compiles read must be in linux-clippy's input key, or its notes could cover a tree they never measured. Only
   # linux-clippy's own run names the skip policy (scripts/ci-clippy-keyed, CI's linux-clippy job): linux-gate runs this stage too and
   # must not depend on the policy file (lane-definition-closure --check), so without CI_KEYED_CLIPPY_POLICY the check is not run.
+  # --warn while linux-clippy is in shadow: no default local run checks it yet, so a failure would first show in the merge queue.
   if [ -n "${CI_KEYED_CLIPPY_POLICY:-}" ]; then
-    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$CI_KEYED_CLIPPY_POLICY" --jsonl 'clippy-*.jsonl' || return
+    python3 scripts/dep-info-check --logs "$logs" --check linux-clippy --policy "$CI_KEYED_CLIPPY_POLICY" --jsonl 'clippy-*.jsonl' --warn || return
   fi
   cargo run --locked -p fractal-client-codegen -- --check
 }

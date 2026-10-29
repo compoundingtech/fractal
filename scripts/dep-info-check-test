@@ -99,6 +99,17 @@ class DepInfo(unittest.TestCase):
         self.assertEqual(code, 1, out)
         self.assertIn('no dep-info found', out)
 
+    def test_in_shadow_the_same_files_are_warnings_and_the_stage_passes(self):
+        self.unit('alpha', ['crates/alpha/src/lib.rs', 'crates/alpha/src/../../../docs/st3/schema.md'])
+        code, out = self.run_check('--warn')
+        self.assertEqual(code, 0, out)
+        self.assertIn("::warning::linux-clippy read docs/st3/schema.md, which its input key does not cover", out)
+        self.assertNotIn('::error::', out)
+        self.assertEqual(out.splitlines()[-1], 'dep-info: check=linux-clippy units=1 files=2 uncovered=1')
+        # ci-linux passes --warn: no default local run checks linux-clippy yet, so a failure would first show in the merge queue.
+        line = next(line for line in (HERE / 'ci-linux').read_text().splitlines() if 'scripts/dep-info-check' in line)
+        self.assertIn('--warn', line)
+
     def test_the_committed_policy_declares_the_check_and_its_lane_lists_the_same_tree_inputs(self):
         root = HERE.parent
         inputs = check.declared((root / POLICY).read_text())

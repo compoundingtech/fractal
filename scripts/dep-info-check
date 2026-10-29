@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Every file a keyed stage's compiles read must be inside its check's input key (docs/keyed-clippy.md).
 
-  python3 scripts/dep-info-check --logs DIR --policy FILE [--check NAME] [--jsonl GLOB] [--root DIR]
+  python3 scripts/dep-info-check --logs DIR --policy FILE [--check NAME] [--jsonl GLOB] [--root DIR] [--warn]
 
 A note for a keyed check (linux-clippy, linux-fleet-compat) covers every tree with the same key, the projection of the policy's
 `inputs`. A file the compiler reads that the key leaves out (an include_str! of a doc, a proc macro's wit file) would let one tree's
@@ -14,6 +14,9 @@ input of --check (default linux-clippy) covers (equal, or a parent directory). T
 The skip policy is named by the caller (--policy), never by this script: scripts/ci-linux runs it only when CI_KEYED_CLIPPY_POLICY
 names the policy, which linux-clippy's own run sets (scripts/ci-clippy-keyed, CI's linux-clippy job). linux-gate runs the same clippy
 stage without it, so linux-gate never depends on the policy file (lane-definition-closure --check holds it to that).
+
+--warn reports the same files as warnings and exits 0. linux-clippy is in shadow and no default local run checks it yet, so the
+merge queue would be the first place a failure showed; scripts/ci-linux passes --warn until linux-clippy is a default local check.
 """
 import argparse
 import json
@@ -83,6 +86,7 @@ def main(argv):
     parser.add_argument('--jsonl', default=JSONL, help=f'the cargo JSON message logs in --logs to read (default {JSONL})')
     parser.add_argument('--policy', required=True, help='the skip policy whose --check inputs make the key')
     parser.add_argument('--root', default=os.getcwd())
+    parser.add_argument('--warn', action='store_true', help='report uncovered files as warnings and exit 0 (shadow)')
     args = parser.parse_args(argv)
     root = Path(posixpath.normpath(os.path.abspath(args.root)))
     inputs = declared(Path(args.policy).read_text(), args.check)
@@ -94,13 +98,14 @@ def main(argv):
     for dep_info in units:
         files |= dependencies(dep_info, root, target)
     uncovered = sorted(path for path in files if not covered(path, inputs))
+    level = 'warning' if args.warn else 'error'
     for path in uncovered:
-        print(f'::error::{args.check} read {path}, which its input key does not cover: add it (or a parent) to the inputs of '
+        print(f'::{level}::{args.check} read {path}, which its input key does not cover: add it (or a parent) to the inputs of '
               f'{args.check} in {args.policy} and the tree_inputs of its lane')
     if not units:
-        print(f'::error::no dep-info found for this stage\'s units ({args.jsonl}): nothing shows what {args.check} read')
+        print(f'::{level}::no dep-info found for this stage\'s units ({args.jsonl}): nothing shows what {args.check} read')
     print(f'dep-info: check={args.check} units={len(units)} files={len(files)} uncovered={len(uncovered)}')
-    return 1 if uncovered or not units else 0
+    return 1 if (uncovered or not units) and not args.warn else 0
 
 
 if __name__ == '__main__':

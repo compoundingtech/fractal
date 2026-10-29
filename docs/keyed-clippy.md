@@ -103,11 +103,13 @@ A key that leaves out an input lets a note cover a tree it never measured. Three
    test until it is declared.
 3. **What cargo read is declared.** `scripts/dep-info-check` runs inside the clippy stage (`scripts/ci-linux`) when linux-clippy
    itself runs it: `scripts/ci-clippy-keyed` (linux-clippy's lane) and CI's linux-clippy job set `CI_KEYED_CLIPPY_POLICY` to the skip
-   policy, and the check reads linux-clippy's inputs from it, so it fails the stage in CI and in a local run alike. linux-gate runs the
+   policy, and the check reads linux-clippy's inputs from it, so it judges the stage in CI and in a local run alike. linux-gate runs the
    same stage without that variable: its result never depends on the policy file, so a policy change on main does not void its
    signature (`lane-definition-closure --check` fails a lane that reads a protected file its `ci_inputs` leave out). It reads the dep-info file (`.d`, every file rustc opened) of each unit the stage's
-   cargo clippy runs reported, keeps the repository files outside the target directory, and fails with an `::error::` line per
-   file the key does not cover. Its last line, `dep-info: check=linux-clippy units=N files=M uncovered=K`, is counted in the daily report.
+   cargo clippy runs reported, keeps the repository files outside the target directory, and reports each file the key does not
+   cover. In shadow (PR 1) it reports them as `::warning::` lines and passes (`--warn`): no default local run checks linux-clippy yet,
+   so a failure would first show in the merge queue. With PR 2, which makes linux-clippy a default local check, it fails with an
+   `::error::` line per file. Its last line, `dep-info: check=linux-clippy units=N files=M uncovered=K`, is counted in the daily report.
    Only units the stage reported are read, so a stale `.d` file in a restored cache cannot fail it. The first measurement (a warm
    target, 2026-10-26) found the files `--all-targets` compiles in from outside the member directories, among them
    `docs/st3/invariants.md`, `docs/st3/schema.md` and `docs/vrs/requirements.md` (tests' `include_str!`) and the `wit/` files a proc
