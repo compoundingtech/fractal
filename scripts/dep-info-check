@@ -64,7 +64,10 @@ def dep_info_files(logs, pattern=JSONL):
 def build_script_reads(logs, pattern, root, target, metadata):
     """The repository files and directories the workspace's build scripts said they read (cargo:rerun-if-changed=PATH, relative to the
     package's directory), for every build-script-executed message the stage's cargo runs reported. A dependency outside the workspace is
-    not in the --no-deps metadata, and its paths lie outside the repository anyway."""
+    not in the --no-deps metadata, and its paths lie outside the repository anyway. The git metadata a build script watches
+    (fractal-build-stamp's HEAD, index and ref) is not the tree: under .git in a plain checkout such as CI's, outside the repository in
+    a linked worktree, and no input key can hold it."""
+    git_dir = root / '.git'
     packages = {package['id']: Path(package['manifest_path']).parent for package in metadata.get('packages', ())
                 if isinstance(package, dict) and 'id' in package and 'manifest_path' in package}
     out = set()
@@ -85,7 +88,7 @@ def build_script_reads(logs, pattern, root, target, metadata):
                 if not sep or name not in ('cargo:', 'cargo::'):
                     continue
                 path = Path(posixpath.normpath(str(package / value)))
-                if path == target or target in path.parents or root not in path.parents:
+                if path == target or target in path.parents or root not in path.parents or path == git_dir or git_dir in path.parents:
                     continue
                 out.add(path.relative_to(root).as_posix())
     return out

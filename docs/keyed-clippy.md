@@ -121,8 +121,10 @@ A key that leaves out an input lets a note cover a tree it never measured. Three
    read the whole policy file and declares it; for a keyed check that costs little, since the merge tree it then falls back to has the
    same key unless the pull request changed one of clippy's inputs. The check reads the dep-info file (`.d`, every file rustc
    opened) of each unit the stage's cargo clippy runs reported, and the `rerun-if-changed` paths each workspace build script printed
-   (its reads are in no dep-info file). It keeps the repository files outside the target directory and fails with an `::error::`
-   line per file the key does not cover. PR 1 only warned, while no default local run checked it; since PR 2 every local run checks it
+   (its reads are in no dep-info file). It keeps the repository files outside the target directory and `.git`, and fails with an
+   `::error::` line per file the key does not cover. `.git` is the repository's metadata, not its tree: fractal-build-stamp watches
+   HEAD, the index and HEAD's ref, which lie under `.git` in a plain checkout such as CI's and outside the repository in the linked
+   worktrees local runs use, so only CI would have seen them. PR 1 only warned, while no default local run checked it; since PR 2 every local run checks it
    before the merge queue does. It cannot see files the codegen check reads; those are declared by hand. Its last line, `dep-info: check=linux-clippy units=N files=M uncovered=K`, is counted in the daily report.
    Only units the stage reported are read, so a stale `.d` file in a restored cache cannot fail it. The first measurement (a warm
    target, 2026-10-26) found the files `--all-targets` compiles in from outside the member directories, among them
