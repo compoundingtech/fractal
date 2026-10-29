@@ -1920,6 +1920,8 @@ fn response_usage_stays_local_while_attributed_totals_replicate() {
         65
     );
 
+    // The second rollup waits for its hour on the host; the seat ending replicates it.
+    observed("ended", "usage-ended");
     let peer = Store::open_memory("host-two").unwrap();
     let exchange = exchange_from(&local, &ReplicationInventory::default());
     receive_and_project(&peer, "host-one", &exchange);
@@ -2268,15 +2270,15 @@ fn response_spend_is_priced_and_kept_apart_by_account_and_step() {
     // leave the previous step's last totals pending behind the next step's.
     let replicated = local.claims_for(subject, Some("harness.usage")).unwrap();
     assert_eq!(replicated.len(), 3, "{replicated:#?}");
-    // The local model's second response waits for the next interval, or for the harness
-    // to stop working.
+    // The local model's second response waits for its hour to be over, or for the seat to
+    // end; a turn end no longer replicates it. The host's reads below still count it.
     observed("ready", "spend-idle");
     assert_eq!(
         local
             .claims_for(subject, Some("harness.usage"))
             .unwrap()
             .len(),
-        4
+        3
     );
 
     let rows = local

@@ -8376,6 +8376,30 @@ pub fn migrate_local_usage_seen(connection: &Connection) -> Result<()> {
 /// compaction or model change, and the end of a turn.
 const USAGE_PUBLISH_INTERVAL_MS: u128 = 5 * 60 * 1000;
 
+/// A `response_rollup` series replicates its first reading, then the last reading of each UTC
+/// hour once that hour is over, and its final totals when its seat ends. Periods and retention
+/// are exact to the hour ([`checkpoint_rules`]), and every response goes to OTLP, so a rollup per
+/// turn bought nothing a reader keeps. The seat's own host folds its pending rollups into its
+/// usage reads ([`pending_usage_rollups`]), so only other members lag, by up to an hour.
+const USAGE_ROLLUP_HOUR_MS: u128 = 60 * 60 * 1000;
+
+fn usage_rollup_hour(fields: &BTreeMap<String, Value>, fallback: u128) -> u128 {
+    fields.get("observed_at_unix_ms").and_then(Value::as_u64).map_or(fallback, u128::from) / USAGE_ROLLUP_HOUR_MS
+}
+
+/// The newest unreplicated `response_rollup` reading of each series of `subject` (of every
+/// subject when `None`) that this node holds, as (subject, body). Only the seat's host has them.
+pub fn pending_usage_rollups(connection: &Connection, subject: Option<&str>) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT o.subject, o.body FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+         WHERE (?1 IS NULL OR s.subject=?1) AND s.kind='harness.usage' AND s.pending_local_id IS NOT NULL
+           AND json_extract(s.slot, '$[1]')='response_rollup'
+         ORDER BY o.id",
+    )?;
+    let rows = statement.query_map([subject], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+    rows.collect()
+}
+
 pub fn validate_local_observation(input: &ClaimInput) -> Result<(), St3Error> {
     let action_receipt_cas = input.kind == "client.action-result"
         && input.actor.is_none()
@@ -8923,6 +8947,7 @@ fn publish_changed_harness_state_tx(
             })
     });
     let resting = input.fields.get("state").and_then(Value::as_str) != Some("working");
+    let ended = input.fields.get("state").and_then(Value::as_str) == Some("ended");
     let incarnation = fields.get("incarnation_id").and_then(Value::as_str).unwrap_or("").to_owned();
     // A resting harness keeps re-stamping its state: each re-stamp replicates the usage that
     // waited out its interval, so a reading after the turn's tally waits no longer than that.
@@ -8943,7 +8968,7 @@ fn publish_changed_harness_state_tx(
                 }))
     {
         if resting {
-            publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage))?;
+            publish_pending_usage_tx(transaction, origin, &input.subject, &incarnation, now, Some(due_usage), ended)?;
         }
         return Ok(None);
     }
@@ -8991,7 +9016,7 @@ fn publish_changed_harness_state_tx(
     if resting {
         publish_pending_usage_tx(
             transaction, origin, &input.subject, &incarnation, now,
-            same_state.then_some(due_usage),
+            same_state.then_some(due_usage), ended,
         )?;
     }
     Ok(Some(claim))
@@ -9121,8 +9146,38 @@ fn publish_due_usage_tx(
                 .map_or(claim.accepted_at_unix_ms, u128::from),
         ),
     };
+    let rollup = input.fields.get("semantics").and_then(Value::as_str) == Some("response_rollup");
     let (due, repeat) = match &last {
         None => (true, false),
+        // A harness that never reported a state never ends or rests, so nothing would flush a
+        // held rollup: its readings keep replicating as before.
+        Some((_, published_fields)) if rollup && resting_since != Some(u128::MAX) => {
+            let mut published: BTreeMap<String, Value> =
+                serde_json::from_str(published_fields).unwrap_or_default();
+            if !input.fields.contains_key("native_session_id") {
+                published.remove("native_session_id");
+            }
+            // The pending reading of an hour that is over was that hour's last: replicate it
+            // now, and hold this one until its own hour ends.
+            let hour = usage_rollup_hour(&input.fields, local.accepted_at_unix_ms);
+            let previous = transaction
+                .query_row(
+                    "SELECT o.body FROM local_latest_slots s JOIN local_observations o ON o.id=s.pending_local_id
+                     WHERE s.subject=?1 AND s.kind='harness.usage' AND s.slot=?2",
+                    params![input.subject, slot],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(internal)?;
+            if let Some(previous) = previous {
+                let previous: Value = serde_json::from_str(&previous).map_err(internal)?;
+                let fields = schema_fields_for_body("harness.usage", &previous).map_err(internal)?;
+                if usage_rollup_hour(&fields, 0) < hour {
+                    publish_usage_slot_tx(transaction, origin, &input.subject, input.actor.as_deref(), &fields, now)?;
+                }
+            }
+            (false, published == input.fields)
+        }
         Some((published_at, published_fields)) => {
             let mut published: BTreeMap<String, Value> =
                 serde_json::from_str(published_fields).unwrap_or_default();
@@ -9213,7 +9268,9 @@ fn publish_usage_slot_tx(
 }
 
 /// Replicate the newest local usage of each pending slot of `subject`: every one when the
-/// harness stops working, or only the slots last replicated at or before `published_by`.
+/// harness stops working, or only the slots last replicated at or before `published_by`. A
+/// `response_rollup` waits for neither: it replicates once its hour is over, or when the seat
+/// has `ended`.
 fn publish_pending_usage_tx(
     transaction: &Transaction<'_>,
     origin: &str,
@@ -9221,6 +9278,7 @@ fn publish_pending_usage_tx(
     incarnation: &str,
     now: u128,
     published_by: Option<u128>,
+    ended: bool,
 ) -> Result<Vec<ClaimRecord>, St3Error> {
     let mut pending = {
         let mut statement = transaction
@@ -9236,6 +9294,13 @@ fn publish_pending_usage_tx(
             .map_err(internal)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(internal)?
+    };
+    // For a rollup, whether it replicates now; `None` for the other semantics.
+    let usage_rollup_due = |observation: &ClaimRecord| {
+        (observation.body.pointer("/fields/semantics").and_then(Value::as_str) == Some("response_rollup")).then(|| {
+            let fields = observation.body["fields"].as_object().cloned().unwrap_or_default().into_iter().collect();
+            ended || usage_rollup_hour(&fields, observation.accepted_at_unix_ms) < now / USAGE_ROLLUP_HOUR_MS
+        })
     };
     if let Some(published_by) = published_by {
         // Publishing a slot clears its pending reading; the rest keep waiting.
@@ -9254,13 +9319,17 @@ fn publish_pending_usage_tx(
             .collect::<rusqlite::Result<BTreeSet<_>>>()
             .map_err(internal)?;
         pending.retain(|observation| {
-            local_observation_position(observation).is_some_and(|id| due.contains(&(id as i64)))
+            usage_rollup_due(observation).unwrap_or_else(|| {
+                local_observation_position(observation).is_some_and(|id| due.contains(&(id as i64)))
+            })
         });
     } else {
+        pending.retain(|observation| usage_rollup_due(observation).unwrap_or(true));
+        // A rollup that waits keeps its pending reading; publishing clears the others.
         transaction
             .execute(
-                /* sqlite-large-value: allow-for-now lv-h1629790977a3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
-             WHERE subject=?1 AND kind='harness.usage'",
+                /* sqlite-large-value: allow-for-now lv-ha084e6156225 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_latest_slots SET pending_local_id=NULL
+             WHERE subject=?1 AND kind='harness.usage' AND json_extract(slot, '$[1]') IS NOT 'response_rollup'",
                 [subject],
             )
             .map_err(internal)?;

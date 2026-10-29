@@ -8563,6 +8563,61 @@ fn a_busy_seat_replicates_its_usage_a_few_times_not_once_per_response() {
     assert_eq!(newest.body["fields"]["context_used_tokens"], responses, "the end replicates the last");
 }
 
+/// A rollup series replicates its first reading, the last reading of each UTC hour once that hour
+/// is over, and its final totals when the seat ends. Measured on the fleet (2026-10-29), rollups
+/// were 456 of 1528 harness claims in three hours, about one per turn per series. A seat answering
+/// every 4 s through 2.5 hours of 5-minute turns now replicates 4, while its host reads the newest.
+#[test]
+fn a_busy_seat_replicates_its_usage_rollups_once_an_hour() {
+    let store = Store::open_memory("node").unwrap();
+    let subject = "agent/node.worker";
+    let hour = 3_600_000_u128;
+    let start = (now_ms() / hour + 1) * hour + 1_000;
+    let state = |state: &str, at: u128| {
+        store.append_latest_observation(&harness_state(subject, state, at as u64), at).unwrap();
+    };
+    let rollup = |tokens: u64, at: u128| ClaimInput {
+        subject: subject.into(),
+        kind: "harness.usage".into(),
+        actor: Some(subject.into()),
+        fields: BTreeMap::from([
+            ("driver".into(), json!("codex")),
+            ("incarnation_id".into(), json!("inc-1")),
+            ("semantics".into(), json!("response_rollup")),
+            ("model".into(), json!("example-model")),
+            ("total_tokens".into(), json!(tokens)),
+            ("observed_at_unix_ms".into(), json!(at as u64)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(format!("rollup:{tokens}")),
+    };
+    let replicated = || {
+        store.claims_for(subject, Some("harness.usage")).unwrap().iter()
+            .map(|claim| claim.body["fields"]["total_tokens"].as_u64().unwrap())
+            .collect::<Vec<_>>()
+    };
+    let host_total = || store.usage_summaries_at(&[subject.to_owned()], None).unwrap()[subject].total_tokens;
+    let mut tokens = 0;
+    let mut at = start;
+    let end = start + 2 * hour + hour / 2;
+    let mut last_of_hour = BTreeMap::new();
+    while at < end {
+        let turn = (at - start) / 300_000;
+        state(if (at - start) % 300_000 < 240_000 { "working" } else { "idle" }, at);
+        tokens += 1;
+        store.append_latest_observation(&rollup(tokens, at), at).unwrap();
+        last_of_hour.insert(at / hour, tokens);
+        assert_eq!(host_total(), tokens, "the host reads its newest rollup at once (turn {turn})");
+        at += 4_000;
+    }
+    let hours = last_of_hour.values().copied().collect::<Vec<_>>();
+    assert_eq!(replicated(), [1, hours[0], hours[1]], "the first reading, then each hour's last once it is over");
+    state("ended", end);
+    assert_eq!(replicated(), [1, hours[0], hours[1], tokens], "the final totals when the seat ends");
+    assert_eq!(host_total(), tokens);
+}
+
 /// Measured on the fleet (2026-10-28): three quarters of the context occupancy claims of seats at
 /// rest repeated the previous claim exactly, one per five-minute interval. An hour of the same
 /// reading every minute replicates once, and a reading that changes still replicates.

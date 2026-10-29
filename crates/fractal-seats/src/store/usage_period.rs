@@ -56,7 +56,13 @@ pub fn boundary_rows(
         }
         previous = key;
     }
-    Ok(result.into_values().collect())
+    let mut rows = result.into_values().collect::<Vec<_>>();
+    // Rollups replicate hourly; the seat's host also has the newer readings that have not, and
+    // each is its series' newest snapshot, so the period's ends stay exact here.
+    for (subject, body) in fractal_store::store::pending_usage_rollups(connection, None)? {
+        rows.push((subject, 0, body));
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
