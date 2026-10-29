@@ -6376,7 +6376,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Set before sync starts, so a member that trims locally never adopts a peer's manifest.
     store.trim_locally(config.trim.local);
     *store
-        .extension::<fractal_store::store::answers_check::AnswersSettings>()
+        .extension::<fractal_store::store::answers_check::TrimSettings>()
         .notify
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = config.trim.notify.clone();

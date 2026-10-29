@@ -12,9 +12,10 @@ pub const ANSWERS_CONDITION: &str = "answers-disagreement";
 /// daemon's other faults.
 pub const EPISODE_PREFIX: &str = "answers-disagreement/";
 
-/// Who owns an answers fault: `[trim] notify`, set at startup.
+/// `[trim] notify`, set at startup: the agent that owns a fault local trimming raises, such as an
+/// answers disagreement.
 #[derive(Default)]
-pub struct AnswersSettings {
+pub struct TrimSettings {
     pub notify: Mutex<Option<String>>,
 }
 
@@ -26,6 +27,17 @@ pub fn episode(local: &str, peer: &str) -> String {
 }
 
 impl Store {
+    /// The `reviewer` of a fault local trimming raises: the agent `[trim] notify` names, which
+    /// then owns the fault, or the operator, which leaves it to the fleet's fault agent.
+    pub fn trim_fault_reviewer(&self) -> String {
+        self.extension::<TrimSettings>()
+            .notify
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| "person/operator".into())
+    }
+
     /// Open a fault for a check that found differences, unless the pair's fault is still open,
     /// or end the pair's open fault for a check that agrees.
     pub fn record_answers_check(&self, check: &AnswersCheck) -> Result<(), St3Error> {
@@ -91,13 +103,7 @@ impl Store {
              kind and key. Nothing repairs it from a peer.",
             named.join("; ")
         );
-        let reviewer = self
-            .extension::<AnswersSettings>()
-            .notify
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-            .unwrap_or_else(|| "person/operator".into());
+        let reviewer = self.trim_fault_reviewer();
         self.append_claim(&ClaimInput {
             subject: subject.clone(),
             kind: "operational.failure".into(),
@@ -208,7 +214,7 @@ mod tests {
     #[test]
     fn a_difference_opens_one_fault_for_the_notify_agent_until_the_pair_agrees() {
         let store = Store::open_memory("alder").unwrap();
-        *store.extension::<AnswersSettings>().notify.lock().unwrap() =
+        *store.extension::<TrimSettings>().notify.lock().unwrap() =
             Some("agent/example/operations".into());
         store.record_answers_check(&check(differs(), 1_000)).unwrap();
         let opened = faults(&store);
