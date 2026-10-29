@@ -1144,6 +1144,87 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
     assert!(!log.contains("st3 up") && !log.contains("fractal up"), "{log}");
 }
 
+async fn initial_bind_observes_binary_replacement(driver: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = fractal_daemon::test_support::evidence_tempdir();
+    let root = root.path();
+    let seat = "agent/follow-before-bind";
+    let incarnation = "follow-before-bind:current";
+    let mut daemon = Daemon::new(root);
+    daemon.observe_running(seat, incarnation);
+    let (bind_sent, bind_received) = std::sync::mpsc::channel::<Value>();
+    let app = fractal_daemon::test_support::admitted_mailbox_protocol_router(daemon.state()).layer(
+        axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let bind_sent = bind_sent.clone();
+                async move {
+                    if request.uri().path() == "/v1/mailbox/bind" {
+                        let body = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+                        bind_sent.send(serde_json::from_slice(&body).unwrap()).unwrap();
+                        // Hold the very first request, rather than timing a retry pause.
+                        return std::future::pending::<axum::response::Response>().await;
+                    }
+                    next.run(request).await
+                }
+            },
+        ),
+    );
+    daemon.start_isolated_app(app).await;
+    let installed = root.join("followed-binary");
+    std::os::unix::fs::symlink(test_bin!("fractal-fixture"), &installed).unwrap();
+    let mut channel = TestSeat(Some(
+        seat_command(root, &daemon.socket)
+            .env("ST3_BIN", &installed)
+            .env("ST3_MAILBOX_TRANSPORT", "push")
+            .arg("--catalog").arg(root.join("catalog"))
+            .args(["driver", &format!("{driver}-channel"), "--identity", "follow-before-bind"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn().unwrap(),
+    ));
+    let output = channel.stdout.take().unwrap();
+    let (frames, received) = std::sync::mpsc::channel::<Value>();
+    std::thread::spawn(move || {
+        for line in BufReader::new(output).lines() {
+            let Ok(line) = line else { break };
+            if let Ok(frame) = serde_json::from_str(&line) {
+                let _ = frames.send(frame);
+            }
+        }
+    });
+    assert_eq!(received.recv_timeout(Duration::from_secs(10)).unwrap()["type"], "hello");
+    let initial_fence = bind_received.recv_timeout(Duration::from_secs(10)).expect("initial bind started");
+    let replacement = root.join("replacement");
+    std::fs::write(&replacement, concat!(
+        "#!/bin/sh\n",
+        "if [ \"$1\" = resume-probe ]; then echo 'st3-resume 1'; exit 0; fi\n",
+        "cat \"$ST3_CHANNEL_RESUME\"\n",
+        "printf '\\n'\n",
+    )).unwrap();
+    std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::rename(&replacement, &installed).unwrap();
+    let resumed = received.recv_timeout(Duration::from_secs(15))
+        .expect("a channel stuck in initial bind must execute its replacement");
+    assert_eq!(resumed["state"]["incarnation"], incarnation);
+    assert_eq!(resumed["state"]["pending"]["fence"], initial_fence);
+    assert!(bind_received.try_recv().is_err(), "the initial bind never completed");
+    let stderr = channel.stop();
+    daemon.stop().await;
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pi_channel_follows_binary_while_initial_mailbox_bind_is_stuck() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    initial_bind_observes_binary_replacement("pi").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn omp_channel_follows_binary_while_initial_mailbox_bind_is_stuck() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    initial_bind_observes_binary_replacement("omp").await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pi_family_channel_keeps_state_and_mail_through_a_daemon_restart() {
     if fractal_daemon::test_support::supervise_test() {
