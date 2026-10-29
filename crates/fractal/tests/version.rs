@@ -106,7 +106,8 @@ fn executable_alias_warning_is_one_stderr_line_without_changing_json_stdout() {
         for suppressed in [false, true] {
             let mut command = Command::new(test_env!("CARGO_BIN_EXE_st3"));
             command.arg0(name).args(["--version", "--json"]).env_clear()
-                .env("HOME", root.path());
+                .env("HOME", root.path())
+                .env("COMPLETE", "0");
             if suppressed {
                 command.env("FRACTAL_SUPPRESS_DEPRECATION", "1");
             }

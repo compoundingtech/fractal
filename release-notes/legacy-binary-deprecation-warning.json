@@ -14,8 +14,8 @@
     "detail": "Command behavior and exit status are unchanged."
   },
   "compatibility": {
-    "status": "none",
-    "detail": "Invoking st or st3 adds exactly one deprecation line to stderr, including in JSON and machine modes; stdout is unchanged. Other executable names do not warn. Set FRACTAL_SUPPRESS_DEPRECATION=1 to preserve legacy stderr temporarily."
+    "status": "changed",
+    "detail": "Deprecation: Run `fractal` instead of `st`/`st3`; the aliases are removed on 2026-11-16. Alias invocations add one stderr warning, except shell-completion callbacks and explicitly suppressed internal launches; stdout is unchanged. Set FRACTAL_SUPPRESS_DEPRECATION=1 to preserve legacy stderr temporarily."
   },
   "downtime": {
     "status": "none",

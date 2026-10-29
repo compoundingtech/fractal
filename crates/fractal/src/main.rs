@@ -4707,7 +4707,10 @@ fn deprecated_binary_name(
 }
 
 fn main() -> ExitCode {
-    if let Some(name) = deprecated_binary_name(
+    // CompleteEnv's dynamic callback uses COMPLETE; empty and "0" disable it.
+    let completing = std::env::var_os("COMPLETE")
+        .is_some_and(|value| !value.is_empty() && value != "0");
+    if !completing && let Some(name) = deprecated_binary_name(
         std::env::args_os().next().as_deref(),
         std::env::var_os("FRACTAL_SUPPRESS_DEPRECATION").as_deref(),
     ) {

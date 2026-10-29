@@ -44,6 +44,9 @@ The legacy executable names `st` and `st3` emit a deprecation warning on stderr,
 including in JSON mode, and will be removed on 2026-11-16. Use `fractal` instead.
 Scripts that need the old names temporarily can set `FRACTAL_SUPPRESS_DEPRECATION=1`
 to suppress this warning; stdout and exit status are unchanged.
+Shell-completion callbacks stay silent. Managed background services and internal
+daemon/seat re-executions suppress the warning because they retain replaceable
+binary paths rather than choosing a human-facing command name.
 
 Read the **[Fractal documentation](https://fractal.how/docs)** or browse its
 [Introduction](docs/site/index.md),
