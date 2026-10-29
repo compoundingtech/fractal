@@ -236,6 +236,8 @@ pub use limits::ACCOUNT_READING_WINDOW_MS;
 pub use subagents::{SUBAGENT_KINDS, SubagentView};
 #[cfg(test)]
 pub mod checkpoint_agreement_tests;
+#[cfg(test)]
+mod local_trim_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod terminal_gate_evidence;
 #[cfg(test)]

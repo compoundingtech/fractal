@@ -1,0 +1,196 @@
+//! Local trim through Fractal's store: a member with `[trim] local` trims its own due cut with
+//! the audited retention rules, and every reader answers the same from the full log and the
+//! trimmed one.
+use super::*;
+use crate::store::checkpoint_agreement_tests_shared_attention_tests::{FLEET, context, kinds, step};
+use crate::store::tests_shared_seats::graph_digest_of;
+use proptest::prelude::*;
+
+const SEATS: &[&str] = &["agent/node.amber", "agent/node.birch"];
+const STATES: &[&str] = &["starting", "ready", "idle", "working", "blocked"];
+
+fn local_member(name: &str) -> Store {
+    let store = Store::open_memory(name).unwrap();
+    store.bind_fleet(FLEET).unwrap();
+    store.import_retired_identities_paced(|_| {}).unwrap();
+    store.trim_locally(true).unwrap();
+    store
+}
+
+/// One write of a random history.
+#[derive(Clone, Debug)]
+enum Write {
+    Observer { observer: u8, status: u8, cursor: Option<u8> },
+    Harness { seat: u8, incarnation: u8, state: u8, restamp: bool, provider_auth: Option<bool> },
+}
+
+fn write() -> impl Strategy<Value = Write> {
+    prop_oneof![
+        (0..3u8, 0..3u8, proptest::option::of(0..4u8))
+            .prop_map(|(observer, status, cursor)| Write::Observer { observer, status, cursor }),
+        (0..2u8, 0..2u8, 0..5u8, any::<bool>(), proptest::option::of(any::<bool>())).prop_map(
+            |(seat, incarnation, state, restamp, provider_auth)| Write::Harness {
+                seat,
+                incarnation,
+                state,
+                restamp,
+                provider_auth,
+            }
+        ),
+    ]
+}
+
+fn apply(store: &Store, write: &Write, n: usize) {
+    let (subject, kind, fields) = match write {
+        Write::Observer { observer, status, cursor } => {
+            let mut fields = BTreeMap::from([
+                ("observer".into(), json!(format!("observer/watch-{observer}"))),
+                ("status".into(), json!(["ok", "changed", "failed"][usize::from(*status)])),
+            ]);
+            if let Some(cursor) = cursor {
+                fields.insert("cursor".into(), json!(format!("cursor-{cursor}")));
+            }
+            (format!("observer/watch-{observer}"), "observer.observed", fields)
+        }
+        Write::Harness { seat, incarnation, state, restamp, provider_auth } => {
+            let seat = SEATS[usize::from(*seat)];
+            let mut fields = BTreeMap::from([
+                ("state".into(), json!(STATES[usize::from(*state)])),
+                ("driver".into(), json!("codex")),
+                ("incarnation_id".into(), json!(format!("{seat}-{incarnation}"))),
+                ("observed_at_ms".into(), json!(n as u64 + 1)),
+                ("status_transition".into(), json!(!restamp)),
+            ]);
+            if let Some(provider_auth) = provider_auth {
+                fields.insert("provider_auth".into(), json!(provider_auth));
+            }
+            (seat.to_owned(), "harness.observed", fields)
+        }
+    };
+    store
+        .append_claim(&ClaimInput {
+            subject: subject.clone(),
+            kind: kind.into(),
+            actor: (kind == "harness.observed").then(|| subject.clone()),
+            fields,
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(format!("history-{n}")),
+        })
+        .unwrap();
+}
+
+/// Every answer the readers of these kinds give: the whole graph, each seat's current harness,
+/// and each seat's status history.
+fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
+    let connection = store.readers.get();
+    let mut seats = Vec::new();
+    for seat in SEATS {
+        let harness = store.current_harness(seat).unwrap();
+        let history = seat_status::history_at(&connection, seat, now, u64::MAX).unwrap();
+        seats.push(format!("{seat}: {harness:?} {history}"));
+    }
+    (graph_digest_of(store), seats)
+}
+
+fn claims_of(store: &Store, kind: &str) -> i64 {
+    store
+        .readers
+        .get()
+        .query_row("SELECT COUNT(*) FROM claims WHERE kind=?1", [kind], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_member_that_trims_locally_trims_its_own_due_cut_once() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    for n in 0..40 {
+        apply(&store, &Write::Observer { observer: (n % 2) as u8, status: (n % 3) as u8, cursor: Some(1) }, n);
+    }
+    let before = answers(&store, context.now_unix_ms);
+    assert_eq!(kinds(&step(&store, &context)), ["trimmed"]);
+    assert_eq!(answers(&store, context.now_unix_ms), before, "the readers answer the same");
+    assert!(claims_of(&store, "observer.observed") < 40, "superseded claims are gone");
+    let retired: i64 = store
+        .readers
+        .get()
+        .query_row("SELECT COUNT(*) FROM retired_claim_ids", [], |row| row.get(0))
+        .unwrap();
+    assert!(retired > 0, "what it deleted is retired, so it travels and is never re-admitted");
+    // The same day again: nothing more to do, and no staging left behind.
+    assert!(step(&store, &context).is_empty());
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().filter(|entry| {
+        entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("capture-")
+    }).count(), 0);
+}
+
+#[test]
+fn an_ordinary_member_does_not_trim_locally() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = Store::open_memory("alder").unwrap();
+    for n in 0..10 {
+        apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
+    }
+    assert!(!kinds(&step(&store, &context)).contains(&"trimmed"));
+    assert_eq!(claims_of(&store, "observer.observed"), 10);
+}
+
+#[test]
+fn a_plan_that_would_drop_the_newest_claim_of_a_key_stops_before_deleting_anything() {
+    let scratch = tempfile::tempdir().unwrap();
+    let context = context(scratch.path(), 0);
+    let store = local_member("alder");
+    for n in 0..6 {
+        apply(&store, &Write::Observer { observer: 0, status: 0, cursor: None }, n);
+    }
+    let claims = claims_of(&store, "observer.observed");
+    store.set_trim_fault(Some(smallclaims::store::TrimFault::DropNewest));
+    assert_eq!(kinds(&step(&store, &context)), ["graph-changed"]);
+    assert_eq!(claims_of(&store, "observer.observed"), claims, "nothing is deleted");
+    // Halted until resumed; an agent may resume a member that trims locally.
+        assert!(step(&store, &context).is_empty());
+    store.resume_checkpoints("agent/fleet/operations", "looked at the plan").unwrap();
+    assert!(step(&store, &context).is_empty(), "the stopped cut is set aside, not retried");
+    assert!(store.resume_checkpoints("agent/fleet/operations", " ").is_err());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+
+    /// For random histories of observer and harness observations, every reader answers the same
+    /// before and after the local trim, and the newest claim of each subject and kind stays.
+    #[test]
+    fn readers_answer_the_same_from_the_full_and_the_trimmed_log(
+        writes in proptest::collection::vec(write(), 1..60)
+    ) {
+        let scratch = tempfile::tempdir().unwrap();
+        let context = context(scratch.path(), 0);
+        let store = local_member("alder");
+        for (n, write) in writes.iter().enumerate() {
+            apply(&store, write, n);
+        }
+        let newest: BTreeSet<String> = store
+            .readers
+            .get()
+            .prepare(
+                "SELECT id FROM claims AS claim WHERE kind IN ('observer.observed', 'harness.observed')
+                 AND store_index=(SELECT MAX(store_index) FROM claims AS newer
+                                  WHERE newer.subject=claim.subject AND newer.kind=claim.kind)",
+            )
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let before = answers(&store, context.now_unix_ms);
+        let actions = kinds(&step(&store, &context));
+        prop_assert!(!actions.contains(&"graph-changed"), "{actions:?}");
+        prop_assert_eq!(answers(&store, context.now_unix_ms), before);
+        for id in &newest {
+            prop_assert!(store.claim_by_id(id).unwrap().is_some(), "the newest claim {} stays", id);
+        }
+    }
+}

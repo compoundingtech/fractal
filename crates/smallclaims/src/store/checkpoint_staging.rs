@@ -1088,6 +1088,32 @@ impl StagedSet {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// A claim the plan drops that is the newest of its subject and kind in the set, if any.
+    /// Every rule keeps the newest claim of its slot, and no slot is coarser than (subject,
+    /// kind), so this finds only a planner defect.
+    pub fn dropped_newest_claim(&self) -> Result<Option<String>> {
+        Ok(self
+            .staging
+            .query_row(
+                "SELECT claims.id FROM claims
+                 JOIN (SELECT subject, kind, MAX(pos) AS pos FROM claims WHERE first=1
+                       GROUP BY subject, kind) AS newest ON newest.pos=claims.pos
+                 WHERE claims.dropped=1 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    /// Mark the newest claim of the set dropped, as a planner defect would. `TrimFault` only.
+    pub(super) fn drop_newest_for_test(&self) -> Result<()> {
+        self.staging.execute(
+            "UPDATE claims SET dropped=1 WHERE pos=(SELECT MAX(pos) FROM claims WHERE first=1)",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Whether the plan drops this claim.
     pub fn drops_claim(&self, id: &str) -> Result<bool> {
         Ok(self.staging.query_row(

@@ -864,10 +864,11 @@ impl Store {
         if self.replication_catching_up() {
             return Ok(actions);
         }
-        // A member that trims locally takes no part in checkpoints; it only finishes a trim it
-        // had already committed.
+        // A member that trims locally takes no part in checkpoints: it finishes a trim it had
+        // already committed, then trims its own due cut.
         if self.trims_locally() {
             self.finish_interrupted_trims(&mut actions)?;
+            self.trim_local_cut(context, &mut actions)?;
             return Ok(actions);
         }
         let claims = self.checkpoint_claims()?;
@@ -1058,14 +1059,16 @@ impl Store {
     }
 
     /// A person looked at a trim that stopped because the graph would change. The rows stay
-    /// as they are, and checkpoints go on from the next one.
+    /// as they are, and checkpoints go on from the next one. On a member that trims locally the
+    /// stop alerts the operations agent, which may resume it too.
     pub fn resume_checkpoints(&self, actor: &str, reason: &str) -> Result<(), St3Error> {
         self.runtime.checkpoint_preflight().map_err(internal)?;
         let actor = normalize_actor(actor, "person");
-        if !actor.starts_with("person/") || reason.trim().is_empty() {
+        let allowed = actor.starts_with("person/") || (self.trims_locally() && actor.starts_with("agent/"));
+        if !allowed || reason.trim().is_empty() {
             return Err(St3Error::new(
                 "invalid-checkpoint-resume",
-                "a person resumes checkpoints, with a reason",
+                "a person resumes checkpoints, with a reason (or an agent, where trim is local)",
             ));
         }
         let mut connection = self.connection.write();
