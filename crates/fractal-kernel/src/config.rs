@@ -185,16 +185,31 @@ impl CheckpointConfig {
 /// then seals, verifies and adopts no checkpoint, and finishes only a trim it had already
 /// committed. Every participant must seal a checkpoint, so the old checkpoints stop on the
 /// other members until a person excuses this one. Off by default; nothing changes unless a
-/// member opts in.
+/// member opts in. `notify` names the agent that receives a fault when the daily answers check
+/// finds this member and a peer answering differently; without it the fleet's fault agent does.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TrimConfig {
     pub local: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notify: Option<String>,
 }
 
 impl TrimConfig {
     pub fn is_default(&self) -> bool {
         self == &Self::default()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.notify.as_deref().is_none_or(|agent| {
+                agent.starts_with("agent/")
+                    && agent.split('/').skip(1).all(|part| !part.is_empty())
+                    && !agent.chars().any(char::is_whitespace)
+            }),
+            "trim.notify names one agent/... subject"
+        );
+        Ok(())
     }
 }
 
@@ -812,6 +827,7 @@ impl Config {
             otlp.validate()?;
         }
         self.limits.validate()?;
+        self.trim.validate()?;
         anyhow::ensure!(
             self.person.as_deref().is_none_or(|person| {
                 person.starts_with("person/")
