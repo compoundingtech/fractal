@@ -89,7 +89,7 @@ impl TabStatuses {
             // submission window). Only live attention establishes that the prompt is open.
             let question_seat = match (&world.link, &item.kind) {
                 (Link::Live, AttentionKind::Prompt { seat_id, question, call, .. })
-                    if *question || call.as_ref().and_then(Option::as_deref).is_some_and(|call| {
+                    if *question || call.as_deref().is_some_and(|call| {
                         question_calls.get(seat_id.as_str()).is_some_and(|calls| calls.contains(call))
                     }) => Some(seat_id.as_str()),
                 _ => None,
@@ -4691,7 +4691,7 @@ mod tests {
             seat: "Atlas".into(), seat_id: "agent/a".into(), text: "Choose".into(),
             question: true,
             answers: vec!["answer".into()], episode: "episode/question".into(),
-            call: Some(Some("call/question".into())),
+            call: Some("call/question".into()),
         };
         let mut second = alert.clone();
         second.id = "attention/b".into();
@@ -4727,7 +4727,7 @@ mod tests {
                     if let AttentionKind::Prompt { question, answers, call, .. } = &mut item.kind {
                         *question = native_kind;
                         answers.clear();
-                        if native_kind { *call = Some(None); }
+                        if native_kind { *call = None; }
                     }
                 }
             }
@@ -7870,7 +7870,8 @@ mod tests {
         // Every row of an alert carries its bar, and what it says is wrapped, never cut at the edge.
         let barred = lines[title + 1..input].iter().filter(|line| line.contains('▌')).count();
         assert!(barred >= 6, "{shown}");
-        assert!(shown.matches("terminal (Ctrl+]) or open it in Inbox").count() == 2, "{shown}");
+        assert!(shown.matches("Fractal does not say which call this asks about").count() == 2, "{shown}");
+        assert!(shown.matches("(Ctrl+]) or open it in Inbox").count() == 2, "{shown}");
         assert!(shown.matches("deny").count() >= 2, "the buttons stay in view: {shown}");
     }
 
