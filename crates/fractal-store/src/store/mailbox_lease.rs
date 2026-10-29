@@ -21,6 +21,14 @@ impl Store {
     pub fn expire_card_fault_reads_for_test(count: usize) {
         CARD_FAULT_DEADLINES.with(|remaining| remaining.set(count));
     }
+
+    /// The next card-fault read stalls `pause` inside its query, as a page read spends no CPU.
+    pub fn stall_next_card_fault_read_for_test(pause: std::time::Duration) {
+        DURING_FAULT_READ.with(|hook| *hook.borrow_mut() = Some(Box::new(move |_| {
+            std::thread::sleep(pause);
+            Ok(())
+        })));
+    }
 }
 
 pub fn lease(

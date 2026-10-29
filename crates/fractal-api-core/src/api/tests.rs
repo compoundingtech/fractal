@@ -8918,6 +8918,41 @@ async fn roster_resilience_fault_deadline_publishes_current_fields_and_retries()
 }
 
 #[tokio::test]
+async fn roster_resilience_refresher_fault_reads_degrade_only_at_the_wall_backstop() {
+    for history in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let store = &state.store;
+        let _wake = store.start_agent_roster_refresher().unwrap();
+        let card = |cards: &[Value], id: &str| cards.iter().find(|card| card["id"] == id).unwrap().clone();
+        roster_resilience_runtime(store, "agent/known-clear", "old");
+        refresh_agent_roster(store, history).unwrap();
+        // The refresher folds on a pinned snapshot outside any request. A scheduling pause past
+        // the 25 ms work allowance spends no query work, so the fault read still answers.
+        roster_resilience_runtime(store, "agent/new-paused", "new");
+        Store::stall_next_card_fault_read_for_test(std::time::Duration::from_millis(60));
+        refresh_agent_roster(store, history).unwrap();
+        let (_, paused, _) = store.published_agent_roster(store.index().unwrap(), history).unwrap();
+        assert!(card(&paused, "agent/new-paused")["fault"].is_null(), "a pause is not a fault deadline");
+        // A page read stalled past the backstop still ends and degrades as documented.
+        roster_resilience_runtime(store, "agent/known-clear", "new");
+        roster_resilience_runtime(store, "agent/new-stalled", "new");
+        Store::stall_next_card_fault_read_for_test(
+            crate::store::mailbox_lease::CARD_FAULT_PINNED_WALL_BACKSTOP + std::time::Duration::from_millis(50));
+        refresh_agent_roster(store, history).expect("a stalled fault read must still publish");
+        let cut = store.index().unwrap();
+        let (published, stalled, _) = store.published_agent_roster(cut, history).unwrap();
+        assert_eq!(published, cut);
+        assert_eq!(card(&stalled, "agent/known-clear")["runtime_ids"], json!(["runtime/new"]));
+        assert!(card(&stalled, "agent/known-clear")["fault"].is_null());
+        assert_eq!(card(&stalled, "agent/new-stalled")["fault"], "fault status unknown");
+        refresh_agent_roster(store, history).unwrap();
+        let (_, retried, _) = store.published_agent_roster(cut, history).unwrap();
+        assert!(card(&retried, "agent/new-stalled")["fault"].is_null());
+    }
+}
+
+#[tokio::test]
 async fn roster_resilience_always_expired_fault_reads_publish_from_the_first_attempt_per_mode() {
     for history in [false, true] {
         let root = tempfile::tempdir().unwrap();
