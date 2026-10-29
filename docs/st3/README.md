@@ -86,7 +86,6 @@ Use these documents for implementation details:
   wait and a run's stalled verdict, read in milliseconds from published state.
 - [Operational queries](operational-queries.md) explains bounded mission lists, outcome history,
   mission run summaries, and the five-minute performance report in `st doctor`.
-- [Eval audit](eval-audit.md) records the test intent and prompt boundary for each Fractal eval.
 - [Running Fractal with omp](omp.md) covers omp seat setup, behavior, and known limits.
 - [Product roadmap](roadmap.md) records accepted future work.
 - [CLI reference](../site/reference/cli.md) introduces the command surface and exact installed help.
