@@ -49,6 +49,10 @@ pub struct KindAnswers {
 pub struct AnswersSummary {
     pub version: u32,
     pub cut_unix_ms: u128,
+    /// Whether the member trims on its own (`[trim] local`), so a peer knows whether its
+    /// `claims` counts compare.
+    #[serde(default)]
+    pub trims_locally: bool,
     pub kinds: BTreeMap<String, KindAnswers>,
 }
 
@@ -213,7 +217,7 @@ pub fn summary(connection: &Connection, cut_unix_ms: u128) -> Result<AnswersSumm
         let answers = kind_answers(connection, &kind, cut_unix_ms)?;
         kinds_answers.insert(kind, answers);
     }
-    Ok(AnswersSummary { version: ANSWERS_VERSION, cut_unix_ms, kinds: kinds_answers })
+    Ok(AnswersSummary { version: ANSWERS_VERSION, cut_unix_ms, trims_locally: false, kinds: kinds_answers })
 }
 
 /// One kind's bucket digests at a cut, with the keys of `wanted` buckets.
@@ -310,7 +314,9 @@ pub fn differing_keys(ours: &[AnswerKey], theirs: &[AnswerKey]) -> Vec<KeyDiffer
 impl Store {
     /// Every kind's answers at a cut; see the module documentation for its cost.
     pub fn answers_summary(&self, cut_unix_ms: u128) -> Result<AnswersSummary> {
-        summary(&self.readers.get(), cut_unix_ms)
+        let mut summary = summary(&self.readers.get(), cut_unix_ms)?;
+        summary.trims_locally = self.trims_locally();
+        Ok(summary)
     }
 
     /// One kind's bucket digests at a cut, with the keys of `wanted` buckets.
