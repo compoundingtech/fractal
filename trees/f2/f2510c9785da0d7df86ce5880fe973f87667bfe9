@@ -8,3 +8,4 @@ record bc4107d9d07c3718b803e19d7928180ea0896642 linux-gate 100 host/spindle 2026
 record cbd78de60eb7373edeab5754229f4b5dd1434ae4 rust-tests 0 host/spindle 2026-10-28T23:52:59Z
 record cd51c6af2c8c3de5fb735b78585a8fb60131c833 rust-tests 0 host/spindle 2026-10-28T23:53:04Z
 record d42b8241ff10acb7a4067070b104f61bc5d5d188 rust-tests 0 host/spindle 2026-10-28T23:53:04Z
+record 28dcda2517feda8f256bdfe931ac144c015be889 ci-script-tests 0 host/spindle 2026-10-29T00:00:02Z
