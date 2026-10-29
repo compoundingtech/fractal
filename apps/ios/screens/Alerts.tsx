@@ -129,8 +129,8 @@ function PromptAnswerView({ item }: { item: KeptAttention }) {
       {each.lines.map((line, index) => <T key={index} selectable>{line}</T>)}
     </View>)}
     {gated && served.calls === null ? <Note tone="warning">{served.why} Answer it in the terminal.</Note> : null}
-    {gated && served.calls !== null && shown.length === 0 ? <Note tone="warning">It is not in the conversation yet, so it cannot be {gated === 'answer' ? 'answered' : gated === 'approve' ? 'approved' : 'allowed'} here. Answer it in the terminal.</Note> : null}
-    {gated && shown.length > 1 ? <Note tone="warning">{shown.length} calls are waiting and the prompt does not say which one it is asking about. Answer it in the terminal, where the harness shows it.</Note> : null}
+    {gated && served.calls !== null && prompt.call_id == null ? <Note tone="warning">Fractal does not say which call this asks about, so it cannot be {gated === 'answer' ? 'answered' : gated === 'approve' ? 'approved' : 'allowed'} here. Answer it in the terminal, where the harness shows it.</Note> : null}
+    {gated && served.calls !== null && prompt.call_id != null && shown.length === 0 ? <Note tone="warning">It is not in the conversation yet, so it cannot be {gated === 'answer' ? 'answered' : gated === 'approve' ? 'approved' : 'allowed'} here. Answer it in the terminal.</Note> : null}
     {gated && shown.length === 1 && !offered.includes(gated) ? <Note tone="warning">It cannot be shown in full, so it is answered in the terminal.</Note> : null}
     <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
       {offered.map(answer => <Button key={answer} label={answer === 'deny' && gated === 'answer' ? 'Decline' : answerLabel(answer)}
