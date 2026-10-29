@@ -20258,13 +20258,16 @@ exec "orchid" {{ command "orchid-tool"; workspace "{}"; }}"#,
         assert_eq!(observed_pty_status(&observation), "running");
     }
 
+    /// The exec a hook waits for, and what happens right after that exec is next observed.
+    type ObserveExecHook = (String, Box<dyn FnOnce() + Send>);
+
     #[derive(Default)]
     pub struct FakeRuntime {
         snapshot_error: Mutex<bool>,
         before_snapshot: Mutex<Option<Box<dyn Fn() + Send>>>,
         before_observe_exec: Mutex<Option<Box<dyn FnOnce() + Send>>>,
         /// Runs once, right after the named exec is next observed: its process ends just then.
-        after_observe_exec: Mutex<Option<(String, Box<dyn FnOnce() + Send>)>>,
+        after_observe_exec: Mutex<Option<ObserveExecHook>>,
         pub ptys: Mutex<Vec<RuntimeObservation>>,
         execs: Mutex<HashMap<String, RuntimeObservation>>,
         logs: Mutex<HashMap<String, String>>,
