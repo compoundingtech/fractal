@@ -1145,7 +1145,7 @@ async fn a_claude_seat_starts_through_a_daemon_restart_and_then_keeps_its_mail()
 }
 
 #[cfg(target_os = "linux")]
-async fn initial_bind_observes_binary_replacement(driver: &str) {
+async fn initial_bind_observes_binary_replacement(driver: &'static str) {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = fractal_daemon::test_support::evidence_tempdir();
