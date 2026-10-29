@@ -12,7 +12,7 @@ fn refused(reason: impl Into<String>) -> St3Error {
     St3Error::new("stale-mailbox-session", reason)
 }
 
-fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
+pub(crate) fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
     crate::hooks::claude_agent_dir(
         &state.state_dir.join("drivers"),
         &fence.subject,
@@ -1667,22 +1667,19 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             .apply_internal(&intent, "raw-terminal-fixture")
             .unwrap();
         crate::store::mailbox_tests::ready(&store, "current");
-        let state = AppState {
-            owning_person: None,
-            store: store.clone(),
-            notify: Arc::new(Notify::new()),
-            event_notify: watch::channel(0).0,
-            node: "node".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-            assistant_receipts: Default::default(),
-        };
+        let state = AppState { owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0).0,
+        node: "node".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
         let request = Fence::new("agent/eval.worker", "current", "delivery");
         let agent_dir = source_agent_dir(&state, &request);
         harness_events::enable(&agent_dir, "current").unwrap();

@@ -1,7 +1,7 @@
 /**
  * Deterministic `TerminalScreen` frame generator for the renderer bake-off.
  *
- * Scenes reproduce what st republishes from real agent PTYs: Claude Code and Codex TUIs mid-turn
+ * Scenes reproduce what Fractal republishes from real agent PTYs: Claude Code and Codex TUIs mid-turn
  * (truecolor + 256-colour + ANSI, box drawing, an animated 10 Hz spinner with shimmer, streaming
  * text, a drawn inverse cursor vs a real terminal cursor), a Unicode/width probe, and a worst-case
  * frame that restyles every cell. Frames are pure functions of `(scene, frame, size)`.
@@ -31,6 +31,18 @@ type Style = Omit<TerminalRun, 'text'>
 /** A segment is a run before clipping and merging: its text plus its style attributes. */
 type Seg = TerminalRun
 type Row = ReadonlyArray<Seg>
+
+/** Plain legacy-mode terminal with bracketed paste, shared by encoder and input proofs. */
+export const keyboardTestModes: TerminalModes = {
+  alternate_screen: false,
+  application_cursor: false,
+  application_keypad: false,
+  bracketed_paste: true,
+  kitty_keyboard: 0,
+  focus_events: false,
+  mouse_encoding: 'default',
+  mouse_tracking: 'none',
+}
 
 /** Synthetic renderer-fidelity scenes. */
 export type SceneId = 'F1' | 'F2' | 'F3' | 'F4'

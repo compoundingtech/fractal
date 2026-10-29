@@ -367,6 +367,39 @@ pub fn bound_session(
         }))
 }
 
+/// Recover the path from the exact binding a suspension captured, without extending its snapshot.
+/// A later binding for another incarnation cannot substitute its transcript.
+pub fn bound_session_path(
+    store: &Store,
+    subject: &str,
+    incarnation: &str,
+    harness: &str,
+    session: &str,
+) -> Result<Option<String>> {
+    let Some(bound) = store
+        .claims_for(subject, Some("harness.session-file"))?
+        .into_iter()
+        .rev()
+        .find(|claim| field(claim, "incarnation_id") == Some(incarnation))
+    else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        field(&bound, "harness") == Some(harness)
+            && field(&bound, "session_id") == Some(session),
+        "the suspended native session binding no longer matches its snapshot"
+    );
+    let Some(path) = field(&bound, "path") else {
+        // Legacy bindings without a path keep the existing ID-based restoration behavior.
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        field(&bound, "agent") == Some(subject),
+        "the suspended native session path belongs to another agent"
+    );
+    Ok(Some(path.to_owned()))
+}
+
 /// Why `subject`'s running `incarnation` cannot be suspended now; empty when it can.
 ///
 /// The harness's own state comes only from its driver's `quiescent` and `blocking` report. The
@@ -435,6 +468,74 @@ pub fn blockers(store: &Store, subject: &str, incarnation: &str) -> Result<Vec<S
 }
 
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suspension_recovers_only_its_exact_incarnation_transcript_path() {
+        let store = Store::open_memory("suspended-path").unwrap();
+        let owner = "agent/suspended-path";
+        let bind = |incarnation: &str, session: &str, path: &str| {
+            store.append_claim(&crate::model::ClaimInput {
+                subject: owner.into(), kind: "runtime.observed".into(), actor: Some(owner.into()),
+                fields: std::collections::BTreeMap::from([
+                    ("status".into(), Value::from("running")),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            store.append_claim(&crate::model::ClaimInput {
+                subject: owner.into(), kind: "harness.session-file".into(), actor: Some(owner.into()),
+                fields: std::collections::BTreeMap::from([
+                    ("agent".into(), Value::from(owner)), ("harness".into(), Value::from("omp")),
+                    ("incarnation_id".into(), Value::from(incarnation)),
+                    ("session_id".into(), Value::from(session)), ("path".into(), Value::from(path)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        bind("suspended", "native", "/external/suspended.jsonl");
+        bind("replacement", "native", "/external/replacement.jsonl");
+        assert_eq!(
+            bound_session_path(&store, owner, "suspended", "omp", "native").unwrap(),
+            Some("/external/suspended.jsonl".into())
+        );
+        assert_eq!(bound_session_path(&store, owner, "missing", "omp", "native").unwrap(), None);
+        assert!(bound_session_path(&store, owner, "suspended", "pi", "native").is_err());
+        bind("suspended", "other", "/external/other.jsonl");
+        assert!(bound_session_path(&store, owner, "suspended", "omp", "native").is_err());
+    }
+
+    #[test]
+    fn legacy_id_only_suspension_has_no_path_to_recover() {
+        let store = Store::open_memory("legacy-path").unwrap();
+        store.append_claim(&crate::model::ClaimInput {
+            subject: "agent/example".into(),
+            kind: "runtime.observed".into(),
+            actor: Some("agent/example".into()),
+            fields: std::collections::BTreeMap::from([
+                ("status".into(), Value::from("running")),
+                ("incarnation_id".into(), Value::from("captured")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.append_claim(&crate::model::ClaimInput {
+            subject: "agent/example".into(),
+            kind: "harness.session-file".into(),
+            actor: Some("agent/example".into()),
+            fields: std::collections::BTreeMap::from([
+                ("harness".into(), Value::from("claude")),
+                ("incarnation_id".into(), Value::from("captured")),
+                ("session_id".into(), Value::from("native")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert_eq!(bound_session_path(&store, "agent/example", "captured", "claude", "native").unwrap(), None);
+        assert!(bound_session_path(&store, "agent/example", "captured", "claude", "other").is_err());
+    }
+
+}
 
 #[cfg(test)]
 mod background_job_tests {

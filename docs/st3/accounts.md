@@ -32,11 +32,11 @@ account "ada/claude-2" {
 ```
 
 - `provider` is `anthropic` (Claude Code) or `openai` (Codex). Other providers can be declared but no
-  st harness uses them yet.
+  Fractal harness uses them yet.
 - `owner` is a person. A pool is the accounts one person owns.
 - `plan` is a label for people and reports.
 - `login` is the credential directory a harness is launched with: `CLAUDE_CONFIG_DIR` for Claude Code,
-  `CODEX_HOME` for Codex. It is a path, never a credential; st never reads, prints or stores what is
+  `CODEX_HOME` for Codex. It is a path, never a credential; Fractal never reads, prints or stores what is
   in it. A path is absolute or starts with `~/`, which is the home of the user the daemon runs as. A
   `host=` property gives a different directory per host; a login with no host serves every host. An
   account is only used on a host that has a login for it.
@@ -52,7 +52,7 @@ A seat refuses to start on a login directory that does not exist, instead of fal
 default login. The directory is the harness's whole home: Claude keeps its login, `settings.json`,
 plugins and `projects/` sessions there, Codex its `auth.json`, `config.toml` and `sessions/`. Copy
 into it the settings a seat should have. Signing in with the variable set, as above, is what ties
-the login to the directory on Linux and macOS alike; st only sets the variable.
+the login to the directory on Linux and macOS alike; Fractal only sets the variable.
 
 ## Bind a seat
 
@@ -80,10 +80,10 @@ A binding is also an authority fact, not only a choice of allowance. A bound acc
 pool's person) decides whose person the agent is: asks the agent raises and its own-ask authority
 are attributed to that person ahead of the declaration author or the mission requester. A mission
 agent that binds another person's account is therefore treated as acting for that person, exactly
-as a top-level seat is. st checks that the account exists, belongs to the harness's provider and
+as a top-level seat is. Fractal checks that the account exists, belongs to the harness's provider and
 has a login on the host; it does not check that the declarer owns it.
 
-Only `claude` and `codex` harness blocks take a binding. st sets the harness's login variable and
+Only `claude` and `codex` harness blocks take a binding. Fractal sets the harness's login variable and
 `ST3_ACCOUNT` on the seat, so an `env` entry for the same variable is refused. A restart on the same
 account continues the native session the driver last bound. The session binding records the
 account's name, so a switch to another account starts fresh and never copies the old account's
@@ -123,13 +123,16 @@ Identity readings that share no seat with a declared account are never assigned 
 
 A seat that sets no login variable runs on the harness's default login (`~/.claude` for Claude Code,
 `~/.codex` for Codex), so when a declared account's login on that host is that directory the seat
-runs on the account too. A seat for a harness that reads a key file instead (`omp`) runs on the one
-`api-key` account that names its `harness` and has a login on the host.
+runs on the account too. A seat for a harness that reads a key file instead (`omp`) runs on the
+`api-key` account whose `login` is the key file its environment names (`ST_OMP_API_KEY_FILE`); with
+none named it reads `~/.config/anthropic/api-key`, so it runs on the account that declares that
+file, or on the only `api-key` account that names its `harness` and has a login on the host. A seat
+that names a key file no account declares runs on no account.
 
 ### Every panel lists the declared accounts
 
 `st usage`, the terminal UI, the phone and the web monitor list the same accounts: every declared
-account, in name order, whether or not it spent or reported limits, then anything st recorded that
+account, in name order, whether or not it spent or reported limits, then anything Fractal recorded that
 no declaration claims. Nothing is hidden to make the list tidy. Two more declaration children keep
 history and unrestarted seats attributed:
 
@@ -165,8 +168,9 @@ account "ada/api-key" {
 These readings are made when the report is read, from today's declarations, so they are a view of
 spend and not an invoice. Declaring a second account for a harness on a host (or removing one)
 changes which account the past unlabelled rows there are read as, because "exactly one" no longer
-holds or now does. An `omp` row is read as the one `api-key` account that names `omp` on its host,
-whichever key that seat really used; credits used is therefore the spend of those seats at API list
+holds or now does. An unlabelled `omp` row is read as the only `api-key` account that names `omp` on
+its host, or, where two keys have a login there, as the one that declares the default key file
+(`~/.config/anthropic/api-key`); a seat launched with another key file recorded its account; credits used is therefore the spend of those seats at API list
 prices, not what the provider billed. A report reads its rows, limits and the month's rows in
 separate snapshots, which is harmless for a display.
 

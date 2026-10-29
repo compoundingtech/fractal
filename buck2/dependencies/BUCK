@@ -2,7 +2,7 @@
 # Source: BUCK.genie.ts
 
 # Projected from pnpm-lock.yaml for the Buck importers in lock.ts.
-# Store fingerprint: sha256:8a8e32cefe7dbac18490c00dbc7255a498ecef1faf52855faa073659c0b23b66
+# Store fingerprint: sha256:0e0c26f14cf75077bd0a82fa7f87b0a4c4848f7d5c3746bf4f3562e052ea9643
 
 load("@rules//buck2/dependencies:defs.bzl", "pnpm_package", "pnpm_platform_gated_packages")
 
@@ -16,11 +16,11 @@ pnpm_platform_gated_packages(
 )
 
 pnpm_package(
-    name = "package_effect_4_0_0_c059cf710fc3",
+    name = "package_effect_4_0_3_1c1410adf149",
     package_name = "effect",
-    url = "https://registry.npmjs.org/effect/-/effect-4.0.0.tgz",
-    sha256 = "eff6ca16140c491380cfdb4bcbc51be6a51f1ac2d402ebc8420e76ccf3e0e19a",
-    size_bytes = 8913724,
+    url = "https://registry.npmjs.org/effect/-/effect-4.0.3.tgz",
+    sha256 = "7958027e5fee227674e89b48c8667f23994d57a2cb9b50b5f50748fc317a8ac3",
+    size_bytes = 9079903,
     bins = {
     },
 )
@@ -58,9 +58,9 @@ alias(
 )
 
 pnpm_store_entry(
-    name = "entry_effect_4_0_0_c059cf710fc3",
-    package = ":package_effect_4_0_0_c059cf710fc3",
-    store_key = "effect@4.0.0",
+    name = "entry_effect_4_0_3_1c1410adf149",
+    package = ":package_effect_4_0_3_1c1410adf149",
+    store_key = "effect@4.0.3",
     runtime = ":assemble-store.ts",
     dependencies = {
     },
@@ -91,12 +91,12 @@ pnpm_store_view(
     name = "view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
-        "effect": "effect@4.0.0",
+        "effect": "effect@4.0.3",
         "typescript": "typescript@6.0.3",
         "ws": "ws@8.22.0",
     },
     closure = {
-        "effect@4.0.0": ":entry_effect_4_0_0_c059cf710fc3",
+        "effect@4.0.3": ":entry_effect_4_0_3_1c1410adf149",
         "typescript@6.0.3": ":entry_typescript_6_0_3_e500ed061b70",
         "ws@8.22.0": ":entry_ws_8_22_0_04f6920ca49f",
     },
@@ -115,12 +115,12 @@ pnpm_store_view(
     name = "product_view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
-        "effect": "effect@4.0.0",
+        "effect": "effect@4.0.3",
         "typescript": "typescript@6.0.3",
         "ws": "ws@8.22.0",
     },
     closure = {
-        "effect@4.0.0": ":entry_effect_4_0_0_c059cf710fc3",
+        "effect@4.0.3": ":entry_effect_4_0_3_1c1410adf149",
         "typescript@6.0.3": ":entry_typescript_6_0_3_e500ed061b70",
         "ws@8.22.0": ":entry_ws_8_22_0_04f6920ca49f",
     },
@@ -139,12 +139,12 @@ pnpm_store_view(
     name = "external_view_clients_typescript_fractal_client_d42b6074f107",
     runtime = ":assemble-store.ts",
     direct = {
-        "effect": "effect@4.0.0",
+        "effect": "effect@4.0.3",
         "typescript": "typescript@6.0.3",
         "ws": "ws@8.22.0",
     },
     closure = {
-        "effect@4.0.0": ":entry_effect_4_0_0_c059cf710fc3",
+        "effect@4.0.3": ":entry_effect_4_0_3_1c1410adf149",
         "typescript@6.0.3": ":entry_typescript_6_0_3_e500ed061b70",
         "ws@8.22.0": ":entry_ws_8_22_0_04f6920ca49f",
     },

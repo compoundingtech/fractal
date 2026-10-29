@@ -3,7 +3,7 @@ import { catchUpEstimate, envelopeCount, peerSummary, syncLine, syncView } from 
 
 const peer = (host, missing, extra = {}) => ({ host_id: `host/${host}`, peer_only_envelopes: missing, local_only_envelopes: 0, estimated_catch_up_seconds: 840, ...extra });
 
-// The words are the ones stui and `st now` use for the same notice.
+// The words are the ones the Fractal terminal UI and `fractal now` use for the same notice.
 assert.equal(envelopeCount(1), '1 envelope');
 assert.equal(envelopeCount(124384), '124,384 envelopes');
 assert.equal(catchUpEstimate(null), 'estimating time to catch up');

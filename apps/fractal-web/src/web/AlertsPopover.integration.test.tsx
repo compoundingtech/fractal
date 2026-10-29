@@ -18,7 +18,7 @@ vi.mock('../data/react.tsx', () => ({ useAttention: () => data.feed }))
 import { AlertsPopover, alertsList } from './AlertsPopover.tsx'
 
 const at = Date.parse('2026-10-14T10:00:00Z')
-/** How st presents an item (`Attention.presentation`), as the web app decodes it: every nullable field an Option. */
+/** How Fractal presents an item (`Attention.presentation`), as the web app decodes it: every nullable field an Option. */
 const presented = (tier: string, kind: string) =>
   ({ agent: Option.none(), kind: Option.some(kind), raised_by: Option.none(), tier: Option.some(tier), waiting: Option.none() })
 const row = (fields: Record<string, unknown>): Native.Attention =>

@@ -25,7 +25,7 @@ const step = (path: string, state: string, claimant?: string) => ({
   claimant: claimant === undefined ? Option.none() : Option.some(claimant), assignee: Option.none(), blocked_reason: Option.none(), last_progress: Option.none(),
 })
 
-it('lists missions by word with who must act, folds away st\'s own, and opens a mission to its steps', async () => {
+it('lists missions by word with who must act, folds away Fractal\'s own, and opens a mission to its steps', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   const container = document.createElement('div')
   document.body.append(container)
@@ -36,7 +36,7 @@ it('lists missions by word with who must act, folds away st\'s own, and opens a 
   data.agents = { _tag: 'Observed', value: [{ id: 'agent/example/builder', name: 'builder', state: 'running', fault: Option.none(), next_work_id: Option.none(), upcoming_work_ids: [], current_work: [] }], freshness: 'live' }
   data.missions = { _tag: 'Observed', freshness: 'live', value: [
     mission('mission/example/build', 'Build the site', 'running', [step('compile', 'claimed', 'agent/example/builder'), step('ship', 'pending')]),
-    mission('mission/example/loop', 'st loop', 'running', [step('tick', 'claimed', 'agent/example/builder')], { system: true }),
+    mission('mission/example/loop', 'Fractal loop', 'running', [step('tick', 'claimed', 'agent/example/builder')], { system: true }),
     mission('mission/example/stuck', 'Fix the parser', 'running', [step('parse', 'blocked', 'agent/example/builder')]),
   ] }
   await act(async () => root.render(<MissionsPane onOpenAgent={onOpenAgent} />))
@@ -45,7 +45,7 @@ it('lists missions by word with who must act, folds away st\'s own, and opens a 
   expect(container.textContent).toContain('Show all (1 more)')
   await act(async () => (container.querySelector('li > button') as HTMLElement).click())
   await act(async () => [...container.querySelectorAll('button')].find((each) => each.textContent === 'Show all (1 more)')!.click())
-  expect([...container.querySelectorAll('li > button')].map((row) => row.textContent?.includes('st loop'))).toContain(true)
+  expect([...container.querySelectorAll('li > button')].map((row) => row.textContent?.includes('Fractal loop'))).toContain(true)
   expect(container.textContent).toContain('Hide settled and Fractal’s own')
   const detail = container.querySelector('[aria-label="Fix the parser steps"]')!
   expect(detail.textContent).toContain('a step has an owner who is not moving')

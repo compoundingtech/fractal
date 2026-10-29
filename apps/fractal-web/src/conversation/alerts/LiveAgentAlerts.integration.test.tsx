@@ -57,7 +57,7 @@ it('times each answered alert until the strip no longer shows it, and drops refu
   expect(data.act).toHaveBeenLastCalledWith({ alert: data.attention[0], action: { type: 'work.done', summary: 'Yes' } })
   expect(landed).not.toHaveBeenCalled()
 
-  // st records the answer: the alert leaves the attention collection and the strip.
+  // Fractal records the answer: the alert leaves the attention collection and the strip.
   data.attention = [ask('attention/two')]
   await render()
   expect(landed).toHaveBeenCalledOnce()

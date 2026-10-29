@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Forward child session detail reads to the owning host and correct child routing regression fixtures",
+  "replay": {"status": "none", "detail": "No stored claims or transcript content changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "Claim rules and digests are unchanged."},
+  "compatibility": {"status": "changed", "detail": "Adds an internal peer session-detail read operation. All gateways and owners must run this build for remote child details, as with the new three-field child encoding; mixed versions are unsupported."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond normal upgrade restarts."},
+  "manual": {"status": "changed", "detail": "Upgrade gateways and owners together and reopen parent conversations to regenerate child links."},
+  "recovery": {"status": "none", "detail": "No data migration. Roll back gateways and owners together and regenerate volatile child links."}
+}

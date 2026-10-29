@@ -2536,7 +2536,7 @@ fn supported_work_operations_do_not_require_a_cache_prefix() {
         let detail: Value = serde_json::from_str(
             lines
                 .iter()
-                .find_map(|line| line.strip_prefix("st: projection failure detail "))
+                .find_map(|line| line.strip_prefix("fractal: projection failure detail "))
                 .unwrap(),
         )
         .unwrap();

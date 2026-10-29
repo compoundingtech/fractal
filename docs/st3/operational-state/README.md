@@ -1,4 +1,4 @@
-# st operational-state contract
+# Fractal operational-state contract
 
 This page defines which facts each operational read selects. The tests in
 `crates/fractal/tests/operational_state_contract.rs` check its fixtures and the two JSON inventories

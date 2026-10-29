@@ -18,6 +18,7 @@ export type ActionCommon = {
   type: 
   "arrangement.edit"
   | "custom.reply"
+  | "private-notes.write"
   | "prompt.respond"
   | "attention.resolve"
   | "review.approve"
@@ -81,6 +82,7 @@ export type ActionResult = {
   arrangement_revision?: Revision;
   kind: "action-result";
   operation_id: Id;
+  private_notes?: PrivateNotesFence;
   snapshot_id: Id;
   status: "accepted" | "completed" | "rejected";
   terminal_attachment?: (TerminalAttachment | null);
@@ -92,6 +94,7 @@ export type Agent = ResourceHeader & {
   active_work_count?: number;
   activity?: string | null;
   ask?: string | null;
+  background_jobs?: number | null;
   blocked_on?: string | null;
   checkout?: (AgentCheckout | null);
   current_session_id?: string | null;
@@ -121,6 +124,7 @@ export type Agent = ResourceHeader & {
   queued_work_count?: number;
   reachability: AgentReachability;
   reason?: string | null;
+  resources?: Array<DeclaredResource>;
   rollout?: {
 
 } | null;
@@ -396,6 +400,25 @@ export type AgentWorkspace = {
   host_id: HostId;
   kind: "agent-workspace";
   workspace: string;
+};
+
+export type AgentsPublication = {
+  has_more: false;
+  items: Array<Agent>;
+  order: Array<Id>;
+  publication: AgentsPublicationMetadata;
+};
+
+export type AgentsPublicationMetadata = {
+  materialized_at_ms: number;
+  node_epoch: string;
+  revision: number;
+  status_watermark: AgentsStatusWatermark;
+};
+
+export type AgentsStatusWatermark = {
+  local_frontier: number;
+  store_index: number;
 };
 
 export type Arrangement = ResourceHeader & {
@@ -1201,6 +1224,7 @@ export type CollectionFrame = ({
   kind: "snapshot";
   order: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
 } | {
   collection: CollectionName;
   has_more: boolean;
@@ -1209,6 +1233,7 @@ export type CollectionFrame = ({
   order: Array<Id>;
   removes: Array<Id>;
   snapshot: Snapshot;
+  sync?: StreamSync;
   upserts: Array<Resource>;
 } | {
   collection: "terminal";
@@ -1367,6 +1392,15 @@ export type DecisionResponse = ({
   value: Array<string>;
 });
 
+export type DeclaredResource = {
+  kind: "uri" | "subject";
+  name: string;
+  reason?: string | null;
+  resolution: "resolved" | "unresolved" | "not-applicable";
+  subject: Id;
+  uri?: string;
+};
+
 export type DelegationProof = {
   episode: string;
   message: string;
@@ -1482,7 +1516,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AgentWorkspace | Page | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -1515,6 +1549,7 @@ export type ErrorCode = (
   | "not-found"
   | "forbidden"
   | "unsupported-capability"
+  | "peer-too-old"
   | "validation-failed"
   | "idempotency-conflict"
   | "issuer-required"
@@ -1551,6 +1586,9 @@ export type ErrorCode = (
   | "content-not-text"
   | "invalid-document-reference"
   | "document-not-synced"
+  | "private-notes-unreachable"
+  | "private-notes-carrier-conflict"
+  | "private-notes-indeterminate"
   | "internal"
  | string);
 
@@ -1584,10 +1622,18 @@ export type ExchangeTransport = {
   fabric_route?: string;
 };
 
+export type FabricGrant = {
+  detail?: string;
+  peer?: string;
+  service?: string;
+  state: "granted" | "already-trusted" | "not-enabled" | "not-requested" | "failed";
+};
+
 export type Fence = {
   attempt?: number;
   mission_generation?: RunGenerationId;
   preview_token?: string;
+  private_notes?: PrivateNotesFence;
   readiness_epoch?: number;
   runtime_desired_revision?: string;
   runtime_incarnation?: string;
@@ -1938,6 +1984,7 @@ export type Mission = ResourceHeader & {
   mission_revision: Revision;
   must_act?: MustAct;
   presentation?: MissionPresentation;
+  resources?: Array<DeclaredResource>;
   run_counts?: {
   [key: string]: number;
 };
@@ -2257,7 +2304,7 @@ export type PairedSession = (PersonPairedSession | AssistantPairedSession);
 export type PairingAdvertisement = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   capabilities: Array<{
-  id: "device-key-proofs";
+  id: "device-key-proofs" | "fabric-gateway-grant";
   state: "granted";
   version: 1;
 }>;
@@ -2298,6 +2345,7 @@ export type PairingComplete = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   code: string;
   device_public_key: string;
+  fabric_node_id?: string;
   key_storage?: "secure-enclave" | "software";
 };
 
@@ -2359,6 +2407,7 @@ export type PersonPairedSession = {
 
 }>;
   expires_at: Timestamp;
+  fabric_grant?: FabricGrant;
   kind: "paired-session";
   person_id: string;
   person_root_key_proof?: {
@@ -2371,6 +2420,7 @@ export type PersonPairedSession = {
 export type PersonPairingBegin = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   device_name: string;
+  fabric_gateway?: boolean;
   full_control?: boolean;
   person_id: string;
   scopes?: Array<"read.projections" | "write.client-diagnostics" | "read.glasses" | "control.glasses" | "terminal.read" | "control.attention" | "control.launches">;
@@ -2403,6 +2453,38 @@ export type PresentationActor = {
   kind: "person" | "agent" | "st" | "nobody";
   label?: string;
   person?: Id;
+};
+
+export type PrivateNotesAction = {
+  fence: Fence & Required<Pick<Fence, 'private_notes'>>;
+  id: "private-notes.write";
+};
+
+export type PrivateNotesData = {
+  fence: PrivateNotesFence;
+  markdown: string;
+  uri: PrivateNotesUri;
+};
+
+export type PrivateNotesFence = {
+  carrier_generation: Revision;
+  revision: Revision;
+};
+
+export type PrivateNotesSubject = {
+  actions: Array<PrivateNotesAction>;
+  data: PrivateNotesData;
+  family: "private-notes";
+  live: null;
+  ref: PrivateNotesUri;
+  schema: "fractal.private-notes@1";
+};
+
+export type PrivateNotesUri = string;
+
+export type PrivateNotesWriteParameters = {
+  markdown: string;
+  uri: PrivateNotesUri;
 };
 
 export type ProjectionEvent = Omit<{
@@ -2753,6 +2835,11 @@ export type StatusTransition = {
 };
 
 export type StepRunId = string;
+
+export type StreamSync = {
+  peers?: Array<SyncPeer>;
+  state: ("level" | "catching-up" | "diverged" | string);
+};
 
 export type StructuredDiff = {
   changes: Array<{
@@ -3832,6 +3919,7 @@ export type ActionRequest =
   workspace: string;
 }; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |

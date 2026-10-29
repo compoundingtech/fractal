@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The managed Codex timeline test reads the transcript once more before it makes the file unreadable: binding found that rollout through discovery's two-second cache, filled before the test's last 230 turns landed, and when the cache ran out just after the chmod the header read failed and the notice named no transcript (left: Null).",
+  "replay": {
+    "status": "none",
+    "detail": "Test-only change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage or schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rule, permission or trust change."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "No wire, CLI or client change."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Nothing runs differently on installed machines."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the commit."
+  }
+}

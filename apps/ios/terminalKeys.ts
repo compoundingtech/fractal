@@ -50,7 +50,7 @@ export function wheelBytes(up: boolean, column: number, row: number, modes: Pick
 
 const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
-/** The UTF-8 bytes of text as base64, which st's raw terminal input takes. */
+/** The UTF-8 bytes of text as base64, which Fractal's raw terminal input takes. */
 export function rawInput(text: string): string {
   const bytes = new TextEncoder().encode(text);
   let out = '';

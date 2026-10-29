@@ -17,22 +17,19 @@ use fractal_daemon::store::Store;
 use tokio::sync::{Notify, watch};
 
 fn test_state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "client-v0-cli".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec!["offline-peer".into()],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("client-v0-cli").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "client-v0-cli".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec!["offline-peer".into()],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 #[tokio::test]
@@ -143,7 +140,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
             device_name: "CLI device".into(),
             person_id: "person/avery".into(),
             full_control: Some(true),
-            scopes: None, })
+            scopes: None, fabric_gateway: None, })
                 .await
                 .unwrap()
                 .value;
@@ -292,7 +289,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -320,7 +317,7 @@ async fn devices_complete_needs_no_daemon_config_and_never_prints_or_loses_secre
     assert!(loaded.devices[0].session.device_key_chain.is_empty());
     assert!(loaded.devices[0].person_root_fingerprint.is_some());
     let challenge = local.pairing_begin_person(&PersonPairingBegin { api_version: fractal_client::API_VERSION.into(), device_name: "Explicit unpinned CLI".into(),
-    person_id: "person/avery".into(), full_control: Some(true), scopes: None, }).await.unwrap().value;
+    person_id: "person/avery".into(), full_control: Some(true), scopes: None, fabric_gateway: None, }).await.unwrap().value;
     let unpinned_profile = root.path().join("unpinned/devices.json");
     let output = run(vec!["devices".into(), "complete".into(), base.clone(), challenge.pairing_id,
         "--unpinned".into(), "--profile".into(), unpinned_profile.to_str().unwrap().into()], challenge.code).await.unwrap();
@@ -1843,7 +1840,7 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn attention_discuss_sends_the_message_stui_chat_about_this_sends() {
+async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = test_state(root.path());
@@ -3908,28 +3905,36 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
     let subject = "agent/example/typed";
     let original = agent_declaration(&socket, subject).await;
     for (option, model, effort, arguments, driver) in [
-        (vec![], "old", "low", vec!["--old"], "omp"),
-        (vec!["--model", "new"], "new", "low", vec!["--old"], "omp"),
+        (vec![], Some("old"), Some("low"), vec!["--old"], "omp"),
+        (vec!["--model", "new"], Some("new"), Some("low"), vec!["--old"], "omp"),
         (
             vec!["--effort", "high"],
-            "new",
-            "high",
+            Some("new"),
+            Some("high"),
             vec!["--old"],
             "omp",
         ),
         (
             vec!["--arg=--new", "--arg", "value"],
-            "new",
-            "high",
+            Some("new"),
+            Some("high"),
             vec!["--new", "value"],
             "omp",
         ),
+        (vec!["--harness", "pi"], None, None, vec![], "pi"),
         (
-            vec!["--harness", "pi"],
-            "new",
-            "high",
-            vec!["--new", "value"],
+            vec!["--model", "pi-model", "--effort", "high", "--arg=--pi"],
+            Some("pi-model"),
+            Some("high"),
+            vec!["--pi"],
             "pi",
+        ),
+        (
+            vec!["--harness", "omp", "--model", "omp-model"],
+            Some("omp-model"),
+            None,
+            vec![],
+            "omp",
         ),
     ] {
         let mut args = vec!["agents", "start", subject, "--as", "person/avery"];
@@ -3944,12 +3949,15 @@ async fn agents_start_patches_only_explicit_typed_harness_fields() {
         assert_eq!(member.environment, previous.environment);
         let nodes = current.desired["children"].as_array().unwrap();
         let harness = nodes.iter().find(|node| node["name"] == "harness").unwrap();
-        let children = harness["children"].as_array().unwrap();
-        let field =
-            |name: &str| &children.iter().find(|node| node["name"] == name).unwrap()["arguments"];
-        assert_eq!(field("model"), &serde_json::json!([model]));
-        assert_eq!(field("effort"), &serde_json::json!([effort]));
-        assert_eq!(field("args"), &serde_json::json!(arguments));
+        let children = harness["children"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let field = |name: &str| children.iter()
+            .find(|node| node["name"] == name).map(|node| &node["arguments"]);
+        assert_eq!(field("model"), model.map(|model| serde_json::json!([model])).as_ref());
+        assert_eq!(field("effort"), effort.map(|effort| serde_json::json!([effort])).as_ref());
+        assert_eq!(
+            field("args"),
+            (!arguments.is_empty()).then(|| serde_json::json!(arguments)).as_ref(),
+        );
         assert_eq!(harness["arguments"][0], driver);
     }
     server.abort();
@@ -4712,7 +4720,7 @@ mission "orchid-actor" state="ready" {
                     String::from_utf8_lossy(&output.stderr)
                         .lines()
                         .collect::<Vec<_>>(),
-                    ["st: --as is ignored for this read; no actor is required"]
+                    ["fractal: --as is ignored for this read; no actor is required"]
                 );
                 if json {
                     let returned = value(&output);
@@ -4738,7 +4746,7 @@ mission "orchid-actor" state="ready" {
             String::from_utf8_lossy(&seat_read.stderr)
                 .lines()
                 .collect::<Vec<_>>(),
-            ["st: --as is ignored for this read; no actor is required"]
+            ["fractal: --as is ignored for this read; no actor is required"]
         );
         if command == "work" {
             assert_eq!(returned["value"], plain_json["value"]);

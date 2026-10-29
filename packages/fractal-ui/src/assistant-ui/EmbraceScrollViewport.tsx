@@ -1,9 +1,16 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
-import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers, motionNumbers } from './composition-tokens.stylex'
 
 const rowSelector = '[data-item-id], [data-embrace-entry-id]'
+/** History anchors also resolve to leaf rows inside a turn: tool calls, thoughts and work summaries. */
+const anchorSelector = `${rowSelector}, [data-conversation-entry-id], [data-scroll-anchor-id]`
+const rowKey = (row: HTMLElement): string | undefined => row.dataset.scrollAnchorId ?? row.dataset.itemId ?? row.dataset.embraceEntryId ?? row.dataset.conversationEntryId
+/** A summary owns its source leaves even while they are folded or unmounted. */
+const rowMembers = (row: HTMLElement): readonly string[] => row.dataset.scrollAnchorMembers === undefined ? [] : JSON.parse(row.dataset.scrollAnchorMembers)
+/** A prefix can grow inside a turn without moving its wrapper, so the wrapper anchors only when it has no leaf row. */
+const isAnchorContainer = (row: HTMLElement) => row.hasAttribute('data-scroll-anchor-container')
 const navigationKeys: Readonly<Record<string, true>> = { PageUp: true, PageDown: true, Home: true, End: true, ArrowUp: true, ArrowDown: true, ' ': true }
 
 /** A bounded lane owns scrolling; a misconfigured host may leave it to an ancestor or the page. */
@@ -17,7 +24,19 @@ function pressScrollOwner(lane: HTMLElement): HTMLElement {
 }
 
 /** Scroll state a conversation keeps while it stays on a surface. */
-export interface ViewportState { readonly top: number; readonly following: boolean; readonly unread: boolean; readonly firstRenderedId?: string }
+export interface ViewportState {
+  readonly top: number
+  readonly following: boolean
+  readonly unread: boolean
+  readonly firstRenderedId?: string
+  /** The reader's line by row identity: `top` alone drifts when a remount backfills rows above it. `memberId` is a source leaf the row owns, so a summary whose turn id changed still restores. */
+  readonly anchor?: { readonly id: string; readonly offset: number; readonly memberId?: string }
+}
+
+/** Complete source membership, independent of which rows are mounted; only complete absence retires a saved anchor. */
+export type ViewportAnchorHistory =
+  | { readonly _tag: 'Complete'; readonly includes: (id: string) => boolean }
+  | { readonly _tag: 'Partial' }
 
 /** Per-surface memory, one entry per conversation. Owners drop closed keys and dispose on unmount. */
 export class ViewportStore {
@@ -35,12 +54,74 @@ export class ViewportStore {
 /** Viewports outside a store-owning surface keep memory only for their own mount. */
 export const ViewportStoreContext = React.createContext<ViewportStore | undefined>(undefined)
 
+/**
+ * Eases an explicit return to the end over the standard motion duration. Ordinary following still settles before paint.
+ * The live edge is re-read every frame because streaming rows keep moving it. Reduced motion, or no media-query engine,
+ * returns instantly; switching to reduced motion mid-return finishes it at once.
+ */
+class FollowAnimation {
+  private element: HTMLElement | null = null
+  private frame: number | undefined
+  private started: number | undefined
+  private from = 0
+  private motion: MediaQueryList | undefined
+
+  constructor(private readonly writeTop: (top: number) => void) {}
+
+  get active(): boolean { return this.element !== null }
+
+  /** Without motion the caller's settle pins the end before paint. */
+  start(element: HTMLElement) {
+    this.cancel()
+    const motion = element.ownerDocument.defaultView?.matchMedia?.('(prefers-reduced-motion: reduce)')
+    if (motion === undefined || motion.matches) return
+    this.motion = motion
+    motion.addEventListener('change', this.motionChanged)
+    this.element = element
+    this.from = element.scrollTop
+    this.started = undefined
+    this.frame = requestAnimationFrame(this.step)
+  }
+
+  cancel() {
+    if (this.frame !== undefined) cancelAnimationFrame(this.frame)
+    this.frame = undefined
+    this.motion?.removeEventListener('change', this.motionChanged)
+    this.motion = undefined
+    this.element = null
+  }
+
+  private readonly motionChanged = (event: MediaQueryListEvent) => {
+    const element = this.element
+    if (!event.matches || element === null) return
+    this.cancel()
+    this.writeTop(element.scrollHeight)
+  }
+
+  private readonly step = (time: number) => {
+    const element = this.element
+    if (element === null) return
+    this.started ??= time
+    const progress = Math.min(1, (time - this.started) / motionNumbers.standard)
+    // Ease-out cubic: the lane starts moving at once and lands softly on the live end.
+    const eased = 1 - (1 - progress) ** 3
+    const end = Math.max(0, element.scrollHeight - element.clientHeight)
+    this.writeTop(this.from + (end - this.from) * eased)
+    if (progress < 1) this.frame = requestAnimationFrame(this.step)
+    else this.cancel()
+  }
+}
+
 /** Scroll and row geometry are imperative; they never invalidate the message subtree. */
 class ViewportController {
   private element: HTMLDivElement | null = null
   private jumpButton: HTMLButtonElement | null = null
   private following = true
   private anchor: { element: HTMLElement; offset: number } | undefined
+  /** The anchor by row identity, captured while this conversation owns the DOM. */
+  private snapshotAnchor: ViewportState['anchor']
+  /** A restored row, applied once it mounts; reader input or explicit navigation clears it with `pendingTop`. */
+  private pendingAnchor: ViewportState['anchor']
   private frame: number | undefined
   private captureFrame: number | undefined
   private unread = false
@@ -54,6 +135,7 @@ class ViewportController {
   private readonly pressed = new Set<number>()
   private pressedAnchor: { pointerId: number; element: HTMLElement; scrollOwner: HTMLElement; top: number } | undefined
   private warnedScrollOwner = false
+  private readonly followAnimation = new FollowAnimation(top => { this.writeTop(top) })
   firstRenderedId: string | undefined
   loadEarlier: (() => void) | undefined
 
@@ -79,8 +161,10 @@ class ViewportController {
 
   /** Explicit navigation owns history, rather than fighting the tail-follow schedule. */
   readonly reveal = () => {
+    this.followAnimation.cancel()
     this.following = false
     this.pendingTop = undefined
+    this.pendingAnchor = undefined
     this.anchor = undefined
     if (this.frame !== undefined) cancelAnimationFrame(this.frame)
     this.frame = undefined
@@ -89,6 +173,8 @@ class ViewportController {
   constructor(saved?: ViewportState) {
     if (saved !== undefined && !saved.following) {
       this.restored = saved
+      this.pendingAnchor = saved.anchor
+      this.snapshotAnchor = saved.anchor
       this.unread = saved.unread
     }
   }
@@ -103,15 +189,57 @@ class ViewportController {
     if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = !this.unread
   }
 
-  readonly released = (): ViewportState => ({ top: this.lastTop, following: this.following, unread: this.unread, firstRenderedId: this.firstRenderedId })
+  readonly released = (): ViewportState => {
+    const state = { top: this.lastTop, following: this.following, unread: this.unread, firstRenderedId: this.firstRenderedId }
+    const anchor = this.pendingAnchor ?? this.snapshotAnchor
+    return this.following || anchor === undefined ? state : { ...state, anchor }
+  }
+
+  /** A pending row may still await adoption or backfill; only its absence from complete source history retires it, leaving the saved top. */
+  readonly updateHistory = (history: ViewportAnchorHistory) => {
+    const saved = this.pendingAnchor
+    if (saved === undefined || history._tag !== 'Complete' || history.includes(saved.memberId ?? saved.id)) return
+    this.pendingAnchor = undefined
+    if (this.snapshotAnchor === saved) this.snapshotAnchor = undefined
+  }
+
+  /** Restores the saved row at its saved offset; false while neither that row nor a summary owning its member is mounted. */
+  private restoreAnchor(): boolean {
+    const element = this.element
+    const saved = this.pendingAnchor
+    if (element === null || saved === undefined) return false
+    const member = saved.memberId ?? saved.id
+    let row: HTMLElement | undefined
+    for (const candidate of element.querySelectorAll<HTMLElement>(anchorSelector)) {
+      if (!isAnchorContainer(candidate) && (rowKey(candidate) === member || (rowKey(candidate) === saved.id && (saved.memberId === undefined || rowMembers(candidate).includes(saved.memberId))))) { row = candidate; break }
+    }
+    if (row === undefined) {
+      for (const candidate of element.querySelectorAll<HTMLElement>('[data-scroll-anchor-members]')) {
+        if (rowMembers(candidate).includes(member)) { row = candidate; break }
+      }
+    }
+    if (row === undefined) return false
+    this.writeTop(element.scrollTop + row.getBoundingClientRect().top - element.getBoundingClientRect().top - saved.offset)
+    this.anchor = { element: row, offset: saved.offset }
+    const id = rowKey(row)!
+    this.snapshotAnchor = rowMembers(row).includes(member)
+      ? { id, offset: saved.offset, memberId: member }
+      : { id, offset: saved.offset }
+    this.pendingAnchor = undefined
+    this.pendingTop = undefined
+    return true
+  }
 
   /** Swaps a reused viewport to another conversation without carrying its unread mark across. */
   readonly resume = (saved?: ViewportState) => {
+    this.followAnimation.cancel()
     this.unread = saved !== undefined && !saved.following && saved.unread
+    this.snapshotAnchor = saved?.following === false ? saved.anchor : undefined
     this.dock()
     if (saved !== undefined && !saved.following) {
       this.following = false
       this.anchor = undefined
+      this.pendingAnchor = saved.anchor
       this.pendingTop = saved.top
       this.writeTop(saved.top)
       this.scheduleCapture()
@@ -119,6 +247,7 @@ class ViewportController {
     } else {
       this.following = true
       this.anchor = undefined
+      this.pendingAnchor = undefined
       if (this.element !== null) this.writeTop(this.element.scrollHeight)
       this.schedule()
     }
@@ -129,24 +258,39 @@ class ViewportController {
     if (element === null) return
     const viewport = element.getBoundingClientRect()
     const top = viewport.top
-    const hit = element.ownerDocument.elementFromPoint(viewport.left + viewport.width / 2, top + geometryNumbers.scrollEndTolerance)?.closest<HTMLElement>(rowSelector)
-    if (hit !== undefined && hit !== null && element.contains(hit)) {
-      this.anchor = { element: hit, offset: hit.getBoundingClientRect().top - top }
+    const hit = element.ownerDocument.elementFromPoint(viewport.left + viewport.width / 2, top + geometryNumbers.scrollEndTolerance)?.closest<HTMLElement>(anchorSelector)
+    if (hit !== undefined && hit !== null && element.contains(hit) && !isAnchorContainer(hit)) {
+      this.remember(hit, hit.getBoundingClientRect().top - top)
       return
     }
-    for (const row of element.querySelectorAll<HTMLElement>(rowSelector)) {
+    let container: { row: HTMLElement; offset: number } | undefined
+    for (const row of element.querySelectorAll<HTMLElement>(anchorSelector)) {
       const bounds = row.getBoundingClientRect()
-      if (bounds.bottom > top) {
-        this.anchor = { element: row, offset: bounds.top - top }
+      if (bounds.bottom <= top) continue
+      if (!isAnchorContainer(row)) {
+        this.remember(row, bounds.top - top)
         return
       }
+      container ??= { row, offset: bounds.top - top }
     }
+    if (container !== undefined) this.remember(container.row, container.offset)
+  }
+  private remember(row: HTMLElement, offset: number) {
+    this.anchor = { element: row, offset }
+    const id = rowKey(row)
+    if (id === undefined) { this.snapshotAnchor = undefined; return }
+    const members = rowMembers(row)
+    // Preserve source identity when a leaf folds into a summary, not just across summary recaptures.
+    const previousMember = this.snapshotAnchor?.memberId ?? this.snapshotAnchor?.id
+    const memberId = previousMember !== undefined && members.includes(previousMember) ? previousMember : members[0]
+    this.snapshotAnchor = memberId === undefined ? { id, offset } : { id, offset, memberId }
   }
   private scheduleCapture() {
     if (this.captureFrame !== undefined) return
     this.captureFrame = requestAnimationFrame(() => {
       this.captureFrame = undefined
-      if (!this.following) this.capture()
+      // A pending restore still owns the reader's line; capturing first would save the pre-restore row.
+      if (!this.following && this.pendingAnchor === undefined) this.capture()
     })
   }
 
@@ -170,7 +314,7 @@ class ViewportController {
     if (anchor.scrollOwner === viewport) this.writeTop(viewport.scrollTop + delta)
     else anchor.scrollOwner.scrollTop += delta
     // Hand history back in the compensated coordinate system; a stale offset would undo the press scroll.
-    if (this.anchor?.element.isConnected) this.anchor.offset = this.anchor.element.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+    if (this.anchor?.element.isConnected) this.remember(this.anchor.element, this.anchor.element.getBoundingClientRect().top - viewport.getBoundingClientRect().top)
     return true
   }
 
@@ -179,7 +323,10 @@ class ViewportController {
     const element = this.element
     if (element === null) return
     if (this.preservePress()) { this.lastWidth = element.clientWidth; return }
-    if (this.following) this.writeTop(element.scrollHeight)
+    if (this.following) {
+      // An eased return re-reads the live end every frame; snapping here would cut it short.
+      if (!this.followAnimation.active) this.writeTop(element.scrollHeight)
+    } else if (this.restoreAnchor()) this.scheduleCapture()
     else if (this.pendingTop !== undefined) {
       this.writeTop(this.pendingTop)
       if (Math.abs(element.scrollTop - Math.max(0, Math.min(this.pendingTop, element.scrollHeight - element.clientHeight))) < geometryNumbers.scrollEndTolerance) {
@@ -202,11 +349,16 @@ class ViewportController {
   }
 
   readonly jump = () => {
+    const returning = !this.following
     this.following = true
     this.unread = false
     this.anchor = undefined
     this.pendingTop = undefined
+    this.pendingAnchor = undefined
+    this.snapshotAnchor = undefined
     this.dock()
+    // Only a return from history eases; an already-following lane keeps settling before paint.
+    if (returning && this.element !== null) this.followAnimation.start(this.element)
     this.schedule()
   }
 
@@ -227,9 +379,12 @@ class ViewportController {
       if (event.type === 'focusin' && event.target === element) return
       if (event instanceof KeyboardEvent && (navigationKeys[event.key] !== true || (event.target instanceof HTMLElement && event.target.closest('input,textarea,[contenteditable="true"]')))) return
       if (event.type === 'wheel' || event.type === 'touchmove' || event.type === 'keydown') this.pressedAnchor = undefined
+      // Reader input interrupts an eased return where it is.
+      this.followAnimation.cancel()
       this.following = false
       this.programmaticTop = undefined
       this.pendingTop = undefined
+      this.pendingAnchor = undefined
       this.scheduleCapture()
       if (this.frame !== undefined) cancelAnimationFrame(this.frame)
       this.frame = undefined
@@ -246,7 +401,8 @@ class ViewportController {
         this.writeTop(this.pendingTop)
         return
       }
-      // A real reader scroll (including scrollbar dragging) takes ownership until the next press.
+      // A real reader scroll (including scrollbar dragging) takes ownership until the next press, and interrupts an eased return.
+      this.followAnimation.cancel()
       this.pressedAnchor = undefined
       this.lastTop = element.scrollTop
       this.following = element.scrollHeight - element.clientHeight - element.scrollTop <= geometryNumbers.scrollEndTolerance
@@ -311,6 +467,7 @@ class ViewportController {
     this.schedule()
     return () => {
       observer.disconnect()
+      this.followAnimation.cancel()
       if (this.frame !== undefined) cancelAnimationFrame(this.frame)
       this.frame = undefined
       if (this.captureFrame !== undefined) cancelAnimationFrame(this.captureFrame)
@@ -348,6 +505,8 @@ function sameRows(previous: readonly ViewportRow[], next: readonly ViewportRow[]
 
 export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HTMLDivElement>, 'children'> {
   readonly items: readonly ViewportRow[]
+  /** Authoritative source ids, not just mounted rows; omitted means `items` is the complete flat history. */
+  readonly anchorHistory?: ViewportAnchorHistory
   readonly contentProps?: React.HTMLAttributes<HTMLDivElement>
   /** Each key keeps its own scroll state across viewport mounts. */
   readonly stateKey?: string
@@ -355,6 +514,8 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly scrollToBottomKey?: string
   /** Mount the tail first, then fill one extra viewport and prepend on upward navigation. */
   readonly initialTailCount?: number
+  /** Deferred rows below which a conversation mounts whole; defaults to one history batch. A strict bound passes 0. */
+  readonly wholeMountSlack?: number
   /** Retained hidden panes pause progressive materialization until they become active again. */
   readonly active?: boolean
   /** Persistent controls share the materialization state without becoming part of the scroll content. */
@@ -364,13 +525,13 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
 
 export const historyBatchSize = 4
 
-export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
+export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({ items, anchorHistory, children, contentProps, stateKey, scrollToBottomKey, initialTailCount, wholeMountSlack = historyBatchSize, active = true, renderHeader, ...props }: EmbraceScrollViewportProps) {
   const store = React.useContext(ViewportStoreContext)
   const saved = stateKey === undefined ? undefined : store?.get(stateKey)
   const rememberedFirstId = saved?.following === false ? saved.firstRenderedId : undefined
   const [controller] = React.useState(() => new ViewportController(stateKey === undefined ? undefined : store?.get(stateKey)))
-  // Do not defer a short conversation that fits within the tail plus one history batch.
-  const initialStart = initialTailCount === undefined || items.length <= initialTailCount + historyBatchSize ? 0 : items.length - initialTailCount
+  // Do not defer a short conversation that fits within the tail plus the whole-mount slack.
+  const initialStart = initialTailCount === undefined || items.length <= initialTailCount + wholeMountSlack ? 0 : items.length - initialTailCount
   const [window, setWindow] = React.useState(() => ({ key: stateKey, firstId: rememberedFirstId ?? items[initialStart]?.id }))
   const [revealTarget, setRevealTarget] = React.useState<{ readonly key: string | undefined; readonly id: string }>()
   const savedFirstId = window.key === stateKey ? window.firstId : rememberedFirstId
@@ -397,6 +558,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   const previousItems = React.useRef(items)
   const previousKey = React.useRef(stateKey)
   const previousCommand = React.useRef(scrollToBottomKey)
+  const history = React.useMemo<ViewportAnchorHistory>(() => anchorHistory ?? { _tag: 'Complete', includes: id => items.some(row => row.id === id) }, [anchorHistory, items])
   React.useLayoutEffect(() => {
     if (stateKey !== previousKey.current) {
       if (previousKey.current !== undefined) store?.save(previousKey.current, controller.released())
@@ -410,10 +572,11 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
       if (sameRows(previousItems.current, items)) controller.schedule()
       else controller.changed()
     }
+    controller.updateHistory(history)
     // The first render is not a command, and a conversation switch adopts its key without scrolling.
     previousCommand.current = scrollToBottomKey
     previousItems.current = items
-  }, [controller, items, store, stateKey, scrollToBottomKey])
+  }, [controller, items, store, stateKey, scrollToBottomKey, history])
   React.useLayoutEffect(() => {
     const windowChanged = controller.firstRenderedId !== firstId
     controller.firstRenderedId = firstId

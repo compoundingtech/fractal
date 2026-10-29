@@ -10,7 +10,7 @@
     "packages/fractal-sdk",
     "packages/fractal-ui"
   ],
-  "packageManager": "pnpm@12.7.0",
+  "packageManager": "pnpm@12.15.0",
   "$genie": {
     "source": "package.json.genie.ts",
     "warning": "DO NOT EDIT - changes will be overwritten"

@@ -49,22 +49,19 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
             .unwrap();
     }
     let socket = root.path().join("api.sock");
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: "alder".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: "alder".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();

@@ -37,6 +37,8 @@ pub struct Config {
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
     pub pty_root: Option<PathBuf>,
+    /// Owner-local catalog roots supplying declared private-notes carrier provenance.
+    pub private_notes_catalogs: Vec<PathBuf>,
     pub socket: PathBuf,
     pub client_gateway_socket: PathBuf,
     pub peer_listen: Option<String>,
@@ -93,6 +95,8 @@ pub struct GithubConfig {
     /// A single-token file readable only by its owner.
     pub token_file: Option<PathBuf>,
     pub sekrets_profile: Option<String>,
+    /// Operator-supplied absolute root containing per-owner installation read tokens.
+    pub app_token_root: Option<PathBuf>,
     /// Local observer request ceiling per resource/hour. Unset meters only until
     /// current usage and freshness are qualified; Factory's proposed cap is1000.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,6 +107,9 @@ impl GithubConfig {
     pub fn is_default(&self) -> bool { self == &Self::default() }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(root) = &self.app_token_root {
+            anyhow::ensure!(root.is_absolute(), "github.app_token_root must be absolute");
+        }
         anyhow::ensure!(self.observer_requests_per_hour.is_none_or(|cap| (1..=1000).contains(&cap)),
             "github.observer_requests_per_hour must be1..1000 or omitted for meter-only");
         anyhow::ensure!(self.token_file.is_none() || self.sekrets_profile.is_none(),
@@ -506,6 +513,7 @@ impl Default for Config {
             shared_secret_file: None,
             state_dir,
             pty_root: None,
+            private_notes_catalogs: Vec::new(),
             socket,
             client_gateway_socket,
             peer_listen: None,
@@ -711,6 +719,11 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         self.reconcile.validate()?;
         self.github.validate()?;
+        anyhow::ensure!(
+            self.private_notes_catalogs.iter().all(|path| path.is_absolute()
+                && path.components().all(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Normal(_)))),
+            "private_notes_catalogs must contain absolute paths without parent components"
+        );
         if self.work_root.is_some() {
             self.work_root()?;
         }
@@ -1012,6 +1025,20 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn github_app_root_is_operator_supplied_absolute_and_optional() {
+        let mut config = super::GithubConfig::default();
+        assert!(config.app_token_root.is_none());
+        config.app_token_root = Some("relative/github-app-token".into());
+        assert!(config.validate().is_err());
+        let root = tempfile::tempdir().unwrap();
+        config.app_token_root = Some(root.path().join("not-minted-yet"));
+        config.validate().unwrap();
+        let encoded = toml::to_string(&config).unwrap();
+        let decoded: super::GithubConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(decoded, config);
+    }
+
     #[test]
     fn the_work_root_defaults_to_a_folder_inside_home_that_macos_does_not_guard() {
         let Ok(home) = super::home_dir() else { return };

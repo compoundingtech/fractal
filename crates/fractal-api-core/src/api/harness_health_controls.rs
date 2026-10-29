@@ -428,6 +428,7 @@ mod tests {
             ask: None,
             input_buffer: None,
             exit: None,
+            background_jobs: None,
             claim: native.claim.clone(),
             observed_at_unix_ms: u128::from(native.observed_at_ms),
             since_unix_ms: u128::from(native.since_ms),

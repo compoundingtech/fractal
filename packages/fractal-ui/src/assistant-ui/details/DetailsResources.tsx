@@ -23,7 +23,7 @@ export type DetailsEmptyRule = 'E1' | 'E2' | 'E3'
 export interface DetailsResourcesProps {
   readonly state: DetailsState
   readonly sections: readonly DetailsSection[]
-  /** Breakdown facts are independent of the st resource snapshot. */
+  /** Breakdown facts are independent of the Fractal resource snapshot. */
   readonly trace: TraceSeries
   readonly now: number
   readonly form?: DetailsResourceForm
@@ -42,7 +42,7 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
   const narrow = React.useContext(NarrowLayoutContext)
   // Pending geometry derives only from the host's supplied observations.
   const observedSubagents = suppliedSections.find(section => section.title === 'Subagents')
-  // Known [] is an observed empty st resource list, distinct from an unreported one; it is evidence once the agent has started.
+  // Known [] is an observed empty Fractal resource list, distinct from an unreported one; it is evidence once the agent has started.
   const hasObservedSubagents = observedSubagents?.items._tag === 'Known'
   const hasObservedSubagentRows = observedSubagents?.items._tag === 'Known' && observedSubagents.items.value.length > 0
   const hasNoTracedSubagents = knownZeroTracedSubagents(trace)

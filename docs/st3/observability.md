@@ -1,4 +1,4 @@
-# st observability
+# Fractal observability
 
 This reference describes the current daemon, CLI, replication worker and hook
 telemetry in the `crates/fractal` implementation. The shared client-class vocabulary
@@ -10,25 +10,25 @@ O11Y-R10–R18 remain the accepted constraints. They include coverage targets th
 are not all implemented; the mechanism and integration boundaries below state the
 current coverage. Budget limits are requirements, not claims of measured compliance.
 
-- **O11Y-R10 Process signals:** The st3 daemon, replication worker, and CLI use the OpenTelemetry
+- **O11Y-R10 Process signals:** The Fractal daemon, replication worker, and CLI use the OpenTelemetry
   SDK to produce traces, metrics, and logs. Their `service.name` values are `st-daemon`,
   `st-replication-worker`, and `st-cli`. Hooks send signals through the daemon and never export
   directly; hook spans and invocation metrics emitted by the observations exporter use
   `st-hook`. Harness-timer statusline commands remain exempt from telemetry initialization.
-- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, st3 builds no
+- **O11Y-R11 No-op when unset:** When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset, Fractal builds no
   exporter or SDK provider, makes no telemetry network calls, and incurs no measurable telemetry
   overhead. Exporter configuration uses standard `OTEL_*` variables.
 - **O11Y-R12 Reactor isolation:** Export work must not run on the daemon's request reactor.
-- **O11Y-R13 Signal version:** Every st3 signal carries `service.version` from the machine build
+- **O11Y-R13 Signal version:** Every Fractal signal carries `service.version` from the machine build
   identity, including signals from the observations exporter.
-- **O11Y-R14 Bounded metrics and attributes:** st3 exposes a bounded rate, error, duration, and
+- **O11Y-R14 Bounded metrics and attributes:** Fractal exposes a bounded rate, error, duration, and
   saturation metric set with at most 2,000 active series per daemon. Agent, session, message,
   terminal, attachment, and lease ids are forbidden in metric labels and `span.label`.
   Capabilities and their hashes are forbidden in every signal.
 - **O11Y-R15 Trace propagation:** W3C `traceparent` and `tracestate` propagate end to end across
-  st3 HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
+  Fractal HTTP and WebSocket upgrades, Rust, TypeScript, and Swift clients, and the signed peer
   protocol. Peer trace context is covered by the peer signature.
-- **O11Y-R16 Sampling:** st3 exports every span when traces are enabled and performs no
+- **O11Y-R16 Sampling:** Fractal exports every span when traces are enabled and performs no
   in-process sampling. The local collector applies the fleet sampling policy: keep traces
   with an error, a local root longer than 1 second, a sampled caller, and a deterministic
   1% of the rest. Sampling never affects metrics.
@@ -74,7 +74,7 @@ so a healthy daemon exports no log stream, while WARN/ERROR diagnostics still ex
 With no `OTEL_EXPORTER_OTLP_ENDPOINT`, initialization builds no telemetry subscriber,
 SDK providers, exporters, or threads. An atomic enabled gate returns before span construction.
 Local stderr diagnostics remain available. Standard `OTEL_*` environment variables configure
-export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every st3
+export. `OTEL_SDK_DISABLED=true` (case-insensitive) selects this disabled path for every Fractal
 unit. `ST3_CLI_OTEL=off` selects it for the CLI only.
 
 | Process unit | `service.name` | Shutdown budget |
@@ -120,10 +120,10 @@ The local collector applies tail sampling keyed by trace id (O11Y-R16), keeping 
 any span has status `ERROR`, a local root lasts more than 1 second, or the root came from a
 sampled caller. It keeps a deterministic trace-id ratio of 1% of the remaining traces.
 
-The sampled-caller signal is `st.parent.sampled`: because st3 exports every span with
+The sampled-caller signal is `st.parent.sampled`: because Fractal exports every span with
 AlwaysOn, every exported span carries the sampled flag, and the collector cannot recover the
 caller's decision from trace flags. Server spans set `st.parent.sampled=true` only when
-the remote parent is sampled and its tracestate has no `st` key. st's own clients mark
+the remote parent is sampled and its tracestate has no `st` key. Fractal's own clients mark
 collector-owned sampling with `st=c`; their AlwaysOn flag must not force the collector to
 keep every trace. Unsampled or st-marked parents record false; a missing parent records no
 attribute. The decision wait must be long enough for the daemon's SDK batch delay and
@@ -188,7 +188,7 @@ Accepted subscriptions to `missions`, `attention`, `agents`, `work`, `glasses`,
 `arrangements`, `conversation`, and `terminal` construct one bounded
 `st.subscription.first_frame` span linked to the valid upgrade context.
 The proposed optional subscribe `trace` field
-(pending [#1910](https://github.com/compoundingtech/smalltalk/pull/1910)) carries W3C
+(pending [#1910](https://github.com/compoundingtech/fractal/pull/1910)) carries W3C
 `traceparent` and optional `tracestate`; the field's repository-local naming and
 compatibility contract is in [collections.md](client-v0/collections.md).
 Every collection-socket subscribe variant accepts the field, but only the collections
@@ -334,7 +334,7 @@ is span-only and never a metric label or `span.label`.
 
 ## Metric naming and cardinality
 
-The repository-local st3 instrument namespace uses lowercase dot-separated names:
+The repository-local Fractal instrument namespace uses lowercase dot-separated names:
 daemon work and storage instruments use `st.`, while HTTP and database client
 instruments use the OpenTelemetry `http.server` and `db.client` namespaces.
 Duration instruments use seconds. Depth, size, and age gauges describe saturation.
@@ -739,7 +739,7 @@ exchange(peer) → st.replication.round (detached root, one per exchange call)
 ```
 
 The root uses the OpenTelemetry API's `start_with_context` with an empty
-parent context. smallclaims depends on the OTel API only; st3 owns providers.
+parent context. smallclaims depends on the OTel API only; Fractal owns providers.
 The round does not inherit an ambient daemon or worker span. `span.label` is
 the bounded operation `round`.
 Span fields use the `st.replication.*` prefix. The round records `peer`,

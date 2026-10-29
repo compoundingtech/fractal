@@ -148,12 +148,23 @@ valid with the same input snapshot, simulation source and native revision.
 Keep the source and binary hashes with the reports. Never discard a failed
 outcome when resuming an interrupted audit.
 
-`claims-v10.json` is generated the same way from the declared-waits registry on top of v9's
-helper-launcher registry
-(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v10.json`).
+`claims-v10.json` captures the merged person-repair registry, adding
+`work.person-reassigned`, `gate.reviewer-reassigned` and `person.rename.completed`.
+Versions 1 through 9 stay frozen. Generate it with
+`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v10.json`;
+do not hand-edit the snapshot. Slot 10 was selected after fetching current main
+immediately before generation. The simulation and audit summaries select v10.
+With this corpus, all 17 fixed seeds converge and trim a checkpoint, including seed 3;
+the exact `NEVER_TRIMS` set is empty. The remote characterization used
+`cargo test -p fractal --test integration convergence::seed_ -- --nocapture --test-threads=1`.
+That run observed every seed trim; its sole failed assertion was v9's obsolete
+expectation that seed 3 never trims. The per-seed equality remains enforced.
+
+`claims-v11.json` is generated the same way from the declared-waits registry on top of v10's
+person-repair registry
+(`cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v11.json`).
 It adds `work.wait-ended`, which closes a declared wait, and the `wait_on` field the work claim
-kinds carry; nothing in v9 is removed. The simulation selects v10 and records that filename in its
-audit summary; v1 to v9 stay fixed. The new kind changes the shared RNG stream, so v9's never-trim
-characterization `[3]` does not apply: with v10 every fixed seed trims a checkpoint and
-`NEVER_TRIMS` is empty. Every seed converges. The characterization run used
+kinds carry; nothing in v10 is removed. The simulation selects v11 and records that filename in its
+audit summary; v1 to v10 stay fixed. Every fixed seed converges and trims a checkpoint, so
+`NEVER_TRIMS` stays empty. The characterization run used
 `cargo test -p fractal --locked --test integration convergence:: -- --nocapture --test-threads=4`.

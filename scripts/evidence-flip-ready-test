@@ -290,6 +290,17 @@ class FlipReady(unittest.TestCase):
         self.assertEqual((entry['unlogged_pass_unexplained'], entry['log_missing']), (2, 1))
         self.assertEqual(entry['why_not'], ['1 lines with log=missing', '2 unexplained log=unlogged_pass'])
 
+    def test_an_aggregates_unlogged_pass_is_explained_by_its_unlogged_members_observed_at_not_its_oldest_members(self):
+        self.ready_history(count=40)
+        # The line's observed_at is its oldest member's (an hour before the run); the unlogged member was observed 100 s before it.
+        self.gh.run(3000, at(3), [decision(log='unlogged_pass', observed_at=stamp(at(3, 3600)), log_unlogged='1',
+                                           log_unlogged_crates='fractal-tui=0123456789ab', log_unlogged_observed_at=stamp(at(3, 100)))])
+        self.assertEqual(self.check()['unlogged_pass_unexplained'], 0)
+        # The oldest unlogged member was observed 300 s before the run: more than the log's latency explains.
+        self.gh.run(3001, at(2), [decision(log='unlogged_pass', observed_at=stamp(at(2, 3600)), log_unlogged='2',
+                                           log_unlogged_observed_at=stamp(at(2, 300)))])
+        self.assertEqual(self.check()['unlogged_pass_unexplained'], 1)
+
     def test_a_satisfied_line_beside_a_failed_real_job_of_the_same_attempt_is_a_hidden_red(self):
         self.ready_history(count=40)
         self.gh.run(4000, at(5), [decision(decision='skip')], real='skipped')  # an enforced skip is evidence neither way
@@ -398,6 +409,53 @@ class FlipReady(unittest.TestCase):
         entry = self.check_of('rust-tests')
         self.assertEqual((entry['hidden_red'], entry['visible_red']), ([6100, 6101], []))
         self.assertIn('2 runs with a hidden red', entry['why_not'])
+
+    def test_rust_tests_flips_at_five_agreeing_host_lines_and_fleet_lines_do_not_count(self):
+        tests = {'linux-test-build': 'success', 'linux-tests': 'success'}
+        line = lambda level: decision(check='rust-tests', trust_level=level)
+        self.gh.run(1000, at(25), [line('fleet')], check='rust-tests', members=tests)       # opens the log window a day ago
+        for i in range(40):                                                                  # many CI-signed (fleet) lines: observe-only
+            self.gh.run(1100 + i, at(23 - i * 0.5), [line('fleet')], check='rust-tests', members=tests)
+        for i in range(4):
+            self.gh.run(1200 + i, at(10 - i), [line('host')], check='rust-tests', members=tests)
+        entry = self.check_of('rust-tests')
+        self.assertEqual((entry['agreeing'], entry['disagreeing'], entry['ready']), (4, [], False))
+        self.assertIn('4 agreeing host lines (satisfied, log=ok, real job success), fewer than 5', entry['why_not'])
+        self.assertFalse(any('fewer than 30' in why for why in entry['why_not']))         # the 30-line count is not rust-tests' trigger
+        self.gh.run(1300, at(2), [decision(check='rust-tests', trust_level='host', log='unlogged_pass', observed_at=stamp(at(2, 60)))],
+                    check='rust-tests', members=tests)                                       # satisfied but not log=ok: not agreeing
+        self.assertEqual(self.check_of('rust-tests')['agreeing'], 4)
+        self.gh.run(1301, at(1), [line('host')], check='rust-tests', members=tests)
+        entry = self.check_of('rust-tests')
+        self.assertEqual((entry['agreeing'], entry['why_not']), (5, []))
+
+    def test_a_host_note_beside_a_red_real_result_disagrees_and_blocks(self):
+        tests = {'linux-test-build': 'success', 'linux-tests': 'success'}
+        self.gh.run(1000, at(25), [decision(check='rust-tests', trust_level='host')], check='rust-tests', members=tests)
+        for i in range(6):
+            self.gh.run(1100 + i, at(20 - i), [decision(check='rust-tests', trust_level='host')], check='rust-tests', members=tests)
+        self.gh.run(1200, at(3), [decision(check='rust-tests', trust_level='host')], check='rust-tests', members={**tests, 'linux-tests': 'failure'})
+        entry = self.check_of('rust-tests')
+        self.assertEqual((entry['agreeing'], entry['disagreeing'], entry['hidden_red']), (6, [1200], [1200]))
+        self.assertIn('1 runs where a host note disagreed with the real job', entry['why_not'])
+
+    def test_the_rust_tests_flip_trusts_host_and_agent_notes_for_pull_requests_and_no_ci_note(self):
+        text = (self.repo / flip.POLICY).read_text()
+        new, entry = flip.flip_policy(text, 'rust-tests')
+        self.assertTrue(entry['enforce'])
+        self.assertEqual(entry['kinds']['wrapper']['trust_levels'], ['host', 'agent', 'queue'])
+        self.assertEqual(entry['kinds']['wrapper']['by_level']['queue']['events'], ['merge_group'])   # queue notes never cover a pull request
+        before = json.loads(text)['checks']['rust-tests']
+        self.assertEqual(entry['sample_one_in'], 1)                                         # no run sampled, whatever the shadow entry said
+        self.assertEqual({k: v for k, v in entry.items() if k not in ('enforce', 'kinds', 'sample_one_in')},
+                         {k: v for k, v in before.items() if k not in ('enforce', 'kinds', 'sample_one_in')})
+        narrowed = json.loads(json.dumps(before['kinds']))
+        narrowed['wrapper']['trust_levels'] = ['host', 'agent', 'queue']
+        self.assertEqual(entry['kinds'], narrowed)                                          # only the wrapper's levels change
+        others = {name: value for name, value in json.loads(new)['checks'].items() if name != 'rust-tests'}
+        self.assertEqual(others, {name: value for name, value in json.loads(text)['checks'].items() if name != 'rust-tests'})
+        _, plain = flip.flip_policy(text, CHECK)                                             # a check without a lowered trigger keeps its levels
+        self.assertEqual(plain['kinds'], json.loads(text)['checks'][CHECK]['kinds'])
 
     def test_a_matrix_members_jobs_are_named_with_their_index_and_still_count(self):
         # The API names fractal-web-execution's matrix jobs "fractal-web-execution (0)", "(1)", ... (run 39866986203).
@@ -527,10 +585,10 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(policy['checks'][CHECK], flip.flipped_entry(before['checks'][CHECK]))
         self.assertEqual(list(policy['checks'][CHECK])[:4], ['trust_levels', 'enforce', 'events', 'sample_one_in'])
         self.assertEqual((policy['checks'][CHECK]['enforce'], policy['checks'][CHECK]['events'], policy['checks'][CHECK]['sample_one_in']),
-                         (True, ['pull_request'], 5))
+                         (True, ['pull_request'], 1))
         before['checks'][CHECK] = policy['checks'][CHECK]
         self.assertEqual(policy, before)  # nothing else changed
-        self.assertIn(f'| `{CHECK}` | true | `pull_request` | 5 | 2026-10-22 |\n', files[flip.DOC])
+        self.assertIn(f'| `{CHECK}` | true | `pull_request` | 1 | 2026-10-22 |\n', files[flip.DOC])
         self.assertIn('| `linux-gate` | false | - | 5 or 1 | - |\n', files[flip.DOC])
         # The check is appended to each pinned tuple as it stands (it grows with every flip).
         for path, name in flip.TEST_LISTS:
@@ -564,7 +622,7 @@ class FlipReady(unittest.TestCase):
         code, _, text = self.report('--propose', '--dry-run')
         self.assertEqual(code, 0, self.err)
         self.assertIn('+      "enforce": true,', text)
-        self.assertIn(f'+| `{CHECK}` | true | `pull_request` | 5 | 2026-10-22 |', text)
+        self.assertIn(f'+| `{CHECK}` | true | `pull_request` | 1 | 2026-10-22 |', text)
         self.assertEqual(git(self.origin, 'branch', '--list', 'evidence-flip/*'), '')
         self.assertFalse([call for call in self.gh.calls if call[:2] == ['pr', 'create']])
 
@@ -580,13 +638,17 @@ class FlipReady(unittest.TestCase):
         self.assertEqual(git(self.origin, 'branch', '--list', 'evidence-flip/*'), '')
 
     def test_a_policy_not_in_json_dumps_form_gets_a_minimal_textual_edit(self):
-        text = SHADOW[flip.POLICY].replace('"version": 1,', '"version":  1,')
+        policy = json.loads(SHADOW[flip.POLICY])
+        policy['checks']['linux-gate']['sample_one_in'] = 5  # main's policy samples no pull request now, so the 5 is set here
+        text = (json.dumps(policy, indent=2) + '\n').replace('"version": 1,', '"version":  1,')
         new, entry = flip.flip_policy(text, 'genie-freshness')
-        self.assertEqual(entry['sample_one_in'], 5)
+        self.assertEqual(entry['sample_one_in'], 1)                                         # added: no run sampled
         self.assertEqual(json.loads(new)['checks']['genie-freshness'], entry)
         self.assertIn('"version":  1,', new)
-        new, entry = flip.flip_policy(text, 'linux-gate')  # sample_one_in is kept where it is
+        self.assertEqual(json.loads(text)['checks']['linux-gate']['sample_one_in'], 5)
+        new, entry = flip.flip_policy(text, 'linux-gate')  # sample_one_in stays where it is, and its 5 becomes 1
         self.assertEqual(list(entry)[1:4], ['enforce', 'events', 'sample_one_in'])
+        self.assertEqual((entry['sample_one_in'], json.loads(new)['checks']['linux-gate']['sample_one_in']), (1, 1))
         with self.assertRaises(ValueError):
             flip.flip_policy(text, 'typescript-client')  # already enforced
 

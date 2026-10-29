@@ -89,6 +89,7 @@ export const transcriptFamilies: WorldDefinition = {
     }
     return {
       roster: { ...inherited.roster, source, state: {
+        sessions: [], devices: [],
         agents: [built.agent], runtimes: built.runtime === null ? [] : [built.runtime],
         machines: [resources.machine(ctx, member.host, [member.runtime], [])], order: [member.id],
       } },

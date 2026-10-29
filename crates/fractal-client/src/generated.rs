@@ -45,6 +45,31 @@ pub struct Snapshot {
     pub created_at: String,
 }
 
+/// Node-local source cut; do not compare across nodes or publication epochs.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentsStatusWatermark {
+    pub store_index: u64,
+    pub local_frontier: u64,
+}
+
+/// Immutable publication identity; materialization time is not producer time.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentsPublicationMetadata {
+    pub node_epoch: String,
+    pub revision: u64,
+    pub status_watermark: AgentsStatusWatermark,
+    pub materialized_at_ms: u64,
+}
+
+/// Complete current view; the wire contract requires `has_more` to be false.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentsPublication {
+    pub publication: AgentsPublicationMetadata,
+    pub items: Vec<Agent>,
+    pub order: Vec<String>,
+    pub has_more: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ErrorEnvelope {
     pub api_version: String,
@@ -91,6 +116,7 @@ pub enum ErrorCode {
     NotFound,
     Forbidden,
     UnsupportedCapability,
+    PeerTooOld,
     ValidationFailed,
     IdempotencyConflict,
     IssuerRequired,
@@ -120,6 +146,9 @@ pub enum ErrorCode {
     BlobQuotaExceeded,
     BlobNotFound,
     BlobExpired,
+    PrivateNotesCarrierConflict,
+    PrivateNotesUnreachable,
+    PrivateNotesIndeterminate,
     MessageTooLarge,
     MessageStoreFull,
     LongMessageSignatureUnsupported,
@@ -136,7 +165,7 @@ pub enum ErrorCode {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct Capability {
     pub id: String,
-    pub version: u32,
+    pub version: u64,
     pub state: CapabilityState,
 }
 
@@ -360,6 +389,29 @@ pub struct SyncNotice {
 impl SyncNotice {
     pub fn diverged(&self) -> bool {
         self.state == "diverged"
+    }
+}
+
+/// This host's replication as a stream frame states it (`sync` on a collection frame): `level`,
+/// or `catching-up` or `diverged` with the peers ahead. Unlike a page's [`SyncNotice`] it is
+/// explicit when level, so a frame without one is unknown, never level.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct StreamSync {
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<SyncPeer>,
+}
+
+impl StreamSync {
+    /// `Some(true)` when level, `Some(false)` when catching up or diverged with the peers named,
+    /// and `None` for a state this client does not know or a shape the contract forbids (level
+    /// with peers, or not level without them): unknown, never level.
+    pub fn level(&self) -> Option<bool> {
+        match (self.state.as_str(), self.peers.is_empty()) {
+            ("level", true) => Some(true),
+            ("catching-up" | "diverged", false) => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -989,7 +1041,7 @@ pub struct LaunchPreview {
     pub steps: Vec<Value>,
     pub agents: Vec<Value>,
     pub gates: Value,
-    pub diagnostics_count: u64,
+    pub diagnostics_count: i64,
     pub request_excerpt: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1057,7 +1109,7 @@ pub struct VisualizationNode {
     #[serde(default)]
     pub constraints: Vec<String>,
     pub assignment: Option<Value>,
-    pub timeout_ms: Option<u64>,
+    pub timeout_ms: Option<i64>,
     pub retry: Value,
     #[serde(default)]
     pub gates: Vec<Value>,
@@ -1305,6 +1357,9 @@ pub struct Mission {
     pub visualization: Option<Visualization>,
     #[serde(default)]
     pub usage: Option<UsageSummary>,
+    /// The resources the current published revision names. An older daemon omits them.
+    #[serde(default)]
+    pub resources: Vec<DeclaredResource>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct MissionRunSummary {
@@ -1345,7 +1400,7 @@ pub struct MissionStep {
     #[serde(default)]
     pub title: Option<String>,
     pub state: String,
-    pub attempt: u32,
+    pub attempt: u64,
     /// An ActorRef: agent, daemon, or person.
     #[serde(default)]
     pub assignee: Option<String>,
@@ -1371,9 +1426,9 @@ pub struct MissionStep {
     #[serde(default)]
     pub constraints: Vec<String>,
     #[serde(default)]
-    pub loop_round: Option<u32>,
+    pub loop_round: Option<u64>,
     #[serde(default)]
-    pub loop_max_rounds: Option<u32>,
+    pub loop_max_rounds: Option<u64>,
     #[serde(default)]
     pub loop_reason: Option<String>,
     /// Earliest work eligibility, not a promise of wake dispatch.
@@ -1395,7 +1450,7 @@ pub struct MissionWake {
     pub assignee: String,
     pub assignee_state: String,
     pub incarnation_id: String,
-    pub attempts: u32,
+    pub attempts: u64,
     #[serde(default)]
     pub last_attempt_at: Option<String>,
     #[serde(default)]
@@ -1476,7 +1531,7 @@ pub struct Work {
     pub progress_at: Option<String>,
     pub state: String,
     pub gate_kind: Option<String>,
-    pub attempt: u32,
+    pub attempt: u64,
     pub readiness_epoch: u64,
     pub claimant: Option<String>,
     pub claim_incarnation: Option<String>,
@@ -1559,6 +1614,9 @@ pub struct Agent {
     pub harness_state: Option<String>,
     #[serde(default)]
     pub harness_error_state: Option<String>,
+    /// Background jobs the current harness incarnation reports; `None` when unknown.
+    #[serde(default)]
+    pub background_jobs: Option<u64>,
     #[serde(default)]
     pub since: Option<String>,
     #[serde(default)]
@@ -1613,7 +1671,8 @@ pub struct Agent {
     pub under: Vec<AgentRelationship>,
     #[serde(default)]
     pub delivery: Option<AgentDelivery>,
-    /// The subagents this seat's harness runs now, oldest first. An older daemon omits them.
+    /// The subagents this seat's harness runs now, oldest first. Omitted when the driver does not
+    /// report subagents, or by an older daemon. Claude, Codex, and OMP report them; Pi does not.
     #[serde(default)]
     pub subagents: Vec<AgentSubagent>,
     /// The seat's latest suspend or resume and its phase. An older daemon omits it.
@@ -1632,6 +1691,9 @@ pub struct Agent {
     pub handoff: Option<AgentHandoff>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<Value>,
+    /// The resources the seat's current declaration names. An older daemon omits them.
+    #[serde(default)]
+    pub resources: Vec<DeclaredResource>,
 }
 /// Declared seat lifecycle: standing, owner, or bounded. Absence means undeclared.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1658,6 +1720,33 @@ pub struct AgentCheckout {
     pub repository: String,
     pub base: String,
     pub branch: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceReferenceKind {
+    Uri,
+    Subject,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ResourceReferenceResolution {
+    Resolved,
+    Unresolved,
+    NotApplicable,
+}
+/// A named, read-only edge from a seat or mission declaration to an ordinary resource subject.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct DeclaredResource {
+    pub name: String,
+    /// The ordinary graph resource subject targeted by this edge.
+    pub subject: String,
+    pub kind: ResourceReferenceKind,
+    pub resolution: ResourceReferenceResolution,
+    /// Present only for resolved URI references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 /// The latest accepted harness todo observation, including its provenance and freshness.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -1813,7 +1902,7 @@ pub struct AgentQueue {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentQueueRun {
     pub mission_run_id: String,
-    pub position: u32,
+    pub position: u64,
     pub state: String,
     pub run_state: String,
     pub joined_at: String,
@@ -1910,7 +1999,7 @@ pub struct LaneEntry {
     pub entry_id: String,
     /// The entry without the lane's prefix, such as a pull request number.
     pub label: String,
-    pub position: u32,
+    pub position: u64,
     /// `waiting`, `held`, `ready`, or `running`.
     pub state: String,
     pub detail: Option<String>,
@@ -2359,7 +2448,7 @@ pub struct TimelineEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivers: Option<String>,
     pub sequence: u64,
-    pub revision: u32,
+    pub revision: u64,
     pub timestamp: String,
     pub role: TimelineRole,
     #[serde(rename = "final")]
@@ -2762,6 +2851,42 @@ pub enum EventType {
     Unknown,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrivateNotesFence {
+    pub carrier_generation: String,
+    pub revision: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrivateNotesData {
+    pub uri: String,
+    pub markdown: String,
+    pub fence: PrivateNotesFence,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PrivateNotesAction {
+    pub id: String,
+    pub fence: Fence,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PrivateNotesSubject {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub family: String,
+    pub schema: String,
+    pub data: PrivateNotesData,
+    pub actions: Vec<PrivateNotesAction>,
+    pub live: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrivateNotesWriteParameters {
+    pub uri: String,
+    pub markdown: String,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Fence {
     pub snapshot_id: String,
@@ -2772,7 +2897,7 @@ pub struct Fence {
     #[serde(default)]
     pub step_definition: Option<String>,
     #[serde(default)]
-    pub attempt: Option<u32>,
+    pub attempt: Option<u64>,
     #[serde(default)]
     pub readiness_epoch: Option<u64>,
     #[serde(default)]
@@ -2783,12 +2908,16 @@ pub struct Fence {
     pub terminal_sequence: Option<u64>,
     #[serde(default)]
     pub preview_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_notes: Option<PrivateNotesFence>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum ActionType {
     #[serde(rename = "custom.reply")]
     CustomReply,
+    #[serde(rename = "private-notes.write")]
+    PrivateNotesWrite,
     #[serde(rename = "prompt.respond")]
     PromptRespond,
     #[serde(rename = "arrangement.edit")]
@@ -3334,6 +3463,20 @@ impl ActionRequest {
         Self::new(
             id,
             ActionType::PairingRevoke,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn private_notes_write(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PrivateNotesWriteParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::PrivateNotesWrite,
             idempotency_key,
             fence,
             &parameters,
@@ -4127,6 +4270,8 @@ pub struct ActionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_attachment: Option<TerminalAttachment>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_notes: Option<PrivateNotesFence>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arrangement_revision: Option<String>,
 }
 
@@ -4329,6 +4474,9 @@ pub struct PersonPairingBegin {
     pub person_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub full_control: Option<bool>,
+    /// Let this pairing grant the device the client gateway over Fabric; off unless true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabric_gateway: Option<bool>,
     /// Narrows the default limited grant to these limited pairing scopes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scopes: Option<Vec<String>>,
@@ -4362,6 +4510,9 @@ pub struct PairingComplete {
     /// Where the device keeps its signing key: `secure-enclave` or `software`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_storage: Option<String>,
+    /// The device's Fabric NodeID, sent only to a member that advertises `fabric-gateway-grant`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_node_id: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
@@ -4388,6 +4539,9 @@ pub struct PersonPairedSession {
     pub device_key_proofs: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub person_root_key_proof: Option<serde_json::Value>,
+    /// What the member did about the device's Fabric grant, when the pairing sent a NodeID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fabric_grant: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -4818,8 +4972,8 @@ pub enum TerminalColor {
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct TerminalCursor {
-    pub row: usize,
-    pub column: usize,
+    pub row: i64,
+    pub column: i64,
     pub visible: bool,
     #[serde(default)]
     pub style: TerminalCursorStyle,
@@ -4846,7 +5000,7 @@ pub struct TerminalModes {
     pub mouse_tracking: String,
     pub mouse_encoding: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kitty_keyboard: Option<u32>,
+    pub kitty_keyboard: Option<u64>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct TerminalScreen {
@@ -4899,7 +5053,7 @@ pub struct TerminalClients {
 pub struct TerminalProcess {
     pub alive: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
+    pub exit_code: Option<i64>,
 }
 /// How a gateway reached a remote owner for one read, so a client can tell a slow gateway from
 /// a down owner.
@@ -4916,7 +5070,7 @@ pub struct TerminalRelay {
     /// How long a terminal attach capability from this gateway lives, in seconds.
     pub capability_ttl_s: u64,
     /// The owner's stale-fence refusals of this gateway's reads in the last minute.
-    pub fence_conflicts: u32,
+    pub fence_conflicts: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

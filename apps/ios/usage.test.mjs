@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { accounts, byOf, cost, creditsLine, groups, label, limitLine, money, nextBy, periodName, tokens, totalOf } from './usage.ts';
 
-// The same day of invented spend stui's demo shows (crates/fractal-tui/src/ui/demo.rs).
+// The same day of invented spend the Fractal terminal UI's demo shows (crates/fractal-tui/src/ui/demo.rs).
 const row = (agent, run, step, model, host, account, total, output, cost) => ({
   agent, mission_run: run, step, model, account, host, pricing: 'list',
   total_tokens: total, input_tokens: total / 50, output_tokens: output, cache_write_tokens: total / 20,
@@ -19,7 +19,7 @@ const rows = [
 ];
 const names = { agents: new Map([['agent/example/atlas/builder', 'Atlas Builder']]), missions: new Map([['mission/fleet/atlas/store-move', 'Move the atlas store']]) };
 
-// Groups rank by cost and name what st does not know.
+// Groups rank by cost and name what Fractal does not know.
 const byAgent = groups(rows, 'agent');
 assert.equal(byAgent[0].id, 'agent/example/atlas/builder');
 assert.equal(byAgent[0].total.costMicrousd, 48_900_000);

@@ -180,8 +180,16 @@ Each factory takes a generator, the cast and optional overrides, and returns val
 | `diff` | a `toolCall` whose call edits a file and whose result carries a unified diff of the edit |
 | `terminalRun` | an asciicast v2 recording of one command and the `TerminalScreen` values a client sees for it |
 
+Agent rows include `subagents` (empty when none are running) only for observing drivers `claude`, `codex`, and `omp`; other drivers omit the field, matching the daemon.
+
 Each entry gets increasing `sequence`, `revision` 1 unless revised, and a timestamp from the
 time model. A streaming entry is emitted as revisions with `final: false` until its last revision.
+
+Native harness turn headers keep non-`message/` body `message_id` values, including
+normalized provider UUIDs (`native/scenario-...`). Like the daemon, they omit `from`/`to`;
+their user/assistant roles distinguish the person from the agent. Only real graph mail
+uses `message/` IDs and carries sender/recipient fields. Timeline entry IDs remain
+`timeline-entry/...` in either case.
 
 ### Slices
 
@@ -196,12 +204,26 @@ after it (see [Store versions](#store-versions)).
 
 | Slice | State | Timeline events |
 | --- | --- | --- |
-| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `order: Id[]`, optional `arrangements: Arrangement[]` (omission means empty) | `changes {upserts, removes, order?}` for roster resources; arrangements are snapshot-only |
-| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them) | `changes {upserts, removes, order?}` |
+| `roster` | `agents: Agent[]`, `runtimes: Runtime[]`, `machines: Machine[]`, `sessions: Session[]`, `devices: Device[]`, `order: Id[]`, optional `arrangements: Arrangement[]` (omission means empty) | `changes {upserts, removes, order?}` for roster resources; arrangements are snapshot-only |
+| `details` | `missions: Mission[]`, `work: Work[]` (joined as list reads return them), `launches: Launch[]`, `launch_variants: LaunchVariant[]` | `changes {upserts, removes, order?}` |
 | `attention` | `attention: Attention[]`, `messages: Message[]` (sources the cards load) | `changes {upserts, removes, order?}` |
 | `conversation` | per agent: `session_id`, `items: TimelineEntry[]`, `page_size`, `has_more` | `thread-create {thread}`, `thread-remove {agent}`, `entries {agent, items}` (append or revise), `replace {agent, session_id, items, has_more}` |
 | `terminal` | per terminal: owner, its terminal `runtime` (the `Runtime` that `runtimesGet` returns before every attach), `incarnation`, `cast` (asciicast v2), `screens: { at_ms, screen }[]` | `terminal-create {record}`, `terminal-remove {terminal}`, `screen`, `unavailable`, `end`, `incarnation` |
 | `sync` | `capabilities` envelope, the [sync script](#sync-matrix) and the `expected` sync status per surface | see [Replay dispatch](#replay-dispatch) |
+
+Synthetic details missions include `run_details`, derived from the same work inventory at
+the baseline and after every details change. Each run's progress, step states and claimants
+match its work rows; the cast maps each `work/...` ID to its `step-run/...` identity.
+This is the cast `work` ↔ `stepRun` mapping: Work keeps `work`; run details use `stepRun`.
+Synthetic missions also include `presentation`, using the daemon's mission/step word
+precedence, display ordering, roster ownership and queue facts, open human gates, action
+offers and progress. Its step IDs are the same `stepRun` IDs as `run_details`, and its
+done count is the number of completed steps, not a client fallback.
+Work-only changes also publish the affected mission's joined run details. Recorded slices
+remain unmodified captures.
+`crates/fractal-ui-model/tests/scenarios.rs` proves synthetic presentations match the real
+daemon presentation function at the baseline and each committed details change, using
+the corresponding roster queues and open human gates rather than a second expected model.
 
 Creation events carry the complete thread or terminal record, including pagination or runtime,
 cast and screens metadata. Resources are genuinely absent before creation, rather than hidden
@@ -309,6 +331,10 @@ member; it never invents a foreign identity or dereferences a missing first reco
 `roster.all-states` cycles the supported lifecycle/harness combinations over the declared cast;
 it does not add agents merely to display every state. `conversation.long` contains 80 exchanges
 per cast agent, and `attention.many` contains 50 cards distributed over cast-owned work.
+`conversation.tool-heavy` keeps its turn `running` while the final shell call has no result;
+`conversation.failed-tools` keeps its turn `waiting`. After the latest terminal (`completed`,
+`failed`, or `cancelled`) status, tool calls without results require a non-terminal status
+update. A terminal status after an unanswered call legitimately interrupts that earlier work.
 `conversation.remote-only-mail` uses another cast agent, preferring a different host; a singleton
 cast uses agent-to-agent loopback mail, which the protocol permits, never person-origin content.
 `conversation.huge` gives the first cast agent a logical 10,000-turn history, four entries per
@@ -510,7 +536,7 @@ cleanup, use the scratch environment; curl disables configuration loading with f
 
 The implementation composes three existing patterns, not a pre-existing recorder API:
 `crates/fractal/tests/terminal_binding.rs` supplies scratch ownership and teardown scaffolding;
-`crates/fractal/tests/no_st2_seat.rs` and `scripts/st3-no-st2-eval/{run,claude}` supply native
+`crates/fractal/tests/no_st2_seat.rs` and `scripts/fractal-no-st2-eval/{run,claude}` supply native
 Claude transcripts and real driver hooks; `terminal_actions_survive_unrelated_writes_but_reject_changed_screens`
 in `crates/fractal-daemon/src/api/client_v0.rs` supplies the real PTY/projector and terminal attach pattern.
 `terminal_binding` alone produces neither native transcripts nor styled screens.
@@ -756,7 +782,7 @@ replay.actions  // actions the client submitted, in order, for test assertions
 ```
 
 - **Seams:** the generated client already accepts `fetchImpl` and `socket`; the fractal-web SDK
-  passes them through `St3Options.fetch` and `St3Options.socket`. Replay adds no other hook.
+  passes them through `FractalOptions.fetch` and `FractalOptions.socket`. Replay adds no other hook.
   The socket accepts and ignores command keys it does not use, such as the `trace` field the
   web client adds to a subscribe command.
 - **Windows:** the first reply to a collection subscription is a `snapshot` with the slice state
@@ -778,6 +804,17 @@ replay.actions  // actions the client submitted, in order, for test assertions
   socket accepts. Other actions are recorded in `replay.actions` and answered with an accepted
   `ActionResult` and an operation that completes; a world may declare a different answer per
   action. Replay does not simulate the effects of actions.
+  The complete modeled route set is listed below. An unmodelled route or route shape returns
+  an `ErrorEnvelope` with code `unsupported-capability` and HTTP 501, never an empty successful
+  page or the resource at a recognized parent path.
+- **Inventories:** session and device list/detail reads use `roster.state.sessions` and
+  `roster.state.devices`; launch and variant reads use `details.state.launches` and
+  `details.state.launch_variants`. These required arrays are independent inventories:
+  sessions are not synthesized from conversation threads, and launches are not inferred from
+  missions. Lists, details, generic resource observations and timeline folds share these rows.
+  Nested variant reads filter by the parent launch before paging or resolving a detail, so a
+  variant belonging to another launch is not returned. In recording-backed replay, these new
+  inventory routes use the synthetic inventory overlay rather than requiring captured HTTP.
 - **Arrangements:** `GET /v1/client/arrangements?person=…`, the arrangement detail route, and
   `collection: 'arrangements'` subscriptions all read `roster.arrangements`. Lists and
   subscriptions require an explicit person selector; they never infer an owner from an agent.
@@ -813,6 +850,46 @@ replay.actions  // actions the client submitted, in order, for test assertions
   `replay.flush()` before asserting socket output. It waits until the delivery queue is idle,
   including replies queued by handlers, but neither advances the clock nor releases future
   timeline events. Awaiting only a microtask is insufficient.
+
+### Served HTTP routes
+
+These are replay's modeled routes, not an assertion that replay implements every daemon
+operation in the [client-v0 manifest](../../../docs/st3/client-v0/schemas/operations.json).
+Every path below is relative to `/v1/client`; `{id}` and `{variant_id}` are URL-encoded
+resource IDs occupying one path segment. Session and launch reads also accept the routed
+ID suffix emitted by the generated client (without `session/` or `launch/`).
+List reads support bounded cursor pagination.
+
+| Method | Path | Source |
+| --- | --- | --- |
+| `GET` | `/capabilities` | `sync` capabilities |
+| `GET` | `/agents`, `/agents/{id}` | `roster` agents |
+| `GET` | `/runtimes`, `/runtimes/{id}` | `roster` runtimes and terminal runtimes |
+| `GET` | `/machines`, `/machines/{id}` | `roster` machines |
+| `GET` | `/sessions`, `/sessions/{id}` | `roster` sessions |
+| `GET` | `/devices`, `/devices/{id}` | `roster` devices |
+| `GET` | `/missions`, `/missions/{id}` | `details` missions |
+| `GET` | `/work`, `/work/{id}` | `details` work |
+| `GET` | `/launches`, `/launches/{id}` | `details` launches |
+| `GET` | `/launches/{id}/variants` | `details` launch variants belonging to this launch |
+| `GET` | `/launches/{id}/variants/{variant_id}` | A `details` launch variant belonging to this launch |
+| `GET` | `/attention`, `/attention/{id}` | `attention` cards |
+| `GET` | `/messages`, `/messages/{id}` | `attention` messages |
+| `GET` | `/terminals`, `/terminals/{id}` | Terminal runtimes |
+| `GET` | `/terminals/{id}/screen` | Current terminal screen |
+| `GET` | `/sessions/{id}/timeline` | `conversation` thread entries and seeded older history |
+| `GET` | `/arrangements?person=…` | Person-scoped `roster` arrangements |
+| `GET` | `/arrangements/{person_name}/{uuid}` | Person-scoped `roster` arrangement detail |
+| `GET` | `/resources` | Generic observations over modeled resource inventories |
+| `GET` | `/operations`, `/operations/{id}` | Operations created by replay actions |
+| `GET` | `/events` | Empty event page with the advertised event cursors |
+| `POST` | `/actions` | Action handling described above, including `terminal.attach` |
+
+WebSocket collection, conversation and terminal subscriptions use `replay.socket`, not
+additional HTTP fetch routes. Recording-backed replay also retains explicitly captured HTTP
+responses at their recorded request and clock offset; that evidence does not add a generic
+synthetic implementation of those routes. In particular, launch decisions and approvals and
+unmodelled agent subroutes are unsupported, not empty inventories.
 
 ### Store versions
 
@@ -1136,30 +1213,31 @@ Stories whose consumer initially mounts only part of a conversation may declare
 `parameters.scenario.window`, typed by `ScenarioStoryParameter` from `/storybook/check`:
 
 ```ts
-// Transcript uses initialTailCount={2}; EmbraceScrollViewport historyBatchSize=4.
-window: { _tag: 'tail', turns: 2, historyBatch: 4 }
+// Transcript mounts transcriptInitialSourceRowCount=6 source rows, plus the latest prompt.
+window: { _tag: 'sourceRows', rows: 6 }
 ```
 
 The tagged union also accepts `{ _tag: 'all' }`, equivalent to omitting the window,
-including for empty or loading baselines; vacuity validation applies only to tail windows.
-The check derives each thread's turns from folded wire entries: user text content opens a
-turn; an assistant-content/tool-call prefix is one turn. It selects the final N turns per
-thread, not the final N entries; threads with at most N + historyBatch turns mount whole,
-matching EmbraceScrollViewport's short-conversation rule. The check requires their markers and counts.
+including for empty or loading baselines; vacuity validation applies only to source-row windows.
+The check derives each thread's source rows from folded wire entries: user or assistant text
+content and tool calls, one row each. It selects the final N source rows per thread plus the
+thread's latest user prompt, without the rows between them; threads with at most N source rows
+mount whole. Scenario wire entries carry no reasoning, so Transcript's rule of mounting a
+reasoning run that crosses the bound whole never widens the window here. The check requires their markers and counts.
 Other slices retain their full marker contract. World-switch contrast selection uses the
 same window; declared/read, pinned-world and URL checks are not waived or otherwise changed.
 The story must state the consumer's real mount rule, with a comment naming that rule; this
 is not permission to choose arbitrary convenient data or split the transcript.
 Fractal-ui exports `transcriptMountedWindow` from its Transcript module, derived from
-Transcript's initial tail count and EmbraceScrollViewport's history batch size. Stories
-can use this shared value instead of copying the counts; a consumer-side test guards it.
+Transcript's initial source-row count. Stories can use this shared value instead of copying
+the count; a consumer-side test guards it.
 
-`MountedWindow` failures reject invalid tail counts/history batches, a baseline tail window
+`MountedWindow` failures reject invalid row counts, a baseline source-row window
 selecting zero entries, or one excluding every marker from a marker-bearing conversation.
 Genuinely empty/loading contrast sides still participate as contentless contrasts.
 Without a window, the all-source marker contract is unchanged. The mounted check does not
 prove history reveal or a reply deliberately held back by an interaction harness: browser
-plays must separately prove both, and a tail window cannot express an arbitrary held-back
+plays must separately prove both, and a source-row window cannot express an arbitrary held-back
 reply within a mounted turn.
 
 The kit's own tests include a negative case: a story that declares slices but renders fixed text
@@ -1250,12 +1328,12 @@ breaks a scenario fails in the same pull request.
 | --- | --- | --- |
 | fractal-ui Storybook | fractal-ui maintainers | `preview.ts` installs `scenarioGlobalTypes`, `scenarioLoaders` and `withScenario`; the catalog loads only for slice stories. The inventory is every CSF loaded by the kit Storybook, including app CSFs, from the shared Storybook configuration. Configured files are discovered without extension filtering; unsupported files fail explicitly instead of escaping the check. The inventory expands nested brace alternatives before deriving static story roots, rejects patterns whose roots cannot be determined or that mention `node_modules` until the check is extended, walks supported roots with `lstat` without following symlinks, and reports any directory or file symlink outside excluded dependencies (including literal file entries). Traversal skips directories named `node_modules`; discovery filters exact `node_modules` path segments independently of glob matching, including patterns with leading `../` prefixes and brace alternatives. Similarly named directories remain included. Every story declares exactly one scenario mode and passes `scenarioStoryCheck`, apart from explicitly pinned blocked-file ratchet entries and the separate app-mode deferral list owned by fractal-web-app, a reviewed shrink-only pin. The app list pins exactly the undeclared app export ids with its own count; missing or already-declared entries fail. Exemptions list their reasons; each CSF exports its reviewed `scenarioExemptions` (sorted `export:mode` ids, excluded from stories), and the collected exemptions must equal their union, with no stale or duplicate id. Projections from wire state to component props live in fractal-ui and use the shared codec/SDK functions where the app does. Contract-fixture stories convert when scenario data can express their contract. |
 | `@fractal/sdk/effect` | fractal-web maintainers | Takes the kit as a development dependency. A test runs every non-pending sync matrix row through the real SDK fold and compares with `expected`; a type-level assertion keeps the kit's portable `SyncStatus` equal to `sync-status.ts`. A second test runs every terminal variant through `followTerminal` and checks screens, the fresh attach and resubscribe after `terminal-unavailable` and after `stale-fence`, and `terminal-ended`. |
-| fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a live source built with the app-local `adoptEarlyCollections: false` option that passes `replay.socket` and `replay.fetch` to `St3Options`. Browser transport, early socket adoption, and visibility/LRU admission are supplied by the app's `src/data/sdk-browser` platform Layer, not the portable SDK. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
-| Fractal TUI | native-client maintainers | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through Fractal TUI's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
+| fractal-web dev, tests, e2e | fractal-web maintainers | A dedicated Vite mode builds the app from a scenario entry: its own HTML page without the early roster connect script of `src/web/index.html`, and a live source built with the app-local `adoptEarlyCollections: false` option that passes `replay.socket` and `replay.fetch` to `FractalOptions`. Browser transport, early socket adoption, and visibility/LRU admission are supplied by the app's `src/data/sdk-browser` platform Layer, not the portable SDK. No socket reaches a real gateway in this mode. Production code never reads a URL parameter or runtime flag to select fake data. A bundle check, modeled on `src/telemetry/measurement/check-bundles.mjs`, fails when the production bundle contains scenario-kit code. e2e runs on replay; story and app projections pass the conformance test; the earlier `scripts/synthetic-fixtures` generator is retired. |
+| Fractal TUI (`crates/fractal-tui`) | Fractal Product Lead | `fixtures/clients/demo-world.json` is derived from `fleet-mid-refactor` through Fractal TUI's own adapter (`ui/adapt.rs`); `STUI_UPDATE_CONTRACT=1` regenerates it, and the contract test fails on drift. |
 | iOS app | native-client maintainers | Demo mode reads the same generated data: the derived `demo-world.json`, or `createReplay` (the app is TypeScript) through its gateway client seams. |
 | Rust `fractal-client` | native-client maintainers | Provides the rebase reader and passes the shared vectors. |
 | Swift `FractalClient` | native-client maintainers | Provides the rebase reader, passes the shared vectors, and decodes every committed scenario file with the Swift models. |
-| fractal TUI | fractal-ui maintainers | Reads `fixtures/scenarios/<world>/<slice>.json` from a pinned Fractal revision through its Rust adapter and the Rust rebase reader; its snapshot tests derive from those files. |
+| fractalite (dotfiles flakes/fractal) | none | No adoption planned; revisit when it needs scenario data. |
 
 ## Non-goals
 
@@ -1289,6 +1367,6 @@ breaks a scenario fails in the same pull request.
 - fractal-web e2e runs on replay; the production bundle contains no scenario-kit code.
 - The SDK fold matches every non-pending sync matrix row.
 - The Fractal TUI demo shows the generated `fleet-mid-refactor` world.
-- fractal TUI and iOS show the same generated data; Rust and Swift pass the rebase vectors.
+- Fractal TUI and iOS show the same generated data; Rust and Swift pass the rebase vectors.
 - CI decode, freshness, privacy, fidelity and consumption gates are green, and each fails on a
   planted violation.

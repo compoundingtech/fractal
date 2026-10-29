@@ -103,7 +103,16 @@ const build = (ctx: FactoryContext): Slices => {
     source,
     decode: 'strict',
     loading: false,
-    state: { agents: agents.map((value) => value.agent), runtimes, machines, order: agents.map((value) => value.agent.id!) },
+    state: {
+      agents: agents.map((value) => value.agent), runtimes, machines, order: agents.map((value) => value.agent.id!),
+      sessions: [
+        resources.session(ctx, builder, 'running', -38 * 60_000),
+        resources.session(ctx, reviewer, 'waiting', -12 * 60_000),
+        resources.session(ctx, migrator, 'running', -21 * 60_000),
+        resources.session(ctx, docs, 'waiting', -55 * 60_000),
+      ],
+      devices: [resources.device(ctx, ada, 'Review phone'), resources.device(ctx, robin, 'Fleet tablet')],
+    },
     timeline: [
       {
         _tag: 'changes',
@@ -125,6 +134,8 @@ const build = (ctx: FactoryContext): Slices => {
   }
 
   // details
+  const launchDraft = resources.launch(ctx, mission, reviewer, [])
+  const launchVariants = [0, 1].map((ordinal) => resources.launchVariant(ctx, mission, launchDraft.id, ordinal))
   const details: Slice<'details'> = {
     kind: 'details',
     variant: 'default',
@@ -132,6 +143,8 @@ const build = (ctx: FactoryContext): Slices => {
     decode: 'strict',
     loading: false,
     state: {
+      launches: [{ ...launchDraft, variants: launchVariants.map((variant) => variant.id) }],
+      launch_variants: launchVariants,
       missions: [resources.mission(ctx, mission, 'running', -95_000)],
       work: [
         resources.work(ctx, { mission, step: 0, state: 'completed', updatedMs: -30 * 60_000, claimant: builder, goals: ['Rename the export and its tests'] }),

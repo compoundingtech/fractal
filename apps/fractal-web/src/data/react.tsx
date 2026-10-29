@@ -299,7 +299,7 @@ export const useAgentRowSelection = <T,>({
 /** Only open cards about this agent or its current missions notify its information surfaces. */
 export const useAgentAttention = (ref: string): Feed<readonly Attention[]> =>
   useAtomValue(useData().agentAttention(ref))
-/** Agent refs st reports as waiting for an answer: an ask-tool question or open attention. */
+/** Agent refs Fractal reports as waiting for an answer: an ask-tool question or open attention. */
 export const useAskingAgents = (): ReadonlySet<string> => useAtomValue(useData().askingAgents)
 /** Badge/count projections ignore unrelated card metadata while detail readers keep native cards. */
 export const useAgentAttentionSelection = <T,>({

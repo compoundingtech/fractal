@@ -13,6 +13,7 @@ mod generated;
 pub mod product_dirs;
 /// W3C context injection, enabled by the optional `trace-propagation` feature.
 pub mod propagation;
+pub mod scenarios;
 pub use contract::*;
 pub use generated::*;
 mod identities;
@@ -439,7 +440,7 @@ impl Capabilities {
     pub fn grants(&self, id: &str, version: u32) -> bool {
         self.capabilities.iter().any(|capability| {
             capability.id == id
-                && capability.version >= version
+                && capability.version >= u64::from(version)
                 && capability.state == CapabilityState::Granted
         })
     }
@@ -662,6 +663,9 @@ pub enum CollectionEvent {
         items: Vec<Resource>,
         order: Vec<String>,
         has_more: bool,
+        /// This host's replication when the frame was built, on the collections that carry it.
+        /// `None` when the frame has none (an older daemon) or it could not be read: unknown.
+        sync: Option<StreamSync>,
     },
     /// What changed in the window since the last frame, with its complete new order.
     Changes {
@@ -671,6 +675,8 @@ pub enum CollectionEvent {
         removes: Vec<String>,
         order: Vec<String>,
         has_more: bool,
+        /// This host's replication, only when it changed since the subscription's last frame.
+        sync: Option<StreamSync>,
     },
     /// A terminal subscription's whole current screen; it replaces every earlier one.
     Screen {
@@ -708,6 +714,12 @@ pub enum CollectionEvent {
     },
 }
 
+/// A frame's `sync`, when it has one this client can read. A malformed one is no reason to drop
+/// the frame: it reads as none, unknown, like a frame from a daemon that sends none.
+fn stream_sync(frame: &serde_json::Value) -> Option<StreamSync> {
+    serde_json::from_value(frame.get("sync")?.clone()).ok()
+}
+
 impl CollectionEvent {
     fn from_frame(frame: serde_json::Value) -> Result<Self, ClientError> {
         fn field<T: DeserializeOwned>(
@@ -726,6 +738,7 @@ impl CollectionEvent {
                 items: field(&frame, "items")?,
                 order: field(&frame, "order")?,
                 has_more: field(&frame, "has_more")?,
+                sync: stream_sync(&frame),
                 id,
             }),
             Some("changes") => Ok(Self::Changes {
@@ -734,6 +747,7 @@ impl CollectionEvent {
                 removes: field(&frame, "removes")?,
                 order: field(&frame, "order")?,
                 has_more: field(&frame, "has_more")?,
+                sync: stream_sync(&frame),
                 id,
             }),
             Some("screen") => Ok(Self::Screen {
@@ -962,6 +976,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         ErrorCode::UnsupportedCapability => {
             format!("this {product} does not do that yet ({message})")
         }
+        ErrorCode::PeerTooOld => {
+            "This host runs an older Fractal version; update it to open subagent conversations.".into()
+        }
         ErrorCode::NotFound => format!("it is gone: {message}"),
         ErrorCode::Forbidden => format!("not allowed: {message}"),
         ErrorCode::Internal => format!("{product} hit a problem: {message}"),
@@ -1010,6 +1027,9 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::IssuerRequired
         | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::RuntimeNotLocal
+        | ErrorCode::PrivateNotesCarrierConflict
+        | ErrorCode::PrivateNotesUnreachable
+        | ErrorCode::PrivateNotesIndeterminate
         | ErrorCode::ArrangementExists
         | ErrorCode::ArrangementFolderExists
         | ErrorCode::ArrangementRetired
@@ -1875,6 +1895,13 @@ impl Client {
     }
     pub async fn custom_subjects_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("custom-subjects", id).await
+    }
+    pub async fn private_notes_get(
+        &self,
+        uri: &str,
+    ) -> Result<Envelope<PrivateNotesSubject>, ClientError> {
+        self.get(&format!("/v1/client/private-notes/{}", percent_encode(uri)))
+            .await
     }
     pub async fn host_repositories(
         &self,
@@ -2853,6 +2880,17 @@ impl Client {
         parameters: TargetParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::pairing_revoke(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn private_notes_write(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: PrivateNotesWriteParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::private_notes_write(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }
@@ -4763,6 +4801,39 @@ fn percent_encode_segment(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The stream sync notice frames (`fixtures/clients/stream-sync/frames.json`) all decode: a
+    /// frame without `sync`, and every malformed one, reads as unknown, never level, and a key
+    /// this client does not know is ignored.
+    #[test]
+    fn stream_sync_frames_decode_and_no_bad_notice_reads_as_level() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../fixtures/clients/stream-sync/frames.json"
+        ))
+        .unwrap();
+        for group in ["valid", "invalid"] {
+            for (name, case) in fixture[group].as_object().unwrap() {
+                let mut frame = case["frame"].clone();
+                frame["a_key_from_a_newer_daemon"] = serde_json::json!({"any": "value"});
+                let event = CollectionEvent::from_frame(frame)
+                    .unwrap_or_else(|error| panic!("{name} does not decode: {error}"));
+                let (CollectionEvent::Snapshot { sync, .. }
+                | CollectionEvent::Changes { sync, .. }) = event
+                else {
+                    panic!("{name} is not a window frame");
+                };
+                let read = match sync
+                    .as_ref()
+                    .map(|sync| (sync.level(), sync.state.as_str()))
+                {
+                    Some((Some(true), _)) => "level",
+                    Some((Some(false), state)) => state,
+                    _ => "unknown",
+                };
+                assert_eq!(read, case["expect"], "{group} {name}");
+            }
+        }
+    }
+
     fn api(code: ErrorCode, message: &str) -> ClientError {
         ClientError::Api(
             code.clone(),
@@ -5051,26 +5122,34 @@ mod tests {
     }
 
     #[test]
-    fn fence_carries_every_schema_fence_field() {
-        // runtime.stop/restart/reset require runtime_desired_revision; a missing typed field makes them unsendable.
-        let schema: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
-        ))
-        .unwrap();
-        let declared: std::collections::BTreeSet<&str> = schema["$defs"]["Fence"]["properties"]
-            .as_object()
+    fn server_fence_round_trip_preserves_action_preconditions() {
+        let wire = serde_json::json!({
+            "snapshot_id": "snapshot/owner/7",
+            "subject_revisions": {"agent/owner/worker": "revision/3"},
+            "mission_generation": "generation/2",
+            "step_definition": "definition/4",
+            "attempt": 2,
+            "readiness_epoch": 3,
+            "runtime_incarnation": "incarnation/5",
+            "runtime_desired_revision": "desired/6",
+            "terminal_sequence": 7,
+            "preview_token": "preview/8",
+            "private_notes": {"carrier_generation": "carrier/9", "revision": "notes/10"}
+        });
+        let typed: Fence = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&typed).unwrap(), wire);
+        let notes = typed.private_notes.as_ref().unwrap();
+        assert_eq!(notes.carrier_generation, "carrier/9");
+        assert_eq!(notes.revision, "notes/10");
+
+        let mut without_notes = wire;
+        without_notes
+            .as_object_mut()
             .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        let typed = serde_json::to_value(Fence::default()).unwrap();
-        let typed: std::collections::BTreeSet<&str> = typed
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(typed, declared);
+            .remove("private_notes");
+        let typed: Fence = serde_json::from_value(without_notes.clone()).unwrap();
+        assert!(typed.private_notes.is_none());
+        assert_eq!(serde_json::to_value(typed).unwrap(), without_notes);
     }
 
     const EMPTY_PAGE: &str = r#"{
@@ -5681,6 +5760,7 @@ mod device_stream_policy_tests {
                 device_key_chain: vec![],
                 device_key_proofs: vec![],
                 person_root_key_proof: None,
+                fabric_grant: None,
             },
         };
         let mut client = device.client().unwrap();

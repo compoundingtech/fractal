@@ -14,8 +14,8 @@
     "./assistant-ui/work-log": "./src/assistant-ui/taste/work-log.ts",
     "./assistant-ui/tool-attention": "./src/assistant-ui/embrace-tool-attention.ts",
     "./assistant-ui/workbench-model": "./src/assistant-ui/workbench/workbench-model.ts",
-    "./assistant-ui/sync": "./src/assistant-ui/st3-views/index.ts",
-    "./assistant-ui/sync-status": "./src/assistant-ui/st3-views/sync-line.ts",
+    "./assistant-ui/sync": "./src/assistant-ui/sync-presentation/index.ts",
+    "./assistant-ui/sync-status": "./src/assistant-ui/sync-presentation/sync-line.ts",
     "./human-time": "./src/time/HumanTime.tsx",
     "./human-time/format": "./src/time/human-time.ts",
     "./human-time/clock": "./src/time/clock.tsx"
@@ -41,9 +41,9 @@
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.25",
-    "@effect/atom-react": "4.0.0",
+    "@effect/atom-react": "4.0.3",
     "@stylexjs/stylex": "0.19.0",
-    "effect": "4.0.0",
+    "effect": "4.0.3",
     "react": "19.2.3",
     "react-aria": "3.52.1",
     "react-aria-components": "1.21.1",
@@ -71,5 +71,5 @@
     "vite": "8.0.5",
     "vitest": "4.1.9"
   },
-  "packageManager": "pnpm@12.7.0"
+  "packageManager": "pnpm@12.15.0"
 }

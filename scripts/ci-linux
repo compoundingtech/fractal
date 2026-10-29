@@ -57,9 +57,9 @@ conversation_model() {
 python3 scripts/ci-cargo-tools-env-test
 python3 scripts/ci-rustc-wrapper-test
 python3 scripts/sccache-evidence-test
-python3 scripts/check-st-boundary-test
-python3 scripts/st3-boot-canaries-offers-test
-python3 scripts/check-st-boundary
+python3 scripts/check-fractal-boundary-test
+python3 scripts/fractal-boot-canaries-offers-test
+python3 scripts/check-fractal-boundary
 
 # Diagnostic only, no behaviour change: how much scratch space the tests use, and how much tmpfs
 # the runner has, so a later change can decide per runner class whether the tests' temporary files
@@ -137,7 +137,7 @@ case "$stage" in
   tests) {
     # The standalone feature check is independent of the workspace's unified test build.
     # Only shard 1 (or an unpartitioned local run) needs to perform it.
-    # CI_TEST_PACKAGES (comma-separated package names; scripts/st-test's per-crate run, docs/per-crate-test-signing.md) narrows the run to
+    # CI_TEST_PACKAGES (comma-separated package names; scripts/fractal-test's per-crate run, docs/per-crate-test-signing.md) narrows the run to
     # those packages' tests on the same workspace build; CI_TEST_JUNIT names the file nextest writes its JUnit report to.
     selected=()
     if [[ -n "${CI_TEST_PACKAGES:-}" ]]; then
@@ -152,7 +152,7 @@ case "$stage" in
       [[ "$CI_TEST_JUNIT" == /* ]] || { echo "CI_TEST_JUNIT must be an absolute path" >&2; exit 2; }
       junit_config="$logs/junit-tool-config.toml"
       printf '[profile.ci.junit]\npath = "%s"\n' "$CI_TEST_JUNIT" > "$junit_config"
-      selected+=(--tool-config-file "st-test:$junit_config")
+      selected+=(--tool-config-file "fractal-test:$junit_config")
     fi
     # The standalone feature check is a separate cargo test of one package.
     if [[ -z "${CI_TEST_EXTRACTED:-}" && "${CI_TEST_PARTITION:-}" != hash:2/2 \

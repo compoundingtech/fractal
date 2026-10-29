@@ -1,4 +1,4 @@
-# st action coverage
+# Fractal action coverage
 
 The inventory covers every offered CLI command, every typed client action, every terminal UI daemon effect, and the palette and local controls. It distinguishes real CLI/Unix transport tests, the live terminal UI adapter, local reducer tests, and shared implementations. A test reference describes its actual layer; a shared implementation test alone is not a claim that the entire interactive UI was driven.
 
@@ -35,7 +35,7 @@ Run the per-PR checks through the repository's normal test and signing runner,
 from the committed head you intend to push:
 
 ```sh
-scripts/st-test --all --push origin
+scripts/fractal-test --all --push origin
 ```
 
 This runs the checks in a clean worktree with isolated test state and publishes
@@ -44,7 +44,7 @@ requirements. The inventory and CLI guards above, the integration action-coverag
 suite, fleet restart controls and terminal UI tests remain part of their owning
 packages' test suites.
 
-Real-process fleet tests require a process ancestry without an inherited st agent identity. Use an isolated test runner when invoking them from an st seat; do not remove the daemon's authority checks. All actors and machines in these tests are invented fixtures.
+Real-process fleet tests require a process ancestry without an inherited Fractal agent identity. Use an isolated test runner when invoking them from a Fractal seat; do not remove the daemon's authority checks. All actors and machines in these tests are invented fixtures.
 
 ## Typed client actions
 
@@ -96,7 +96,7 @@ Unix daemon: all six windows, typed client/usage adaptation, period replacement,
 unsubscription and authoritative reconnect snapshots.
 `crates/fractal/tests/client_only.rs::the_fleet_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
 and `…::the_usage_inventory_screen_sends_no_request_after_its_first_frames_for_more_than_a_minute`
-drive the actual binary with `scripts/stui-test-client` and `STUI_TIMING_LOG`.
+drive the actual binary with `scripts/fractal-ui-test-client` and `STUI_TIMING_LOG`.
 Fleet and Usage each remain idle for 72 seconds; their first snapshots must occur
 once, every inventory HTTP read is forbidden, and no request follows ready frames
 for longer than the old 60-second interval.

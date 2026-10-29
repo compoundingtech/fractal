@@ -9,13 +9,370 @@
     "seed": 1
   },
   "state": {
+    "launch_variants": [
+      {
+        "candidate_revision": 1,
+        "diagnostics": [],
+        "id": "launch-variant/scenario-fleet-mid-refactor-api-rename-0",
+        "kind": "launch-variant",
+        "launch_id": "launch/scenario-fleet-mid-refactor-api-rename",
+        "normalized_mission": {
+          "goal": "Rename the API and preserve every session argument",
+          "steps": [
+            {
+              "path": "step-1",
+              "title": "Rename fetchUser in packages/api"
+            },
+            {
+              "path": "step-2",
+              "title": "Update call sites in packages/web"
+            },
+            {
+              "path": "step-3",
+              "title": "Fix the worker after the rename"
+            },
+            {
+              "path": "step-4",
+              "title": "Review the rename"
+            },
+            {
+              "path": "step-5",
+              "title": "Update the users API reference"
+            }
+          ],
+          "title": "Rename fetchUser to loadUser"
+        },
+        "ordinal": 0,
+        "revision": "lv-1",
+        "status": "previewable",
+        "target_generation": "run-generation/example/atlas/load-user-rename/1/g1",
+        "updated_at": "2030-01-01T11:48:00.000Z"
+      },
+      {
+        "candidate_revision": 1,
+        "diagnostics": [],
+        "id": "launch-variant/scenario-fleet-mid-refactor-api-rename-1",
+        "kind": "launch-variant",
+        "launch_id": "launch/scenario-fleet-mid-refactor-api-rename",
+        "normalized_mission": {
+          "goal": "Compare a staged compatibility rename",
+          "steps": [
+            {
+              "path": "step-1",
+              "title": "Rename fetchUser in packages/api"
+            },
+            {
+              "path": "step-2",
+              "title": "Update call sites in packages/web"
+            },
+            {
+              "path": "step-3",
+              "title": "Fix the worker after the rename"
+            },
+            {
+              "path": "step-4",
+              "title": "Review the rename"
+            },
+            {
+              "path": "step-5",
+              "title": "Update the users API reference"
+            }
+          ],
+          "title": "Rename fetchUser to loadUser"
+        },
+        "ordinal": 1,
+        "revision": "lv-1",
+        "status": "rejected",
+        "target_generation": "run-generation/example/atlas/load-user-rename/1/g1",
+        "updated_at": "2030-01-01T11:48:00.000Z"
+      }
+    ],
+    "launches": [
+      {
+        "approvals": [],
+        "decisions": [],
+        "id": "launch/scenario-fleet-mid-refactor-api-rename",
+        "kind": "launch",
+        "phase": "review",
+        "planner": "agent/example/atlas/reviewer",
+        "planner_config": {
+          "provider": "codex"
+        },
+        "request": "Rename fetchUser to loadUser while preserving session propagation.",
+        "revision": "l-1",
+        "target": {
+          "generation_id": "run-generation/example/atlas/load-user-rename/1/g1",
+          "mission_id": "mission/example/atlas/load-user-rename",
+          "mission_run_id": "mission-run/example/atlas/load-user-rename/1",
+          "type": "mission-run"
+        },
+        "title": "Rename fetchUser to loadUser",
+        "updated_at": "2030-01-01T11:48:00.000Z",
+        "variants": [
+          "launch-variant/scenario-fleet-mid-refactor-api-rename-0",
+          "launch-variant/scenario-fleet-mid-refactor-api-rename-1"
+        ]
+      }
+    ],
     "missions": [
       {
         "active_runs": 1,
         "id": "mission/example/atlas/load-user-rename",
         "kind": "mission",
         "mission_revision": "sha256:atlas-mission-1",
+        "presentation": {
+          "actions": [
+            {
+              "action": "message.send",
+              "confirm": false,
+              "id": "chat",
+              "target": "agent/example/atlas/migrator"
+            },
+            {
+              "action": "mission.cancel",
+              "confirm": true,
+              "id": "cancel-run",
+              "target": "mission-run/example/atlas/load-user-rename/1"
+            }
+          ],
+          "card": "what-you-can-do",
+          "last_progress": null,
+          "progress": {
+            "done": 1,
+            "total": 5
+          },
+          "queued_behind": null,
+          "settled_at": null,
+          "steps": [
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-1",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-1",
+              "title": "Rename fetchUser in packages/api",
+              "word": "done"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-2",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/migrator",
+                "kind": "agent",
+                "label": "Atlas Migrator"
+              },
+              "path": "step-2",
+              "title": "Update call sites in packages/web",
+              "word": "working"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-5",
+              "keep_open": false,
+              "note": "queued for Atlas Migrator, which is busy with example/atlas/load-user-rename › step-2",
+              "owner": {
+                "agent": "agent/example/atlas/migrator",
+                "kind": "agent",
+                "label": "Atlas Migrator"
+              },
+              "path": "step-5",
+              "title": "Update the users API reference",
+              "word": "ready"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-3",
+              "keep_open": false,
+              "note": "syncAvatars calls loadUser without the session",
+              "owner": {
+                "agent": "agent/example/atlas/builder",
+                "kind": "agent",
+                "label": "Atlas Builder"
+              },
+              "path": "step-3",
+              "title": "Fix the worker after the rename",
+              "word": "waiting"
+            },
+            {
+              "attempts": 1,
+              "blockers": [],
+              "id": "step-run/example/atlas/load-user-rename/1/step-4",
+              "keep_open": false,
+              "note": null,
+              "owner": {
+                "agent": "agent/example/atlas/reviewer",
+                "kind": "agent",
+                "label": "Atlas Reviewer"
+              },
+              "path": "step-4",
+              "title": "Review the rename",
+              "word": "pending"
+            }
+          ],
+          "stuck": {
+            "agent": {
+              "id": "agent/example/atlas/migrator",
+              "label": "Atlas Migrator",
+              "state": "running"
+            },
+            "attempts": 1,
+            "blockers": [],
+            "step": "step-run/example/atlas/load-user-rename/1/step-5",
+            "word": "ready"
+          },
+          "system": false,
+          "who": {
+            "agent": "agent/example/atlas/migrator",
+            "kind": "agent",
+            "label": "Atlas Migrator"
+          },
+          "word": "stalled"
+        },
         "revision": "mr-5",
+        "run_details": [
+          {
+            "current_steps": [
+              {
+                "assignee": "agent/example/atlas/migrator",
+                "claimant": "agent/example/atlas/migrator",
+                "id": "step-run/example/atlas/load-user-rename/1/step-2",
+                "since": "2030-01-01T11:39:00.000Z",
+                "state": "claimed",
+                "title": "Update call sites in packages/web"
+              },
+              {
+                "assignee": "agent/example/atlas/builder",
+                "claimant": "agent/example/atlas/builder",
+                "id": "step-run/example/atlas/load-user-rename/1/step-3",
+                "since": "2030-01-01T11:58:25.000Z",
+                "state": "blocked",
+                "title": "Fix the worker after the rename"
+              },
+              {
+                "assignee": null,
+                "claimant": null,
+                "id": "step-run/example/atlas/load-user-rename/1/step-5",
+                "since": "2030-01-01T11:48:00.000Z",
+                "state": "ready",
+                "title": "Update the users API reference"
+              }
+            ],
+            "generation_id": "run-generation/example/atlas/load-user-rename/1/g1",
+            "id": "mission-run/example/atlas/load-user-rename/1",
+            "must_act": "you",
+            "phase": "normal",
+            "progress": {
+              "done": 1,
+              "total": 5
+            },
+            "requester": "person/ada",
+            "state_since": "2030-01-01T11:58:25.000Z",
+            "status": "running",
+            "steps": [
+              {
+                "assignee": "agent/example/atlas/builder",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/atlas/builder",
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "Rename the export and its tests"
+                ],
+                "id": "step-run/example/atlas/load-user-rename/1/step-1",
+                "path": "step-1",
+                "since": "2030-01-01T11:30:00.000Z",
+                "state": "completed",
+                "title": "Rename fetchUser in packages/api"
+              },
+              {
+                "assignee": "agent/example/atlas/migrator",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/atlas/migrator",
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "Every web call site uses loadUser"
+                ],
+                "id": "step-run/example/atlas/load-user-rename/1/step-2",
+                "path": "step-2",
+                "since": "2030-01-01T11:39:00.000Z",
+                "state": "claimed",
+                "title": "Update call sites in packages/web"
+              },
+              {
+                "assignee": "agent/example/atlas/builder",
+                "attempt": 1,
+                "blocked_reason": "syncAvatars calls loadUser without the session",
+                "blockers": [],
+                "claimant": "agent/example/atlas/builder",
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "pnpm -r typecheck passes"
+                ],
+                "id": "step-run/example/atlas/load-user-rename/1/step-3",
+                "path": "step-3",
+                "since": "2030-01-01T11:58:25.000Z",
+                "state": "blocked",
+                "title": "Fix the worker after the rename"
+              },
+              {
+                "assignee": "agent/example/atlas/reviewer",
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": "agent/example/atlas/reviewer",
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "A person approves the rename"
+                ],
+                "id": "step-run/example/atlas/load-user-rename/1/step-4",
+                "path": "step-4",
+                "since": "2030-01-01T11:48:00.000Z",
+                "state": "waiting-person",
+                "title": "Review the rename"
+              },
+              {
+                "assignee": null,
+                "attempt": 1,
+                "blocked_reason": null,
+                "blockers": [],
+                "claimant": null,
+                "constraints": [
+                  "Keep the public API stable until the docs land"
+                ],
+                "goals": [
+                  "docs/api/users.md describes loadUser"
+                ],
+                "id": "step-run/example/atlas/load-user-rename/1/step-5",
+                "path": "step-5",
+                "since": "2030-01-01T11:48:00.000Z",
+                "state": "ready",
+                "title": "Update the users API reference"
+              }
+            ]
+          }
+        ],
         "run_generations": {
           "mission-run/example/atlas/load-user-rename/1": "run-generation/example/atlas/load-user-rename/1/g1"
         },
@@ -164,6 +521,42 @@
     },
     {
       "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/current_steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/current_steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/current_steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/state_since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/0/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/1/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/2/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/3/since"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/missions/0/run_details/0/steps/4/since"
+    },
+    {
+      "codec": "timestamp",
       "pointer": "/state/work/0/updated_at"
     },
     {
@@ -181,6 +574,18 @@
     {
       "codec": "timestamp",
       "pointer": "/state/work/4/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/launches/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/launch_variants/0/updated_at"
+    },
+    {
+      "codec": "timestamp",
+      "pointer": "/state/launch_variants/1/updated_at"
     }
   ],
   "variant": "default",

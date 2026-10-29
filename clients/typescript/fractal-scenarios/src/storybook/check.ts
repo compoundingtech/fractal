@@ -15,22 +15,24 @@ export type { ScenarioMountedWindow, ScenarioStoryParameter } from './index.ts'
 
 type ConversationEntry = World['slices']['conversation']['state']['threads'][number]['items'][number]
 
-// Each user content entry starts a turn; an assistant-only prefix is one turn.
-// This matches scenario-transcript.story-harness's threadTurns, without importing UI code.
+// Transcript mounts the final N source rows plus the latest user prompt. A source row is user or assistant text
+// content or a tool call, matching scenario-transcript.story-harness's threadTurns without importing UI code.
+// Scenario wire entries carry no reasoning, so Transcript's reasoning-run widening never applies here.
 const mountedEntries = (items: readonly ConversationEntry[], window?: ScenarioMountedWindow): readonly ConversationEntry[] => {
   if (window === undefined || window._tag === 'all') return items
-  if (!Number.isSafeInteger(window.turns) || window.turns <= 0
-    || !Number.isSafeInteger(window.historyBatch) || window.historyBatch < 0) return []
-  const starts: number[] = []
-  for (const [index, entry] of items.entries()) {
-    if (entry.type === 'content' && entry.role === 'user' && typeof entry.body.text === 'string') starts.push(index)
-    else if (starts.length === 0 && (entry.type === 'tool_call'
-      || entry.type === 'content' && entry.role === 'assistant' && typeof entry.body.text === 'string')) starts.push(index)
+  if (!Number.isSafeInteger(window.rows) || window.rows <= 0) return []
+  const rows = items.filter((entry) => entry.type === 'tool_call'
+    || entry.type === 'content' && (entry.role === 'user' || entry.role === 'assistant') && typeof entry.body.text === 'string')
+  if (rows.length <= window.rows) return items
+  const mounted = new Set(rows.slice(-window.rows))
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const entry = rows[index]!
+    if (entry.type === 'content' && entry.role === 'user') {
+      mounted.add(entry)
+      break
+    }
   }
-  // EmbraceScrollViewport mounts short conversations whole (tail + one history batch).
-  if (starts.length <= window.turns + window.historyBatch) return items
-  const start = starts[Math.max(0, starts.length - window.turns)]
-  return start === undefined ? [] : items.slice(start)
+  return items.filter((entry) => mounted.has(entry))
 }
 
 export type ScenarioCheck = 1 | 2 | 3 | 4 | 5
@@ -259,13 +261,12 @@ export const scenarioStoryCheck = <TArgs extends Args>(
   const initialMarkup = render(scenario)
   const activeKinds = parameter.slices.filter((kind) => parameter.invariant?.[kind] === undefined)
   const baseWorld = resolveScenarioWorld(parameter, { scenario, scenarioNow: now }, baselineArgs)
-  if (parameter.window?._tag === 'tail') {
+  if (parameter.window?._tag === 'sourceRows') {
     const window = parameter.window
     const atMs = options.atMs ?? 0
     const items = foldSlice(baseWorld.slices.conversation, atMs).state.threads.flatMap((thread) => mountedEntries(thread.items, window))
     const message = !declared.has('conversation') ? 'mounted window requires a declared conversation slice'
-      : !Number.isSafeInteger(window.turns) || window.turns <= 0 ? 'tail window turns must be a positive safe integer'
-      : !Number.isSafeInteger(window.historyBatch) || window.historyBatch < 0 ? 'tail window historyBatch must be a non-negative safe integer'
+      : !Number.isSafeInteger(window.rows) || window.rows <= 0 ? 'sourceRows window rows must be a positive safe integer'
       : items.length === 0 ? 'mounted window selects zero conversation entries'
       : markers(baseWorld, 'conversation', atMs).length > 0 && markers(baseWorld, 'conversation', atMs, window).length === 0 ? 'mounted window excludes every conversation marker'
       : undefined

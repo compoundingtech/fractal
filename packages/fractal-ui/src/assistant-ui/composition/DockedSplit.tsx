@@ -12,7 +12,8 @@ export const dockedSplitStorageKey = (persistKey: string) => `composition.${pers
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, Math.round(value)))
 
 /** The persisted width for `persistKey`, clamped to the bounds; the default when nothing valid is stored. */
-export function readDockedSize(persistKey: string, { min, max, defaultSize }: { readonly min: number; readonly max: number; readonly defaultSize: number }) {
+export function readDockedSize(persistKey: string | undefined, { min, max, defaultSize }: { readonly min: number; readonly max: number; readonly defaultSize: number }) {
+  if (persistKey === undefined) return clamp(defaultSize, min, max)
   let stored: number | undefined
   try {
     const raw = window.localStorage.getItem(dockedSplitStorageKey(persistKey))
@@ -22,8 +23,8 @@ export function readDockedSize(persistKey: string, { min, max, defaultSize }: { 
 }
 
 export interface DockedSplitProps {
-  /** Workspace-scoped key: each key keeps its own width; changing it restores that key's width. */
-  readonly persistKey: string
+  /** Workspace-scoped key; omitting it keeps the width in memory without reading or writing browser storage. */
+  readonly persistKey?: string
   /** Accessible name of the separator, e.g. "Resize changes". */
   readonly label: string
   /** The main pane. It keeps its DOM position whether or not a dock is shown, so its state and portals survive toggling. */
@@ -66,6 +67,7 @@ export function DockedSplit({ persistKey, label, children, dock, min = dockedSpl
     }
   }, [])
   const persist = React.useCallback((size: number) => {
+    if (persistKey === undefined) return
     try { window.localStorage.setItem(dockedSplitStorageKey(persistKey), String(size)) } catch { /* persistence is best-effort */ }
   }, [persistKey])
   const constrain = (size: number) => clamp(size, minimumRef.current, maximumRef.current)

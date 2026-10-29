@@ -311,7 +311,7 @@ not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, hold
 lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
-st3 integration fixtures use the separate `st3-fixture` executable, built automatically by
+Fractal integration fixtures use the separate `st3-fixture` executable, built automatically by
 the test-only `test-support` dev dependency. It captures an isolated Bash environment,
 reads only the fixture HOME's `.bash_profile`, preserves the fixture PATH, and ignores the
 launching seat's process ancestry. The production `st3` target has no runtime flag or
@@ -320,7 +320,7 @@ Fixture command helpers clear inherited `ST_AGENT`/`ST3_*`; temporary-repository
 isolate global/system config, hooks, signing and author identity on each command. Real
 repository commits keep the host's Git policy. Run the same suite from an agent seat with
 `nix develop --command cargo nextest run -p fractal -p fractal-daemon --locked --profile ci --retries 0`.
-Provider fixtures that load st3 extensions publish their isolated hook set with
+Provider fixtures that load Fractal extensions publish their isolated hook set with
 `fractal_daemon::hooks::ensure_installed`, preserving every declared asset and relative import.
 
 Boot, delivery-probe and messaging-fault fixtures put large executable copies in Cargo's target scratch
@@ -329,7 +329,7 @@ host's temporary-filesystem quota when debug binaries are copied by parallel cas
 
 On Linux, tests that launch isolated daemons, drivers, PTYs or long-lived CLI children call
 `fractal_daemon::test_support::supervise_test()` before creating their fixtures. It runs that exact test
-under `scripts/st3_test_process.py`, a detached subreaper watching pidfds for the Rust runner
+under `scripts/fractal_test_process.py`, a detached subreaper watching pidfds for the Rust runner
 and its launcher. Success, failure, panic, timeout, SIGTERM and SIGKILL of the runner all
 end the owned process tree. Each test has its own process group; detached children are
 adopted and killed and reaped before the supervisor returns the test's status. Exited adopted
@@ -350,7 +350,7 @@ their tasks end with their test runtime. New process-spawning fixtures should us
 The workspace suite still covers the token-free two-node messaging fault matrix. Its
 previous-release channel archive is pinned in `.github/messaging-compat-baseline.json`. Its
 provider stand-in runs the omp channel hook's TypeScript with Node 24's built-in type stripping;
-the default devShell supplies that `node`. See [the eval contract](../evals/st3/messaging-faults/README.md).
+the default devShell supplies that `node`. See [the eval contract](../evals/fractal/messaging-faults/README.md).
 
 ### Rolling compatibility baselines
 
@@ -415,12 +415,12 @@ workflows in the ordinary final validation.
 
 ### Boot canaries
 
-`boot_canaries::*` in `linux-tests` boots real seats of every harness st drives (Claude, Codex, pi,
-omp, OpenCode) against a real st3 daemon and real `pty` sessions, with a token-free stand-in for
-the provider (`scripts/st3-boot-canaries`; see its README). Five scenarios per harness: a fresh
+`boot_canaries::*` in `linux-tests` boots real seats of every harness Fractal drives (Claude, Codex, pi,
+omp, OpenCode) against a real Fractal daemon and real `pty` sessions, with a token-free stand-in for
+the provider (`scripts/fractal-boot-canaries`; see its README). Five scenarios per harness: a fresh
 seat, a restarted seat, a daemon restart while the predecessor is still the latest runtime
 observation, a driver re-exec into a replaced binary, and five seats launching at once. Each seat
-must claim its step with its current incarnation and read an st message within the time bound, and
+must claim its step with its current incarnation and read a Fractal message within the time bound, and
 must not park in the crash-loop guard. The stand-ins answer instantly, where real providers take
 seconds, so a race between a provider and the daemon fails here every time instead of on whichever
 launch loses it. These cases never retry: a pass on the second attempt is the race the canary
@@ -490,10 +490,10 @@ still cannot increase. Run the ratchet's focused regression proofs with
 
 ### Gate scope
 
-The gate covers st3 and the code st3 uses. The `ci` profile's `default-filter` in
+The gate covers Fractal and the code Fractal uses. The `ci` profile's `default-filter` in
 `.config/nextest.toml` selects it on every event, with no path filter or scheduled full run:
 
-- every test of the other workspace crates: st3, fractal-client, fractal-client-codegen, fractal-schema,
+- every test of the other workspace crates: Fractal, fractal-client, fractal-client-codegen, fractal-schema,
   fractal-migrate, Fractal TUI (the terminal UI library), fractal-runtime, fractal-drivers (the harness drivers, channels, hooks, messages,
   harness state and sessions st3 and st2 share) and the shared and resource-provider crates;
 - st2's integration test files, apart from those below.
@@ -517,7 +517,7 @@ library directly, rather than by the legacy runner CLI.
 Outside GitHub Actions on Linux, `scripts/ci-nextest run` keeps the tests' temporary files in a
 per-run directory `/dev/shm/st-nextest.XXXXXX` (removed when the run ends) when `TMPDIR` is unset,
 `/tmp` or `/var/tmp` and `/dev/shm` has 4 GiB free. The file-backed SQLite stores sync every WAL
-commit, and that wait is most of the wall time of the tests that use them (the st3 library set
+commit, and that wait is most of the wall time of the tests that use them (the Fractal library set
 measured 251 s on tmpfs against 407 s on disk with the same CPU, about 0.5 GiB of scratch either
 way). The 4 GiB check is made at start and reserves nothing: concurrent local runs share that RAM. A run
 killed with SIGKILL leaves its directory in RAM until reboot; sweep with
@@ -534,8 +534,8 @@ existing scope.
 
 ### Current-product boundary
 
-Every required Linux stage runs `scripts/check-st-boundary-test` and
-`scripts/check-st-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
+Every required Linux stage runs `scripts/check-fractal-boundary-test` and
+`scripts/check-fractal-boundary`. The source guard rejects `fractal_legacy_runner::` imports and `extern crate st2`
 in st3/Fractal TUI, plus direct, renamed or indirect workspace dependencies on st2 (including
 optional and target-specific dependencies). st2 remains independently buildable/testable.
 
@@ -604,9 +604,16 @@ inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack s
 The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
 are disabled by the workspace configuration.
 The store cache key is
-`typescript-client-<os>-node24.18.0-pnpm12.7.0-<sha256 of pnpm-lock.yaml>`.
+`typescript-client-<os>-node24.18.0-pnpm12.15.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
+
+The effect-utils GVS shared-store default and `pnpm:store:retire` task do not
+relocate this workspace's stores: Fractal uses the hoisted linker, a plain
+`nix develop .#web` shell (not the upstream pnpm devenv tasks), explicit
+`${{ runner.temp }}/pnpm-store` in CI, and a sandbox-local `$TMPDIR/store`
+for the fixed-output installation. Store cache keys track pnpm 12.15.0;
+no legacy-store retirement is needed for this cutover.
 
 After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
 contract/schema tests and both compiler projects, the views' tests and typecheck,
@@ -657,6 +664,8 @@ their sandbox flags and declared-input boundary remain unchanged.
   the final commit). `--no-renames` counts both sides of a rename. Missing or malformed
   SHAs, failed fetches and failed diffs conservatively select every web lane, including
   kit plays, with a warning; `workflow_dispatch` also forces all lanes.
+  Kit inputs explicitly include the raw PTY terminal surface and its bundled runtime
+  dependencies; terminal unit tests alone do not select kit plays.
   Relevant paths are `apps/fractal-web/**`, `packages/fractal-ui/**`,
   `clients/typescript/fractal-views/**`, `clients/typescript/fractal-scenarios/**` and `fixtures/**`.
   Within `clients/typescript/fractal-client`, only the consumed export graph (`index.ts`,
@@ -683,7 +692,7 @@ their sandbox flags and declared-input boundary remain unchanged.
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
-  `fractal-web-pnpm-<os>-pnpm12.7.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  `fractal-web-pnpm-<os>-pnpm12.15.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
@@ -927,7 +936,7 @@ Calling-thread CPU excludes host descheduling and unrelated Node worker-thread C
 Each report includes all samples and host load averages; load never skips the lane or
 changes its thresholds.
 
-The web shell supplies pnpm 12.7.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+The web shell supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
 mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching
@@ -1264,7 +1273,7 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which st3 builds in. It is
+The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which Fractal builds in. It is
 the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
@@ -1473,7 +1482,7 @@ Apply the fifth live ruleset check after this workflow has passed on main.
 All workflow YAML and `.github/repo-settings.json` are generated from neighboring `.genie.ts`
 files. The `effect-utils` flake input supplies the genie CLI and the `effect-utils` member in
 `megarepo.lock` supplies the generator library: run `mr apply` first, which links
-`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/st-test` run the same command; the small,
+`repos/effect-utils` (CI's `megarepoApplyStep` and `scripts/fractal-test` run the same command; the small,
 separate `genie` shell only warns when it is missing). `repos/` is ignored. No local `node_modules` or megarepo adoption is needed. The default Rust
 shell is not changed to depend on genie, so generation does not build its PTY/collector tools.
 
@@ -1493,7 +1502,7 @@ repo-settings changes have merged.
 | --- | --- |
 | `fleet.yml` | The old fork-only fleet compatibility job is absorbed into `linux-gate`, which now covers every PR and main. This preserves fork coverage and adds same-repository coverage on Namespace. |
 | `nix.yml` | Build the package and all native checks on tags, relevant trusted PRs, dispatch, and daily at 01:17 UTC. Use ci1's persistent Nix store and GC roots; verify a repeat with downloads and builds disabled. No Actions cache or FlakeHub dependency. Forks use the public Linux gate. |
-| `release-smalltalk.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
+| `release-fractal.yml` | Preserve tag/dispatch/fork-PR triggers, target packaging, source verification and publishing permissions. Move Linux and ARM macOS runners to Namespace. Also run on every `main` push, keeping the archives as 7-day artifacts, so release breakage fails on `main` (not required for merging). |
 | `debug-assertions-daily.yml` | New. Once a day (03:41 UTC) and on dispatch, never on pull requests: builds and runs the whole required test set with `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=true CARGO_PROFILE_TEST_DEBUG_ASSERTIONS=true`, because the dev and test profiles build without debug assertions (see Debug assertions). A failure opens, or comments on, one open issue titled `Daily debug-assertions run failed`. Not a required check. |
 | `daily-long.yml` | New. Once a day (05:07 UTC) and on dispatch, `main` only: runs `isolation-vm`, `mail-redelivery-canaries` and `linux-fleet-compat` as Workspace CI does and the whole test selection at `ST_TEST_SCALE=full`, then reports each lane's time and failures and opens or comments on one issue titled `Daily long-lane run failed` on red (see Daily long lanes). Not a required check. |
 | `release-daily.yml` | New. Once a day, publish the archives of the newest successful `main` release run when `main` changed since the last release; see [binary releases](st3/binary-releases.md#daily-releases). |
@@ -1531,11 +1540,10 @@ branch deletion after merge. Check the live settings against the file with `gh-c
 nix run github:overengineeringstudio/effect-utils/3089f7e1faa82d7a4cb4de0e8d485164f837708b#gh-check-settings -- --repo compoundingtech/fractal --file .github/repo-settings.json
 ```
 
-A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no deletion, no update and
-no force push, an empty bypass list, creation open (CI and agents create records). Its enforcement is turned off only by
-`scripts/evidence-gc --lock-config`, around its own tag deletions, logged and relocked in a `finally`; see
-[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace). `gh-check-settings` reports it
-as drifted during that window.
+A second ruleset, `evidence-tags`, protects the evidence records (`refs/tags/evidence/**`): no update and no force push,
+an empty bypass list, creation open (CI and agents create records) and deletion open, so `scripts/evidence-gc` deletes
+dead trees with its host's own login; see
+[gate evidence](st3/gate-evidence.md#garbage-collection-and-the-size-of-the-namespace).
 
 `st/ci` is no longer required. Its producer on the fleet's machines is retired after the first
 pull request has merged through the queue.
@@ -1740,10 +1748,10 @@ producer attempt, toolchain and individual file hashes are still checked before 
 The job logs the ZIP size/digest and transfer attempt. This protects the transfer boundary;
 it does not establish the cause of earlier digest mismatches or a measured speedup.
 
-## Tests the sandboxed st3 check does not run
+## Tests the sandboxed Fractal check does not run
 
-`checks.st3` (the Nix build of the st3 workspace's tests) leaves out the tests named in
-`nix/st3-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
+`checks.st3` (the Nix build of the Fractal workspace's tests) leaves out the tests named in
+`nix/fractal-check-exclusions.json`, because the Nix build sandbox cannot give them what they need.
 Today these are 14 `setup::` and 12 `otel_export::` integration tests, which need a login shell the
 sandbox user does not have (the `otel_export` output says so in so many words; for the 14th `setup::`
 test the cause is inferred from the identical daemon exit status). Each entry has a reason, an owner and where it runs instead: central CI's `linux-tests`

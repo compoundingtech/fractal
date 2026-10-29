@@ -6,7 +6,7 @@ import stylex from '@stylexjs/unplugin'
 const server = await createServer({ configFile: false, root: new URL('../../', import.meta.url).pathname, plugins: [stylex.vite({ useCSSLayers: false })], optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true } })
 after(() => server.close())
 const { formatClock, formatDay, formatDuration, formatRelative, nextCivilChange, nextCountdownChange, nextDurationChange, nextRelativeChange, earliestChange } = await server.ssrLoadModule('/src/time/human-time.ts')
-const { syncLine, syncLineNextChange } = await server.ssrLoadModule('/src/assistant-ui/st3-views/sync-line.ts')
+const { syncLine, syncLineNextChange } = await server.ssrLoadModule('/src/assistant-ui/sync-presentation/sync-line.ts')
 
 const zone = { locale: 'en-GB', timeZone: 'Europe/Berlin' }
 const base = Date.parse('2026-10-14T21:47:13.250Z')

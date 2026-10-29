@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.dont_write_bytecode = True
 ROOT = Path(__file__).resolve().parent.parent
@@ -503,7 +504,7 @@ OBSERVED = 'github:org/repo/actions/runs/7/attempts/1/jobs/9'
 
 # The checks whose committed skip policy says enforce: true (pull requests only). Each flip is its own reviewed change.
 ENFORCED = ('typescript-client', 'fractal-web', 'linux-gate', 'genie-freshness', 'ci-script-tests')
-# The checks a host or agent may sign (scripts/st-test's LOCAL table), and those of them whose host note is held to the lane.
+# The checks a host or agent may sign (scripts/fractal-test's LOCAL table), and those of them whose host note is held to the lane.
 # isolation-vm and mail-redelivery-canaries run daily only (2026-10-23): no policy entry, no lane, no local command.
 HOST_CHECKS = frozenset({'genie-freshness', 'ci-script-tests', 'typescript-client', 'linux-gate', 'fractal-web', 'rust-tests'})
 HOST_LANE_BOUND = frozenset({'linux-gate', 'fractal-web', 'rust-tests'})
@@ -1510,7 +1511,7 @@ class CommittedPolicy(unittest.TestCase):
             self.assertEqual(policy['checks'][check].get('enforce', False), check in ENFORCED, check)
             rules = self.rules(check)
             self.assertEqual(rules['kinds']['wrapper']['by_level']['host']['events'], ['pull_request'])
-        # The commands are the ones scripts/st-test records, so a local note can match.
+        # The commands are the ones scripts/fractal-test records, so a local note can match.
         script = ROOT / 'scripts/st-test'
         if script.exists():
             loader = importlib.machinery.SourceFileLoader('st_test_policy', str(script))
@@ -1620,7 +1621,7 @@ class CommittedPolicy(unittest.TestCase):
         self.assertEqual(web['kinds']['wrapper']['bind_inputs'], {'flake_lock_sha256': 'flake.lock'})
         # Its shard inputs are values, not just present: every shard a success, and one shard on a pull request.
         self.assertEqual(web['kinds']['wrapper']['shard_inputs'],
-                         {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1})
+                         {'count': 'kit_shard_count', 'results': 'shard_results', 'pull_request_count': 1, 'index': 'kit_shard'})
         # A note made without kit plays covers only a run whose own change detection says the kit did not change either.
         self.assertEqual(web['kinds']['wrapper']['input_order'], {'kit_inputs': ['true', 'false']})
 
@@ -1713,6 +1714,22 @@ class MembersLogView(unittest.TestCase):
         self.log({self.keys['base']: [base]})
         view = self.view({'base': base, 'top': top})
         self.assertEqual((view['log'], view['log_missing'], view['log_unlogged']), ('unlogged_pass', 0, 1), view)
+        self.assertEqual((view['log_unlogged_crates'], view['log_unlogged_observed_at']), (f'top={top[:12]}', None), view)
+
+    def test_an_unlogged_pass_names_its_first_members_and_the_oldest_of_their_observed_at(self):
+        base, top = self.record('base'), self.record('top')
+        self.log({})
+        times = {'base': '2026-10-25T20:30:00Z', 'top': '2026-10-25T20:28:02Z'}
+        view = evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                {crate: (self.keys[crate], {'base': base, 'top': top}[crate], times[crate])
+                                                 for crate in self.keys}, now=NOW + timedelta(seconds=30))
+        self.assertEqual((view['log'], view['log_unlogged'], view['log_unlogged_crates'], view['log_unlogged_observed_at']),
+                         ('unlogged_pass', 2, f'base={base[:12]}+top={top[:12]}', '2026-10-25T20:28:02Z'), view)
+        with mock.patch.object(evidence_verify, 'UNLOGGED_SHOWN', 1):
+            view = evidence_verify.members_log_view(str(self.f.repo), str(self.log_keys), self.tree, self.CHECK,
+                                                    {crate: (self.keys[crate], {'base': base, 'top': top}[crate]) for crate in self.keys},
+                                                    now=NOW + timedelta(seconds=30))
+        self.assertEqual((view['log_unlogged_crates'], view['log_unlogged_observed_at']), (f'base={base[:12]}+1_more', None), view)
 
     def test_a_record_the_log_lists_under_a_members_key_that_is_not_here_is_missing_with_or_without_a_choice(self):
         base, top = self.record('base'), self.record('top')

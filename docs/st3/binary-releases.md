@@ -78,8 +78,8 @@ An extracted archive can also be installed with `./install.sh --bin-dir
 command payload is `st3`, the relative `fractal` and `st` links, and `pty`. The source migration
 tool remains available as the separate `fractal-migrate` Cargo package.
 
-`fractal` opens the same terminal interface; `fractal tui` opens it explicitly, and
-`fractal web` opens the web interface. Other arguments behave like `st`. Release and
+The opt-in `fractal` alias opens the same terminal interface; `st ui` opens it explicitly, and
+`st web` opens the web interface. Other arguments behave like `st`. Release and
 source installers add `fractal -> st3` only when the destination is free or already
 links to this installation's `st3`. They leave foreign files, directories and links
 intact, and do not introduce the alias when a foreign `fractal` exists elsewhere on
@@ -89,7 +89,7 @@ own `~/.st-instance/NAME/bin`, not the default command directory. Default Nix an
 Home Manager installations do not expose `fractal`; those paths require explicit opt-in.
 
 Bare `fractal` follows bare `st`'s first-run setup and terminal/agent guards;
-`fractal tui` follows explicit `st ui`. Setup records an owned `fractal` symlink
+The alias also forwards explicit UI commands. Setup records an owned `fractal` symlink
 in its uninstall manifest. Uninstall also discovers that alias beside a recorded
 `st3` when upgrading an older manifest, and preserves a foreign replacement of
 `fractal`, including inside a named instance. The ownership check applies only to
@@ -129,13 +129,13 @@ installing files.
 
 Every commit on `main`, PRs changing release files and manual **Run workflow** invocations run both native builds,
 archive extraction, a temporary-directory installation, CLI help checks, the TUI PTY smoke suite,
-and combined checksum/source validation. They upload `smalltalk-release` as an Actions artifact
+and combined checksum/source validation. They upload `fractal-release` as an Actions artifact
 (kept 7 days) and never publish a GitHub release, so release breakage fails on `main` and not at tag
 time. Each native job also uploads its own archive and checksum as `release-<target>`, for example
 `release-x86_64-unknown-linux-gnu`; once a main commit's run has succeeded,
 `gh run download RUN_ID --repo compoundingtech/fractal --name release-x86_64-unknown-linux-gnu`
 fetches that commit's Linux archive without building it (find RUN_ID with
-`gh run list --workflow release-smalltalk.yml --branch main --commit SHA`). Tag pushes use the same jobs, then verify that the tag still
+`gh run list --workflow release-fractal.yml --branch main --commit SHA`). Tag pushes use the same jobs, then verify that the tag still
 points at the built commit, upload a draft, and publish it only after every asset is present.
 Existing releases are not overwritten. If publication fails leaving a draft, inspect and remove
 that draft before rerunning the publish job; never move a published tag.
@@ -154,9 +154,9 @@ GitHub's Actions cache nor FlakeHub. The `nix-release-proof` artifact records th
 targets, and output paths. The scheduled check starts four hours before the daily release schedule
 to catch package breakage early.
 
-The st3 Nix check uses nextest to give each test its own process, including CPU-budget and
+The Fractal Nix check uses nextest to give each test its own process, including CPU-budget and
 delivery-presence fixtures. Python, Node, and the Linux process utilities are declared test inputs;
-the st3 messaging compatibility binary is the published release archive pinned by
+the Fractal messaging compatibility binary is the published release archive pinned by
 `.github/messaging-compat-baseline.json` and supplied through `ST3_MESSAGING_COMPAT_BIN` by the check’s `preCheck` inside the sandbox.
 The native runtime suite and documentation tests remain covered.
 
@@ -164,7 +164,7 @@ The native runtime suite and documentation tests remain covered.
 
 After a `main` run of **Fractal tag release** passes every job, its last job (`release-publish-edge`)
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
-one release per commit. It builds nothing: it takes the run's `smalltalk-release` artifact, re-checks the
+one release per commit. It builds nothing: it takes the run's `fractal-release` artifact, re-checks the
 checksums and the source recorded in each archive, then replaces the assets (both target archives and
 their compatibility archives, their `.sha256` files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
 source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
@@ -178,20 +178,24 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
   backwards. Runs are serialized. While assets are being replaced, a download can briefly pair a new
   archive with an old checksum; the installer fails closed on the mismatch, so retry after a minute.
 - The `edge` tag is excluded from the tag trigger, and a tag moved with the workflow's token starts no workflow.
-- `scripts/release-smalltalk-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
+- `scripts/release-fractal-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
   and prints the notes without publishing.
 
 ## Daily releases
 
 **Fractal daily release** (`release-daily.yml`) runs at 05:17 UTC and on manual dispatch. It takes the
 newest `main` commit whose release run succeeded; if that commit is not already in the latest
-release, it re-checks the checksums and sources of that run's `smalltalk-release` artifact, publishes
+release, it re-checks the checksums and sources of that run's `fractal-release` artifact, publishes
 those same bytes under the next patch tag (the highest `vX.Y.Z` tag plus one; dispatch with `tag` to
 choose another), and lists the merged pull request titles since the previous release in the notes.
 Nothing is rebuilt, and the tag is created at that exact commit with the workflow's own token, so it
 does not start a second tag build. There are no version-bump commits. Archives from these releases
-carry no tag in `BUILD.json`; `source` identifies the commit. `scripts/release-smalltalk-daily
+carry no tag in `BUILD.json`; `source` identifies the commit. `scripts/release-fractal-daily
 --dry-run` prints what would be published without publishing.
+
+The downloader prefers `fractal-release` and also accepts `smalltalk-release` from older
+successful runs until those 7-day artifacts expire
+(`arn:lmig:smalltalk:2026-10-26-release-artifact-name`, sunset 2026-11-01).
 
 Daily, manual dispatch, and tag publication use the same source-pinned **Upgrade impact**
 section before the change list, and attach `UPGRADE-IMPACT.json`. It describes replay,

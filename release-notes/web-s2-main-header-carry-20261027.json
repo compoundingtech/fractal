@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Carry current main transcript headers into OMP child transcript tabs",
+  "replay": {"status": "none", "detail": "The merge preserves native transcript projection and child summary behavior without changing stored data."},
+  "schema": {"status": "none", "detail": "No additional wire schema changes; web conversation pages retain both native headers and child summaries."},
+  "rules": {"status": "none", "detail": "No additional claim rule or digest changes."},
+  "compatibility": {"status": "none", "detail": "Both native header metadata and opaque child conversation identities remain available to their existing consumers."},
+  "downtime": {"status": "none", "detail": "No additional downtime required."},
+  "manual": {"status": "none", "detail": "No additional manual action required."},
+  "recovery": {"status": "none", "detail": "No persisted data changes or recovery required by the merge."}
+}

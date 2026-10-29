@@ -19,7 +19,7 @@ each other holds.
 
 This document explains how a checkpoint works and what trimming drops, with examples. It describes
 the code in `crates/smallclaims/src/store/checkpoint*.rs` (agreement, proof, trim),
-`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for st's own claim
+`crates/fractal-schema/retention.toml` (the retention policy, which names the rules for Fractal's own claim
 kinds; see [Retention](retention.md)) and `crates/fractal-store/src/store/checkpoint_rules.rs` (the planner
 functions those rules name). Operating commands
 are in [Fleet replication](replication.md#checkpoints). Read this before changing a rule, the

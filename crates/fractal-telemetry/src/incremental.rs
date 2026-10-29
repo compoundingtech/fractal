@@ -447,7 +447,42 @@ impl Incremental {
             .is_none_or(|item| item.dirty || item.due.is_some_and(|due| due <= now))
     }
 
-    /// Remember what `item`'s evaluation read and when its result could next change with time.
+    /// The items named with `prefix` that read something the feed has after `cursor`, in name
+    /// order, and the cursor to pass next time. With no cursor it starts where the passes' own
+    /// reading of the feed is. Unlike [`Self::observe`], it marks nothing and leaves the passes'
+    /// place in the feed alone: an evaluation clears its item's mark, so a mark set from another
+    /// thread while a pass evaluates that item would be lost until the next full pass.
+    pub fn readers_since<S: ChangeSource + ?Sized>(
+        &self,
+        store: &S,
+        cursor: Option<(u64, i64)>,
+        prefix: &str,
+    ) -> Result<((u64, i64), Vec<String>)> {
+        let watermark = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .watermark;
+        let Some((index, local)) = cursor.or(watermark) else {
+            let feed = store.changes_since(i64::MAX as u64, i64::MAX)?;
+            return Ok(((feed.index, feed.local), Vec::new()));
+        };
+        let feed = store.changes_since(index, local)?;
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let readers = feed
+            .changes
+            .iter()
+            .flat_map(change_keys)
+            .flat_map(|key| state.readers.get(&key).into_iter().flatten())
+            .filter(|item| item.starts_with(prefix))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        Ok(((feed.index, feed.local), readers.into_iter().collect()))
+    }
+
     pub fn evaluated(&self, item: &str, reads: BTreeSet<String>, due: Option<u128>) {
         let mut state = self
             .state
@@ -610,6 +645,45 @@ mod tests {
         );
         assert_eq!(split_watch_subject("subscription/watch/acme/garden/x/planner"), None);
         assert_eq!(split_watch_subject("intent/acme/garden/12/planner"), None);
+    }
+
+    /// Every change so far; an index is how many of them a reader has seen.
+    struct Feed(Mutex<Vec<Change>>);
+
+    impl ChangeSource for Feed {
+        fn changes_since(&self, index: u64, _local: i64) -> Result<ChangeFeed> {
+            let changes = self.0.lock().unwrap();
+            let seen = usize::try_from(index).unwrap_or(usize::MAX).min(changes.len());
+            Ok(ChangeFeed {
+                index: changes.len() as u64,
+                local: 0,
+                changes: changes[seen..].to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn readers_since_names_the_readers_of_a_change_and_leaves_the_passes_marks_alone() {
+        let feed = Feed(Mutex::new(Vec::new()));
+        let incremental = Incremental::default();
+        incremental.observe(&feed).unwrap();
+        let reads = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect();
+        incremental.evaluated("mission-run/a", reads(&["resource/x"]), None);
+        incremental.evaluated("mission-run/b", reads(&["resource/y"]), None);
+        incremental.evaluated("stop/c", reads(&["resource/x"]), None);
+        feed.0.lock().unwrap().push(change("resource/x", "resource.observed", None, "{}"));
+
+        let (cursor, readers) = incremental.readers_since(&feed, None, "mission-run/").unwrap();
+        assert_eq!(readers, ["mission-run/a"]);
+        let (_, again) = incremental.readers_since(&feed, Some(cursor), "mission-run/").unwrap();
+        assert!(again.is_empty());
+
+        // It marked nothing, and the passes still read the change from where they were.
+        assert!(!incremental.needs("stop/c", 0));
+        incremental.observe(&feed).unwrap();
+        assert!(incremental.needs("stop/c", 0));
+        assert!(incremental.needs("mission-run/a", 0));
+        assert!(!incremental.needs("mission-run/b", 0));
     }
 
     fn change(subject: &str, kind: &str, actor: Option<&str>, body: &str) -> Change {

@@ -822,7 +822,7 @@ impl Args {
 
 /// What `st ui --classic` says now that spaces are Fractal TUI's only layout.
 const CLASSIC_GONE: &str =
-    "The classic layout is gone: run plain `fractal ui`, or `fractal ui --space NAME` to open a named space";
+    "The classic layout is gone: run plain `fractal tui`, or `fractal tui --space NAME` to open a named space";
 
 /// `st ui open`: ask this person's terminal interface on this machine to show a subject, and
 /// say plainly what happened.
@@ -906,7 +906,7 @@ pub fn run(mut options: Args) -> Result<()> {
         return ui::run_demo(&args);
     }
     if !io::stdout().is_terminal() {
-        anyhow::bail!("fractal ui needs an interactive terminal");
+        anyhow::bail!("fractal tui needs an interactive terminal");
     }
     let _quality_session = ui::slo::Session::start();
     let stopping = Arc::new(AtomicBool::new(false));
@@ -1027,13 +1027,13 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            error.contains("plain `fractal ui`") && error.contains("`fractal ui --space NAME`"),
+            error.contains("plain `fractal tui`") && error.contains("`fractal tui --space NAME`"),
             "{error}"
         );
     }
 
     #[test]
-    fn a_closed_look_that_does_not_hold_never_ends_stui_and_a_hangup_does() {
+    fn a_closed_look_that_does_not_hold_never_ends_tui_and_a_hangup_does() {
         let mut run = 0;
         // Looks that find the terminal closed now and then, with keys arriving between them,
         // never add up.
@@ -1357,22 +1357,19 @@ mission "release" state="ready" {
                     idempotency_key: "release-run".into(),
                 })
                 .unwrap();
-            let state = fractal_daemon::api::AppState {
-                owning_person: None,
-                store: store.clone(),
-                notify: Arc::new(tokio::sync::Notify::new()),
-                event_notify: tokio::sync::watch::channel(0_u64).0,
-                node: node.into(),
-                state_dir: root.path().into(),
-                pty_root: root.path().join("pty"),
-                pty_binary: root.path().join("unused-pty"),
-                fleet_id: None,
-                configured_peers: vec![],
-                client_relay: None,
-                native_session_home: None,
-                planner_default: fractal_daemon::model::PlannerSpec::default(),
-                assistant_receipts: Default::default(),
-            };
+            let state = fractal_daemon::api::AppState { owning_person: None,
+            store: store.clone(),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: root.path().join("unused-pty"),
+            fleet_id: None,
+            configured_peers: vec![],
+            client_relay: None,
+            native_session_home: None,
+            planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
             let socket = root.path().join("st3.sock");
             let server_socket = socket.clone();
             let served_state = state.clone();

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Operational failure episodes are folded again only when an operational failure or recovery claim was added or trimmed, not on every lookup of one episode",
+  "replay": {"status": "none", "detail": "No claim, projection or replay change."},
+  "schema": {"status": "none", "detail": "No table, index or migration change; the key is read from claims_kind_index."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests unchanged; a trim lowers the count, so the next lookup folds the claims that remain."},
+  "compatibility": {"status": "none", "detail": "The same episodes, statuses and order."},
+  "downtime": {"status": "none", "detail": "Normal restart on deploy."},
+  "manual": {"status": "none", "detail": "Nothing to configure."},
+  "recovery": {"status": "none", "detail": "Swapping back to an older build restores the fold on every lookup; the episodes are kept in memory only."}
+}

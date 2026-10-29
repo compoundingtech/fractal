@@ -11,12 +11,12 @@ export const StaleReason = Schema.Union([
   Schema.TaggedStruct('Reconnecting', { attempt: Count, nextAt: Timestamp, issue: Schema.String }),
   Schema.TaggedStruct('Evicted', {}),
   Schema.TaggedStruct('Unknown', {}),
-]).annotate({ identifier: 'St3.StaleReason' })
+]).annotate({ identifier: 'Fractal.StaleReason' })
 export const SyncFailureCause = Schema.Union([
   Schema.TaggedStruct('Server', { code: Schema.NonEmptyString, message: Schema.String }),
   Schema.TaggedStruct('Local', { kind: Schema.NonEmptyString, detail: Schema.optional(Schema.Struct({ cap: Schema.optional(Count), message: Schema.optional(Schema.String) })) }),
   Schema.TaggedStruct('Unknown', {}),
-]).annotate({ identifier: 'St3.SyncFailureCause' })
+]).annotate({ identifier: 'Fractal.SyncFailureCause' })
 export const SyncStatus = Schema.Union([
   Schema.TaggedStruct('Connecting', { attempt: Count, since: Timestamp }),
   Schema.TaggedStruct('Requested', { since: Timestamp }),
@@ -24,8 +24,8 @@ export const SyncStatus = Schema.Union([
   Schema.TaggedStruct('Live', { since: Timestamp, snapshot: Schema.optional(Schema.Unknown) }),
   Schema.TaggedStruct('Stale', { reason: StaleReason, lastLiveAt: Schema.optional(Timestamp) }),
   Schema.TaggedStruct('Failed', { cause: SyncFailureCause }),
-]).annotate({ identifier: 'St3.SyncStatus' })
-export const St3 = { SyncStatus, SyncStage, StaleReason, SyncFailureCause } as const
+]).annotate({ identifier: 'Fractal.SyncStatus' })
+export const Fractal = { SyncStatus, SyncStage, StaleReason, SyncFailureCause } as const
 
 type Equal<TA, TB> = (<T>() => T extends TA ? 1 : 2) extends (<T>() => T extends TB ? 1 : 2) ? true : false
 type Assert<T extends true> = T

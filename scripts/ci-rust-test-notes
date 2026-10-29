@@ -22,11 +22,11 @@ and it ran at least one test, unless the accepted base lists it under `no_tests`
 scripts/evidence-verify applies to every per-crate note). The other crates get no note at all, so a failure is never hidden
 behind a record either way.
 
-The key of each crate is computed exactly as scripts/st-test computes it: the accepted base's scripts/rust-test-keys over the
+The key of each crate is computed exactly as scripts/fractal-test computes it: the accepted base's scripts/rust-test-keys over the
 tested tree, with the base's .st/rust-test-inputs.json and the base's scripts/evidence-verify projection. The record is the one
-st-test signs (command `python3 scripts/ci-rust-test-result`, its output digest over this crate's part of the union report, and
+fractal-test signs (command `python3 scripts/ci-rust-test-result`, its output digest over this crate's part of the union report, and
 the inputs crate, source_inputs, tests_run, tests_ignored, test_list_sha256, ignored_list_sha256, filterset, run_command_sha256),
-so the rust-tests policy entry judges it as it judges st-test's. Every script used comes from the base commit (the directory this
+so the rust-tests policy entry judges it as it judges fractal-test's. Every script used comes from the base commit (the directory this
 script is in), never from the tree under test.
 
 Exit 0: done (sign: every planned crate signed). Exit 1: refused or failed, with a ::warning:: that says why; the job is fail-soft.
@@ -47,7 +47,7 @@ sys.dont_write_bytecode = True
 
 HERE = Path(__file__).resolve().parent
 CHECK = 'rust-tests'
-COMMAND = ['python3', 'scripts/ci-rust-test-result']  # the rust-tests policy entry's wrapper command, as st-test records it
+COMMAND = ['python3', 'scripts/ci-rust-test-result']  # the rust-tests policy entry's wrapper command, as fractal-test records it
 STAGE_COMMAND = ['bash', 'scripts/ci-linux', 'tests']
 SIGNING_EVENTS = {
     'merge_group': ['refs/heads/gh-readonly-queue/*'],
@@ -212,7 +212,7 @@ def base_file(base, path):
 
 
 def crate_keys(base, tree, scratch):
-    """{crate: key} for the tested tree, the way scripts/st-test's crate_keys computes it once the base's policy judges rust-tests: the
+    """{crate: key} for the tested tree, the way scripts/fractal-test's crate_keys computes it once the base's policy judges rust-tests: the
     base's rust-test-keys and inputs file and the base's evidence-verify projection, never the tree's own copies."""
     tool, verifier = HERE / 'rust-test-keys', HERE / 'evidence-verify'
     if not (tool.exists() and verifier.exists()) or base_file(base, '.st/rust-test-inputs.json') is None:

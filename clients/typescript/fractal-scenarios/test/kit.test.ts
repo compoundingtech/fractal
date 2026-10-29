@@ -11,6 +11,7 @@ import { describe, expect } from 'vitest'
 import { ANCHOR, ANCHOR_MS, catalog, loadWorld, parseTimestamp, rebase, SLICE_KINDS, TimeRangeError, type AnySlice } from '../src/index.ts'
 import type { Asciicast } from '../src/kit/asciicast.ts'
 import { screenAt } from '../src/kit/screen.ts'
+import { foldSlice } from '../src/kit/fold.ts'
 import { generate, sliceFile, sliceTimes } from '../scripts/emit.ts'
 import { rebaseVectors } from '../scripts/vectors.ts'
 import { buildWorld, genericVariants } from '../src/index.ts'
@@ -114,6 +115,35 @@ describe('rebase', () => {
 })
 
 describe('worlds', () => {
+  it('keeps pending tool calls from following a terminal status in every world and conversation variant', () => {
+    const violations: string[] = []
+    const terminal = ['completed', 'failed', 'cancelled']
+    for (const { id } of catalog) {
+      const world = loadWorld(id, { now: ANCHOR_MS })
+      for (const variant of world.available.conversation) {
+        const slice = world.with({ conversation: variant }).slices.conversation
+        let current = slice
+        const states = [slice.state, ...slice.timeline.map((event) => {
+          current = foldSlice(current, event.at_ms)
+          return current.state
+        })]
+        for (const [snapshot, state] of states.entries()) for (const thread of state.threads) {
+          const results = new Set(thread.items.filter((entry) => entry.type === 'tool_result').map((entry) => entry.body.call_id))
+          // A terminal status after a call legitimately interrupts it; only work appended
+          // after the latest terminal status needs a new non-terminal status.
+          const status = thread.items.filter((entry) => entry.type === 'status').at(-1)
+          if (status === undefined || typeof status.body.status !== 'string' || !terminal.includes(status.body.status)) continue
+          for (const entry of thread.items) {
+            if (entry.sequence > status.sequence && entry.type === 'tool_call' && !results.has(entry.body.call_id)) {
+              violations.push(`${id}/${variant}/${thread.agent}/snapshot-${snapshot}/sequence-${entry.sequence}: pending call after ${status.body.status}`)
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([])
+  }, 60_000)
+
   it('orders every timeline and numbers wholly synthetic world stores without gaps', () => {
     for (const { id } of catalog) {
       const world = loadWorld(id, { now: ANCHOR_MS })

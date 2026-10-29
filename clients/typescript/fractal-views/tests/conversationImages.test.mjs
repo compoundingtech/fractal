@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { conversationEntries, deliveredImages, requestImages } from '@fractal/views';
 
-// Images in a conversation, as stui shows them (docs/clients/ui-contract.md, "Images").
+// Images in a conversation, as the Fractal terminal UI shows them (docs/clients/ui-contract.md, "Images").
 const sha = 'ab'.repeat(32);
 const names = new Map([['person/ada', 'you'], ['agent/example/gardener', 'Gardener']]);
 const at = '2026-10-13T10:00:00Z';
@@ -20,7 +20,7 @@ const at = '2026-10-13T10:00:00Z';
   assert.equal(deliveredImages('<attachment path="/x/short.png"/>', 'message/x').text, '[attachment · not available here]');
 }
 
-// The same through the transcript: a Claude seat's turn carrying st's envelope.
+// The same through the transcript: a Claude seat's turn carrying Fractal's envelope.
 {
   const raw = `<smalltalk-message id="1" from="person/ada" to="agent/example/gardener" subject="pond" graph="message/pond">\nthe pond again\n<attachment path="/work/garden/state/attachments/${sha}.png" media_type="image/png" bytes="1269" name="pond.png"/>\n</smalltalk-message>`;
   const entries = conversationEntries([{ id: 'turn', sequence: 1, revision: 1, timestamp: at, role: 'user', type: 'content', final: true, body: { media_type: 'text/plain', text: raw, blocks: [{ id: 'turn/0', kind: 'text', source_type: 'content', payload: { body_ref: true } }] } }], names);

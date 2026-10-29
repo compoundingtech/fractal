@@ -707,6 +707,26 @@ pub struct StepSpec {
     pub definition_hash: String,
 }
 
+/// How the resource edge was authored. Older stored URI edges predate this discriminator.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceReferenceKind {
+    #[default]
+    Uri,
+    Subject,
+}
+
+/// A named edge to an ordinary resource subject, not a copy of its locator.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct DeclaredResourceReference {
+    pub name: String,
+    pub subject: String,
+    #[serde(default)]
+    pub kind: ResourceReferenceKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MissionSpec {
     pub id: String,
@@ -717,6 +737,8 @@ pub struct MissionSpec {
     /// with `mission::is_system` (fractal-daemon), which covers revisions published before the flag.
     #[serde(default, skip_serializing_if = "is_false")]
     pub system: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<DeclaredResourceReference>,
     #[serde(default)]
     pub inputs: BTreeMap<String, MissionInputSpec>,
     #[serde(default = "default_mission_run_limit")]
@@ -1797,6 +1819,10 @@ pub struct CurrentHarnessView {
     pub input_buffer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit: Option<String>,
+    /// Background jobs the current incarnation last reported with its state; `None` when the
+    /// harness does not report them or the incarnation ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_jobs: Option<u64>,
     pub claim: String,
     pub observed_at_unix_ms: u128,
     #[serde(default)]
@@ -1804,6 +1830,14 @@ pub struct CurrentHarnessView {
 }
 
 impl CurrentHarnessView {
+    /// The background-job count a `harness.observed` state report carries for a live incarnation.
+    pub fn reported_background_jobs(state: &str, fields: &serde_json::Value) -> Option<u64> {
+        if matches!(state, "ended" | "indeterminate") {
+            return None;
+        }
+        fields.get("background_jobs").and_then(serde_json::Value::as_u64)
+    }
+
     pub fn is_ready(&self) -> bool {
         matches!(self.state.as_str(), "ready" | "working" | "idle")
             && self.reason.as_deref() != Some("providerAuth")
@@ -1825,6 +1859,7 @@ mod current_harness_view_tests {
             ask: None,
             input_buffer: None,
             exit: None,
+            background_jobs: None,
             claim: "claim/one".into(),
             since_unix_ms: 1,
             observed_at_unix_ms: 1,
@@ -2497,6 +2532,9 @@ pub struct OperationalRepairPlan {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct OperationalRepairApplyRequest {
     pub token: String,
+    /// Caller actor, honoured only for an authenticated local harness binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -3034,6 +3072,40 @@ pub struct WorkExtendRequest {
     #[serde(default)]
     pub reason: Option<String>,
     pub idempotency_key: String,
+}
+
+/// One-shot repair of current person-bound work; this never aliases identities or rewrites history.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PersonRenameRequest {
+    pub old_person: String,
+    pub new_person: String,
+    pub actor: String,
+    pub idempotency_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PersonRenameReport {
+    pub old_person: String,
+    pub new_person: String,
+    pub reassigned_steps: Vec<String>,
+    pub reassigned_reviews: Vec<String>,
+    pub run_requesters: Vec<String>,
+    pub missions_to_republish: Vec<String>,
+    /// Open, immutable inbox records that this repair does not move.
+    #[serde(default)]
+    pub unchanged_attention_requests: Vec<String>,
+    #[serde(default)]
+    pub unchanged_fault_cards: Vec<String>,
+    #[serde(default)]
+    pub unchanged_revision_approvals: Vec<String>,
+    #[serde(default)]
+    pub unchanged_planning_launch_approvals: Vec<String>,
+    /// Remaining routing references, keyed by subject with sorted JSON-pointer paths.
+    #[serde(default)]
+    pub live_run_references: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub published_mission_references: BTreeMap<String, Vec<String>>,
+    pub namespace_notice: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -16,9 +16,9 @@ lane() {
 }
 
 toolchain() {
-  [ "$(pnpm --version)" = 12.7.0 ] || { echo "pnpm $(pnpm --version) is not 12.7.0" >&2; return 1; }
+  [ "$(pnpm --version)" = 12.15.0 ] || { echo "pnpm $(pnpm --version) is not 12.15.0" >&2; return 1; }
   [ "$(node --version)" = v24.20.0 ] || { echo "Node $(node --version) is not 24.20.0" >&2; return 1; }
-  grep -q '"packageManager": "pnpm@12.7.0"' package.json || { echo 'package.json must declare pnpm@12.7.0' >&2; return 1; }
+  grep -q '"packageManager": "pnpm@12.15.0"' package.json || { echo 'package.json must declare pnpm@12.15.0' >&2; return 1; }
   # The checked-in Buck root is the Nix-rendered consumer root below Genie's three-line header.
   [ -n "${FRACTAL_WEB_BUCK_ROOT:-}" ] || { echo 'run inside nix develop .#web' >&2; return 1; }
   [ ! -s .buckroot ] || { echo '.buckroot must be empty' >&2; return 1; }
@@ -144,6 +144,7 @@ stream_kit() {
       lane "UI kit play index contracts" node --test packages/fractal-ui/scripts/kit-play-index.node-test.mjs
       lane "UI kit timing contracts" node --test packages/fractal-ui/scripts/kit-play-timings.node-test.mjs
       lane "UI kit worker cap" node --test packages/fractal-ui/scripts/kit-play-workers.node-test.mjs
+      lane "UI kit CPU budget contracts" node --test packages/fractal-ui/scripts/kit-play-budget.node-test.mjs packages/fractal-ui/scripts/kit-play-cpu.node-test.mjs
       ;;
     false)
       printf 'UI kit plays skipped: no kit inputs changed (%s..%s)\n' "${BASE_SHA:?}" "${HEAD_SHA:?}" | tee -a "$summary"

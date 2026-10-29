@@ -84,7 +84,7 @@ pub struct Row {
 pub struct Form {
     pub name: String,
     pub machine: String,
-    /// "Start st when I log in", pre-checked, with the platform's wording.
+    /// "Start Fractal when I log in", pre-checked, with the platform's wording.
     pub login_label: String,
     pub login: bool,
     /// What it installs and how to remove it.

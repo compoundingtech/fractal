@@ -2096,6 +2096,7 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     const NEW: &str = "00-81af7651916cd43dd8448eb211c80319-b7ad6b7169203336-01";
     const DUPLICATE: &str = "00-91af7651916cd43dd8448eb211c80319-b7ad6b7169203337-01";
     const HEARTBEAT: &str = "00-a1af7651916cd43dd8448eb211c80319-b7ad6b7169203338-01";
+    const SETTLE: &str = "00-b1af7651916cd43dd8448eb211c80319-b7ad6b7169203339-01";
     let Some(collector) = otelite("replication_projection_is_linked_root_only_for_new_data") else { return };
     let root = tempfile::tempdir().unwrap();
     let state = root.path().join("daemon-state");
@@ -2120,6 +2121,21 @@ async fn replication_projection_is_linked_root_only_for_new_data() {
     assert!(heartbeat.envelopes.is_empty());
     drop(target);
     let mut daemon = ExportDaemon::start(&collector, root.path());
+    // The daemon seals its first checkpoint in the background just after it starts. A seal that
+    // commits while the first receive projects moves the store past that projection's target, so
+    // the projection stays deferred and the duplicate receive below projects again, with a root of
+    // its own. Wait for the seal, so that the receives meet a store nothing else is writing to.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (page, _) = daemon.request("GET", "/v1/claims?after_index=0&limit=500", None, SETTLE, None).await;
+        if page["value"]["claims"].as_array().is_some_and(|claims| {
+            claims.iter().any(|claim| claim["kind"] == "checkpoint.sealed")
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the first checkpoint was never sealed: {page}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let payload = serde_json::json!({"peer":"otel-source", "fleet_id":FLEET, "exchange":exchange});
     let (received, _) = daemon.request("POST", "/v1/internal/replication/receive",
         Some(payload.clone()), NEW, None).await;

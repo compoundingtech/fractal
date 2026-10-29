@@ -1204,51 +1204,27 @@ fn attention_item_from_revision(
     }
 }
 
-fn pending_human_reviews_tx(
+pub(super) fn pending_human_reviews_tx(
     connection: &Connection,
     reviewer: Option<&str>,
 ) -> Result<Vec<HumanReviewView>> {
     let requests = {
-        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h152042da2cc3 owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
-            "SELECT request.id, request.store_index, request.batch_id, request.subject,
-                    request.kind, request.origin, request.actor, request.body,
-                    request.predecessors, request.accepted_at_unix_ms
-             FROM claims request INDEXED BY claims_human_gate_request_index
-             WHERE request.kind='gate.requested'
-               AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
-               AND (?1 IS NULL OR json_extract(request.body, '$.fields.reviewer')=?1)
-               AND NOT EXISTS (SELECT 1 FROM claims result WHERE {})
-             ORDER BY CANONICAL_ASC(request)",
-            reviewer_answer_sql("result")
-        )))?;
+        let mut statement =
+            connection.prepare(/* sqlite-large-value: allow-for-now lv-h17335d660f3b owner=fractal_store::store::attention TODO=trace-statement-and-value-representation */ &human_review_reassignment::pending_requests_sql(reviewer.is_some()))?;
         statement
-            .query_map([reviewer], claim_from_row)?
+            .query_map([reviewer], |row| {
+                Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?
     };
-    // A build that words a gate's request differently asks the same gate again. The reviewer
-    // answers the newest request, which is the one the gate waits on, and has waited since the
-    // first.
-    let mut reviews: Vec<HumanReviewView> = Vec::new();
-    for request in requests {
-        let Some(review) = current_human_review(connection, request)? else {
-            continue;
-        };
-        match reviews.iter_mut().find(|kept| {
-            kept.owner == review.owner
-                && kept.reviewer == review.reviewer
-                && kept.attempt == review.attempt
-        }) {
-            Some(kept) => {
-                let first = kept.requested_at_unix_ms.min(review.requested_at_unix_ms);
-                if review.requested_at_unix_ms >= kept.requested_at_unix_ms {
-                    *kept = review;
-                }
-                kept.requested_at_unix_ms = first;
-            }
-            None => reviews.push(review),
+    let mut pending = Vec::with_capacity(requests.len());
+    for (request, first_requested_at) in requests {
+        if let Some(mut review) = current_human_review(connection, request)? {
+            review.requested_at_unix_ms = first_requested_at.parse()?;
+            pending.push(review);
         }
     }
-    Ok(reviews)
+    Ok(pending)
 }
 
 pub fn attention_request_view_tx(

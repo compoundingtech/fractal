@@ -23,7 +23,7 @@ registerHooks({
       'expo-crypto': 'export const randomUUID = globalThis.testDiagnosticsPlatform.randomUUID;',
       expo: 'export const requireOptionalNativeModule = () => undefined;',
       'react-native': 'export const AppState = globalThis.testDiagnosticsPlatform.AppState; export const Linking = {}; export const Platform = { OS: "ios", Version: "27.0" };',
-      './modules/st-diagnostics': 'export default undefined;',
+      './modules/fractal-diagnostics': 'export default undefined;',
       './app.json': 'export default { expo: { version: "1.0.0" } };',
     }[specifier];
     if (source) return { url: `data:text/javascript,${encodeURIComponent(source)}`, shortCircuit: true };

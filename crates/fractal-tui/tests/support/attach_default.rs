@@ -61,7 +61,7 @@ fn attach_default_probe_worker() -> Result<()> {
     let socket = PathBuf::from(std::env::var_os("STUI_PROBE_SOCKET").expect("probe socket"));
     let _guard = Guard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
-    let mut ui = Ui::new(demo::world());
+    let mut ui = Ui::new(demo::test_world());
     ui.live = true;
     // This device's own choice, from the isolated XDG_STATE_HOME the harness wrote (or none).
     ui.load_prefs();
@@ -197,10 +197,10 @@ fn attach_default_probe_worker() -> Result<()> {
 #[ignore = "a measurement, not a check"]
 fn attach_redraw_cost() {
     use ratatui::backend::TestBackend;
-    let mut ui = Ui::new(demo::world());
+    let mut ui = Ui::new(demo::test_world());
     ui.glasses = glass::Glasses::open(None, None);
     ui.open_in_glass(Pane::Terminal(AGENT.into()), glass::Open::Tab);
-    let (stui, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (tui, _daemon) = std::os::unix::net::UnixStream::pair().unwrap();
     ui.terminal = Some(TerminalView {
         agent: AGENT.into(),
         name: "Probe".into(),
@@ -209,7 +209,7 @@ fn attach_redraw_cost() {
         cursor: None,
         stale: None,
         ended: None,
-        native: Some(pty::NativeTerminal::spawn(stui, "bench", "one".into(), 38, 120)),
+        native: Some(pty::NativeTerminal::spawn(tui, "bench", "one".into(), 38, 120)),
     });
     if std::env::var_os("STUI_BENCH_ALERT").is_some() {
         ui.world.attention = Load::Ready(vec![ask(AGENT)]);

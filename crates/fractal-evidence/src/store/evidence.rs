@@ -6,8 +6,28 @@ pub use fractal_attention::store::evidence::*;
 
 /// A roster head: its cut, every agent's refs, the first cards in order, and when published.
 pub type PublishedRosterHead = (u64, Arc<Vec<Value>>, Vec<Value>, u128);
+use crate::store::published_list::PublicationBuild;
+
+pub struct AgentsPublicationSource {
+    pub watermark: crate::store::agents_publication::AgentsStatusWatermark,
+    pub rows: Arc<Vec<Value>>,
+    pub valid_until_ms: Option<u64>,
+}
 
 pub trait EvidenceStore {
+    fn agents_publication(&self) -> Option<Arc<crate::store::agents_publication::AgentsPublication>>;
+    fn subscribe_agents_publications(&self) -> tokio::sync::watch::Receiver<u64>;
+    fn agents_publication_build(&self) -> Result<PublicationBuild>;
+    fn agents_publication_demand(&self) -> bool;
+    fn agents_publication_source(&self, index: u64) -> Result<AgentsPublicationSource>;
+    fn publish_presented_agents(
+        &self,
+        build: PublicationBuild,
+        source: AgentsPublicationSource,
+        at: u64,
+        valid_until: Option<u64>,
+        rows: Vec<Value>,
+    ) -> Result<()>;
     /// Lazily attach the one Store publisher shared by receipt waits and collection
     /// consumers. Registration and journal installation happen when the Store opens.
     /// Attachment errors are returned on each call until attachment succeeds; failures
@@ -76,6 +96,80 @@ pub trait EvidenceStore {
 }
 
 impl EvidenceStore for Store {
+    fn agents_publication(&self) -> Option<Arc<crate::store::agents_publication::AgentsPublication>> {
+        match self.fractal.presented_agents.current() {
+            crate::store::published_list::ListRead::Served(publication, _) => Some(publication),
+            _ => None,
+        }
+    }
+
+    fn agents_publication_demand(&self) -> bool {
+        self.fractal.agents_publication_demand()
+    }
+
+    fn subscribe_agents_publications(&self) -> tokio::sync::watch::Receiver<u64> {
+        let receiver = self.fractal.presented_agents.subscribe();
+        // A subscription contributes only receiver demand: its wake is not an explicit
+        // refresh request that must survive the last receiver leaving.
+        if let Some(wake) = self.fractal.agent_roster_refresh.get() {
+            wake.notify_one();
+        }
+        receiver
+    }
+
+    fn agents_publication_build(&self) -> Result<PublicationBuild> {
+        self.fractal.presented_agents.begin_materialization()
+            .context("the agents publication materialization counter is exhausted")
+    }
+
+    fn agents_publication_source(&self, index: u64) -> Result<AgentsPublicationSource> {
+        let local = roster_local_frontier(&self.readers.get(), index)?;
+        let cache = self.fractal.agent_resources_cache.lock()
+            .map_err(|_| anyhow::anyhow!("agent resources cache poisoned"))?;
+        let entry = cache.iter().rev().find(|entry| entry.index == index && entry.local == local
+            && !entry.history && entry.covered.is_none())
+            .context("the complete current agents source is unavailable")?;
+        Ok(AgentsPublicationSource {
+            watermark: crate::store::agents_publication::AgentsStatusWatermark {
+                store_index: index, local_frontier: local,
+            },
+            rows: Arc::clone(&entry.items),
+            valid_until_ms: entry.valid_until_unix_ms.map(|deadline| deadline.min(u128::from(u64::MAX)) as u64),
+        })
+    }
+
+    fn publish_presented_agents(
+        &self,
+        build: PublicationBuild,
+        source: AgentsPublicationSource,
+        at: u64,
+        valid_until: Option<u64>,
+        rows: Vec<Value>,
+    ) -> Result<()> {
+        use crate::store::{agents_publication::PresentedAgents, published_list::Publication};
+        if let Some(current) = self.agents_publication()
+            && current.metadata().status_watermark == source.watermark && current.rows() == rows
+            && self.fractal.presented_agents.retain_materialization(build, &current)
+        {
+            return Ok(());
+        }
+        let order = rows.iter().map(|row| row["id"].as_str()
+            .context("a complete agent card has no ID").map(str::to_owned))
+            .collect::<Result<Vec<_>>>()?;
+        self.fractal.presented_agents.start();
+        let epoch = self.fractal.presented_agents_epoch.get();
+        if self.fractal.presented_agents.publish_identified(build, |identity| Publication {
+            cut: source.watermark.store_index,
+            published_at_unix_ms: u128::from(at),
+            valid_until_unix_ms: valid_until.map(u128::from),
+            rows: PresentedAgents::new(epoch, identity, source.watermark, at, rows, order),
+        }).is_none() {
+            anyhow::bail!("the agents source reset while materializing its publication");
+        }
+        // Serialize once outside the shared owner lock.
+        if let Some(publication) = self.agents_publication() { let _ = publication.encoded(); }
+        Ok(())
+    }
 
     fn ivm_publisher(&self) -> Result<Option<Arc<smallclaims::ivm::events::Publisher>>> {
         if self.fractal.ivm_views.is_none() {
@@ -430,12 +524,14 @@ impl EvidenceStore for Store {
 
     fn human_gate_requests(&self) -> Result<Vec<(String, String, String)>> {
         let connection = self.readers.get();
-        let mut statement = connection.prepare(
-            "SELECT id, json_extract(body, '$.fields.owner'), json_extract(body, '$.fields.reviewer')
-             FROM claims INDEXED BY claims_human_gate_request_index
-             WHERE kind='gate.requested' AND json_extract(body, '$.fields.reviewer') IS NOT NULL
-               AND json_extract(body, '$.fields.owner') IS NOT NULL",
-        )?;
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h9b347ba24aa6 owner=fractal_evidence::store::evidence TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
+            "SELECT request.id, json_extract(request.body, '$.fields.owner'), {}
+             FROM claims request INDEXED BY claims_human_gate_request_index
+             WHERE request.kind='gate.requested' AND json_extract(request.body, '$.fields.reviewer') IS NOT NULL
+               AND json_extract(request.body, '$.fields.owner') IS NOT NULL
+             ORDER BY CANONICAL_ASC(request)",
+            human_review_reassignment::reviewer_sql("request", None),
+        )))?;
         statement
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<Result<Vec<_>, _>>()

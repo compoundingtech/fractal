@@ -2,7 +2,7 @@
 """scripts/evidence-queue-signer: what it records per merge-queue entry (group tree, merge-tree equality, a dropped entry, the
 depth-1 prediction), which tree it signs (the prediction first, then the queue in order, our own authors only, never twice), how
 it compares its notes with the queue's gate, and when it seeds main's per-crate notes (once per new tip, not beside another seed).
-gh, st-test, the host's pressure files and its process list are stand-ins; nothing is signed."""
+gh, fractal-test, the host's pressure files and its process list are stand-ins; nothing is signed."""
 import json
 import os
 from pathlib import Path
@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SIGNER = ROOT / 'scripts/evidence-queue-signer'
 CLEAN = dict(PATH=os.environ['PATH'], GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_SYSTEM='/dev/null',
              GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@example.invalid', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@example.invalid')
-# The base's st-test: --list (two light checks, one heavy) and a run, recorded with the commit it ran on.
+# The base's self-contained st-test: --list (two light checks, one heavy) and a run, recorded with the commit it ran on.
 ST_TEST = '''#!/usr/bin/env python3
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 argv = sys.argv[1:]
 if '--list' in argv:
     for name in ['typescript-client', 'genie-freshness'] + (['linux-gate'] if '--all' in argv else []):
@@ -42,7 +42,7 @@ if '--seed' in argv:
             pressure.write('some avg10=40 avg60=40.00 avg300=40 total=1\\n')
         import time
         time.sleep(60)
-    print('st-test: tree 0123456789ab (HEAD), in a clean worktree')
+    print('fractal-test: tree 0123456789ab (HEAD), in a clean worktree')
     print(f'  {"rust-tests":<20} {os.environ.get("STUB_SEED", "passed"):<12} {60:>6}s  2 of 2 crates run and signed')
     for crate in json.loads(os.environ.get('STUB_SEED_FAILED', '[]')):
         print(f'  {"rust-tests:" + crate:<20} {"FAILED (1)":<12} {0:>6}s  signer refused')
@@ -51,6 +51,7 @@ with open(os.environ['STUB_LOG'], 'a') as log:
     log.write(json.dumps({'head': head, 'tree': tree, 'parents': parents, 'checks': checks,
                           'target': os.environ.get('CARGO_TARGET_DIR')}) + '\\n')
 results = json.loads(os.environ.get('STUB_RESULTS', '{}'))
+time.sleep(float(os.environ.get('STUB_RUN_SECONDS', '0')))  # a run that outlives the watcher's one-second sample
 if os.environ.get('STUB_PUSH_NOTES'):
     # A note per check, as evidence-wrap pushes it: a commit holding one file named after the tree, under refs/tags/evidence/TREE/.
     for name in checks:
@@ -60,7 +61,7 @@ if os.environ.get('STUB_PUSH_NOTES'):
         listing = subprocess.run(['git', 'mktree'], input=f'100644 blob {blob}\\t{tree}\\n', capture_output=True, text=True).stdout.strip()
         note = subprocess.run(['git', 'commit-tree', listing, '-m', 'st gate observation v1'], capture_output=True, text=True).stdout.strip()
         subprocess.run(['git', 'push', '-q', 'origin', f'{note}:refs/tags/evidence/{tree}/{name}'], check=True)
-print('st-test: tree 0123456789ab (HEAD), in a clean worktree')
+print('fractal-test: tree 0123456789ab (HEAD), in a clean worktree')
 for name in checks:
     print(f'  {name:<20} {results.get(name, "passed"):<12} {60:>6}s  why')
 '''
@@ -126,7 +127,7 @@ class QueueSigner(unittest.TestCase):
     def env(self, **extra):
         return dict(CLEAN, HOME=self.tmp.name, EVIDENCE_QUEUE_CONFIG=str(self.config), EVIDENCE_QUEUE_STATE=str(self.state),
                     EVIDENCE_PRESIGN_CONFIG=str(self.presign), EVIDENCE_PRESIGN_REMOTE=str(self.origin),
-                    EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo),
+                    EVIDENCE_PRESIGN_PRESSURE=str(self.pressure), EVIDENCE_PRESIGN_MEMINFO=str(self.meminfo), EVIDENCE_PRESIGN_FREE_GIB='1000',
                     EVIDENCE_PRESIGN_ADMISSION='/nonexistent', EVIDENCE_QUEUE_PROC=str(self.proc), ST_TEST_POOL_MAX_GB='170', EVIDENCE_QUEUE_GH=str(Path(self.tmp.name) / 'gh'),
                     STUB_GH=str(self.gh_data), STUB_LOG=str(self.log), **extra)
 
@@ -188,6 +189,53 @@ class QueueSigner(unittest.TestCase):
     def runs(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
+    def base_runners(self, runners):
+        git(self.work, 'checkout', '-q', 'main')
+        for name in ('fractal-test', 'st-test'):
+            (self.work / 'scripts' / name).unlink(missing_ok=True)
+        for name, source in runners.items():
+            (self.work / 'scripts' / name).write_text(source)
+        git(self.work, 'add', '-A')
+        git(self.work, 'commit', '-q', '-m', 'base runners')
+        git(self.work, 'push', '-q', 'origin', 'main')
+        self.main = git(self.work, 'rev-parse', 'HEAD')
+
+    def test_a_st_test_only_base_seeds_and_reads_the_old_summary_header(self):
+        self.base_runners({'st-test': ST_TEST.replace('fractal-test: tree ', 'st-test: tree ')})
+        self.run_signer('seed')
+        self.assertEqual(len(self.runs()), 1)
+        self.assertEqual(self.lines('seeds.jsonl')[0]['outcome'], 'seeded')
+
+    def test_both_base_names_seed_with_st_test_not_the_python_shim(self):
+        self.base_runners({'st-test': ST_TEST, 'fractal-test': 'raise RuntimeError("POISON: shim must not be copied")\n'})
+        self.run_signer('seed')
+        self.assertEqual(len(self.runs()), 1)
+        self.assertEqual(self.lines('seeds.jsonl')[0]['outcome'], 'seeded')
+
+    def test_a_seed_from_an_old_base_also_prevents_a_second_seed(self):
+        (self.proc / '4242').mkdir()
+        (self.proc / '4242/cmdline').write_bytes(b'python3\0-I\0/tmp/st-test\0--seed\0')
+        self.run_signer('seed')
+        self.assertEqual(self.runs(), [])
+
+    def test_a_st_test_only_base_preserves_old_header_per_check_timing(self):
+        self.base_runners({'st-test': ST_TEST.replace('fractal-test: tree ', 'st-test: tree ')})
+        self.pull(1, 'one')
+        self.enqueue(1, self.main, 1)
+        self.run_signer('observe')
+        self.run_signer('sign')
+        [attempt] = self.lines('attempts.jsonl')
+        self.assertEqual(attempt['stage_seconds'],
+                         dict.fromkeys(['typescript-client', 'genie-freshness', 'linux-gate'], 60))
+
+    def test_a_run_that_outlives_a_sample_is_judged_by_the_stand_in_disk_not_the_hosts(self):
+        self.pull(1, 'one')
+        self.enqueue(1, self.main, 1)
+        self.run_signer('observe')
+        self.run_signer('sign', STUB_RUN_SECONDS='2.5')
+        [attempt] = self.lines('attempts.jsonl')
+        self.assertEqual((attempt['outcome'], attempt.get('stopped')), ('signed', None))
+
     def test_an_entry_records_its_group_tree_and_merge_tree_and_a_dropped_entry_is_measured_too(self):
         self.pull(1, 'one')
         group = self.enqueue(1, self.main, 1)
@@ -218,9 +266,11 @@ class QueueSigner(unittest.TestCase):
         [run] = self.runs()
         self.assertEqual((run['tree'], run['parents']), (prediction['tree'], [self.main, head]))
         self.assertEqual(run['checks'], ['typescript-client', 'genie-freshness', 'linux-gate'], 'every local check, heavy too')
-        self.assertIsNone(run['target'], "st-test's own kept target, not the pre-sign worker's")
+        self.assertIsNone(run['target'], "fractal-test's own kept target, not the pre-sign worker's")
         [attempt] = self.lines('attempts.jsonl')
         self.assertEqual((attempt['kind'], attempt['outcome'], attempt['signed_at_source']), ('predicted', 'signed', 'note'))
+        self.assertEqual(attempt['stage_seconds'],
+                         dict.fromkeys(['typescript-client', 'genie-freshness', 'linux-gate'], 60))
         self.assertEqual(attempt['signed_at'], dict.fromkeys(['typescript-client', 'genie-freshness', 'linux-gate'], signed),
                          "each note's own time, read back from the pushed notes")
         # Queued as predicted: the group tree is the predicted tree, already signed.
@@ -258,7 +308,7 @@ class QueueSigner(unittest.TestCase):
         self.run_signer('sign')
         self.run_signer('sign')
         self.assertEqual([run['head'] for run in self.runs()], [first, second], 'position order')
-        # No note read back (this st-test pushes none): the note times are estimated, and the line says so.
+        # No note read back (this fractal-test pushes none): the note times are estimated, and the line says so.
         self.assertEqual({a['signed_at_source'] for a in self.lines('attempts.jsonl')}, {'estimate'})
 
     def test_a_busy_full_or_short_of_memory_host_starts_nothing_and_says_so(self):
@@ -335,11 +385,11 @@ class QueueSigner(unittest.TestCase):
         self.assertEqual(len(self.runs()), 1)
 
     def test_seed_waits_while_another_seed_runs_or_the_host_is_busy(self):
-        # Another seat's st-test --seed on the host: this tick starts nothing, and the next one, once it ended, seeds the tip.
+        # Another seat's fractal-test --seed on the host: this tick starts nothing, and the next one, once it ended, seeds the tip.
         (self.proc / '4242').mkdir()
-        (self.proc / '4242/cmdline').write_bytes(b'python3\0-I\0/srv/fractal/scripts/st-test\0--seed\0')
+        (self.proc / '4242/cmdline').write_bytes(b'python3\0-I\0/srv/fractal/scripts/fractal-test\0--seed\0')
         (self.proc / '4243').mkdir()
-        (self.proc / '4243/cmdline').write_bytes(b'python3\0-I\0/tmp/st-test\0--push\0origin\0')  # st-test, but no seed
+        (self.proc / '4243/cmdline').write_bytes(b'python3\0-I\0/tmp/fractal-test\0--push\0origin\0')  # runner, but no seed
         self.run_signer('seed')
         self.assertEqual(self.runs(), [])
         (self.proc / '4242/cmdline').unlink()

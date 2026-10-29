@@ -43,6 +43,8 @@ def rule_files(repo, base, from_checkout, folder):
     texts = {}
     for key, path in wanted.items():
         if from_checkout:
+            if subprocess.run(["git", "cat-file", "-e", f"{base}:{path}"], cwd=repo, capture_output=True).returncode == 0:
+                raise SystemExit(f"review-risk: {base} holds {path}; it is read from there, --rules-from-checkout is only for a base that has none")
             texts[key] = (repo / path).read_text()
             continue
         shown = subprocess.run(["git", "show", f"{base}:{path}"], cwd=repo, capture_output=True, text=True)

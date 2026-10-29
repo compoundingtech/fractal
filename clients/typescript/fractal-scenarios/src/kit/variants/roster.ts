@@ -15,17 +15,17 @@ const rosterAt = (ctx: FactoryContext, phase: number): RosterState => {
     fault: (phase + index) % 7 === 5 ? 'Typecheck failed: session argument missing' : undefined,
   }))
   const runtimes = built.flatMap((value) => value.runtime ?? [])
-  return { agents: built.map((value) => value.agent), runtimes, machines: ctx.cast.hosts.map((host) => machine(ctx, host, runtimes.filter((runtime) => runtime.owner_host_id === host.id).map((runtime) => runtime.id), [])), order: ctx.cast.agents.map((member) => member.id) }
+  return { sessions: [], devices: [], agents: built.map((value) => value.agent), runtimes, machines: ctx.cast.hosts.map((host) => machine(ctx, host, runtimes.filter((runtime) => runtime.owner_host_id === host.id).map((runtime) => runtime.id), [])), order: ctx.cast.agents.map((member) => member.id) }
 }
 
 export const rosterVariants: VariantTable['roster'] = {
-  empty: (_ctx, base) => cleared(base.roster, { agents: [], runtimes: [], machines: [], order: [] }),
+  empty: (_ctx, base) => cleared(base.roster, { sessions: [], devices: [], agents: [], runtimes: [], machines: [], order: [] }),
   loading: (_ctx, base) => ({ ...base.roster, loading: true }),
   'one-agent': (ctx, base) => {
     const member = ctx.cast.agents[0]
     if (member === undefined) throw new Error('one-agent variant requires a cast agent')
     const built = agent(child(ctx, 'one-agent'), member, { state: 'stopped', sinceMs: -60_000 })
-    return cleared(base.roster, { agents: [built.agent], runtimes: [], machines: [machine(ctx, member.host, [], [])], order: [member.id] })
+    return cleared(base.roster, { sessions: [], devices: [], agents: [built.agent], runtimes: [], machines: [machine(ctx, member.host, [], [])], order: [member.id] })
   },
   'all-states': (ctx, base) => {
     const initial = rosterAt(ctx, 0)
@@ -50,6 +50,7 @@ export const rosterVariants: VariantTable['roster'] = {
     })
     const runtimes = built.flatMap((value) => value.runtime ?? [])
     return cleared(base.roster, {
+      sessions: [], devices: [],
       agents: built.map((value) => value.agent),
       runtimes,
       machines: ctx.cast.hosts.map((host) => machine(ctx, host,

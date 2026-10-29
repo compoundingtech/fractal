@@ -19,10 +19,10 @@ const onMission = (mission: string) => ({
 })
 const asking = (rows: readonly DecodedAgent[], attention: readonly Attention[] = []) => [...askingAgentRefs({ rows, attention })]
 
-describe('Waiting for answer reads only st', () => {
+describe('Waiting for answer reads only Fractal', () => {
   it.each([
     ['while blocked on a person', { blocked_on: 'human', ask: 'question' }],
-    ['from the ask field alone (st sets it only while blocked on a person)', { ask: 'question' }],
+    ['from the ask field alone (Fractal sets it only while blocked on a person)', { ask: 'question' }],
   ])('maps an ask-tool question %s', (_, fields) => {
     expect(asking([agent('agent/q', fields)])).toEqual(['agent/q'])
   })
@@ -44,12 +44,12 @@ describe('Waiting for answer reads only st', () => {
     expect(asking(rows, [card({ mission_id: 'mission/other' })])).toEqual([])
   })
 
-  it('maps open attention owned by or shown in the agent conversation, as st links shared cards', () => {
+  it('maps open attention owned by or shown in the agent conversation, as Fractal links shared cards', () => {
     const rows = [agent('agent/atlas'), agent('agent/harbor'), agent('agent/owner'), agent('agent/none')]
     // A shared login: raised by atlas, shown in every seat it covers; harbor is linked only by conversation_ids.
     const sharedLogin = { source_id: 'agent/atlas', conversation_id: 'agent/atlas', conversation_ids: ['agent/atlas', 'agent/harbor'] }
     expect(asking(rows, [card(sharedLogin)])).toEqual(['agent/atlas', 'agent/harbor'])
-    // st resolves the owning conversation from a run while requester and mission are absent.
+    // Fractal resolves the owning conversation from a run while requester and mission are absent.
     const runOwned = { source_id: 'run/one', conversation_id: 'agent/owner' }
     expect(asking(rows, [card(runOwned)])).toEqual(['agent/owner'])
     expect(asking(rows, [card({ ...sharedLogin, state: 'resolved' }), card({ ...runOwned, state: 'resolved' })])).toEqual([])

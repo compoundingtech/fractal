@@ -78,7 +78,7 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   // A refused window is reported by name, and the other windows keep going.
   sockets[0].frame({ kind: 'error', id: 'attention', message: 'invalid subscription' });
   assert.deepEqual(seen.errors, ['attention: invalid subscription · trying again']);
-  // st stopped sending it, so it is asked for again after the backoff, said only once.
+  // Fractal stopped sending it, so it is asked for again after the backoff, said only once.
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(sockets[0].sent.at(-1), { kind: 'subscribe', id: 'attention', collection: 'attention', limit: sockets[0].sent.find(sent => sent.id === 'attention').limit });
   sockets[0].frame({ kind: 'error', id: 'attention', message: 'invalid subscription' });
@@ -210,7 +210,7 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
 }
 
 {
-  // st keeps the subscription while the owner's host is away and says why: the copy shown is
+  // Fractal keeps the subscription while the owner's host is away and says why: the copy shown is
   // stale, and the phone does not ask again itself.
   const { client, sockets } = fakeClient();
   const { handlers } = watch();
@@ -223,15 +223,15 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
   sockets[0].frame({ kind: 'resync', id: 'conversation', collection: 'conversation', retryable: true, code: 'remote-unavailable', message: 'owner host/two is temporarily unavailable; cached data remains usable' });
   assert.equal(issues.at(-1), 'two cannot be reached right now · trying again');
   await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(sockets[0].sent.length, before, 'st retries; the phone does not');
-  // Once st reaches it again, the issue clears.
+  assert.equal(sockets[0].sent.length, before, 'Fractal retries; the phone does not');
+  // Once Fractal reaches it again, the issue clears.
   sockets[0].frame({ kind: 'conversation', id: 'conversation', collection: 'conversation', session_id: 'session/one', replace: false, items: [{ id: 'entry/2' }] });
   assert.equal(issues.at(-1), '');
   feed.close();
 }
 
 {
-  // st keeps no start for this transcript: the phone says st's reason once and stops asking.
+  // Fractal keeps no start for this transcript: the phone says Fractal's reason once and stops asking.
   const { client, sockets } = fakeClient();
   const { handlers } = watch();
   const feed = new Feed(client, handlers, new ForegroundGate('active'), () => 'action/test', [5]);
@@ -334,7 +334,7 @@ const subscribed = socket => socket.sent.filter(command => command.kind === 'sub
 }
 
 {
-  // A conversation frame carries the header when st sends one (`conversation-blocks.v1`);
+  // A conversation frame carries the header when Fractal sends one (`conversation-blocks.v1`);
   // without it there is none, and nothing assumes the field.
   const { client, sockets } = fakeClient();
   const { handlers } = watch();

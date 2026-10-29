@@ -3353,6 +3353,117 @@ fn full_status_stays_full_after_summary_reductions_share_the_caches() {
 }
 
 #[test]
+fn replicated_uri_resources_never_restore_legacy_run_ownership() {
+    let source = Store::open_memory("source").unwrap();
+    let reader = parse_intent(
+        r#"version 2
+agent "shared/reader" {
+  workspace "/tmp"
+  command "true"
+  resource "issue" uri="https://github.com/example/project/issues/42"
+}
+"#,
+        "source",
+    ).unwrap();
+    source.apply_internal(&reader, "replicated-uri-reader").unwrap();
+    let references = crate::graph::declared_resources(&reader.subjects["agent/shared/reader"].desired);
+    let resource = &references[0].subject;
+    let original = source.claims_for(resource, Some("intent.desired")).unwrap().remove(0);
+    let owner = "mission-run/legacy";
+    let mut legacy = reader.subjects[resource].clone();
+    legacy.owner_run = Some(owner.into());
+    legacy.owner_generation = Some("run-generation/legacy".into());
+    legacy.owner_step = Some("step-run/legacy/work".into());
+    // Author a valid historical claim through the durable append primitive, as the old
+    // materializer did, rather than bypassing replication admission with forged bytes.
+    let legacy_claim = {
+        let mut connection = source.connection.write();
+        let transaction = connection.transaction().unwrap();
+        let claim = append_claim_tx(
+            &transaction,
+            &source.origin,
+            resource,
+            "intent.desired",
+            Some("daemon/legacy"),
+            &serde_json::to_value(&legacy).unwrap(),
+            &[original.id],
+            None,
+        ).unwrap();
+        select_replicated_desired(&transaction, &claim, &legacy).unwrap();
+        transaction.commit().unwrap();
+        claim
+    };
+    let replica = Store::open_memory("replica").unwrap();
+    receive_and_project(
+        &replica,
+        "source",
+        &exchange_from(&source, &replica.replication_inventory().unwrap()),
+    );
+    for replay in [false, true] {
+        if replay {
+            let mut connection = replica.connection.write();
+            let transaction = connection.transaction().unwrap();
+            replay_graph_from_nothing_tx(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        let shared = replica.desired_subjects_named(std::slice::from_ref(resource)).unwrap();
+        assert_eq!(shared[0].owner_run, None);
+        assert_eq!(shared[0].owner_generation, None);
+        assert_eq!(shared[0].owner_step, None);
+        assert!(replica.desired_subjects_for_owner_run(owner).unwrap().is_empty());
+        assert!(replica.status_at(Some(resource), Some(owner), Some(replica.index().unwrap()))
+            .unwrap().subjects.is_empty());
+        assert_eq!(
+            replica.declared_resource_uris(&references).unwrap()[resource],
+            "https://github.com/example/project/issues/42",
+        );
+        assert_eq!(replica.claim_by_id(&legacy_claim.id).unwrap().unwrap().body, legacy_claim.body);
+    }
+}
+
+#[test]
+fn a_shared_uri_resource_cannot_be_redeclared_with_a_different_kind() {
+    let store = Store::open_memory("node").unwrap();
+    let reader = parse_intent(
+        r#"version 2
+agent "shared/reader" {
+  workspace "/tmp"
+  command "true"
+  resource "issue" uri="https://github.com/example/project/issues/42"
+}
+"#,
+        "node",
+    ).unwrap();
+    store.apply_internal(&reader, "immutable-uri-reader").unwrap();
+    let references = crate::graph::declared_resources(&reader.subjects["agent/shared/reader"].desired);
+    let replacement = parse_intent(
+        &format!(
+            "version 2\nresource {:?} {{ kind \"custom.test.issue\" }}\n",
+            references[0].subject.strip_prefix("resource/").unwrap(),
+        ),
+        "node",
+    ).unwrap();
+    let planned = store.mission(
+        &replacement,
+        IntentInput { kdl: String::new(), source_name: None },
+    ).unwrap_err();
+    assert_eq!(planned.code, "immutable-uri-resource");
+    let tokens = BTreeMap::from([(
+        references[0].subject.clone(),
+        store.claims_for(&references[0].subject, Some("intent.desired")).unwrap()
+            .into_iter().map(|claim| claim.id).collect::<Vec<_>>(),
+    )]);
+    assert_eq!(
+        store.apply(&replacement, &tokens, "replace-uri-kind").unwrap_err().code,
+        "immutable-uri-resource",
+    );
+    assert_eq!(
+        store.declared_resource_uris(&references).unwrap()[&references[0].subject],
+        "https://github.com/example/project/issues/42",
+    );
+}
+
+#[test]
 fn forgetting_views_invalidates_every_status_reduction_mode() {
     let store = Store::open_memory("node").unwrap();
     observe_runtime(&store, "agent/cache/forget", "running", "one");

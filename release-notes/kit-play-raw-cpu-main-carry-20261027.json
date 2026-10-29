@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Recover the raw CPU kit gate merge after transcript image contract batching landed",
+  "replay": {"status": "none", "detail": "CI harness merge only; no replay changes."},
+  "schema": {"status": "none", "detail": "No database changes."},
+  "rules": {"status": "none", "detail": "Retain main's batched transcript image commit contracts and full merge matrix without changing product rules."},
+  "compatibility": {"status": "none", "detail": "Preserve the raw CPU gate's 413.9-second anchor, 10% headroom, millisecond precision, separate wall guard and compatible receipt fields alongside main's PR evidence execution-skip policy."},
+  "downtime": {"status": "none", "detail": "No deployment impact."},
+  "manual": {"status": "none", "detail": "No additional manual steps."},
+  "recovery": {"status": "none", "detail": "Merge main into the raw CPU gate branch without rebasing; preserve transcript image batching documentation and replace obsolete wall-budget documentation with the raw CPU and wall guard policy. No persisted state requires recovery."}
+}

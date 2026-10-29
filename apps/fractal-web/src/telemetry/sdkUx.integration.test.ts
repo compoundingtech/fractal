@@ -4,7 +4,7 @@
  * only after the frame is observed and the transcript paint is reported.
  */
 import type { CollectionSocket, Snapshot } from '@fractal/client'
-import { FIRST_FRAME_SPAN, FOLLOW_SUBSCRIBE_SPAN, St3, St3Live } from '@fractal/sdk/effect'
+import { FIRST_FRAME_SPAN, FOLLOW_SUBSCRIBE_SPAN, Fractal, FractalLive } from '@fractal/sdk/effect'
 import * as Effect from 'effect/Effect'
 import * as Option from 'effect/Option'
 import * as Stream from 'effect/Stream'
@@ -70,13 +70,13 @@ it('a conversation switch traces subscribe -> first frame -> painted transcript 
   const ref = 'session/switch-proof'
 
   await Effect.gen(function* () {
-    const st3 = yield* St3
+    const fractal = yield* Fractal
     yield* settle
     ux.beginSwitch({ ref, warm: false, slotCount: 1 })
     const switchRoot = ux.activeSpan()!
     let observed = 0
     yield* Effect.forkChild(
-      st3.followConversation({ _tag: 'Conversation', ref }).pipe(
+      fractal.followConversation({ _tag: 'Conversation', ref }).pipe(
         Stream.runForEach((event) =>
           Effect.sync(() => {
             if (event._tag !== 'Observed') return
@@ -97,7 +97,7 @@ it('a conversation switch traces subscribe -> first frame -> painted transcript 
     // The subscribe frame names the SDK's own child span, not the switch root.
     expect(subscribe['trace']).toEqual({ traceparent: `00-${switchRoot.traceId}-${child.spanId}-01` })
     // So does an SDK HTTP read issued while the switch is active.
-    yield* st3.snapshot
+    yield* fractal.snapshot
     const read = spans.find((span) => span.name === 'st3.snapshot')!
     expect(Option.getOrUndefined(read.parent)).toBe(switchRoot)
     expect(headers.at(-1)).toBe(`00-${switchRoot.traceId}-${read.spanId}-01`)
@@ -140,7 +140,7 @@ it('a conversation switch traces subscribe -> first frame -> painted transcript 
       expect([...span.attributes.values()].some((value) => String(value).includes(ref))).toBe(false)
   }).pipe(
     Effect.provide(
-      St3Live({
+      FractalLive({
         baseUrl: 'http://gateway.test',
         maxFollows: 4,
         traceContext: ux.traceContext,

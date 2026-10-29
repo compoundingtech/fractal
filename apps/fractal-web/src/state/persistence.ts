@@ -1,5 +1,6 @@
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
+import { storageAdapter } from './storageAdapter.ts'
 
 /** One origin-local document. Individual entries carry their own migration version. */
 interface Entry {
@@ -17,40 +18,6 @@ export interface StorageAdapter {
   read(): string | null
   write(value: string): void
   subscribe(listener: (value: string | null) => void): () => void
-}
-const storageKey = 'wf.ui@1'
-/** Browser storage adapter with legacy developer-bar preference migration. */
-export const localStorageAdapter: StorageAdapter = {
-  read: () => {
-    if (typeof window === 'undefined') return null
-    const stored = window.localStorage.getItem(storageKey)
-    if (stored !== null) return stored
-    const legacy = window.localStorage.getItem('wf.devbar.visible')
-    return legacy === 'true' || legacy === 'false'
-      ? JSON.stringify({
-          version: 1,
-          entries: {
-            'devbar.visible': {
-              version: 1,
-              value: legacy === 'true',
-              clock: 0,
-              writer: 'migration',
-            },
-          },
-        })
-      : null
-  },
-  write: (value) => {
-    if (typeof window !== 'undefined') window.localStorage.setItem(storageKey, value)
-  },
-  subscribe: (listener) => {
-    if (typeof window === 'undefined') return () => {}
-    const receive = (event: StorageEvent) => {
-      if (event.key === storageKey) listener(event.newValue)
-    }
-    window.addEventListener('storage', receive)
-    return () => window.removeEventListener('storage', receive)
-  },
 }
 const parse = (raw: string | null): Document => {
   if (raw === null) return { version: 1, entries: {} }
@@ -203,6 +170,6 @@ export const createPersistence = ({
   }
 }
 /** Shared browser persistence boundary for application working state. */
-export const persistence = createPersistence({ adapter: localStorageAdapter })
+export const persistence = createPersistence({ adapter: storageAdapter })
 /** Creates schema-backed atoms through the shared browser persistence boundary. */
 export const persistedAtom = persistence.atom

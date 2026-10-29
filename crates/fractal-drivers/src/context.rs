@@ -117,7 +117,7 @@ pub fn write_now_if_blank(context_dir: &Path, content: &str) -> anyhow::Result<b
     }
 }
 
-fn lock_now(context_dir: &Path) -> anyhow::Result<crate::flock::FileLock> {
+fn lock_now(context_dir: &Path) -> anyhow::Result<crate::harness_state::RecordLock> {
     crate::harness_state::lock_exclusive(&context_dir.join(NOW_LOCK))
         .context("acquire now.md writer lock")
 }

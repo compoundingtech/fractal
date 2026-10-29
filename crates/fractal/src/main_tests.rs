@@ -1,6 +1,18 @@
 use super::*;
 
 #[test]
+fn github_watch_line_shows_throttling_without_a_new_wire_state() {
+    let view = serde_json::json!({
+        "thread": "acme/garden#12", "state": "active",
+        "reason": "throttled: local observer budget reached, next slot at 1000 (Unix ms)"
+    });
+    let line = gh_watch_line(&view, false);
+    assert!(line.contains("active (throttled: local observer budget reached"));
+    assert!(line.contains("next slot at 1000"));
+    assert!(!line.contains("degraded"));
+}
+
+#[test]
 fn native_fabric_endpoint_reaches_product_client_without_local_authority() {
     let value = "fabric://devbox/st3-client-v0";
     let cli = Cli::try_parse_from(["st", "--endpoint", value, "now"]).unwrap();
@@ -38,12 +50,13 @@ fn filtered_repair_refuses_an_old_daemon_unfiltered_token() {
 #[test]
 fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     let cli = Cli::try_parse_from([
-        "st", "repair", "dry-run", "--subject", "agent/example-first",
+        "st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/example-first",
         "--subject", "agent/example-second", "--class", "revoked-legacy-runtime-start",
     ]).unwrap();
-    let Command::Repair { command: RepairCommand::DryRun { subjects, classes } } = cli.command else {
+    let Command::Repair { command: RepairCommand::DryRun { subjects, classes, ignored_actor } } = cli.command else {
         panic!("expected filtered repair dry-run");
     };
+    assert_eq!(ignored_actor.as_deref(), Some("agent/own"));
     assert_eq!(subjects, ["agent/example-first", "agent/example-second"]);
     assert_eq!(classes, ["revoked-legacy-runtime-start"]);
     let path = repair_plan_path(&subjects, &classes).unwrap();
@@ -52,6 +65,77 @@ fn repair_dry_run_preserves_repeatable_subject_and_class_filters() {
     assert!(path.contains(&format!("classes={}",
         urlencoding::encode(r#"["revoked-legacy-runtime-start"]"#))));
     assert_eq!(repair_plan_path(&[], &[]).unwrap(), "/v1/repair");
+}
+
+#[test]
+fn repair_actor_path_binds_the_literal_seat_before_requests() {
+    for arguments in [
+        vec!["st", "repair", "apply", "--as", "agent/own", "orpv0:token"],
+        vec!["st", "repair", "dry-run", "--as", "agent/own", "--subject", "agent/target",
+            "--class", "revoked-legacy-runtime-start"],
+        vec!["st", "conversations", "status", "--as", "agent/own", "--idempotency-key", "key"],
+    ] {
+        let own = Cli::try_parse_from(&arguments).unwrap();
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/own"), None).is_ok());
+        assert!(guard_mutating_cli_actor(&own.command, Some("agent/peer"), None).is_err());
+        for actor in ["agent/peer", "person/other", "own", "requester"] {
+            let mut mismatched = arguments.clone();
+            let index = mismatched.iter().position(|arg| *arg == "--as").unwrap() + 1;
+            mismatched[index] = actor;
+            let cli = Cli::try_parse_from(mismatched).unwrap();
+            assert!(guard_mutating_cli_actor(&cli.command, Some("agent/own"), None).is_err());
+        }
+    }
+    let absent = Cli::try_parse_from(["st", "repair", "apply", "orpv0:token"]).unwrap();
+    assert!(guard_mutating_cli_actor(&absent.command, Some("agent/own"), None).is_err());
+    assert!(guard_mutating_cli_actor(&absent.command, None, None).is_ok());
+    let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+    assert!(guard_mutating_cli_actor(&read.command, Some("agent/own"), None).is_ok());
+}
+
+#[test]
+fn repair_actor_path_keeps_unrelated_subjects_and_classes_out() {
+    let store = Store::open_memory("repair-actor-test").unwrap();
+    let subjects = vec!["agent/target".to_owned()];
+    let classes = vec!["revoked-legacy-runtime-start".to_owned()];
+    let mut plan = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &[], &subjects, &classes,
+    ).unwrap();
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_ok());
+    let mut item: fractal_daemon::model::OperationalRepairItem = serde_json::from_value(
+        serde_json::json!({
+            "id": "repair/test", "class": classes[0], "subject": "agent/unrelated",
+            "affected_subjects": [], "reason": "test"
+        })
+    ).unwrap();
+    plan.items.push(item.clone());
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+    item.subject = subjects[0].clone();
+    item.class = "unrelated-class".into();
+    plan.items = vec![item];
+    assert!(validate_repair_plan_filters(&plan, &subjects, &classes).is_err());
+}
+
+#[test]
+fn repair_apply_guidance_preserves_actorless_humans_and_effective_agent_aliases() {
+    let human = fractal_drivers::contracts::env_with("ST_AGENT", &|_| None);
+    assert_eq!(repair_apply_guidance("orpv0:token", human.as_deref()),
+        "fractal repair apply orpv0:token");
+    for variable in ["ST_AGENT", "FRACTAL_AGENT"] {
+        let own = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
+            (name == variable).then(|| "agent/own".to_owned())
+        });
+        let read = Cli::try_parse_from(["st", "repair", "dry-run"]).unwrap();
+        guard_mutating_cli_actor(&read.command, own.as_deref(), None).unwrap();
+        assert_eq!(repair_apply_guidance("orpv0:token", own.as_deref()),
+            "fractal repair apply --as agent/own orpv0:token", "{variable}");
+    }
+}
+
+#[test]
+fn repair_apply_actor_requests_use_only_the_new_attributed_route() {
+    assert_eq!(repair_apply_path(None), "/v1/repair/apply");
+    assert_eq!(repair_apply_path(Some("agent/own")), "/v1/repair/apply-attributed");
 }
 
 #[test]
@@ -386,15 +470,13 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
     };
-    let state = fractal_daemon::api::AppState {
-        owning_person: None,
-        store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0).0,
-        node: "todo-liveness".into(), state_dir: root.path().into(),
-        pty_root: root.path().join("pty"), pty_binary: "pty".into(),
-        fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { owning_person: None,
+    store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+    event_notify: tokio::sync::watch::channel(0).0,
+    node: "todo-liveness".into(), state_dir: root.path().into(),
+    pty_root: root.path().join("pty"), pty_binary: "pty".into(),
+    fleet_id: None, configured_peers: vec![], client_relay: None,
+    native_session_home: None, planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let path = root.path().join("api.sock");
     let socket = path.clone();
     let server = tokio::spawn(async move {
@@ -504,6 +586,17 @@ fn client_api_errors_print_in_plain_words_with_their_code() {
 }
 
 #[test]
+fn diagnostic_prefix_preserves_gate_and_native_driver_contracts() {
+    assert_eq!(ClientMessage::Human.product_name(), "Fractal");
+    assert_eq!(ClientMessage::Stable.product_name(), "st");
+    for legacy in ["st", "st3"] {
+        assert_eq!(ClientMessage::Human.diagnostic_prefix(legacy), "fractal");
+        assert_eq!(ClientMessage::Stable.diagnostic_prefix(legacy), legacy);
+        assert_eq!(ClientMessage::for_output(true).diagnostic_prefix(legacy), legacy);
+    }
+}
+
+#[test]
 fn gate_subprocess_stderr_keeps_stable_client_errors() {
     const CHILD: &str = "ST_TEST_GATE_ERROR_CHILD";
     if std::env::var_os(CHILD).is_some() {
@@ -518,7 +611,7 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         let error = anyhow::Error::from(fractal_client::ClientError::Api(
             api.code.clone(), api.message.clone(), Box::new(api),
         ));
-        eprintln!("{}", cli_error_message(&error, false));
+        stderr_message("st", format_args!("{}", cli_error_message(&error, false)));
         let mut stalled = None;
         // Exercise the actual Resync notice sink, including duplicate suppression.
         for _ in 0..2 {
@@ -542,9 +635,9 @@ fn gate_subprocess_stderr_keeps_stable_client_errors() {
         assert!(output.status.success(), "{output:?}");
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert_eq!(stderr.trim(), if gate {
-            "st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
+            "st: st hit a problem: the store failed (internal)\nst: st hit a problem: the stream failed · trying again"
         } else {
-            "Fractal hit a problem: the store failed (internal)\nst: Fractal hit a problem: the stream failed · trying again"
+            "fractal: Fractal hit a problem: the store failed (internal)\nfractal: Fractal hit a problem: the stream failed · trying again"
         });
     }
 }
@@ -812,7 +905,7 @@ fn missions_tree_fixture_renders_all_sections() {
 }
 
 #[test]
-fn a_conversation_reads_as_stui_shows_it_and_raw_keeps_every_entry() {
+fn a_conversation_reads_as_tui_shows_it_and_raw_keeps_every_entry() {
     let items: Vec<ClientTimelineEntry> = serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h55886ab30a77 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!(
         "../../../fixtures/clients/transcripts/claude.json"
     ))
@@ -924,12 +1017,20 @@ fn usage_report_ranks_each_group_by_cost_and_marks_unpriced_tokens() {
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
         {"account": "claude/bbbb", "weekly_percent": 50.0, "five_hour_percent": null, "exempt": false,
          "weekly_resets_at_unix_ms": 1_800_000_000_000_u64, "measured_at_unix_ms": 1_799_000_000_000_u64},
-    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": []}});
+    ], "limits_policy": {"stop_at_weekly_percent": 95, "exempt_accounts": ["ada/codex"], "exempt_harnesses": [], "keep": ["agent/example/coordinator", "agent/example/lead"], "keep_retired": ["agent/example/lead"]}});
     let output_exempt = render_usage_report(&exempt, 24, None);
     assert!(output_exempt.contains("codex/aaaa  exempt\n"), "{output_exempt}");
     assert!(output_exempt.contains("claude/bbbb\n"), "{output_exempt}");
     assert!(
         output_exempt.contains("EXEMPT  never stopped at 95% · accounts: ada/codex · harnesses: none"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  seats this node never stops at the weekly limit ([limits] keep) · agent/example/coordinator, agent/example/lead\n"),
+        "{output_exempt}"
+    );
+    assert!(
+        output_exempt.contains("KEPT  1 of those seats are no longer declared and keep nothing; remove them from keep when convenient · agent/example/lead\n"),
         "{output_exempt}"
     );
     let by_step = render_usage_report(&report, 24, Some(UsageBy::Step));
@@ -1314,7 +1415,7 @@ fn pi_family_mail_uses_the_shared_envelope_and_the_steer_boundary() {
             "<smalltalk-message id=\"0123456789abcdef\" from=\"agent/run-1/wake.claude\" \
                  to=\"agent/run-1/wake.omp-2\" subject=\"Cross-harness consensus: idle\" \
                  sha256=\"{}\" graph=\"message/0123456789abcdef\">\nFACT QUARTZ\n</smalltalk-message>",
-            fractal_drivers::ding::st3_body_sha256("FACT QUARTZ")
+            fractal_drivers::ding::fractal_body_sha256("FACT QUARTZ")
         )
     );
     assert_eq!(omp["meta"]["messageId"], "message/0123456789abcdef");
@@ -1597,6 +1698,85 @@ fn pi_family_channel_logs_unhandled_frames_without_claiming_or_panicking() {
         assert!(state.pending.state.is_none());
         assert!(state.pending.native_session.is_none());
     }
+}
+
+#[tokio::test]
+async fn pi_family_publication_verifies_the_exact_external_frame_path() {
+    use axum::{Json, Router, routing::post};
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("daemon.sock");
+    let client = Client::new(Endpoint::Unix(socket.clone()));
+    let store = std::sync::Arc::new(
+        Store::open(&root.path().join("graph.db"), "test").unwrap(),
+    );
+    store.append_claim(&ClaimInput {
+        subject: "agent/external".into(),
+        kind: "runtime.observed".into(),
+        actor: Some("agent/external".into()),
+        fields: BTreeMap::from([
+            ("status".into(), json!("running")),
+            ("incarnation_id".into(), json!("external-incarnation")),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let graph = store.clone();
+    let app = Router::new().route("/v1/agents/native-session", post(move |Json(report): Json<Value>| {
+        let store = graph.clone();
+        async move {
+            assert_eq!(report["subject"], "agent/external");
+            assert_eq!(report["actor"], "agent/external");
+            assert_eq!(report["incarnation_id"], "external-incarnation");
+            assert_eq!(report["session_id"], "external-native");
+            let record = store.append_claim(&ClaimInput {
+                subject: "agent/external".into(),
+                kind: "harness.session-file".into(),
+                actor: Some("agent/external".into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("omp")),
+                    ("agent".into(), report["subject"].clone()),
+                    ("incarnation_id".into(), report["incarnation_id"].clone()),
+                    ("session_id".into(), report["session_id"].clone()),
+                    ("path".into(), report["path"].clone()),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap();
+            Json(json!({"api_version":"st3.v1", "value":record}))
+        }
+    }));
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, app).await.unwrap();
+    });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let selected = root.path().join("arbitrary-external-name.jsonl");
+    // A sibling with the same native ID must never rescue the reported file.
+    fs::write(root.path().join("fallback_external-native.jsonl"),
+        "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    let mut pending = PiFamilyReports {
+        native_session: Some(("external-native".into(), Some(selected.to_string_lossy().into_owned()))),
+        ..Default::default()
+    };
+    for content in [None, Some("{}\n"), Some("{\"type\":\"session\",\"id\":\"foreign\"}\n")] {
+        if let Some(content) = content { fs::write(&selected, content).unwrap(); }
+        pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+            .await.unwrap();
+        assert!(pending.native_session.is_some());
+        assert!(store.claims_for("agent/external", Some("harness.session-file")).unwrap().is_empty());
+    }
+    fs::write(&selected, "{\"type\":\"session\",\"id\":\"external-native\"}\n").unwrap();
+    pending.publish(&client, "agent/external", "omp", "external-incarnation", "channel")
+        .await.unwrap();
+    assert!(pending.native_session.is_none());
+    let claim = store.latest_claim("agent/external", Some("harness.session-file")).unwrap().unwrap();
+    assert_eq!(claim.body["fields"]["path"], json!(fs::canonicalize(selected).unwrap()));
+    server.abort();
 }
 
 #[tokio::test]
@@ -2281,22 +2461,19 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             ))
             .unwrap();
     }
-    let state = AppState {
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "pi-delivery-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "pi-delivery-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -2375,22 +2552,19 @@ async fn trace_after_index_reads_the_first_bounded_page() {
                 .store_index
         })
         .collect::<Vec<_>>();
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "trace-cursor-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "trace-cursor-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -2452,22 +2626,19 @@ async fn trace_wait_starts_after_existing_events() {
             .unwrap()
             .store_index;
     }
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "wait-cursor-test".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "wait-cursor-test".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel();
     let app = router(state).layer(axum::middleware::from_fn(
         move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -2541,7 +2712,7 @@ fn conversation_follow_is_explicit_and_bounded() {
 
 #[test]
 fn conversation_follow_emits_new_entries_and_revisions_once() {
-    let entry = |id: &str, sequence: u64, revision: u32| {
+    let entry = |id: &str, sequence: u64, revision: u64| {
         serde_json::from_value::<ClientTimelineEntry>(json!({
             "id": id,
             "sequence": sequence,
@@ -2560,7 +2731,7 @@ fn conversation_follow_emits_new_entries_and_revisions_once() {
     assert!(unseen_timeline_entries(&initial, &mut seen).is_empty());
     let changed = vec![
         entry("timeline-entry/b", 2, 1),
-        entry("timeline-entry/a", 1, 2),
+        entry("timeline-entry/a", 1, u64::from(u32::MAX) + 1),
     ];
     assert_eq!(
         unseen_timeline_entries(&changed, &mut seen),
@@ -2587,8 +2758,10 @@ fn every_cli_command_has_a_valid_help_surface() {
         );
         for line in help.render_long_help().to_string().lines() {
             // These describe real executable filenames, not the product identity.
-            if line.contains("Install st3, the st link")
-                || line.contains("Keep the installed st3, st,")
+            if line.contains("Install Fractal (st3 and the st link) and pty")
+                || line.contains(
+                    "Keep the installed Fractal executables (fractal, st3, st, stui, fractal-migrate, and pty)",
+                )
             {
                 continue;
             }
@@ -5592,22 +5765,19 @@ fn a_provenance_reads_as_one_line() {
 async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store: Arc::new(Store::open_memory("message-read-state").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "message-read-state".into(),
-        state_dir: root.path().to_path_buf(),
-        pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store: Arc::new(Store::open_memory("message-read-state").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "message-read-state".into(),
+    state_dir: root.path().to_path_buf(),
+    pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();
@@ -5689,15 +5859,12 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     let token = store.selected_desired_token("agent/example/old").unwrap().unwrap();
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new")).unwrap();
-    let state = AppState {
-        store: store.clone(), notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
-        state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
-        pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
-        client_relay: None, native_session_home: None, owning_person: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { store: store.clone(), notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
+    state_dir: root.path().to_path_buf(), pty_root: root.path().join("pty"),
+    pty_binary: PathBuf::from("pty"), fleet_id: None, configured_peers: Vec::new(),
+    client_relay: None, native_session_home: None, owning_person: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move { serve_unix(&server_socket, router(state)).await.unwrap(); });
     for _ in 0..100 {
@@ -5715,6 +5882,43 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     read_message_after_lifecycle(&client, &message.subject, "agent/example/new", false).await.unwrap();
     assert_eq!(store.latest_claim(&message.subject, Some("message.read")).unwrap().unwrap().id, signed.id);
     server.abort();
+}
+
+#[test]
+fn generic_declaration_rendering_preserves_nested_agent_resource_references() {
+    use fractal_daemon::graph::{declared_resources, render_desired_node};
+    let source = r#"version 2
+agent "example/worker" {
+  workspace "/tmp"
+  command "sleep 1000"
+  resource "explicit" subject="resource/example/known" reason="Keep the explicit edge"
+  resource "unresolved" subject="resource/example/not-yet-published" reason="Keep unresolved work"
+}
+"#;
+    let original = fractal_daemon::parse_intent(source, "studio").unwrap();
+    let desired = &original.subjects["agent/example/worker"].desired;
+    let expected = declared_resources(desired);
+    assert_eq!(expected.len(), 2);
+    for tree in [
+        desired.clone(),
+        serde_json::json!({
+            "name": "host",
+            "arguments": ["studio"],
+            "properties": {},
+            "children": [desired],
+        }),
+    ] {
+        let rendered = render_desired_node(&tree).unwrap();
+        let parsed = fractal_daemon::parse_intent(
+            &format!("version 2\n{rendered}\n"),
+            "studio",
+        )
+        .unwrap();
+        assert_eq!(
+            declared_resources(&parsed.subjects["agent/example/worker"].desired),
+            expected,
+        );
+    }
 }
 
 #[test]
@@ -5771,7 +5975,7 @@ fn agents_requires_an_explicit_subcommand_and_exposes_seat_lifecycle_commands() 
     else {
         panic!("agents start did not parse");
     };
-    let kdl = agent_start_document(&args, None).unwrap();
+    let kdl = agent_start_document(&args, None, &Default::default()).unwrap();
     let intent = fractal_daemon::parse_intent(&kdl, "node").unwrap();
     assert!(intent.subjects.contains_key("agent/example/cos/standing/cos"));
     assert!(
@@ -7316,7 +7520,7 @@ async fn a_projected_message_envelope_names_the_graph_recipient_and_exact_body_h
             "<smalltalk-message id=\"fact\" from=\"agent/run-1/wake.left\" \
                  to=\"agent/run-1/wake.right\" subject=\"Fact\" sha256=\"{}\" \
                  graph=\"message/fact\">\nFACT &lt;b&gt;QUARTZ&lt;/b&gt;\n</smalltalk-message>",
-            fractal_drivers::ding::st3_body_sha256("FACT <b>QUARTZ</b>")
+            fractal_drivers::ding::fractal_body_sha256("FACT <b>QUARTZ</b>")
         )
     );
 }
@@ -7544,7 +7748,7 @@ fn mission_follow_stops_for_completed_and_standing_runs() {
 }
 
 #[test]
-fn a_runtime_driver_retries_a_transient_st3_api_outage() {
+fn a_runtime_driver_retries_a_transient_fractal_api_outage() {
     let mut last_warning = None;
     tolerate_driver_api_outage(
         "agent/run/worker",
@@ -7587,22 +7791,19 @@ async fn serve_test_store(
     node: &str,
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
-    let state = AppState {
-        owning_person: None,
-        store,
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    };
+    let state = AppState { owning_person: None,
+    store,
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: node.into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         serve_unix(&server_socket, router(state)).await.unwrap();

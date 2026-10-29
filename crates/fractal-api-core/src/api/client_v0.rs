@@ -297,6 +297,7 @@ pub const ALL_SCOPES: &[&str] = &[
     "control.pairing",
 ];
 const ACTIONS: &[&str] = &[
+    "private-notes.write",
     "arrangement.edit",
     "attention.resolve",
     "review.approve",
@@ -355,6 +356,7 @@ const ACTIONS: &[&str] = &[
     "pairing.revoke",
 ];
 const AVAILABLE_ACTIONS: &[&str] = &[
+    "private-notes.write",
     "custom.reply",
     "prompt.respond",
     "arrangement.edit",
@@ -423,7 +425,7 @@ pub struct LocalWebSession {
 pub struct ClientSession {
     /// The credential/session identity used for audit and idempotency isolation.
     pub actor: String,
-    /// The concrete graph person whose explicitly delegated authority is exercised.
+    /// The concrete graph person or local agent whose authority is exercised.
     pub authority_actor: String,
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
@@ -614,6 +616,8 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
         json!({ "id": action, "version": 0, "state": state })
     }));
     capabilities.push(json!({"id":"device-key-proofs", "version":1, "state":"granted"}));
+    // Pairing accepts `fabric_node_id` and reports `fabric_grant`.
+    capabilities.push(json!({"id":"fabric-gateway-grant", "version":1, "state":"granted"}));
     capabilities.push(json!({"id":"conversation-message-participants", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-delivery-links", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"conversation-blocks", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -929,6 +933,11 @@ pub fn mission_list_cards_with(
         .into_iter()
         .map(|d| (d.mission.subject.clone(), d))
         .collect::<BTreeMap<_, _>>();
+    let resource_uris = store.declared_resource_uris(
+        definitions
+            .values()
+            .flat_map(|definition| &definition.mission.resources),
+    )?;
     ids.iter().map(|id| {
         let overview = crate::performance::task("mission_collection/overview", || store.mission_overview(id, 3))?;
         let newest = overview["newest"].as_array().expect("overview previews");
@@ -991,6 +1000,8 @@ pub fn mission_list_cards_with(
             "run_details":details,"active_runs":active,"total_runs":overview["total_runs"],
             "run_counts":overview["counts"],"runs_truncated":overview["total_runs"].as_u64().unwrap_or(0)>newest.len() as u64,
             "run_generations":generations,"must_act":must_act,
+            "resources":crate::api::client_declared_resources(
+                definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
             "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
     }).collect()
 }
@@ -1123,7 +1134,7 @@ fn runtime_resources_from_status_access(
             .map(|selected| selected.subject.as_str())
             .collect::<Vec<_>>(),
     )?;
-    let claim_times = store.claim_acceptance_times(
+    let claim_times = store.kept_claim_acceptance_times(
         &status
             .subjects
             .iter()
@@ -2016,8 +2027,11 @@ pub fn session_message_body(state: &AppState, claim: &ClaimRecord, participants:
 }
 
 fn timeline_order(a: &Value, b: &Value) -> std::cmp::Ordering {
-    a["timestamp"].as_str().cmp(&b["timestamp"].as_str())
-        .then_with(|| a["sequence"].as_u64().cmp(&b["sequence"].as_u64()))
+    crate::external_sessions::compare_timeline_positions(
+        (a["timestamp"].as_str().unwrap_or_default(), a["sequence"].as_u64().unwrap_or(0), 0, a["id"].as_str().unwrap_or_default()),
+        (b["timestamp"].as_str().unwrap_or_default(), b["sequence"].as_u64().unwrap_or(0), 0, b["id"].as_str().unwrap_or_default()),
+        crate::external_sessions::TimelineOrder::TimestampSequence,
+    )
 }
 
 /// The conversation header (client contract `conversation-blocks.v1` §3): derived from a
@@ -2383,7 +2397,7 @@ pub fn native_slice_page_at_generation(
     };
     drop(preparation);
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, true,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2399,7 +2413,7 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS, managed,
+                None, CLIENT_MAX_PAGE_ITEMS, managed, true,
             )?.0)
         } else {
             None
@@ -2510,7 +2524,7 @@ pub fn native_head_fence(
 /// on with a fresh budget), and refuses (`page-cursor-expired`) only when that many consecutive
 /// entries are all hidden.
 #[allow(clippy::too_many_arguments)]
-fn canonical_native_slice(
+pub fn canonical_native_slice(
     state: &AppState,
     snapshot: &ClientSnapshot,
     source: &crate::external_sessions::ExternalSession,
@@ -2521,9 +2535,10 @@ fn canonical_native_slice(
     before: Option<&crate::external_sessions::TimelineKey>,
     limit: usize,
     managed: Option<&super::ManagedSessionOwner>,
+    prepare_display: bool,
 ) -> Result<(conversation_blocks::PreparedSlice, u64), ApiError> {
     let mut slice = conversation_blocks::read_slice(
-        source, session, session_id, order, before, limit,
+        source, session, session_id, order, before, limit, prepare_display,
     )?;
     let mut boundary = slice.items.last().map(|item| crate::external_sessions::timeline_key(item, 0));
     let mut scanned = slice.items.len();
@@ -2543,6 +2558,7 @@ fn canonical_native_slice(
         let mut next = conversation_blocks::read_slice(
             source, session, session_id, order, boundary.as_ref(),
             (limit - slice.items.len()).min(budget),
+            prepare_display,
         )?;
         scanned += next.items.len();
         if next.basis != slice.basis || next.generation != slice.generation {
@@ -2571,11 +2587,6 @@ pub const TIMELINE_PAGE_BYTE_BUDGET: usize = 768 * 1024;
 
 /// Replace a timeline entry that alone exceeds the response ceiling with a visible error entry
 /// that keeps its identity and place, so the page it is on still opens and continues past it.
-/// A stored page's position for one entry; the stored projection sorts by it alone.
-pub fn stored_timeline_position(item: &Value) -> u64 {
-    item["sequence"].as_u64().unwrap_or(u64::MAX)
-}
-
 pub fn cut_oversized_timeline_entry(item: &mut Value, size: usize) {
     item["type"] = json!("error");
     item["role"] = json!("system");
@@ -3012,49 +3023,119 @@ fn managed_claude_transcript(
     }
 }
 
+fn pi_family_binding<'a>(
+    bindings: &'a [crate::model::ClaimRecord],
+    owner: &str,
+    incarnation: &str,
+    driver: crate::external_sessions::ExternalDriver,
+) -> Option<&'a crate::model::ClaimRecord> {
+    let matches_owner = |fields: &Value| {
+        fields["harness"] == driver.as_str() && fields["agent"] == owner
+    };
+    bindings.iter().rev().find(|claim| {
+        let fields = claim.body.get("fields").unwrap_or(&claim.body);
+        matches_owner(fields) && fields["incarnation_id"] == incarnation
+    }).or_else(|| bindings.last().filter(|claim| {
+        // Import provenance is usable only until a runtime binding supersedes it.
+        let fields = claim.body.get("fields").unwrap_or(&claim.body);
+        matches_owner(fields)
+            && fields["incarnation_id"].is_null()
+            && fields["source_session"].as_str().is_some()
+    }))
+}
+
+#[cfg(test)]
+mod pi_family_binding_tests {
+    use super::*;
+
+    #[test]
+    fn exact_incarnation_beats_newer_imports_and_other_runtime_bindings() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(&root.path().join("graph.db"), "test").unwrap();
+        let owner = "agent/binding-test";
+        let append = |incarnation: Option<&str>, source: Option<&str>, agent: &str| {
+            if let Some(incarnation) = incarnation {
+                store.append_claim(&crate::model::ClaimInput {
+                    subject: owner.into(), kind: "runtime.observed".into(),
+                    actor: Some("person/robin".into()),
+                    fields: BTreeMap::from([
+                        ("status".into(), json!("running")),
+                        ("incarnation_id".into(), json!(incarnation)),
+                    ]),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+            store.append_claim(&crate::model::ClaimInput {
+                subject: owner.into(),
+                kind: "harness.session-file".into(),
+                actor: Some("person/robin".into()),
+                fields: BTreeMap::from([
+                    ("harness".into(), json!("omp")),
+                    ("session_id".into(), json!("native-binding")),
+                    ("agent".into(), json!(agent)),
+                    ("incarnation_id".into(), json!(incarnation)),
+                    ("source_session".into(), json!(source)),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap()
+        };
+        let imported = append(None, Some("session/imported"), owner);
+        let claims = || store.claims_for(owner, Some("harness.session-file")).unwrap();
+        let selected = |bindings: &[crate::model::ClaimRecord], incarnation: &str| {
+            pi_family_binding(bindings, owner, incarnation, crate::external_sessions::ExternalDriver::Omp)
+                .map(|claim| claim.id.clone())
+        };
+        assert_eq!(selected(&claims(), "old"), Some(imported.id));
+        let exact = append(Some("old"), None, owner);
+        append(Some("new"), None, owner);
+        assert_eq!(selected(&claims(), "old"), Some(exact.id.clone()));
+        assert_eq!(selected(&claims(), "unbound"), None, "runtime claims supersede import provenance");
+        append(None, Some("session/later-import"), owner);
+        assert_eq!(selected(&claims(), "old"), Some(exact.id.clone()));
+        append(Some("old"), None, "agent/other-owner");
+        assert_eq!(selected(&claims(), "old"), Some(exact.id));
+        assert_eq!(selected(&claims(), "unbound"), None, "a foreign latest claim cannot revive an import");
+    }
+}
+
 fn managed_pi_family_transcript(
     state: &AppState,
     owner: &str,
     incarnation: &str,
     driver: crate::external_sessions::ExternalDriver,
 ) -> Result<crate::external_sessions::ExternalSession, Missing> {
-    if let Some(claim) = state
+    let bindings = state
         .store
-        .latest_claim(owner, Some("harness.session-file"))
-        .map_err(|error| format!("reading the pi-family session record failed: {error:#}"))?
-    {
+        .claims_for(owner, Some("harness.session-file"))
+        .map_err(|error| format!("reading the pi-family session record failed: {error:#}"))?;
+    if let Some(claim) = pi_family_binding(&bindings, owner, incarnation, driver) {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
-        if fields["harness"] == driver.as_str()
-            && fields["agent"] == owner
-            && (fields["incarnation_id"] == incarnation
-                || (fields["incarnation_id"].is_null()
-                    && fields["source_session"].as_str().is_some()))
-        {
-            let (Some(path), Some(native_id)) =
-                (fields["path"].as_str(), fields["session_id"].as_str())
-            else {
-                return Err(Missing::not_yet(
-                    "the bound pi-family session has no transcript path",
-                ));
-            };
-            return match crate::external_sessions::find_bound_pi_family_transcript(
-                driver,
-                Path::new(path),
-                native_id,
-            ) {
-                Ok(Some(session)) => Ok(session),
-                Ok(None) => Err(format!(
-                    "the bound {} session {native_id} is not readable",
-                    driver.as_str()
-                )
-                .into()),
-                Err(error) => Err(format!(
-                    "reading the bound {} session {native_id} failed: {error:#}",
-                    driver.as_str()
-                )
-                .into()),
-            };
-        }
+        let (Some(path), Some(native_id)) =
+            (fields["path"].as_str(), fields["session_id"].as_str())
+        else {
+            return Err(Missing::not_yet(
+                "the bound pi-family session has no transcript path",
+            ));
+        };
+        return match crate::external_sessions::find_bound_pi_family_transcript(
+            driver,
+            Path::new(path),
+            native_id,
+        ) {
+            Ok(Some(session)) => Ok(session),
+            Ok(None) => Err(format!(
+                "the bound {} session {native_id} is not readable",
+                driver.as_str()
+            )
+            .into()),
+            Err(error) => Err(format!(
+                "reading the bound {} session {native_id} failed: {error:#}",
+                driver.as_str()
+            )
+            .into()),
+        };
     }
     let root = state
         .state_dir
@@ -3180,6 +3261,12 @@ pub fn timeline_value(
     })
 }
 
+/// Stable identity shared by stored projection and conversation replay selection.
+pub fn timeline_claim_entry_id(session_id: &str, claim: &ClaimRecord, suffix: &str) -> String {
+    let digest = hex::encode(Sha256::digest(format!("{}:{suffix}", claim.id).as_bytes()));
+    format!("timeline-entry/{}/{}", session_id.trim_start_matches("session/"), &digest[..24])
+}
+
 pub fn timeline_first_page(
     state: &AppState,
     snapshot: &ClientSnapshot,
@@ -3188,6 +3275,23 @@ pub fn timeline_first_page(
     query: &ClientListQuery,
     native_read_error: Option<ApiError>,
     managed: Option<&super::ManagedSessionOwner>,
+) -> Result<Json<Value>, ApiError> {
+    timeline_first_page_with_extent(state, snapshot, session, session_id, query, native_read_error, managed, None)
+}
+
+pub type TimelineExtentVisitor<'a> = &'a mut dyn FnMut(&[Value]);
+
+/// Capture the complete bounded stored projection beside its display window for replay loss checks.
+#[allow(clippy::too_many_arguments)]
+pub fn timeline_first_page_with_extent(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    session_id: String,
+    query: &ClientListQuery,
+    native_read_error: Option<ApiError>,
+    managed: Option<&super::ManagedSessionOwner>,
+    extent: Option<TimelineExtentVisitor<'_>>,
 ) -> Result<Json<Value>, ApiError> {
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(mut rebuilds) = timeline_rebuilds().lock() {
@@ -3210,21 +3314,14 @@ pub fn timeline_first_page(
                 }
                 conversation_blocks::read(&external, session, &session_id)?
             }
-            // A subagent conversation id resolves beside its parent before it is unknown.
-            other => match crate::subagent_sessions::resolve_child(
-                state.native_session_home.as_deref(),
-                &session_id,
-            )
-            .map_err(ApiError::internal)?
-            {
-                Some(child) => {
-                    if child.driver != crate::external_sessions::ExternalDriver::OpenCode {
-                        return native_slice_page(state, snapshot, session, &session_id, query, &child);
-                    }
-                    conversation_blocks::read(&child, session, &session_id)?
+            _ if crate::subagent_sessions::child_parts(&session_id).is_some() => {
+                let child = conversation_blocks::source(state, &session_id, None)?;
+                if child.driver != crate::external_sessions::ExternalDriver::OpenCode {
+                    return native_slice_page(state, snapshot, session, &session_id, query, &child);
                 }
-                None => external_conversation_items(other, &session_id)?,
-            },
+                conversation_blocks::read(&child, session, &session_id)?
+            }
+            other => external_conversation_items(other, &session_id)?,
         };
         return native_timeline_page(state, snapshot, session, &session_id, query, items, managed);
     };
@@ -3368,10 +3465,7 @@ pub fn timeline_first_page(
     let mut items = Vec::<Value>::new();
     let mut explicit = BTreeMap::<String, usize>::new();
     let mut tool_calls = BTreeSet::<String>::new();
-    let entry_id = |claim: &ClaimRecord, suffix: &str| {
-        let digest = hex::encode(Sha256::digest(format!("{}:{suffix}", claim.id).as_bytes()));
-        format!("timeline-entry/{session_leaf}/{}", &digest[..24])
-    };
+    let entry_id = |claim: &ClaimRecord, suffix: &str| timeline_claim_entry_id(&session_id, claim, suffix);
     let applies_to_incarnation = |fields: &Value| {
         let observed = fields.get("incarnation_id").and_then(Value::as_str);
         observed.is_none() || incarnation.is_none() || observed == incarnation
@@ -3610,7 +3704,7 @@ pub fn timeline_first_page(
         let notice_timestamp = items
             .iter()
             .filter_map(|item| item["timestamp"].as_str())
-            .max()
+            .max_by_key(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
             .unwrap_or(&snapshot.created_at);
         let mut notice = |code: &str, message: &str, details: Value| {
             notice_sequence = notice_sequence.saturating_add(1);
@@ -3638,7 +3732,10 @@ pub fn timeline_first_page(
         });
         items.extend([query_notice, prefix_notice].into_iter().flatten());
     }
-    items.sort_by_key(stored_timeline_position);
+    items.sort_by(timeline_order);
+    if let Some(extent) = extent {
+        extent(&items);
+    }
     let header = conversation_page_header(state, session, &session_id, &items, false);
     // A conversation opens at its newest bounded window. The cursor walks toward older
     // windows, while each individual page remains chronological for straightforward rendering.
@@ -3661,6 +3758,16 @@ pub fn timeline_first_page(
         page_value["header"] = header;
     }
     Ok(Json(page_value))
+}
+
+/// Resolve only where a conversation is read, without making a child a managed session.
+pub fn routing_session_owner_at(
+    store: &Store, index: u64, session_id: &str,
+) -> anyhow::Result<Option<super::ManagedSessionOwner>> {
+    let child = crate::subagent_sessions::child_parts(session_id);
+    let routing_id = child.as_ref()
+        .map_or(session_id, |parts| parts.routing_parent_session_id.as_str());
+    super::managed_session_owner_at(store, index, routing_id)
 }
 
 pub fn conversation_session_id(state: &AppState, id: &str) -> Result<String, ApiError> {
@@ -4170,9 +4277,11 @@ pub struct Fence {
     pub runtime_desired_revision: Option<String>,
     pub terminal_sequence: Option<u64>,
     pub preview_token: Option<String>,
+    pub private_notes: Option<crate::private_notes::NotesFence>,
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
+    if action == "private-notes.write" { return Some("control.work"); }
     if matches!(
         action,
         "agent.create"

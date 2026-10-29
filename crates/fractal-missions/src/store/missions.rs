@@ -1755,6 +1755,17 @@ pub trait MissionsStore {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error>;
+    /// [`Self::work_action_with_handoff`]. A renewal answers with the step's row view alone unless
+    /// `enrich_renewal`: its queue, timing, summaries and wake are folded from a reader after COMMIT.
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error>;
     /// Fill a committed work acknowledgement's queue, timing, summaries and wake from a reader.
     fn enrich_work_response(&self, view: &mut StepRunView) -> Result<()>;
     fn set_step_state(
@@ -5651,6 +5662,18 @@ impl MissionsStore for Store {
             extend_ms: Option<u64>,
             handoff: Option<&crate::model::WorkHandoffRequest>,
         ) -> Result<StepRunView, St3Error> {
+        self.work_action_answering(subject, action, request, extend_ms, handoff, true)
+    }
+
+    fn work_action_answering(
+            &self,
+            subject: &str,
+            action: &str,
+            request: &WorkRequest,
+            extend_ms: Option<u64>,
+            handoff: Option<&crate::model::WorkHandoffRequest>,
+            enrich_renewal: bool,
+        ) -> Result<StepRunView, St3Error> {
         if action == "extend" {
             if !extend_ms.is_some_and(|by| (1..=MAX_STEP_EXTENSION_MS).contains(&by)) {
                 return Err(St3Error::new(
@@ -6228,7 +6251,7 @@ impl MissionsStore for Store {
             })
             .map_err(|error| St3Error::new("internal", error))?;
         let mut view = committed?;
-        if action == "renew" {
+        if action == "renew" && enrich_renewal {
             // An exact retry of a renewal also replays a view cached without these fields.
             self.enrich_work_response(&mut view)
                 .map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;

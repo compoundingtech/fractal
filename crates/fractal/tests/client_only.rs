@@ -143,22 +143,19 @@ fn state(root: &Path, node: &str) -> AppState {
             smallclaims::fleet::MemberKey::generate().unwrap().0,
         ))
         .unwrap();
-    AppState {
-        owning_person: None,
-        store: Arc::new(store),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-    }
+    AppState { owning_person: None,
+    store: Arc::new(store),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0).0,
+    node: node.into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: root.join("unused-pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 fn person_ask(state: &AppState, name: &str, title: &str) -> String {
     let intent = fractal_daemon::graph::parse_intent(
@@ -241,7 +238,7 @@ async fn pair(root: &Path, local: &Client, url: &str) {
     device_name: "Demo laptop".into(),
     person_id: "person/avery".into(),
     full_control: Some(true),
-    scopes: None, })
+    scopes: None, fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -282,7 +279,7 @@ async fn complete_challenge(root: &Path, url: &str, challenge: &fractal_client::
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
+async fn tui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_without_one() {
     use fractal_client::{Fence, MessageSendParameters, device::Profile};
     use std::os::unix::fs::PermissionsExt as _;
     let member = tempfile::tempdir().unwrap();
@@ -382,7 +379,7 @@ async fn stui_pair_persists_a_real_signing_key_and_leaves_read_only_devices_with
     device_name: "Display".into(),
     person_id: "person/avery".into(),
     full_control: None,
-    scopes: Some(vec!["read.projections".into()]), })
+    scopes: Some(vec!["read.projections".into()]), fabric_gateway: None, })
         .await
         .unwrap()
         .value;
@@ -409,7 +406,7 @@ fn files_under(root: &Path) -> Vec<PathBuf> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn daemon_less_stui_pairs_controls_loses_recovers_and_uses_another_member() {
+async fn daemon_less_tui_pairs_controls_loses_recovers_and_uses_another_member() {
     let member = tempfile::tempdir().unwrap();
     let device = tempfile::tempdir().unwrap();
     let state = state(member.path(), "member-cedar");
@@ -688,7 +685,7 @@ async fn inventory_screen_sends_no_request_after_its_first_frames_for_more_than_
     let events = device.path().join("events.jsonl");
     let mut command = Command::new("python3");
     command
-        .arg(repo.join("scripts/stui-test-client"))
+        .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
             test_env!("CARGO_BIN_EXE_st3"),
@@ -850,7 +847,7 @@ async fn an_older_member_reads_fleet_on_focus_without_attempting_inventory_subsc
     let repo = Path::new(test_env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut command = Command::new("python3");
     command
-        .arg(repo.join("scripts/stui-test-client"))
+        .arg(repo.join("scripts/fractal-ui-test-client"))
         .args([
             "--binary",
             test_env!("CARGO_BIN_EXE_st3"),

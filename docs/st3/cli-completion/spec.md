@@ -1,6 +1,6 @@
-# st shell completion specification
+# Fractal shell completion specification
 
-This document specifies how st completes command lines and resolves short entity names.
+This document specifies how Fractal completes command lines and resolves short entity names.
 
 ## Status
 
@@ -16,9 +16,9 @@ Does not define: the entity model (see [../design.md](../design.md)) or the clie
 
 ## Mechanism
 
-st uses clap_complete's dynamic engine (`unstable-dynamic`, pinned with `=` in
-`crates/fractal/Cargo.toml`). st pins the exact version and reviews the unstable API on
-each upgrade. The shell stub passes the command line back to st on every TAB:
+Fractal uses clap_complete's dynamic engine (`unstable-dynamic`, pinned with `=` in
+`crates/fractal/Cargo.toml`). Fractal pins the exact version and reviews the unstable API on
+each upgrade. The shell stub passes the command line back to Fractal on every TAB:
 
 ```
 shell TAB
@@ -32,7 +32,7 @@ shell TAB
 
 The engine prints one candidate per line in the shell's format. Values and descriptions are
 separated by a tab (fish) or a colon (zsh). Bash receives values only. Every TAB starts the
-st executable once.
+Fractal executable once.
 
 `CompleteEnv::complete()` runs early in `main`, after the recorder and contract-inventory
 checks and `--instance` activation, and before any config, runtime or daemon work. It returns
@@ -137,7 +137,7 @@ differently per shell.
 
 `terminals attach, peek, send, signal`, `agents stop`, `missions cancel`, and `alerts show`
 resolve their subject before they act. A word that contains `/` is used as typed. For a bare word,
-st lists **all subjects of the kind**, without completion's running/unfinished filters or
+Fractal lists **all subjects of the kind**, without completion's running/unfinished filters or
 description joins. `agents stop`, `terminals send/signal`, and `missions cancel` use only steps
 1–2 below: destructive commands never accept prefix or substring matches. `attach`, `peek`, and
 `show` use all four steps. The first step that matches anything decides:

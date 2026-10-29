@@ -3,7 +3,9 @@
 //! The live client and the demo fixtures both produce a `World`. Anything the graph cannot
 //! answer yet is an `Option` or a `Load`, so a screen can say "unknown" instead of guessing.
 
-pub use fractal_ui_model::missions::{Mission, Step, StepState, Word};
+pub use fractal_ui_model::missions::{Mission, StepState, Word};
+#[cfg(test)]
+pub use fractal_ui_model::missions::Step;
 use std::collections::BTreeMap;
 
 /// Something that arrives later. `Loading` is never drawn as empty.
@@ -564,4 +566,6 @@ pub struct Device {
 
 // -------------------------------------------------------------- conversations
 
-pub use fractal_conversation_ui::{Body, Entry, ToolState};
+pub use fractal_conversation_ui::{Body, Entry};
+#[cfg(test)]
+pub use fractal_conversation_ui::ToolState;

@@ -1,4 +1,4 @@
-/** Story fixtures in the shape st serves: the agent text matches `render_agent_desired_kdl` output with env values redacted. */
+/** Story fixtures in the shape Fractal serves: the agent text matches `render_agent_desired_kdl` output with env values redacted. */
 export const agentDeclarationKdl = `version 2
 agent "example/ui-design" {
     accountable "person/avery"
@@ -16,7 +16,7 @@ agent "example/ui-design" {
 }
 `
 
-/** A mission declaration as authored; st serves no KDL for missions today, so this is a kit-only fixture. */
+/** A mission declaration as authored; Fractal serves no KDL for missions today, so this is a kit-only fixture. */
 export const missionDeclarationKdl = `version 2
 mission "example/ui-design/kdl-view" state="ready" timeout="3h" report-to="agent/example/ui-design" {
   goal "Canonical KDL viewer modal for agents and missions"

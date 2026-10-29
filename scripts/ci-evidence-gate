@@ -53,6 +53,12 @@ PROTECTED = (
     # The evidence log's key: which log heads the verifier reads at all.
     '.st/evidence-log-key',
 )
+# The protected files the gate and verifier only ever read at the accepted BASE when they judge a note: the signing keys (--keys-from),
+# the author list (check_authors, from the base's ci-evidence-signing) and the evidence log's key (--log-keys-from). The copy in a head
+# tree decides nothing, so main changing one after the branch point does not make a pull request fall back to the merge tree (a key
+# rotation on main voided every head signature made before it, 2026-10-26). A note the change distrusts, a dropped key say, is still
+# refused, by the lists as they are at the base. The branch's OWN edits to them still count as protected changes (choose_tree).
+BASE_READ = ('.st/evidence-keys', '.st/evidence-authors.json', '.st/evidence-log-key')
 
 # Staleness bound for a head-tree note (the stated policy, docs/st3/gate-evidence.md "How stale a head may be"): the branch point
 # may be at most this many first-parent commits of main behind the tip GitHub merged into. Further behind, the run asks about the
@@ -293,7 +299,11 @@ def prefetch_manifests(revision, base):
     missing = [oid for oid in wanted if OID.match(oid) and run('git', 'cat-file', '-e', oid, env={'GIT_NO_LAZY_FETCH': '1'}).returncode != 0]
     if not missing:
         return 'none'
-    return 'ok' if run('git', 'fetch', '--no-tags', '-q', 'origin', *missing).returncode == 0 else 'failed'
+    # No negotiation: the clone has main's commits but not their blobs, and a server with bitmaps would leave out every manifest that
+    # an advertised commit reaches, which is each one main changed since the branch point. The lazy fetch of a partial clone asks the
+    # same way.
+    return 'ok' if run('git', '-c', 'fetch.negotiationAlgorithm=noop', 'fetch', '--no-tags', '-q', 'origin', *missing).returncode == 0 \
+        else 'failed'
 
 
 def fetch_member_notes(verifier, base, check, repository, revision='HEAD'):
@@ -351,6 +361,9 @@ def line(context, decision, outcome, result, detail, tree, verifier_sha, gate_sh
         ('notes_fetch', context.get('notes_fetch')), ('policy_sha256', context.get('policy_sha256')), ('keys_sha256', context.get('keys_sha256')),
         ('log', result.get('log')), ('log_head', result.get('log_head')), ('log_age_s', result.get('log_age_s')),
         ('log_missing', result.get('log_missing')), ('log_fetch', context.get('log_fetch')),
+        # A per-crate check's unlogged pass: how many members, the first few as crate=record, and the oldest of their observed_at.
+        ('log_unlogged', result.get('log_unlogged')), ('log_unlogged_crates', result.get('log_unlogged_crates')),
+        ('log_unlogged_observed_at', result.get('log_unlogged_observed_at')),
         # A per-crate check: how many workspace members, and how many of them no satisfying note covers.
         ('members', result.get('members')), ('missing', len(result['missing']) if isinstance(result.get('missing'), (dict, list)) else None),
         ('manifests_fetch', context.get('manifests_fetch')), ('members_fetch', context.get('members_fetch')),
@@ -428,10 +441,10 @@ def base_signing_module(base):
 def branch_point_verdict(branch_point, head, base, current, context=None):
     """How far the branch is behind main, when the pull request head's own tree may be asked about; else a Fallback naming why not.
 
-    The history half of the head-tree rule, with no CI context in it so that scripts/st-test asks the very same question before a push: the
+    The history half of the head-tree rule, with no CI context in it so that scripts/fractal-test asks the very same question before a push: the
     branch is not more than HEAD_TREE_MAX_BEHIND commits behind (first-parent count from the branch point to `current`, the base tip the
     merge commit was made on), and no protected file differs between the branch point and the base or `current` (main moved one since
-    the branch). The branch's OWN protected edits do not make it fall back: they are the run's `protected_changed` (choose_tree), which
+    the branch), other than those only ever read at the base (BASE_READ). The branch's OWN protected edits do not make it fall back: they are the run's `protected_changed` (choose_tree), which
     decide weighs against the note's signer. Runs git in the current directory."""
     behind = git_out('rev-list', '--count', '--first-parent', f'{branch_point}..{current}')
     if not behind.isdigit():
@@ -445,7 +458,7 @@ def branch_point_verdict(branch_point, head, base, current, context=None):
         diff = run('git', 'diff', '--no-renames', '--name-only', '-z', first, second)
         if diff.returncode != 0:
             raise Fallback('could not compare protected files')
-        changed += [p for p in diff.stdout.decode(errors='replace').split('\0') if p in PROTECTED]
+        changed += [p for p in diff.stdout.decode(errors='replace').split('\0') if p in PROTECTED and p not in BASE_READ]
     if changed:
         raise Fallback('protected files differ from the branch point')
     return int(behind)

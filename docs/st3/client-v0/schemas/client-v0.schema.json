@@ -193,9 +193,9 @@
       "required": ["api_version", "capabilities"],
       "properties": {
         "api_version": {"enum": ["st3.client.v0", "fractal.client.v0"]},
-        "capabilities": {"type": "array", "minItems": 1, "maxItems": 1, "items": {
+        "capabilities": {"type": "array", "minItems": 1, "maxItems": 2, "items": {
           "type": "object", "additionalProperties": false, "required": ["id", "version", "state"],
-          "properties": {"id": {"const": "device-key-proofs"}, "version": {"const": 1}, "state": {"const": "granted"}}
+          "properties": {"id": {"enum": ["device-key-proofs", "fabric-gateway-grant"]}, "version": {"const": 1}, "state": {"const": "granted"}}
         }}
       }
     },
@@ -277,6 +277,7 @@
       "not-found",
       "forbidden",
       "unsupported-capability",
+      "peer-too-old",
       "validation-failed",
       "idempotency-conflict",
       "issuer-required",
@@ -313,6 +314,9 @@
       "content-not-text",
       "invalid-document-reference",
       "document-not-synced",
+      "private-notes-unreachable",
+      "private-notes-carrier-conflict",
+      "private-notes-indeterminate",
       "internal"
     ]}, {"type": "string"}], "description": "Versioned safe error code; unknown codes fall back to `retryable`. runtime-list-not-ready is a retryable HTTP 503 while the list warms; runtime-list-ended is a non-retryable HTTP 503 requiring daemon restart. message-selectors-not-ready is a retryable HTTP 503 during initial online message selector population. Arrangement admission and validation refusals are non-retryable. suspend-authored-session-selection is a non-retryable HTTP 422 refusal before any suspend write; details.selector names the declared native session selector. issuer-required is a non-retryable HTTP 409 pairing revocation refusal; details.issuer_host_id identifies the authoritative issuer. Assistant reads: response-budget-exceeded is non-retryable HTTP 413 (page, text or one bounded source record exceeds max_response_bytes); content-not-text is non-retryable HTTP 422 for attachments, images or structured payloads."},
     "UnknownResource": {"allOf": [{"$ref": "#/$defs/ResourceHeader"}, {"type": "object", "properties": {"kind": {"type": "string", "not": {"enum": [
@@ -371,6 +375,64 @@
     "Timestamp": { "x-st-codec": "timestamp", "description": "RFC 3339 UTC instant; servers emit millisecond precision with `Z`.", "examples": ["2026-10-01T10:00:00.000Z"], "type": "string", "format": "date-time" },
     "Cursor": { "x-st-brand": "Cursor", "description": "Opaque, snapshot-bound page/event cursor.", "type": "string", "minLength": 8, "maxLength": 2048 },
     "Revision": { "x-st-brand": "Revision", "description": "Opaque per-subject revision; compare for equality, echo in fences.", "type": "string", "minLength": 1, "maxLength": 256 },
+    "AgentsStatusWatermark": {
+      "description": "Node-local graph cut and roster-relevant local activity frontier. These numbers are not comparable across nodes or epochs.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_index", "local_frontier"],
+      "properties": {
+        "store_index": { "type": "integer", "minimum": 0 },
+        "local_frontier": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "AgentsPublicationMetadata": {
+      "description": "Identity and source cut of one immutable complete current agents publication. This definition does not add fields to legacy HTTP responses or collection frames.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_epoch", "revision", "status_watermark", "materialized_at_ms"],
+      "properties": {
+        "node_epoch": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", "description": "Opaque UUID for the publication owner's epoch. Restart, full projection reset or revision exhaustion starts a new epoch." },
+        "revision": { "type": "integer", "minimum": 1, "maximum": 9007199254740991, "description": "Increasing JSON-safe publication number within one node epoch. Gaps are allowed; this is not a replay cursor." },
+        "status_watermark": { "$ref": "#/$defs/AgentsStatusWatermark" },
+        "materialized_at_ms": { "type": "integer", "minimum": 0, "description": "Server-captured presentation time in Unix milliseconds, not producer observation time or evidence receipt time." }
+      }
+    },
+    "AgentsPublication": {
+      "description": "Complete immutable current agents view. Order contains each item ID once in presentation order. No core row-count or encoded-byte limit applies. This transport-neutral definition does not change legacy response shapes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publication", "items", "order", "has_more"],
+      "properties": {
+        "publication": { "$ref": "#/$defs/AgentsPublicationMetadata" },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/Agent" } },
+        "order": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "uniqueItems": true },
+        "has_more": { "const": false }
+      }
+    },
+    "PrivateNotesUri": { "x-st-brand": "PrivateNotesUri", "type": "string", "pattern": "^dev\\.schickling\\.agent-private-notes://[^/]+/[^/]+$", "description": "Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile." },
+    "PrivateNotesFence": {
+      "type": "object", "additionalProperties": false, "required": ["carrier_generation", "revision"],
+      "properties": { "carrier_generation": { "$ref": "#/$defs/Revision" }, "revision": { "$ref": "#/$defs/Revision" } }
+    },
+    "PrivateNotesData": {
+      "type": "object", "additionalProperties": false, "required": ["uri", "markdown", "fence"],
+      "properties": { "uri": { "$ref": "#/$defs/PrivateNotesUri" }, "markdown": { "type": "string" }, "fence": { "$ref": "#/$defs/PrivateNotesFence" } }
+    },
+    "PrivateNotesAction": {
+      "type": "object", "additionalProperties": false, "required": ["id", "fence"],
+      "properties": { "id": { "const": "private-notes.write" }, "fence": { "allOf": [{ "$ref": "#/$defs/Fence" }, { "required": ["private_notes"] }] } }
+    },
+    "PrivateNotesSubject": {
+      "type": "object", "additionalProperties": false, "required": ["ref", "family", "schema", "data", "actions", "live"],
+      "properties": {
+        "ref": { "$ref": "#/$defs/PrivateNotesUri" }, "family": { "const": "private-notes" }, "schema": { "const": "fractal.private-notes@1" },
+        "data": { "$ref": "#/$defs/PrivateNotesData" }, "actions": { "type": "array", "maxItems": 1, "items": { "$ref": "#/$defs/PrivateNotesAction" } }, "live": { "type": "null" }
+      }
+    },
+    "PrivateNotesWriteParameters": {
+      "type": "object", "additionalProperties": false, "required": ["uri", "markdown"],
+      "properties": { "uri": { "$ref": "#/$defs/PrivateNotesUri" }, "markdown": { "type": "string" } }
+    },
     "Snapshot": {
       "description": "The complete projected state at one local store index and projection version.",
       "examples": [{"id": "snapshot/host-a/1842/2fc9", "host_id": "host/host-a", "store_index": 1842, "projection_version": "client-projection.v0", "created_at": "2026-09-20T12:00:00.000Z"}],
@@ -436,6 +498,7 @@
           "oneOf": [
             { "$ref": "#/$defs/DirectiveNotes" },
             { "$ref": "#/$defs/Capabilities" },
+            { "$ref": "#/$defs/PrivateNotesSubject" },
             { "$ref": "#/$defs/DocumentContent" },
             { "$ref": "#/$defs/DocumentsPage" },
             { "$ref": "#/$defs/SchedulesPage" },
@@ -1359,7 +1422,8 @@
             "runs_truncated": { "type": "boolean" },
             "run_generations": { "propertyNames": {"$ref": "#/$defs/MissionRunId"}, "type": "object", "additionalProperties": { "$ref": "#/$defs/RunGenerationId" } },
             "visualization": { "oneOf": [{ "$ref": "#/$defs/Visualization" }, { "type": "null" }] },
-            "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] }
+            "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] },
+            "resources": { "type": "array", "items": { "$ref": "#/$defs/DeclaredResource" }, "description": "The resources the current published revision names, in authored order. Read-only. An older daemon omits the field." }
           }
         }
       ]
@@ -1753,6 +1817,7 @@
             "owner_run_id": { "oneOf": [{ "$ref": "#/$defs/MissionRunId" }, { "type": "null" }] },
             "driver": { "type": ["string", "null"] },
             "harness_state": { "type": ["string", "null"], "description": "Observed harness state; stale idle is indeterminate. Desired state and declared work status remain separate." },
+            "background_jobs": { "type": ["integer", "null"], "minimum": 0, "description": "Background job count from the selected current-incarnation harness state report; zero is known empty, null is unknown." },
             "since": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When this observed state began in this runtime incarnation. Same-state observations never reset it." },
             "observation": { "enum": ["current", "stale", "missing"], "description": "Stale after 90 seconds without a new observation; missing when this runtime has no observation." },
             "harness_error_state": { "type": ["string", "null"], "description": "Known actionable harness error: needs-login. Login keeps the legacy unauthenticated harness_state for older clients; older daemons omit this optional detail." },
@@ -1782,13 +1847,14 @@
             "usage": { "oneOf": [{ "$ref": "#/$defs/UsageSummary" }, { "type": "null" }] },
             "under": { "type": "array", "items": { "$ref": "#/$defs/AgentRelationship" } },
             "delivery": { "oneOf": [{ "$ref": "#/$defs/AgentDelivery" }, { "type": "null" }], "description": "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." },
-            "subagents": { "type": "array", "items": { "$ref": "#/$defs/AgentSubagent" }, "description": "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. An older daemon omits the field." },
+            "subagents": { "type": "array", "items": { "$ref": "#/$defs/AgentSubagent" }, "description": "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents." },
             "handoff": {"oneOf": [{"$ref": "#/$defs/AgentHandoff"}, {"type": "null"}], "description": "Placement handoff phase; the destination waits for former hosts to acknowledge their stopped runtimes."},
             "rollout": { "type": ["object", "null"], "description": "Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons." },
             "workspace": { "type": ["string", "null"], "description": "The declared workspace on the owning host." },
             "lifecycle": { "$ref": "#/$defs/AgentLifecycle", "description": "The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row." },
             "checkout": { "oneOf": [{ "$ref": "#/$defs/AgentCheckout" }, { "type": "null" }], "description": "The requested Git worktree repository, base and branch. Present before launch; it does not assert that checkout succeeded." },
-            "suspension": { "oneOf": [{ "$ref": "#/$defs/AgentSuspension" }, { "type": "null" }], "description": "The seat's latest suspend or resume and its phase. An older daemon omits the field." }
+            "suspension": { "oneOf": [{ "$ref": "#/$defs/AgentSuspension" }, { "type": "null" }], "description": "The seat's latest suspend or resume and its phase. An older daemon omits the field." },
+            "resources": { "type": "array", "items": { "$ref": "#/$defs/DeclaredResource" }, "description": "The resources the seat's current declaration names, in authored order. Read-only. An older daemon omits the field." }
           }
         }
       ]
@@ -1915,6 +1981,20 @@
       "required": ["agent_id"],
       "properties": {
         "agent_id": { "$ref": "#/$defs/Id" },
+        "reason": { "type": ["string", "null"] }
+      }
+    },
+    "DeclaredResource": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "A named edge from a seat or mission declaration to an ordinary resource subject in the graph.",
+      "required": ["name", "subject", "kind", "resolution"],
+      "properties": {
+        "name": { "type": "string", "description": "Unique within the declaration." },
+        "subject": { "$ref": "#/$defs/Id", "description": "The ordinary resource subject targeted by this edge. URI references use resource/uri/SHA256 of the exact URI." },
+        "kind": { "type": "string", "enum": ["uri", "subject"], "description": "Whether the edge was authored with uri= or subject=." },
+        "resolution": { "type": "string", "enum": ["resolved", "unresolved", "not-applicable"], "description": "URI locator availability. Subject references use not-applicable; this is not a subject existence check." },
+        "uri": { "type": "string", "description": "The exact absolute URI, any scheme. Present only for resolved URI references." },
         "reason": { "type": ["string", "null"] }
       }
     },
@@ -2701,7 +2781,8 @@
         "runtime_incarnation": { "type": "string" },
         "runtime_desired_revision": { "type": "string" },
         "terminal_sequence": { "type": "integer", "minimum": 0 },
-        "preview_token": { "x-st-brand": "PreviewToken", "type": "string", "pattern": "^lpv0:[0-9a-f]{64}$" }
+        "preview_token": { "x-st-brand": "PreviewToken", "type": "string", "pattern": "^lpv0:[0-9a-f]{64}$" },
+        "private_notes": { "$ref": "#/$defs/PrivateNotesFence" }
       }
     },
     "ActionCommon": {
@@ -2715,6 +2796,7 @@
           "enum": [
             "arrangement.edit",
             "custom.reply",
+            "private-notes.write",
             "prompt.respond",
             "attention.resolve",
             "review.approve",
@@ -2906,6 +2988,7 @@
       "oneOf": [
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
+        {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
         {"properties": {"type": {"const": "agent.create"}, "parameters": {"$ref": "#/$defs/AgentCreateParameters"}}},
         {"properties": {"type": {"const": "agent.retire"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_desired_revision"]}]}, "parameters": {"$ref": "#/$defs/AgentRetireParameters"}}},
@@ -3155,6 +3238,7 @@
         "status": { "enum": ["accepted", "completed", "rejected"] },
         "affected_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "uniqueItems": true },
         "snapshot_id": { "$ref": "#/$defs/Id" },
+        "private_notes": { "$ref": "#/$defs/PrivateNotesFence" },
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
         "arrangement_revision": { "$ref": "#/$defs/Revision" }
       }
@@ -3534,6 +3618,7 @@
         "device_name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "person_id": { "type": "string", "pattern": "^person/[^/]+$" },
         "full_control": { "type": "boolean" },
+        "fabric_gateway": { "type": "boolean", "description": "Let this pairing grant the device the client gateway over Fabric. Absent or false: it grants nothing." },
         "scopes": {
           "type": "array",
           "minItems": 1,
@@ -3573,7 +3658,8 @@
         "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] },
         "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
         "device_public_key": { "type": "string", "minLength": 32 },
-        "key_storage": { "enum": ["secure-enclave", "software"] }
+        "key_storage": { "enum": ["secure-enclave", "software"] },
+        "fabric_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
       }
     },
     "AssistantPairedSession": {
@@ -3610,7 +3696,19 @@
         "expires_at": { "$ref": "#/$defs/Timestamp" },
         "device_key_chain": { "type": "array", "items": { "type": "string" } },
         "device_key_proofs": { "type": "array", "items": { "type": "object" }, "maxItems": 2 },
-        "person_root_key_proof": { "type": "object" }
+        "person_root_key_proof": { "type": "object" },
+        "fabric_grant": { "$ref": "#/$defs/FabricGrant" }
+      }
+    },
+    "FabricGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": { "enum": ["granted", "already-trusted", "not-enabled", "not-requested", "failed"] },
+        "service": { "type": "string" },
+        "peer": { "type": "string" },
+        "detail": { "type": "string" }
       }
     },
     "DeviceSignature": {
@@ -3882,6 +3980,20 @@
         }
       ]
     },
+    "StreamSync": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "description": "This host's replication as a stream frame states it: level, or catching up with or diverged from the peers named. Unlike a page's SyncNotice it is explicit when level, so that its absence on a stream means unknown. A state this client does not know reads as unknown, never level.",
+      "properties": {
+        "state": { "anyOf": [{ "enum": ["level", "catching-up", "diverged"] }, { "type": "string" }], "description": "level; diverged when any peer has diverged; else catching-up." },
+        "peers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/SyncPeer" }, "description": "The peers this host is behind or diverged from: present exactly when the state is not level." }
+      },
+      "allOf": [
+        { "if": { "properties": { "state": { "const": "level" } } }, "then": { "properties": { "peers": { "type": "array", "maxItems": 0 } } } },
+        { "if": { "properties": { "state": { "enum": ["catching-up", "diverged"] } } }, "then": { "required": ["peers"] } }
+      ]
+    },
     "HarnessInventoryQuery": {
       "type": "object", "additionalProperties": false,
       "required": ["owner_host_id", "session_id", "native_session_id", "runtime_incarnation", "collection"],
@@ -3983,7 +4095,8 @@
             "snapshot": { "$ref": "#/$defs/Snapshot" },
             "items": { "type": "array", "items": { "$ref": "#/$defs/Resource" } },
             "order": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
-            "has_more": { "type": "boolean" }
+            "has_more": { "type": "boolean" },
+            "sync": { "$ref": "#/$defs/StreamSync", "description": "This host's replication, taken when this frame was built. A daemon that sends it sends it on every snapshot of the collections that carry it (attention). Absent means unknown (an older daemon), never level." }
           }
         },
         {
@@ -3998,7 +4111,8 @@
             "upserts": { "type": "array", "items": { "$ref": "#/$defs/Resource" } },
             "removes": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
             "order": { "type": "array", "items": { "$ref": "#/$defs/Id" } },
-            "has_more": { "type": "boolean" }
+            "has_more": { "type": "boolean" },
+            "sync": { "$ref": "#/$defs/StreamSync", "description": "Present only when this host's replication changed since the last frame of this subscription (its state, or which peers are ahead), including back to level. Absent means it did not change." }
           }
         },
         {

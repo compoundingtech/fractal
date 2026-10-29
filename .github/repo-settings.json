@@ -94,9 +94,6 @@
       },
       "rules": [
         {
-          "type": "deletion"
-        },
-        {
           "type": "update"
         },
         {

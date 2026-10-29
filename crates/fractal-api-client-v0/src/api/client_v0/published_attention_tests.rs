@@ -5,7 +5,7 @@ use super::*;
 
 fn custom(state: &AppState, subject: &str, person: &str) {
     let manifest =
-        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h468409c7e69b owner=fractal_api_client_v0::api::client_v0::published_attention_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../examples/st3/custom-review.json"))
+        serde_json::from_str(/* sqlite-large-value: allow-for-now lv-hcc2187204d02 owner=fractal_api_client_v0::api::client_v0::published_attention_tests TODO=trace-statement-and-value-representation */ include_str!("../../../../../examples/fractal/custom-review.json"))
             .unwrap();
     state
         .store

@@ -273,22 +273,19 @@ impl Fixture {
         };
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
-        let state = AppState {
-            owning_person: None,
-            store: store.clone(),
-            notify,
-            event_notify: watch::channel(0).0,
-            node: "restart-test".into(),
-            state_dir: root.path().into(),
-            pty_root: root.path().join("pty"),
-            pty_binary: "pty".into(),
-            fleet_id: None,
-            configured_peers: vec![],
-            client_relay: None,
-            native_session_home: None,
-            planner_default: Default::default(),
-            assistant_receipts: Default::default(),
-        };
+        let state = AppState { owning_person: None,
+        store: store.clone(),
+        notify,
+        event_notify: watch::channel(0).0,
+        node: "restart-test".into(),
+        state_dir: root.path().into(),
+        pty_root: root.path().join("pty"),
+        pty_binary: "pty".into(),
+        fleet_id: None,
+        configured_peers: vec![],
+        client_relay: None,
+        native_session_home: None,
+        planner_default: Default::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  };
         let socket = root.path().join("st3.sock");
         let router = make_router(state.clone());
         let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });
@@ -354,6 +351,7 @@ async fn st(socket: &Path, args: &[&str]) -> std::process::Output {
     tokio::task::spawn_blocking(move || {
         fractal_daemon::test_support::command(test_bin!("st3-fixture")).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT")
             .env_remove("ST_MISSION_RUN")
+            .env("HOME", socket.parent().unwrap())
             .args(["--endpoint", socket.to_str().unwrap()])
             .args(args)
             .output()
@@ -912,7 +910,11 @@ async fn one_shot_exit_retires_an_owned_set_member_without_changing_its_source()
         .unwrap()
         .unwrap()
         .0;
-    let node = fractal_daemon::graph::render_desired_node(&original.desired).unwrap();
+    let uris = fixture
+        .store
+        .declared_resource_uris(&fractal_daemon::graph::declared_resources(&original.desired))
+        .unwrap();
+    let node = fractal_daemon::graph::render_agent_node(&original.desired, &uris).unwrap();
     let intent = fractal_daemon::parse_intent(&format!("version 2\n{node}\n"), "restart-test").unwrap();
     let mut options = fractal_daemon::store::owned_sets::Options {
         set: "garden".into(),
@@ -1858,6 +1860,107 @@ async fn every_restart_continues_the_seats_last_native_session() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn harness_switch_retires_claude_before_starting_codex_and_can_stop() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    bind_session(&fixture, &subject, "fixture:1", "claude-session").await;
+    let source = format!(
+        "version 2\nagent \"example/worker\" {{ workspace {:?}; harness \"codex\" {{}}; restart \"always\"; }}",
+        fixture.root.path().to_str().unwrap(),
+    );
+    let intent = fractal_daemon::parse_intent(&source, "restart-test").unwrap();
+    let preview = fixture.store.mission(
+        &intent,
+        fractal_daemon::model::IntentInput { kdl: source, source_name: None },
+    ).unwrap();
+    fixture.store.apply_as(
+        &intent, &preview.subject_tokens, "switch-harness", Some("agent/example/operator"),
+    ).unwrap();
+    reconcile_ready(&fixture, &fixture.reconciler, &subject);
+    let starts = fixture.runtime.starts.lock().unwrap().clone();
+    assert_eq!(starts.len(), 2, "the new harness must replace the incumbent");
+    assert_eq!(fixture.runtime.stops.lock().unwrap().as_slice(), ["fixture:1"]);
+    assert_eq!(starts[1].driver.as_deref(), Some("codex"));
+    assert_eq!(continued(&starts[1]), None, "Claude native IDs are not Codex sessions");
+    assert!(!launch(&starts[1]).contains(&"example-model".to_owned()));
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    let socket = fixture.root.path().join("st3.sock");
+    succeeded(&st(
+        &socket, &["agents", "stop", &subject, "--as", "agent/example/operator"],
+    ).await);
+    for _ in 0..4 {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.latest_actual_value(&subject).unwrap().unwrap()["status"], "stopped");
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    assert_eq!(fixture.runtime.starts.lock().unwrap().len(), 2);
+    assert!(!succeeded(&st(&socket, &["agents", "ls"]).await).contains(&subject));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_clears_a_failed_explicit_harness_restart() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::claude(Shape::TopLevel, "always").await;
+    hang_up(&fixture);
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    let request = fixture.request(&subject, "failed-before-stop").await;
+    reconcile_ready(&fixture, &fixture.reconciler, &subject);
+    assert_eq!(restart_result(&fixture, &request).kind, "runtime.action.failed");
+    assert!(fixture.store.member_reconcile_fault(&subject, None).unwrap().is_some());
+    succeeded(&st(
+        &fixture.root.path().join("st3.sock"),
+        &["agents", "stop", &subject, "--as", "agent/example/operator"],
+    ).await);
+    for _ in 0..4 {
+        fixture.reconciler.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.latest_actual_value(&subject).unwrap().unwrap()["status"], "stopped");
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..3 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.store.member_reconcile_fault(&subject, None).unwrap(), None);
+    assert!(!succeeded(&st(
+        &fixture.root.path().join("st3.sock"), &["agents", "ls"],
+    ).await).contains(&subject));
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn harness_switch_does_not_keep_the_previous_provider_body() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel,
+        r#"harness "claude" { model "example-model"; effort "high"; args "--old-provider-flag"; }"#,
+        "always",
+    ).await;
+    let socket = fixture.root.path().join("st3.sock");
+    for (provider, model) in [("codex", None), ("claude", None), ("codex", Some("replacement-model"))] {
+        let mut args = vec![
+            "agents", "start", &subject, "--harness", provider, "--print-kdl",
+            "--as", "agent/example/operator",
+        ];
+        if let Some(model) = model {
+            args.extend(["--model", model]);
+        }
+        let source = succeeded(&st(&socket, &args).await);
+        assert!(source.contains(provider), "{source}");
+        let retained = provider == "claude";
+        for old in ["example-model", "high", "--old-provider-flag"] {
+            assert_eq!(source.contains(old), retained, "unexpected provider configuration:\n{source}");
+        }
+        assert_eq!(source.contains("replacement-model"), model.is_some(), "{source}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_the_driver_could_not_continue_is_not_tried_again() {
     if fractal_daemon::test_support::supervise_test() {
         return;
@@ -2173,6 +2276,10 @@ async fn an_explicit_restart_supersedes_a_failed_start_that_never_proved_its_pro
     let seen = fixture.store.claims_for(&subject, Some("runtime.reconcile-decision")).unwrap().into_iter().map(|c| c.body["fields"].clone()).collect::<Vec<_>>();
     assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempts + 1, "the request made its attempt; pending={pending:?} decisions={seen:?} obs={:?}", fixture.runtime.observations.lock().unwrap());
     assert_eq!(restart_result(&fixture, &second).kind, "runtime.action.succeeded");
+    let attempt = fixture.store.operation_claim(&format!("agent-restart-attempt:{}", second.id))
+        .unwrap().unwrap();
+    assert_eq!(attempt.actor.as_deref(), Some("agent/st3/reconciler"));
+    assert_eq!(attempt.body["evidence"][0], second.id);
     let decisions = fixture
         .store
         .claims_for(&subject, Some("runtime.reconcile-decision"))
@@ -2181,6 +2288,166 @@ async fn an_explicit_restart_supersedes_a_failed_start_that_never_proved_its_pro
         .filter_map(|claim| claim.body.pointer("/fields/decision").and_then(Value::as_str).map(str::to_owned))
         .collect::<Vec<_>>();
     assert!(decisions.iter().any(|decision| decision == "restart-superseded-failed-start"), "{decisions:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_start_recovery_rejected_at_dispatch_releases_admission_without_a_daemon_restart() {
+    use fractal_daemon::RuntimeStartsStore;
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel, r#"harness "omp" { model "example-model"; }"#, "always",
+    ).await;
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    *fixture.runtime.producer_unproven.lock().unwrap() = true;
+    let failed_request = fixture.request(&subject, "failed-first").await;
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..4 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(restart_result(&fixture, &failed_request).kind, "runtime.action.failed");
+    let failed = fixture.store.runtime_start_for(&subject).unwrap().unwrap();
+    let retry = fixture.request(&subject, "queued-recovery").await;
+    // Persist the same queued recovery snapshot admission retains, without dispatching it.
+    let mut queued = failed.clone();
+    queued.id = uuid::Uuid::now_v7().to_string();
+    queued.revoked_by = None;
+    queued.finished = false;
+    queued.result = None;
+    queued.applied = false;
+    queued.cleanup_verified = false;
+    queued.dispatched = false;
+    queued.receipted = false;
+    queued.body["request"] = serde_json::to_value(&retry).unwrap();
+    queued.body["stale_failed_start"] = json!(failed.id);
+    assert_eq!(fixture.store.admit_runtime_start(&mut queued, 2).unwrap(),
+        fractal_daemon::store::RuntimeStartAdmission::Admitted);
+    fixture.store.append_claim(&ClaimInput {
+        subject: subject.clone(), kind: "runtime.action.requested".into(), actor: None,
+        fields: std::collections::BTreeMap::from([
+            ("action".into(), json!("terminate")),
+            ("operation".into(), json!(queued.id)),
+        ]),
+        evidence: vec![retry.id], expected_subject: None,
+        idempotency_key: Some("interleaved-termination".into()),
+    }).unwrap();
+    assert!(!fixture.store.dispatch_runtime_start(&queued.id, 2).unwrap());
+    let canceled = fixture.store.runtime_start_for(&subject).unwrap().unwrap();
+    assert!(canceled.finished && canceled.cleanup_verified && !canceled.dispatched);
+    assert_eq!(canceled.result.as_ref().unwrap()["closure_kind"], "never-dispatched");
+    let attempts = fixture.runtime.attempts.lock().unwrap().len();
+    daemon.reconcile_start_jobs().unwrap();
+    assert!(fixture.store.runtime_start_for(&subject).unwrap().is_none());
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempts);
+    *fixture.runtime.refuse_start.lock().unwrap() = false;
+    *fixture.runtime.producer_unproven.lock().unwrap() = false;
+    let later = fixture.request(&subject, "later-valid-restart").await;
+    reconcile_ready(&fixture, &daemon, &subject);
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempts + 1);
+    assert_eq!(restart_result(&fixture, &later).kind, "runtime.action.succeeded");
+}
+
+async fn obsolete_restart_cannot_release_failed_start(change: &str) {
+    use fractal_daemon::RuntimeStartsStore;
+    let (fixture, subject) = Fixture::launching(
+        Shape::TopLevel, r#"harness "omp" { model "example-model"; }"#, "always",
+    ).await;
+    hang_up(&fixture);
+    park(&fixture, &subject, "omp");
+    *fixture.runtime.refuse_start.lock().unwrap() = true;
+    *fixture.runtime.producer_unproven.lock().unwrap() = true;
+    let first = fixture.request(&subject, "failed-first").await;
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..4 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(restart_result(&fixture, &first).kind, "runtime.action.failed");
+    let request = fixture.request(&subject, "pending-retry").await;
+    let attempts = fixture.runtime.attempts.lock().unwrap().len();
+    let pending = fixture.store.runtime_start_for(&subject).unwrap().unwrap().id;
+    if change == "revoke" {
+        fixture.store.append_claim(&ClaimInput {
+            subject: subject.clone(),
+            kind: "runtime.action.requested".into(),
+            actor: None,
+            fields: std::collections::BTreeMap::from([
+                ("action".into(), json!("terminate")),
+                ("operation".into(), json!(pending)),
+            ]),
+            evidence: vec![request.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some("later-revocation".into()),
+        }).unwrap();
+    } else if change == "suspend" {
+        let suspended = fixture.store.append_claim(&ClaimInput {
+            subject: subject.clone(),
+            kind: "runtime.action.requested".into(),
+            actor: Some("person/avery".into()),
+            fields: std::collections::BTreeMap::from([
+                ("action".into(), json!("suspend")),
+                ("incarnation_id".into(), json!("fixture:1")),
+            ]),
+            evidence: vec![fixture.store.selected_desired_token(&subject).unwrap().unwrap()],
+            expected_subject: None,
+            idempotency_key: Some("later-suspend".into()),
+        }).unwrap();
+        fixture.store.append_claim(&ClaimInput {
+            subject: subject.clone(),
+            kind: "runtime.action.succeeded".into(),
+            actor: suspended.actor,
+            fields: std::collections::BTreeMap::from([("action".into(), json!("suspend"))]),
+            evidence: vec![suspended.id.clone()],
+            expected_subject: None,
+            idempotency_key: Some(format!("agent-suspend-completed:{}", suspended.id)),
+        }).unwrap();
+    } else {
+        let source = if change == "stop" {
+            format!("version 2\nstop {subject:?}")
+        } else {
+            format!("version 2\nagent \"example/worker\" {{ workspace {:?}; harness \"omp\" {{ model \"changed-model\"; }}; restart \"always\"; }}",
+                fixture.root.path().to_str().unwrap())
+        };
+        let intent = fractal_daemon::parse_intent(&source, "restart-test").unwrap();
+        let preview = fixture.store.mission(&intent, fractal_daemon::model::IntentInput {
+            kdl: source, source_name: None,
+        }).unwrap();
+        fixture.store.apply_as(&intent, &preview.subject_tokens, "later-intent", Some("person/avery")).unwrap();
+    }
+    *fixture.runtime.refuse_start.lock().unwrap() = false;
+    let daemon = restarted_daemon(&fixture);
+    for _ in 0..4 {
+        daemon.reconcile_once().unwrap();
+    }
+    assert_eq!(fixture.runtime.attempts.lock().unwrap().len(), attempts);
+    let retained = fixture.store.runtime_start_for(&subject).unwrap().unwrap();
+    assert_eq!(retained.id, pending);
+    assert!(!retained.cleanup_verified, "retiring intent must not invent producer closure");
+    let result = restart_result(&fixture, &request);
+    assert_eq!(result.body["fields"]["operation_status"], "retired");
+    assert_eq!(result.actor.as_deref(), Some("agent/st3/reconciler"));
+    assert!(fixture.store.claims_for(&subject, Some("runtime.reconcile-decision")).unwrap()
+        .iter().any(|claim| claim.body["fields"]["decision"] == "restart-retired-obsolete-request"
+            && claim.body["evidence"][0] == request.id));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_suspension_retires_a_failed_start_restart_request() {
+    obsolete_restart_cannot_release_failed_start("suspend").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_changed_declaration_retires_a_failed_start_restart_request() {
+    obsolete_restart_cannot_release_failed_start("desired").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_retires_a_failed_start_restart_request() {
+    obsolete_restart_cannot_release_failed_start("stop").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_retires_a_failed_start_restart_request() {
+    obsolete_restart_cannot_release_failed_start("revoke").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

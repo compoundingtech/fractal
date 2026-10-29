@@ -2,27 +2,38 @@ import { createContext, useContext, useCallback, useRef, type ReactNode, type Re
 import { quality } from './qualityNative';
 import * as Clipboard from 'expo-clipboard';
 import { ActionSheetIOS, Linking, Pressable, StyleSheet, Text, TextInput, View, useColorScheme, type StyleProp, type TextInputProps, type TextStyle, type ViewStyle } from 'react-native';
-import { fonts, systemColors, theme } from './theme';
+import { fonts, inLight, lightTheme, systemColors, theme, type Theme } from './theme';
 import type { Run } from './markdown';
 import { markdown } from './markdown';
 import { StackActions } from '@react-navigation/native';
 import { navigationRef } from './navigation';
 
-// Shared renderers retain the legacy stui presentation by default. SystemScreen scopes
-// system text, semantic appearance and grouped rows to the migrated native surfaces.
+// Shared renderers retain the legacy Fractal terminal UI presentation by default. SchemeScreen scopes its
+// palette, in its light or dark form as the system appearance is, to screens that follow it;
+// SystemScreen scopes system text, semantic appearance and grouped rows to the migrated native surfaces.
 
 export const SIZE = 14;
 export const LINE = 20;
 
-const SystemAppearance = createContext(false);
-export function useSystemColors() {
-  return systemColors[useColorScheme() === 'dark' ? 'dark' : 'light'];
+/** How a scope draws: the Fractal terminal UI's fixed Mocha, its palette following the system appearance, or system colours. */
+type Scope = 'fixed' | 'scheme' | 'system';
+const AppearanceScope = createContext<Scope>('fixed');
+/** The system appearance, read live: every reader draws again when it changes, without a restart. */
+export function useScheme(): 'dark' | 'light' {
+  return useColorScheme() === 'dark' ? 'dark' : 'light';
 }
+export function useSystemColors() {
+  return systemColors[useScheme()];
+}
+/** The scope's colours. Callers name text colours by their Mocha token; `color` repaints one for the scope. */
 export function useTextAppearance() {
-  const system = useContext(SystemAppearance);
-  const colors = useSystemColors();
+  const scope = useContext(AppearanceScope);
+  const scheme = useScheme();
+  const colors = systemColors[scheme];
+  const system = scope === 'system';
+  const palette: Theme = scope === 'scheme' && scheme === 'light' ? lightTheme : theme;
   const color = (value?: string) => {
-    if (!system) return value;
+    if (!system) return value && palette === lightTheme ? inLight(value) : value;
     if (!value || value === theme.text) return colors.text;
     if (value === theme.person || value === theme.waiting || value === theme.working || value === theme.yellow || value === theme.peach) return colors.attention;
     if (value === theme.red) return colors.fault;
@@ -30,13 +41,19 @@ export function useTextAppearance() {
     if (value === theme.blue || value === theme.lavender || value === theme.sapphire) return colors.action;
     return colors.secondary;
   };
-  return { system, colors, color };
+  return { system, colors, palette, color };
 }
 
 /** Opt-in system typography and appearance, scoped to one migrated screen. */
 export function SystemScreen({ children }: { children: ReactNode }) {
   const colors = useSystemColors();
-  return <SystemAppearance.Provider value={true}><View style={{ flex: 1, backgroundColor: colors.background }}>{children}</View></SystemAppearance.Provider>;
+  return <AppearanceScope.Provider value="system"><View style={{ flex: 1, backgroundColor: colors.background }}>{children}</View></AppearanceScope.Provider>;
+}
+
+/** The Fractal terminal UI's look in the system appearance: Mocha when dark, its light palette when light, switching live. */
+export function SchemeScreen({ children }: { children: ReactNode }) {
+  const palette = useScheme() === 'light' ? lightTheme : theme;
+  return <AppearanceScope.Provider value="scheme"><View style={{ flex: 1, backgroundColor: palette.base }}>{children}</View></AppearanceScope.Provider>;
 }
 
 /** Wrapping, inset grouped row. The label carries meaning without a glyph legend. */
@@ -55,7 +72,9 @@ export function GroupedHeader({ title, count }: { title: string; count?: number 
 
 export function T({ children, style, color, dim, bold, soft, numberOfLines, selectable }: { children: ReactNode; style?: StyleProp<TextStyle>; color?: string; dim?: boolean; bold?: boolean; soft?: boolean; numberOfLines?: number; selectable?: boolean }) {
   const appearance = useTextAppearance();
-  return <Text allowFontScaling numberOfLines={numberOfLines} selectable={selectable} style={[styles.text, dim && { color: theme.overlay0 }, soft && { color: theme.subtext0 }, bold && styles.bold, color ? { color } : null, appearance.system && { fontFamily: 'System', fontSize: 17, lineHeight: undefined, fontWeight: bold ? '600' : '400', color: appearance.color(color ?? (dim || soft ? theme.subtext0 : theme.text)) }, style]}>{children}</Text>;
+  return <Text allowFontScaling numberOfLines={numberOfLines} selectable={selectable} style={[styles.text, bold && styles.bold, appearance.system
+    ? { fontFamily: 'System', fontSize: 17, lineHeight: undefined, fontWeight: bold ? '600' : '400', color: appearance.color(color ?? (dim || soft ? theme.subtext0 : theme.text)) }
+    : { color: appearance.color(color ?? (soft ? theme.subtext0 : dim ? theme.overlay0 : theme.text)) }, style]}>{children}</Text>;
 }
 
 /** A section rule: `idle ────── 19`, mauve when a person is needed. */
@@ -90,7 +109,7 @@ export function Note({ children, tone = 'dim' }: { children: ReactNode; tone?: '
 
 export function Button({ label, onPress, disabled = false, color = theme.accent, style }: { label: string; onPress: () => void; disabled?: boolean; color?: string; style?: StyleProp<ViewStyle> }) {
   const appearance = useTextAppearance();
-  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system && { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: theme.surface1 }), disabled && styles.disabled, style]}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, appearance.system ? { minHeight: 44, justifyContent: 'center', backgroundColor: appearance.colors.grouped, paddingHorizontal: 16, paddingVertical: 12, borderRadius: 10 } : { backgroundColor: appearance.palette.surface0 }, pressed && (appearance.system ? { opacity: 0.7 } : { backgroundColor: appearance.palette.surface1 }), disabled && styles.disabled, style]}>
     <T bold color={color}>{label}</T>
   </Pressable>;
 }
@@ -98,27 +117,28 @@ export function Button({ label, onPress, disabled = false, color = theme.accent,
 /** A text input. Prose (messages, titles, requests) gets iOS's autocorrect and spell check;
  *  a field for an identifier (a URL, a code, a path) turns them off. */
 export function Field(props: TextInputProps & { ref?: Ref<TextInput> }) {
+  const { palette } = useTextAppearance();
   const keyHandler = useRef(props.onKeyPress); keyHandler.current = props.onKeyPress;
   const onKeyPress = useCallback<NonNullable<TextInputProps['onKeyPress']>>(event => { quality.key(); keyHandler.current?.(event); }, []);
-  return <TextInput placeholderTextColor={theme.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, props.multiline && styles.fieldMultiline, props.style]} />;
+  return <TextInput placeholderTextColor={palette.overlay0} autoCorrect spellCheck {...props} onKeyPress={onKeyPress} style={[styles.field, { color: palette.text, backgroundColor: palette.mantle, borderColor: palette.surface1 }, props.multiline && styles.fieldMultiline, props.style]} />;
 }
 
 /** A banner under the header: a problem to read, tap to dismiss when it can be. */
 export function Banner({ text, tone = 'fault', onPress }: { text: string; tone?: 'fault' | 'warning' | 'quiet'; onPress?: () => void }) {
   const appearance = useTextAppearance();
   const color = tone === 'fault' ? theme.fault : tone === 'warning' ? theme.waiting : theme.subtext0;
-  return <Pressable accessibilityRole={onPress ? 'button' : undefined} disabled={!onPress} onPress={onPress} style={[styles.banner, { borderLeftColor: appearance.color(color), backgroundColor: appearance.system ? appearance.colors.grouped : theme.mantle }]}><T color={color}>{text}</T></Pressable>;
+  return <Pressable accessibilityRole={onPress ? 'button' : undefined} disabled={!onPress} onPress={onPress} style={[styles.banner, { borderLeftColor: appearance.color(color), backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.mantle }]}><T color={color}>{text}</T></Pressable>;
 }
 
 export function Screen({ children, style }: { children: ReactNode; style?: StyleProp<ViewStyle> }) {
   return <View style={[styles.screen, style]}>{children}</View>;
 }
 
-function runStyle(run: Run, base: TextStyle): StyleProp<TextStyle> {
+function runStyle(run: Run, base: TextStyle, palette: Theme): StyleProp<TextStyle> {
   switch (run.style) {
     case 'bold': return [base, styles.bold];
-    case 'code': return [base, { color: theme.teal }];
-    case 'link': return [base, { color: theme.blue, textDecorationLine: 'underline' }];
+    case 'code': return [base, { color: palette.teal }];
+    case 'link': return [base, { color: palette.blue, textDecorationLine: 'underline' }];
     default: return base;
   }
 }
@@ -137,23 +157,24 @@ export function openDocumentLink(reference: string) {
 type DocumentOpener = (reference: string) => void;
 function Runs({ runs, base, onDocument = openDocumentLink }: { runs: Run[]; base: TextStyle; onDocument?: DocumentOpener }) {
   const appearance = useTextAppearance();
-  return <>{runs.map((run, index) => <Text key={index} style={appearance.system ? [base, run.style === 'bold' && { fontWeight: '600' }, run.style === 'code' && { fontFamily: fonts.regular }, run.style === 'link' && { color: appearance.colors.action, textDecorationLine: 'underline' }] : runStyle(run, base)} onPress={run.document ? () => onDocument(run.document!) : run.url ? () => void Linking.openURL(run.url!) : run.path ? () => showPath(run.path!) : undefined}>{run.text}</Text>)}</>;
+  return <>{runs.map((run, index) => <Text key={index} style={appearance.system ? [base, run.style === 'bold' && { fontWeight: '600' }, run.style === 'code' && { fontFamily: fonts.regular }, run.style === 'link' && { color: appearance.colors.action, textDecorationLine: 'underline' }] : runStyle(run, base, appearance.palette)} onPress={run.document ? () => onDocument(run.document!) : run.url ? () => void Linking.openURL(run.url!) : run.path ? () => showPath(run.path!) : undefined}>{run.text}</Text>)}</>;
 }
 
-/** Markdown as stui renders a reply: peach headings, lavender bullets, code in a gutter. */
+/** Markdown as the Fractal terminal UI renders a reply: peach headings, lavender bullets, code in a gutter. */
 export function Markdown({ text, color = theme.text, selectable = true, onDocument }: { text: string; color?: string; selectable?: boolean; onDocument?: DocumentOpener }) {
   const appearance = useTextAppearance();
-  const base: TextStyle = appearance.system ? { fontFamily: 'System', fontSize: 17, color: appearance.color(color) } : { ...styles.text, color };
+  const { palette } = appearance;
+  const base: TextStyle = appearance.system ? { fontFamily: 'System', fontSize: 17, color: appearance.color(color) } : { ...styles.text, color: appearance.color(color) };
   return <View>{markdown(text).map((block, index) => {
     switch (block.kind) {
       case 'blank': return <View key={index} style={{ height: LINE / 2 }} />;
-      case 'heading': return <Text key={index} style={[base, appearance.system ? { fontWeight: '600', color: appearance.color(theme.peach) } : [styles.bold, { color: theme.peach }, block.level === 1 && { textDecorationLine: 'underline' }]]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? { ...base, fontWeight: '600' } : { ...base, ...styles.bold, color: theme.peach }} /></Text>;
-      case 'rule': return <View key={index} style={[styles.mdRule, { backgroundColor: theme.surface2 }]} />;
-      case 'quote': return <View key={index} style={styles.quote}><Text style={[base, appearance.system ? { color: appearance.colors.secondary, fontStyle: 'italic' } : { color: theme.subtext0, fontFamily: fonts.italic }]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? base : { ...base, color: theme.subtext0, fontFamily: fonts.italic }} /></Text></View>;
+      case 'heading': return <Text key={index} style={[base, appearance.system ? { fontWeight: '600', color: appearance.color(theme.peach) } : [styles.bold, { color: palette.peach }, block.level === 1 && { textDecorationLine: 'underline' }]]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? { ...base, fontWeight: '600' } : { ...base, ...styles.bold, color: palette.peach }} /></Text>;
+      case 'rule': return <View key={index} style={[styles.mdRule, { backgroundColor: palette.surface2 }]} />;
+      case 'quote': return <View key={index} style={[styles.quote, { borderLeftColor: palette.surface2 }]}><Text style={[base, appearance.system ? { color: appearance.colors.secondary, fontStyle: 'italic' } : { color: palette.subtext0, fontFamily: fonts.italic }]}><Runs onDocument={onDocument} runs={block.runs} base={appearance.system ? base : { ...base, color: palette.subtext0, fontFamily: fonts.italic }} /></Text></View>;
       case 'item': return <View key={index} style={[styles.item, { paddingLeft: block.indent * 7 }]}><Text style={[base, { color: appearance.color(theme.lavender) }]}>{block.marker}</Text><Text style={[base, styles.itemText]}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text></View>;
-      case 'fence': return <Text key={index} style={[base, { color: theme.overlay0 }]}>{block.text}</Text>;
+      case 'fence': return <Text key={index} style={[base, { color: appearance.color(theme.overlay0) }]}>{block.text}</Text>;
       case 'code': return <Text key={index} selectable={selectable} style={[base, { fontFamily: fonts.regular, color: appearance.color(theme.subtext1), paddingLeft: 14 }]}>{block.text || ' '}</Text>;
-      case 'table': return <Text key={index} style={[base, !appearance.system && { color: theme.subtext0 }]}>{block.text}</Text>;
+      case 'table': return <Text key={index} style={[base, !appearance.system && { color: palette.subtext0 }]}>{block.text}</Text>;
       case 'text': return <Text key={index} selectable={selectable} style={base}><Runs onDocument={onDocument} runs={block.runs} base={base} /></Text>;
     }
   })}</View>;

@@ -58830,6 +58830,7 @@
         "updated_at": "2030-01-01T11:59:00.000Z"
       }
     ],
+    "devices": [],
     "machines": [
       {
         "capacity": {
@@ -75015,7 +75016,8 @@
         "state": "running",
         "updated_at": "2030-01-01T11:42:21.000Z"
       }
-    ]
+    ],
+    "sessions": []
   },
   "timeline": [],
   "times": [

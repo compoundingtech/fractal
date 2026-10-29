@@ -30,6 +30,7 @@ pub fn availability(
         harness.state = "indeterminate".into();
         harness.reason = Some(reason.into());
         harness.blocked_on = Some("channel".into());
+        harness.background_jobs = None;
     }
     observed
 }

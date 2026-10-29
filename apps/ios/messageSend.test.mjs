@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ClientError } from '../../clients/typescript/fractal-client/index.ts';
-import { resendMessage, sendMessage } from './messageSend.ts';
+import { resendBoundMessage, sendBoundMessage, resendMessage, sendMessage } from './messageSend.ts';
 
 const refused = (code, status, details = {}, retryable = false) => new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code, message: 'm', retryable, details }, status);
-// st could not confirm the send in time; it may still complete.
+// Fractal could not confirm the send in time; it may still complete.
 const unconfirmed = () => refused('message-send-unconfirmed', 503, { applied: 'unknown', action_id: 'action/1', idempotency_key: 'action/1' });
 const rateLimited = () => refused('rate-limited', 429, { applied: 'none' }, true);
 
-// A scripted st: each send answers the next step. Each built request is new: its own id, key and
+// A scripted Fractal: each send answers the next step. Each built request is new: its own id, key and
 // signature nonce, as the app signs one.
 function world(steps) {
   const log = { sent: [], built: 0, fences: 0, waited: [] };
@@ -30,14 +30,14 @@ function world(steps) {
   return { ports, log };
 }
 
-test('a send st confirms at once is sent, once', async () => {
+test('a send Fractal confirms at once is sent, once', async () => {
   const { ports, log } = world(['ok']);
   assert.deepEqual(await sendMessage(ports), { how: 'sent' });
   assert.equal(log.sent.length, 1);
   assert.equal(log.built, 1);
 });
 
-test('a send st leaves unconfirmed twice is unconfirmed and carries the exact request it sent', async () => {
+test('a send Fractal leaves unconfirmed twice is unconfirmed and carries the exact request it sent', async () => {
   const { ports, log } = world([unconfirmed(), unconfirmed()]);
   const outcome = await sendMessage(ports);
   assert.equal(outcome.how, 'unconfirmed');
@@ -48,7 +48,7 @@ test('a send st leaves unconfirmed twice is unconfirmed and carries the exact re
   assert.deepEqual(log.waited, [1000]);
 });
 
-test('an unconfirmed send whose repeat st confirms is sent', async () => {
+test('an unconfirmed send whose repeat Fractal confirms is sent', async () => {
   const { ports, log } = world([unconfirmed(), 'ok']);
   assert.deepEqual(await sendMessage(ports), { how: 'sent' });
   assert.equal(log.built, 1);
@@ -71,7 +71,7 @@ test('sending again repeats the unconfirmed request with only its fence read ane
   assert.equal(fence.snapshot_id, 'snapshot/fresh-1');
 });
 
-test('sending again that st still does not confirm stays unconfirmed with the same request', async () => {
+test('sending again that Fractal still does not confirm stays unconfirmed with the same request', async () => {
   const { ports, log } = world([unconfirmed()]);
   const request = (await world([]).ports.build());
   const outcome = await resendMessage(ports, request);
@@ -110,4 +110,44 @@ test('only a refusal that applied nothing builds a request with a fresh id', asy
   assert.equal(failed.error.response.code, 'forbidden');
   assert.equal(forbidden.log.built, 1);
   assert.equal(forbidden.log.sent.length, 1);
+});
+
+for (const present of [true, false]) {
+  test(`member change never rebinds an unconfirmed request (original ${present ? 'present' : 'gone'})`, async () => {
+    const original = world([unconfirmed(), unconfirmed(), 'ok']);
+    const replacement = world(['ok']);
+    let current = original;
+    const first = await sendBoundMessage('member/A', current.ports);
+    assert.equal(first.how, 'unconfirmed');
+    current = replacement;
+    if (!present) original.ports.fence = async () => { throw new TypeError('original member gone'); };
+    const outcome = await resendBoundMessage(first.request);
+    assert.equal(outcome.how, present ? 'sent' : 'unconfirmed');
+    assert.equal(current.log.sent.length, 0, 'replacement never receives the old key');
+    assert.equal(original.log.sent.length, present ? 3 : 2);
+    if (present) {
+      assert.equal(original.log.sent[2].idempotency_key, original.log.sent[0].idempotency_key);
+    } else {
+      assert.equal(outcome.request, first.request, 'the original binding stays unconfirmed');
+    }
+  });
+}
+
+test('automatic repeat stays on the original member if selection changes during the wait', async () => {
+  const original = world([unconfirmed(), 'ok']);
+  const replacement = world(['ok']);
+  let current = original;
+  original.ports.wait = async () => { current = replacement; };
+  assert.deepEqual(await sendBoundMessage('member/A', current.ports), { how: 'sent' });
+  assert.equal(original.log.sent.length, 2);
+  assert.equal(current.log.sent.length, 0);
+});
+
+test('a person can send as new with a new key after an unconfirmed send', async () => {
+  const original = world([unconfirmed()]);
+  const first = await sendBoundMessage('member/A', original.ports);
+  const replacement = world(['ok']);
+  await replacement.ports.build(); // Each world starts its fake ID counter at zero.
+  assert.deepEqual(await sendBoundMessage('member/B', replacement.ports), { how: 'sent' });
+  assert.notEqual(replacement.log.sent[0].idempotency_key, first.request.request.idempotency_key);
 });

@@ -54,8 +54,8 @@ it('restarts agent and joined-work state clocks at each roster transition in eve
 
 it('onboarding has no hidden resources at zero and becomes a green first run', () => {
   const world = buildWorld(firstRunOnboarding, genericVariants, ANCHOR_MS)
-  expect(foldSlice(world.slices.roster, 0).state).toEqual({ agents: [], runtimes: [], machines: [], order: [] })
-  expect(foldSlice(world.slices.details, 0).state).toEqual({ missions: [], work: [] })
+  expect(foldSlice(world.slices.roster, 0).state).toEqual({ sessions: [], devices: [], agents: [], runtimes: [], machines: [], order: [] })
+  expect(foldSlice(world.slices.details, 0).state).toEqual({ launches: [], launch_variants: [], missions: [], work: [] })
   expect(foldSlice(world.slices.attention, 0).state).toEqual({ attention: [], messages: [] })
   expect(foldSlice(world.slices.conversation, 0).state).toEqual({ threads: [] })
   expect(foldSlice(world.slices.terminal, 0).state).toEqual({ terminals: [] })

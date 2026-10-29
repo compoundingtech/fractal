@@ -12,9 +12,9 @@ import * as Tracer from 'effect/Tracer'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { EARLY_COLLECTIONS_GLOBAL, peekEarlyBootstrap, takeEarlyCollections } from './early.ts'
-import { FIRST_FRAME_SPAN, type FollowEvent, St3, St3Live, type WindowValue } from '@fractal/sdk/effect'
+import { FIRST_FRAME_SPAN, type FollowEvent, Fractal, FractalLive, type WindowValue } from '@fractal/sdk/effect'
 import { Layer } from 'effect'
-import { BrowserSt3Platform } from './platform.ts'
+import { BrowserFractalPlatform } from './platform.ts'
 
 const API_VERSION = 'st3.client.v0'
 const EARLY_ID = 'wf-early-0123456789abcdef'
@@ -197,7 +197,7 @@ describe('takeEarlyCollections', () => {
   })
 })
 
-describe('St3Live adopting the early socket', () => {
+describe('FractalLive adopting the early socket', () => {
   it('serves the roster from the early subscription: one socket, no duplicate subscribe, early first-frame root', async () => {
     const { socket, target } = publish()
     const previous = Reflect.get(globalThis, EARLY_COLLECTIONS_GLOBAL)
@@ -214,16 +214,16 @@ describe('St3Live adopting the early socket', () => {
     const events: FollowEvent<WindowValue>[] = []
     try {
       await Effect.gen(function* () {
-        const st3 = yield* St3
+        const fractal = yield* Fractal
         yield* Effect.forkChild(
-          st3.followWindow({ _tag: 'Window', collection: 'agents', limit: 100 }).pipe(
+          fractal.followWindow({ _tag: 'Window', collection: 'agents', limit: 100 }).pipe(
             Stream.runForEach((event) => Effect.sync(() => events.push(event))),
           ),
         )
         yield* Effect.promise(settle)
       }).pipe(
         Effect.provide(
-          St3Live({
+          FractalLive({
             baseUrl: 'http://gateway.test',
             maxFollows: 4,
             fetch: async () => new Response(JSON.stringify({ api_version: API_VERSION, snapshot, value: {} })),
@@ -231,7 +231,7 @@ describe('St3Live adopting the early socket', () => {
               freshSockets += 1
               return { onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} } satisfies CollectionSocket
             },
-          }).pipe(Layer.provide(BrowserSt3Platform())),
+          }).pipe(Layer.provide(BrowserFractalPlatform())),
         ),
         Effect.scoped,
         Effect.withTracer(tracer),

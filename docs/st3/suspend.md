@@ -26,7 +26,7 @@ exists. This check reads no transcript, appends no claims, and leaves the seat r
 
 A seat suspends only at a clean boundary. Core does not read harness state. Each driver adds
 `quiescent` and `blocking` to the `harness.observed` claims it already publishes, and core reads
-those two fields. Core adds its own blockers, so st refuses a suspend with a typed list of
+those two fields. Core adds its own blockers, so Fractal refuses a suspend with a typed list of
 reasons:
 
 | reason | meaning |
@@ -36,7 +36,7 @@ reasons:
 | `unsent-input` | text sits in the harness's composer |
 | `starting`, `harness-indeterminate`, `harness-unobserved` | the driver cannot yet show the harness is idle |
 | `claimed-work` | the seat holds a claimed step, whose lease would lapse |
-| `subagent-running` | st still records a subagent for the seat |
+| `subagent-running` | Fractal still records a subagent for the seat |
 | `native-session-unbound` | the driver has reported no native session it can resume; Claude and pi write a transcript only with their first turn |
 
 The owner checks the same reasons again before it stops anything. A refused suspend leaves the
@@ -81,13 +81,43 @@ native session. A different session (`native-session-mismatch`), no session with
 (`native-session-unbound`), or an exit before binding fails the resume. After a failed resume the
 seat stays suspended on the same snapshot, with the code and reason.
 
+### Explicit pi-family transcript paths
+
+OMP's session manager reports the actual `sessionFile` along with the native ID on
+session, ready, and session-switch frames. The publisher verifies that exact regular
+file's header names the reported ID, then binds its canonical path to the subject and
+incarnation. An externally resumed file need not live under managed `provider-sessions`.
+Conversation replay consumes this exact-incarnation binding, so a resumed transcript
+created before the current incarnation is readable without guessing a file by cwd or age.
+
+On Linux, an older loaded hook that reports only its current native ID can also bind
+an explicit launch path without a restart. The publisher checks the incarnation's
+runtime PID and kernel start time, the exact subject's managed OMP driver and its direct
+provider child, the account, and the provider's absolute `--resume` path. That file's
+header must match the hook's **current** native ID; launch argv alone is never sufficient.
+Process lifetimes and parent links are checked again before accepting the path. A
+different current session, ambiguous provider, or missing ownership evidence refuses
+recovery rather than searching for another transcript.
+
+An import's provenance remains binding authority only while it is the latest binding.
+A later native-session report supersedes it; querying an incarnation without its own
+binding must not revive a historical import.
+
+Ordinary continuation passes the recorded path through `FRACTAL_NATIVE_CONTINUE_PATH`.
+Rollout restoration passes it through `FRACTAL_NATIVE_RESUME_PATH`. Suspend/resume recovers
+the path from the durable binding for the suspended incarnation and snapshot's native
+ID, then uses the same resume-path carrier; the snapshot schema is unchanged. A changed
+binding fails with `snapshot-binding-changed`. Missing, unreadable, or foreign explicit
+files are refused rather than replaced with a managed transcript. Without an explicit
+path, fresh managed-session publication and checked managed-transcript restoration remain unchanged.
+
 ## Leaving an existing suspension when resume refuses
 
 Older daemons accepted suspends whose declaration already selects a session. For omp and pi, resume
 accepts such a declaration when its one selector (omp `--resume TRANSCRIPT`, `--resume=TRANSCRIPT`
 or `-r TRANSCRIPT`; pi `--session TRANSCRIPT` or `--session=TRANSCRIPT`) is an absolute path of
 the suspended session's own transcript: the file name and the header both name that session, and
-the seat's transcript inventory resolves to the same file. st then replaces the authored selector
+the seat's transcript inventory resolves to the same file. Fractal then replaces the authored selector
 with its single selector for the checked path. A selector that names another session, a relative
 path, a missing, unreadable or mismatched transcript, an inventory entry that is a different file
 (`transcript-ambiguous`), a second or conflicting selection flag, or any other harness is refused
@@ -183,4 +213,4 @@ leaves the seat suspended with a code and reason; it never silently starts a fre
 The boot canaries cover single-host suspend and resume for every harness. The isolated two-node
 fleet test moves an omp seat with tracked and untracked changes and its prior conversation,
 checks occupied-target refusal, verifies the live native ID, and delivers mail after the move. See
-[scripts/st3-boot-canaries](../../scripts/st3-boot-canaries/README.md).
+[scripts/fractal-boot-canaries](../../scripts/fractal-boot-canaries/README.md).

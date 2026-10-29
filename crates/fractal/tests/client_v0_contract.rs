@@ -122,6 +122,36 @@ fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Val
 }
 
 #[test]
+fn agents_publication_contract_is_complete_and_unbounded() {
+    let validator = contract_validator("AgentsPublication");
+    let resources = fixture("resources.json");
+    let agent = resources.as_array().unwrap().iter()
+        .find(|row| row["kind"] == "agent").unwrap();
+    let rows = (0..401).map(|index| {
+        let mut row = agent.clone();
+        row["id"] = serde_json::json!(format!("agent/publication-{index}"));
+        row
+    }).collect::<Vec<_>>();
+    let order = rows.iter().map(|row| row["id"].clone()).collect::<Vec<_>>();
+    let mut publication = serde_json::json!({
+        "publication": {
+            "node_epoch": "18a992c2-f834-4946-b412-211f358ff531",
+            "revision": 9_007_199_254_740_991_u64,
+            "status_watermark": {"store_index": 8, "local_frontier": 3},
+            "materialized_at_ms": 1_700_000_000_000_u64
+        },
+        "items": rows, "order": order, "has_more": false
+    });
+    assert_conforms(&validator, "401 complete current agents", &publication);
+    publication["has_more"] = serde_json::json!(true);
+    assert!(!validator.is_valid(&publication), "a partial head cannot be complete");
+    publication["has_more"] = serde_json::json!(false);
+    publication["publication"]["revision"] = serde_json::json!(9_007_199_254_740_992_u64);
+    assert!(!validator.is_valid(&publication), "revision exhaustion requires another epoch");
+}
+
+
+#[test]
 fn consumers_accept_future_enum_cases_but_producers_reject_them() {
     for (definition, known) in [
         ("MissionState", "running"),
@@ -1152,25 +1182,22 @@ async fn publish_fixture_lists(state: &AppState) -> u64 {
 }
 
 fn test_state(root: &Path) -> AppState {
-    AppState {
-        owning_person: None,
-        // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
-        store: Arc::new(
-            Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
-        ),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "client-v0-baseline".into(),
-        state_dir: root.to_path_buf(),
-        pty_root: root.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-    }
+    AppState { owning_person: None,
+    // Server reads and writes overlap; use the daemon's file-backed WAL semantics.
+    store: Arc::new(
+        Store::open(&root.join("claims.sqlite3"), "client-v0-baseline").unwrap(),
+    ),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "client-v0-baseline".into(),
+    state_dir: root.to_path_buf(),
+    pty_root: root.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: fractal_daemon::model::PlannerSpec::default(), assistant_receipts: Default::default(), private_notes: Default::default(),  }
 }
 
 #[test]
@@ -4364,7 +4391,7 @@ async fn custom_subject_contract_pagination_and_paired_person_reply() {
     let root = tempfile::tempdir().unwrap();
     let state = test_state(root.path());
     let mut manifest: fractal_schema::custom::Manifest = serde_json::from_str(include_str!(
-        "../../../examples/st3/custom-review.json"
+        "../../../examples/fractal/custom-review.json"
     )).unwrap();
     manifest.attention.as_mut().unwrap().episode = fractal_schema::custom::Expr::Constant {
         value: serde_json::json!("garden question; keep"),

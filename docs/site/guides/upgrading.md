@@ -21,6 +21,14 @@ Use the existing package manager. Do not overwrite a Nix-owned path with an arch
 
 For an archive installation, use the [installer](https://github.com/compoundingtech/fractal/blob/main/install.sh) and its release-selection options. Install without opening the interface so you can inspect the selected build before restarting. For Home Manager, update the selected input and activate through the same configuration that owns the service.
 
+The archive installer prints the installed CLI's old and new versions before replacing an
+existing installation. It inspects `service status --json` without running doctor or restarting
+services. If the service manager reports a running daemon, the installer prints the exact
+installed command to restart it and links this guide. That notice does not establish the
+daemon's current build: inspect it after preserving the state described above. Unmanaged
+daemons are not reported by the service-manager probe. macOS app backups are retained, but
+they do not roll back database migrations.
+
 Use the selected release's restart instructions. Confirm the daemon actually changed, not only the client on your shell PATH:
 
 ```sh

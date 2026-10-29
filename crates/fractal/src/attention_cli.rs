@@ -217,12 +217,9 @@ pub(super) async fn run_attention(
                 return Ok(());
             };
             if let Err(error) = sync_message_projection(client).await {
-                eprintln!(
-                    "st: {} was sent (idempotency key {}), but the message projection was not refreshed: {}",
-                    receipt.message.subject,
-                    receipt.idempotency_key,
-                    plain_error(&error)
-                );
+                crate::stderr_message("st", format_args!("{} was sent (idempotency key {}), but the message projection was not refreshed: {}", receipt.message.subject,
+                receipt.idempotency_key,
+                plain_error(&error)));
             }
             print_message_receipt(&receipt, json_output)
         }

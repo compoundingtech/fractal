@@ -218,7 +218,12 @@ fn apply_current_terminal_update(ui: &mut Ui, update: TerminalUpdate, attached: 
         TerminalUpdate::Screen(screen) => {
             if let Some(view) = ui.terminal.as_mut() {
                 view.lines = screen_lines(&screen);
-                view.cursor = screen.cursor.visible.then_some((screen.cursor.row, screen.cursor.column));
+                view.cursor = screen.cursor.visible.then(|| {
+                    Some((
+                        usize::try_from(screen.cursor.row).ok()?,
+                        usize::try_from(screen.cursor.column).ok()?,
+                    ))
+                }).flatten().filter(|(row, column)| *row < screen.rows && *column < screen.columns);
                 view.stale = None;
                 if !screen.title.is_empty() {
                     view.title = format!("{} · {}", view.name, screen.title);
@@ -276,7 +281,7 @@ mod tests {
     }
 
     fn selected(agent: &str) -> (State, Ui, mpsc::UnboundedSender<Command>, mpsc::UnboundedReceiver<Command>) {
-        let mut ui = Ui::new(crate::ui::demo::world());
+        let mut ui = Ui::new(crate::ui::demo::test_world());
         ui.live = true;
         ui.open_in_glass(Pane::Terminal(agent.into()), Open::Here);
         ui.terminal = Some(view(agent));
@@ -401,7 +406,7 @@ mod tests {
     #[test]
     fn fallback_screen_failure_stays_failed_and_ctrl_r_starts_exactly_one_attempt() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let existing = crate::ui::demo::world().agents.items()[0].id.clone();
+        let existing = crate::ui::demo::test_world().agents.items()[0].id.clone();
         let (mut state, mut ui, tx, mut rx) = selected(&existing);
         let generation = state.generation;
         state.apply_fetched(&mut ui, Fetched::NativeFailed {

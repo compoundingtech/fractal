@@ -3,13 +3,17 @@ import type {
   Arrangement,
   Attention,
   Capabilities,
+  Device,
   ErrorEnvelope,
   Id,
   Machine,
+  Launch,
+  LaunchVariant,
   Message,
   Mission,
   Resource,
   Runtime,
+  Session,
   SyncPeer,
   TerminalScreen,
   TimelineEntry,
@@ -43,6 +47,8 @@ export interface RosterState {
   readonly agents: Agent[]
   readonly runtimes: Runtime[]
   readonly machines: Machine[]
+  readonly sessions: Session[]
+  readonly devices: Device[]
   /** Synthetic sidebar inventory; omitted inventories are empty. */
   readonly arrangements?: Arrangement[]
   /** Agent display order. */
@@ -55,6 +61,8 @@ export interface DetailsState {
   readonly resources?: RawResource[]
   readonly missions: Mission[]
   readonly work: Work[]
+  readonly launches: Launch[]
+  readonly launch_variants: LaunchVariant[]
 }
 
 export interface AttentionState {

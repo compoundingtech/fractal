@@ -1,4 +1,4 @@
-# st3 schema registry
+# Fractal schema registry
 
 This file is generated from `fractal-schema`.
 
@@ -19,7 +19,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `checkpoint-excusal` | `checkpoint-excusal/ID` | no | A person's excusal of an unreachable writer from checkpoints. |
 | `client` | `client/DEVICE` | no | A paired device's server-derived diagnostic identity. |
 | `custom` | `custom/NAMESPACE/NAME` | yes | An extension subject. |
-| `daemon` | `daemon/NODE` | no | An st3 daemon. |
+| `daemon` | `daemon/NODE` | no | A Fractal daemon. |
 | `doc` | `doc/NAME` | no | A named immutable document lineage. |
 | `exec` | `exec/RUN/LOCAL_ID` | no | A mission-run exec runtime. |
 | `external` | `external/PROVIDER/KIND/IDENTITY` | no | An external account or actor, distinct from a native person. |
@@ -32,7 +32,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `host` | `host/NAME` | no | A graph host. |
 | `lane` | `lane/RUN/LOCAL_ID` | no | A mission-run lane: an ordered line of entries its run works through front first. |
 | `loop-run` | `loop-run/GENERATION/PATH` | no | One bounded loop execution. |
-| `message` | `message/ID` | yes | A Small Talk message. |
+| `message` | `message/ID` | yes | A Fractal message. |
 | `mission` | `mission/ID` | no | An immutable mission revision lineage. |
 | `mission-run` | `mission-run/ID` | no | A mission execution. |
 | `observer` | `observer/RUN/LOCAL_ID` | no | A mission-run resource observer. |
@@ -61,6 +61,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `filesystem.file` | `content_hash:string`, `mode:integer`, `path:string immutable`, `reason:string`, `size:integer`, `status:string` | A file observed through an explicit local path. |
 | `harness.session-file` | `agent:subject-reference`, `desired_token:string`, `harness:string immutable`, `incarnation_id:string`, `modified_at:string`, `path:string`, `session_id:string`, `status:string` | A harness session file that can outlive one runtime incarnation. |
 | `human.review` | `decision:string`, `document:string`, `evidence_tests:array`, `reason:string`, `reviewer:subject-reference`, `submitted_at:string`, `target:subject-reference` | A human review of another graph subject. |
+| `uri.reference` | `uri:string immutable` | An external resource addressed by an opaque absolute URI. |
 | `vcs.commit` | `author:string`, `committed_at:string`, `committer:string`, `message:string`, `parents:array`, `repository:subject-reference immutable`, `sha:string immutable`, `state:string`, `tree:string immutable`, `url:string` | An immutable version control commit. |
 | `vcs.issue` | `author:string`, `closed_by:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `labels:array`, `last_comment:object`, `mentions:array`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control issue. |
 | `vcs.pull-request` | `author:string`, `base:subject-reference`, `base_branch:string`, `branch:string`, `checks:array`, `checks_state:string`, `closed_by_resource:subject-reference`, `comments:integer`, `created_at:string`, `draft:boolean`, `head:subject-reference`, `head_sha:string`, `last_comment:object`, `mentions:array`, `merge_commit_sha:string`, `merge_queue:object`, `merged:boolean`, `merged_at:string`, `merged_by:string`, `moved_to:subject-reference`, `node_id:string`, `number:integer`, `opened_by:subject-reference`, `opened_by_run:subject-reference`, `reactions:object`, `recent_comments:array`, `repository:subject-reference`, `required_checks:object`, `review_decision:string`, `reviews:array`, `state:string`, `state_reason:string`, `title:string`, `updated_at:string`, `url:string` | A version control pull request. |
@@ -117,6 +118,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `gate.result` | `gate-operation` | `capability-holder` | `append` | `durable` | `acted_for:subject-reference(person)`, `baseline:boolean`, `decision:string`, `delegation:object`, `field:string`, `gate:string`, `operation:subject-reference`, `reason:string`, `request:string`, `stage:string`, `token_usage:integer`, `value:any`, `verdict!:string` | `gate` |
 | `gate.review-verdict` | `gate-operation` | `capability-holder` | `append` | `durable` | `attempt!:integer`, `binding_claim!:string`, `carry_forward_from:string`, `change!:object`, `episode!:integer`, `evidence!:array`, `finding_refs!:array`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `request!:string`, `review_targets!:array`, `reviewed_head!:object`, `reviewer!:subject-reference(agent|person)`, `scope!:object`, `source!:object`, `verdict!:string` | `gate` |
 | `gate.review-withdrawn` | `gate-operation` | `system-only` | `append` | `durable` | `attempt!:integer`, `authorization_evidence!:array`, `binding_claim!:string`, `episode!:integer`, `gate_subject!:subject-reference(gate-operation)`, `generation!:subject-reference(run-generation)`, `previous_binding!:string`, `reason!:string`, `request!:string`, `reviewer!:subject-reference(agent|person)`, `verdict!:string`, `withdrawing_actor!:subject-reference(agent|person)` | `gate` |
+| `gate.reviewer-reassigned` | `gate-operation` | `authorized-requester` | `append` | `durable` | `owner:subject-reference`, `previous_reviewer:subject-reference`, `request:string`, `reviewer:subject-reference` | `gate` |
 | `github.posted` | `github-post` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `id!:integer`, `item!:integer`, `kind!:string`, `login:string`, `repository!:string`, `url:string` |  |
 | `glass.deleted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `replaced_revision:string` |  |
 | `glass.upserted` | `glass` | `authorized-requester` | `append` | `durable` | `base_revision:string`, `body:object`, `replaced_revision:string` |  |
@@ -162,6 +164,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `owned-set.revised` | `owned-set` | `system-only` | `append` | `durable` | `body!:object`, `revision!:string` |  |
 | `person.delegation-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `actions!:array` |  |
 | `person.directive-note-set` | `person` | `same-subject-actor` | `state-transition` | `durable` | `expires_at:string`, `text!:string or null` |  |
+| `person.rename.completed` | `person` | `authorized-requester` | `append` | `durable` | `new_person:subject-reference`, `old_person:subject-reference`, `report:object` |  |
 | `planning-session.approved` | `planning-session` | `authorized-requester` | `once` | `durable` | `candidate_revision:integer`, `kdl:subject-reference`, `markdown:subject-reference`, `mission_revision:string`, `preview_hash:string`, `preview_token:string`, `requester:subject-reference`, `variant:string` |  |
 | `planning-session.cancelled` | `planning-session` | `authorized-requester` | `once` | `durable` | `reason:string`, `requester:subject-reference` | `cancellation` |
 | `planning-session.candidate-submitted` | `planning-session` | `authorized-participant` | `append` | `durable` | `candidate_revision:integer`, `kdl:subject-reference`, `markdown:subject-reference`, `mission_revision:string`, `revision:integer`, `variant:string` |  |
@@ -233,6 +236,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `work.person-asked` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `generation:subject-reference`, `key:string`, `legacy_request:string`, `mission_spec:object`, `origin_attempt:integer`, `origin_step:subject-reference`, `owner_generation:subject-reference`, `owner_run:subject-reference`, `person:subject-reference`, `reason:string`, `request:object`, `requester_declaration:string`, `run:subject-reference`, `status:string`, `title:string`, `waiting_since:string` |  |
 | `work.person-cancelled` | `step-run` | `authorized-participant` | `append` | `durable` | `answer:object`, `attempt:integer`, `episode:string`, `key:string`, `status:string`, `summary:string` |  |
 | `work.person-done` | `step-run` | `authorized-participant` | `append` | `durable` | `acted_for:subject-reference(person)`, `answer:object`, `assistant_grant_id:string`, `assistant_owner:subject-reference(person)`, `assistant_session_actor:string`, `attempt:integer`, `delegation:object`, `episode:string`, `key:string`, `sender_class:string`, `status:string`, `summary:string` |  |
+| `work.person-reassigned` | `step-run` | `authorized-requester` | `append` | `durable` | `attempt:integer`, `episode:string`, `generation:subject-reference`, `person:subject-reference`, `previous_person:subject-reference`, `run:subject-reference` |  |
 | `work.progress` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_on:object`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.released` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_on:object`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |
 | `work.renewed` | `step-run` | `authorized-participant` | `append` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_on:object`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |

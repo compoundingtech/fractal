@@ -10,7 +10,7 @@ import type {
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
-    PairingComplete, PairedSession, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
+    PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
@@ -644,6 +644,7 @@ export class FractalClient {
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
     async customSubjectsList(options: PageOptions & { kind?: string; version?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/custom-subjects' + query(options), undefined, requestOptions); }
     async customSubjectsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/custom-subjects/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async privateNotesGet(uri: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PrivateNotesSubject>> { return this.get(`/v1/client/private-notes/${encodeURIComponent(uri)}`, undefined, requestOptions); }
     async hostRepositories(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HostRepositories>> { return this.get(`/v1/client/hosts/${encodeURIComponent(routedId(id))}/repositories`, undefined, requestOptions); }
     async setsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/sets' + query(options), undefined, requestOptions); }
     async setsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/sets/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
@@ -748,6 +749,7 @@ export class FractalClient {
     async missionRevise(input: Omit<ActionOf<'mission.revise'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'mission.revise' } as ActionOf<'mission.revise'>, requestOptions); }
     async missionStart(input: Omit<ActionOf<'mission.start'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'mission.start' } as ActionOf<'mission.start'>, requestOptions); }
     async pairingRevoke(input: Omit<ActionOf<'pairing.revoke'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'pairing.revoke' } as ActionOf<'pairing.revoke'>, requestOptions); }
+    async privateNotesWrite(input: Omit<ActionOf<'private-notes.write'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'private-notes.write' } as ActionOf<'private-notes.write'>, requestOptions); }
     async promptRespond(input: Omit<ActionOf<'prompt.respond'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'prompt.respond' } as ActionOf<'prompt.respond'>, requestOptions); }
     async reviewApprove(input: Omit<ActionOf<'review.approve'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.approve' } as ActionOf<'review.approve'>, requestOptions); }
     async reviewReject(input: Omit<ActionOf<'review.reject'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'review.reject' } as ActionOf<'review.reject'>, requestOptions); }

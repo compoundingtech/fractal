@@ -70,7 +70,7 @@ pub struct StepPresentation {
     pub owner: Actor,
     /// Why it waits: what queue it sits in, or st's reason while it waits.
     pub note: Option<String>,
-    pub attempts: u32,
+    pub attempts: u64,
     pub blockers: Vec<String>,
     pub keep_open: bool,
 }
@@ -86,7 +86,7 @@ pub struct SeatRef {
 pub struct Stuck {
     pub step: String,
     pub word: StepState,
-    pub attempts: u32,
+    pub attempts: u64,
     pub blockers: Vec<String>,
     /// The step's seat: its claimant, else its assignee, else the agent queuing it.
     pub agent: Option<SeatRef>,

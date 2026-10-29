@@ -4,6 +4,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import { usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
+import { DiagnosticsBoundary } from './DiagnosticsBoundary.tsx'
 
 // A stored preference must never pull diagnostic modules into a production build.
 const Diagnostics = import.meta.env.DEV || import.meta.env.PERF
@@ -17,9 +18,11 @@ export const App = () => {
   return (
     <UNSAFE_PortalProvider getContainer={getContainer}>
       {Diagnostics !== undefined && (
-        <React.Suspense fallback={null}>
-          <Diagnostics defaultVisible />
-        </React.Suspense>
+        <DiagnosticsBoundary>
+          <React.Suspense fallback={null}>
+            <Diagnostics defaultVisible />
+          </React.Suspense>
+        </DiagnosticsBoundary>
       )}
       <DataSourceProvider source={live.source} registry={live.registry}>
         <React.Profiler id="workbench" onRender={telemetry.onCommit}>

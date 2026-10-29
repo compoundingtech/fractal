@@ -16,6 +16,9 @@ mod context;
 mod contract;
 pub mod conversation;
 pub mod demo;
+#[cfg(test)]
+#[allow(dead_code)]
+mod demo_test_fixture;
 mod direct;
 pub mod doc;
 pub mod checklist;
@@ -58,7 +61,7 @@ mod voice;
 #[allow(dead_code)]
 pub mod view;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
@@ -174,12 +177,7 @@ fn terminal_space_key(key: KeyEvent) -> bool {
 struct Demo {
     started: Instant,
     loaded: bool,
-    streamed: usize,
-    mail: bool,
-    tool_done: bool,
-    /// When the person first opened these conversations: their demo motion starts then.
-    cos_seen: Option<Instant>,
-    harbor_seen: Option<Instant>,
+    world: World,
 }
 
 /// A request the live loop sends to st. The demo never produces these.
@@ -1547,10 +1545,15 @@ impl Ui {
                     ));
                 }
             }
-            Link::Connecting => self.flash(format!(
-                "Connecting to {}: Fractal has not answered yet",
-                self.world.host
-            )),
+            Link::Connecting => {
+                let replacing = self.world.stale.iter().find_map(|why| {
+                    why.strip_prefix("live stream: ").map(|why| why.trim_end_matches(" · Fractal answers, reconnecting"))
+                });
+                self.flash(match replacing {
+                    Some(why) => format!("Reconnecting the live stream to {}: {why}", self.world.host),
+                    None => format!("Connecting to {}: Fractal has not answered yet", self.world.host),
+                })
+            }
             Link::Offline(reason) => self.flash(reason),
         }
     }
@@ -3778,7 +3781,7 @@ impl Ui {
                 ("ctrl+v", "attach the clipboard's image"),
                 (
                     "ctrl+y",
-                    "speak instead of typing, with the box open or not (a Mac with SmallTalk.app's speech helper)",
+                    "speak instead of typing, with the box open or not (a Mac with the Fractal speech helper)",
                 ),
                 ("esc", "stop writing; the keys above work again"),
             ],
@@ -4089,11 +4092,17 @@ impl Ui {
     }
 
     /// Whether a held key may act again as a press. While text is being typed (a message box,
-    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may; outside
-    /// it only the keys that move. Never a pending confirmation or answer: Enter, y and the
+    /// the palette, find, a form) any key but Enter, Esc, Tab and the function keys may;
+    /// the palette and focused sidebar own input even over a focused terminal.
+    /// Outside it only the keys that move.
+    /// Never a pending confirmation or answer: Enter, y and the
     /// commands that change things act once per press, so holding one can never repeat them.
     fn repeat_is_safe(&self, key: &KeyEvent) -> bool {
-        if self.confirm.is_some() || self.answering.is_some() || self.terminal_focused() {
+        if self.confirmation_open()
+            || (self.terminal_focused()
+                && !self.palette_open()
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused))
+        {
             return false;
         }
         let typing = self.editing
@@ -4144,6 +4153,7 @@ impl Ui {
             if self.terminal_focused()
                 && !self.palette_open()
                 && !self.help
+                && !(self.glasses.sidebar.shown && self.glasses.sidebar.focused)
                 && self.popover.is_none()
                 && self.voice.is_none()
                 && self.context.is_none()
@@ -4881,7 +4891,7 @@ impl Ui {
                 _ => "fractal agents start AGENT",
             };
             self.flash(format!(
-                "{what}: Fractal does not let Fractal TUI do this yet · use {hint}"
+                "{what}: Fractal does not let the Fractal terminal UI do this yet · use {hint}"
             ));
         } else {
             self.flash(format!("{what} · demo: nothing was sent"));
@@ -5060,7 +5070,7 @@ impl Ui {
                 agent: agent.id.clone(),
                 title: format!("{} · demo terminal", agent.name),
                 name: agent.name.clone(),
-                lines: demo::terminal(&agent.name),
+                lines: demo::terminal(&agent.id),
                 cursor: None,
                 stale: None,
                 ended: None,
@@ -6362,124 +6372,21 @@ impl Ui {
 
     pub fn step_demo(&mut self) {
         let Some(demo) = &mut self.demo else { return };
-        let elapsed = demo.started.elapsed();
-        if !demo.loaded {
-            let full = demo::world();
-            let stage = elapsed.as_millis() / 350;
-            if stage >= 1 {
-                self.world.link = Link::Live;
-                self.world.attention = full.attention.clone();
-                self.world.quiet_missions = full.quiet_missions;
-            }
-            if stage >= 2 {
-                self.world.agents = full.agents.clone();
-            }
-            if stage >= 3 {
-                self.world.missions = full.missions.clone();
-                self.world.machines = full.machines.clone();
-                self.world.usage = full.usage.clone();
-                self.world.usage_limits = full.usage_limits.clone();
-                self.world.usage_accounts = full.usage_accounts.clone();
-                self.world.agent_messages = full.agent_messages.clone();
-                self.world.worktrees = full.worktrees.clone();
-                self.world.conversations = full.conversations;
-                if let Some(Load::Ready(entries)) = self
-                    .world
-                    .conversations
-                    .get_mut("agent/example/harbor/reviewer")
-                {
-                    entries.push(Entry {
-                        id: "h3".into(),
-                        at: "09:14".into(),
-                        body: Body::Tool {
-                            title: "$ cargo test -p harbor --test retry".into(),
-                            state: ToolState::Running,
-                            output: vec!["compiling harbor v0.9.0".into()],
-                        },
-                    });
-                }
-                demo.loaded = true;
-            }
-            self.refresh_tab_statuses();
-            return;
+        if demo.loaded { return; }
+        let stage = demo.started.elapsed().as_millis() / 350;
+        let full = &demo.world;
+        if stage >= 1 {
+            self.world.link = Link::Live;
+            self.world.attention = full.attention.clone();
+            self.world.quiet_missions = full.quiet_missions;
         }
-        let viewing = (self.tab() == 1)
-            .then(|| {
-                let ids = screens::agent_order(&self.world)
-                    .into_iter()
-                    .map(|agent| agent.id.clone())
-                    .collect::<Vec<_>>();
-                ids.get(self.selected[1]).cloned()
-            })
-            .flatten();
-        let Some(demo) = &mut self.demo else { return };
-        let now = Instant::now();
-        match viewing.as_deref() {
-            Some("agent/example/cos") if demo.cos_seen.is_none() => demo.cos_seen = Some(now),
-            Some("agent/example/harbor/reviewer") if demo.harbor_seen.is_none() => {
-                demo.harbor_seen = Some(now)
-            }
-            _ => {}
+        if stage >= 2 { self.world.agents = full.agents.clone(); }
+        if stage >= 3 {
+            self.world = full.clone();
+            demo.loaded = true;
         }
-        let cos = demo
-            .cos_seen
-            .map(|at| at.elapsed().as_secs_f32())
-            .unwrap_or(0.0);
-        let harbor = demo
-            .harbor_seen
-            .map(|at| at.elapsed().as_secs_f32())
-            .unwrap_or(0.0);
-        if cos > 1.5 {
-            let words = demo::STREAM.split(' ').collect::<Vec<_>>();
-            let want = (((cos - 1.5) * 6.0) as usize).min(words.len());
-            if want > demo.streamed
-                && let Some(Load::Ready(entries)) =
-                    self.world.conversations.get_mut("agent/example/cos")
-            {
-                let text = words[..want].join(" ");
-                if let Some(entry) = entries.iter_mut().find(|entry| entry.id == "stream") {
-                    entry.body = Body::Assistant(text);
-                } else {
-                    entries.push(Entry {
-                        id: "stream".into(),
-                        at: "09:50".into(),
-                        body: Body::Assistant(text),
-                    });
-                }
-                demo.streamed = want;
-            }
-        }
-        if harbor > 3.0 && !demo.tool_done {
-            demo.tool_done = true;
-            if let Some(Load::Ready(entries)) = self
-                .world
-                .conversations
-                .get_mut("agent/example/harbor/reviewer")
-                && let Some(entry) = entries.iter_mut().find(|entry| entry.id == "h3")
-            {
-                entry.body = Body::Tool {
-                    title: "$ cargo test -p harbor --test retry".into(),
-                    state: ToolState::Ok,
-                    output: vec![
-                        "compiling harbor v0.9.0".into(),
-                        "running 3 tests".into(),
-                        "test retry_after_is_milliseconds ... ok".into(),
-                        "test paused_clock_backoff ... ok".into(),
-                        "test gives_up_after_five ... ok".into(),
-                        "".into(),
-                        "test result: ok. 3 passed; 0 failed".into(),
-                    ],
-                };
-            }
-        }
-        if cos > 8.0 && !demo.mail {
-            demo.mail = true;
-            if let Some(Load::Ready(entries)) =
-                self.world.conversations.get_mut("agent/example/cos")
-            {
-                entries.push(demo::late_mail());
-            }
-        }
+        self.resource_sidebar.observe(&self.world);
+        self.refresh_tab_statuses();
     }
 }
 
@@ -6707,10 +6614,12 @@ pub fn run_demo(args: &[String]) -> Result<()> {
     if args.iter().any(|arg| arg == "--dump") {
         return dump(args);
     }
+    let generated = demo::load().context("Cannot open scenario demo")?;
     let _guard = Guard::enter(true)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.hide_cursor()?;
-    let mut ui = Ui::new(demo::loading());
+    let mut ui = Ui::new(demo::loading_from(generated.world.clone()));
+    ui.resource_sidebar.arrangements = generated.arrangements;
     ui.load_prefs();
     // The demo keeps its spaces in memory only, and shows the sidebar as a new device does.
     ui.glasses = glass::Glasses::open(space_request(args), None);
@@ -6718,11 +6627,7 @@ pub fn run_demo(args: &[String]) -> Result<()> {
     ui.demo = Some(Demo {
         started: Instant::now(),
         loaded: false,
-        streamed: 0,
-        mail: false,
-        tool_done: false,
-        cos_seen: None,
-        harbor_seen: None,
+        world: generated.world,
     });
     let started = Instant::now();
     let stopping = stop_flag()?;
@@ -6764,11 +6669,13 @@ fn dump(args: &[String]) -> Result<()> {
     let height = arg(args, "--height")
         .and_then(|v| v.parse().ok())
         .unwrap_or(44);
+    let generated = demo::load().context("Cannot open scenario demo")?;
     let mut ui = Ui::new(if args.iter().any(|arg| arg == "--loading") {
-        demo::loading()
+        demo::loading_from(generated.world)
     } else {
-        demo::world()
+        generated.world
     });
+    ui.resource_sidebar.arrangements = generated.arrangements;
     ui.glasses = glass::Glasses::open(space_request(args), None);
     let mut terminal = Terminal::new(TestBackend::new(width, height))?;
     // Keys: each character is a key; "\n" is Enter, "<esc>", "<end>", "<pgdn>", "<pgup>", "<down>";
@@ -6905,7 +6812,7 @@ mod tests {
 
     #[test]
     fn conversation_open_retry_does_not_act_inside_a_draft_or_on_a_ready_conversation() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 1);
         let target = ui.selected_id().unwrap();
@@ -6929,7 +6836,7 @@ mod tests {
 
     #[test]
     fn first_useful_conversation_requires_a_rendered_entry_not_a_placeholder() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let target = ui.selected_id().unwrap();
         let entries = ui.world.conversations.get(&target).unwrap().clone();
@@ -6964,7 +6871,7 @@ mod tests {
     }
 
     fn expand_all_viewport_fixture() -> (Ui, String) {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let conversation = ui.selected_id().unwrap();
         let items = [
@@ -7196,7 +7103,7 @@ mod tests {
 
     #[test]
     fn mail_image_click_keeps_the_existing_blob_open_effect() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let image = fractal_conversation_ui::MailImage {
             sha256: "cd".repeat(32),
             message: "message/picture".into(),
@@ -7210,7 +7117,7 @@ mod tests {
 
     #[test]
     fn focused_tool_chords_expand_and_collapse_without_toggling_all_tools() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let conversation = ui.selected_id().unwrap();
         let entries = vec![
@@ -7230,7 +7137,7 @@ mod tests {
 
     #[test]
     fn a_custom_request_sends_the_generic_reply_and_has_no_yes_no_shortcut() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         world.attention = Load::Ready(vec![Attention {
             conversations: vec![],
             id: "attention/garden".into(),
@@ -7311,7 +7218,7 @@ mod tests {
 
     #[test]
     fn a_mission_between_steps_says_what_is_next_not_that_the_person_has_no_part() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.open("mission/fleet/rekey");
         let shown = frame(&ui, 140, 50).join("\n").to_lowercase();
         assert!(shown.contains("up next"), "{shown}");
@@ -7338,7 +7245,7 @@ mod tests {
     #[test]
     fn the_top_bar_border_keeps_controls_above_the_body() {
         for (width, height) in [(20, 6), (80, 12), (140, 40)] {
-            let mut ui = Ui::new(demo::world());
+            let mut ui = Ui::new(demo::test_world());
             ui.world.link = Link::Offline("Connection unavailable".into());
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
             terminal.draw(|frame| ui.render(frame)).unwrap();
@@ -7514,7 +7421,7 @@ mod tests {
 
     #[test]
     fn answering_a_request_leaves_the_next_one_closed() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let asks = |id: &str| Attention {
             conversations: vec![],
             id: id.into(),
@@ -7586,7 +7493,7 @@ mod tests {
             blocked: None,
         };
         let live = |items: Vec<Attention>| {
-            let mut world = demo::world();
+            let mut world = demo::test_world();
             world.link = Link::Live;
             world.attention = Load::Ready(items);
             world
@@ -7628,7 +7535,7 @@ mod tests {
     #[test]
     fn the_missions_under_next_in_an_agents_details_open_when_clicked() {
         // Nathan, 2026-10-10: the missions listed under `next` should open their mission.
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let Load::Ready(agents) = &mut world.agents else { panic!() };
         let id = agents[0].id.clone();
         agents[0].details.next = Some("Atlas move › cleanup".into());
@@ -7658,7 +7565,7 @@ mod tests {
     #[test]
     fn an_agents_details_name_its_effort_beside_its_model() {
         // Nathan, 2026-10-10: "I'd like to see the effort level too" in the details sidebar.
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let Load::Ready(agents) = &mut world.agents else { panic!() };
         let id = agents[0].id.clone();
         agents[0].details.model = Some("claude-sonnet-5-5".into());
@@ -7678,7 +7585,7 @@ mod tests {
 
     #[test]
     fn ctrl_p_simplifies_every_conversation_and_back() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let agent = ui.selected_id().unwrap();
         let tools = |ui: &Ui| {
@@ -7702,7 +7609,7 @@ mod tests {
         let _serial = drafts_store::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("drafts.json");
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.drafts_path = Some(path.clone());
         ui.editing = true;
         let agent = "agent/example/atlas/builder".to_owned();
@@ -7741,7 +7648,7 @@ mod tests {
             &HashMap::from([(agent.clone(), "what I was typing".to_owned())]),
         )
         .unwrap();
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.drafts_path = Some(path.clone());
         ui.load_drafts();
         assert_eq!(ui.conversation_state.drafts[&agent], "what I was typing");
@@ -7749,7 +7656,7 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         ui.step_drafts();
         assert!(!path.exists());
-        let mut busy = Ui::new(demo::world());
+        let mut busy = Ui::new(demo::test_world());
         busy.drafts_path = Some(dir.path().join("other.json"));
         busy.conversation_state.drafts.insert(agent.clone(), "already here".into());
         drafts_store::save(
@@ -7769,7 +7676,7 @@ mod tests {
         // The drafts file's parent is a file, so no write can succeed.
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"x").unwrap();
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.drafts_path = Some(blocker.join("drafts.json"));
         ui.editing = false;
         ui.conversation_state.drafts.insert("a".into(), "text".into());
@@ -7784,7 +7691,7 @@ mod tests {
 
     #[test]
     fn a_failed_mission_ages_out_of_the_list_after_its_day() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let now = chrono::Local::now();
         if let Load::Ready(missions) = &mut world.missions {
             let mut failed = missions[0].clone();
@@ -7850,7 +7757,7 @@ mod tests {
 
     #[test]
     fn a_chosen_answer_never_stops_a_text_box_from_taking_keys() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let request = fractal_client::StructuredRequest {
             version: 1,
             entry_type: "choice".into(),
@@ -7939,7 +7846,7 @@ mod tests {
     fn a_feedback_request_offers_words_and_a_dismissal_not_an_answer_to_choose() {
         // Nathan, 2026-10-05: "why can't I dismiss this attention item?"
         let feedback = |kind: &str, answers: Vec<fractal_client::RequestAnswerOption>| {
-            let mut world = demo::world();
+            let mut world = demo::test_world();
             let request = fractal_client::StructuredRequest {
                 version: 1,
                 entry_type: kind.into(),
@@ -8049,7 +7956,7 @@ mod tests {
 
     #[test]
     fn a_structured_request_shows_its_fields_and_sends_a_named_answer() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let request = fractal_client::StructuredRequest {
             version: 1,
             entry_type: "choice".into(),
@@ -8151,7 +8058,7 @@ mod tests {
     fn the_buttons_under_a_chosen_answer_send_it_move_on_and_put_it_away() {
         // Nathan, 2026-10-07: "I can't choose an option for this attention item, it says I must
         // write something": the Send button went to the empty text box.
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let option = |id: &str, label: &str| fractal_client::RequestAnswerOption {
             id: id.into(),
             label: label.into(),
@@ -8231,7 +8138,7 @@ mod tests {
     #[test]
     fn an_answer_that_asks_for_changes_says_it_needs_words() {
         // Nathan, 2026-10-07: "it says I must type something. What does this mean?"
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let request = fractal_client::StructuredRequest {
             version: 1,
             entry_type: "decision".into(),
@@ -8340,7 +8247,7 @@ mod tests {
     #[test]
     fn a_mission_backed_ask_names_its_mission_and_the_step_that_waits() {
         // Nathan, 2026-10-05: a request a mission step made lost its mission link.
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let mission = "mission/release-proof";
         let item = Attention {
             conversations: vec![],
@@ -8392,7 +8299,7 @@ mod tests {
 
     #[test]
     fn an_update_shows_what_was_asked_for_and_clears_once_read() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let item = Attention {
             conversations: vec![],
             id: "attention/update".into(),
@@ -8453,7 +8360,7 @@ mod tests {
 
     #[test]
     fn an_item_st_stops_listing_stays_on_home_until_x_clears_it() {
-        let world = demo::world();
+        let world = demo::test_world();
         let mut ui = Ui::new(world.clone());
         ui.live = true;
         ui.open_home();
@@ -8494,7 +8401,7 @@ mod tests {
 
     #[test]
     fn recently_closed_lists_only_the_latest_few() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         if let Load::Ready(items) = &mut world.attention {
             let template = items[0].clone();
             items.clear();
@@ -8527,7 +8434,7 @@ mod tests {
     #[test]
     fn a_held_key_repeats_while_typing_and_never_repeats_a_command() {
         // Nathan, 2026-10-07: holding Ctrl+W deleted one word, not word after word.
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 1);
         ui.select(0);
@@ -8565,21 +8472,41 @@ mod tests {
 
     #[test]
     fn a_list_st_stopped_serving_after_it_loaded_marks_the_connection_stale_and_says_why() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         world.stale = vec!["Agents: collection source is unavailable".into()];
         let mut ui = Ui::new(world);
         ui.live = true;
         let top = frame(&ui, 140, 50)[0].clone();
-        assert!(top.contains("stale") && !top.contains("live"), "{top}");
+        // The word names the list, so the person need not hunt for what is stale.
+        assert!(top.contains("◐ stale · Agents") && !top.contains("live"), "{top}");
         // Clicking the connection word says why, and the rows stay.
         ui.show_connection();
         assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("collection source is unavailable")));
         assert!(!ui.world.agents.items().is_empty());
+        ui.world.stale.push("machines: harbor cannot be reached right now".into());
+        let top = frame(&ui, 140, 50)[0].clone();
+        assert!(top.contains("◐ stale · Agents +1"), "{top}");
+    }
+
+    #[test]
+    fn a_live_stream_being_replaced_is_not_flashed_and_clicking_connecting_says_why() {
+        let mut world = demo::world();
+        world.link = Link::Connecting;
+        world.stale = vec!["live stream: the member stopped answering · Fractal answers, reconnecting".into()];
+        let mut ui = Ui::new(world);
+        assert!(ui.flash.is_none());
+        ui.show_connection();
+        let flash = ui.flash.as_ref().map(|(text, _)| text.clone()).unwrap_or_default();
+        assert!(flash.contains("Reconnecting the live stream") && flash.ends_with("the member stopped answering"), "{flash}");
+        // Without a stream being replaced it is still Fractal that has not answered.
+        ui.world.stale.clear();
+        ui.show_connection();
+        assert!(ui.flash.as_ref().is_some_and(|(text, _)| text.contains("Fractal has not answered yet")));
     }
 
     #[test]
     fn a_host_catching_up_says_behind_and_never_reads_as_no_alerts() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         world.attention = Load::Ready(Vec::new());
         let mut quiet = Ui::new(world.clone());
         quiet.live = true;
@@ -8600,7 +8527,7 @@ mod tests {
 
     #[test]
     fn an_alerts_list_st_stopped_serving_never_reads_as_no_alerts() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         world.attention = Load::Ready(Vec::new());
         // Another list going stale does not make the alerts unknown.
         world.stale = vec!["Agents: collection source is unavailable".into()];
@@ -8617,7 +8544,7 @@ mod tests {
 
     #[test]
     fn x_dismisses_whatever_on_home_can_be_dismissed() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         if let Load::Ready(items) = &mut world.attention {
             for item in items.iter_mut() {
                 if item.kind.word() == "message" {
@@ -8725,7 +8652,7 @@ mod tests {
 
     #[test]
     fn spoken_words_are_sent_tagged_dictated() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 1);
         let agent = ui.selected_id().unwrap();
@@ -8771,7 +8698,7 @@ mod tests {
 
     #[test]
     fn a_draft_over_what_st_takes_is_not_sent_and_stays_in_the_box() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 1);
         ui.message_limit = Some(262_144);
@@ -8801,7 +8728,7 @@ mod tests {
 
     #[test]
     fn nothing_is_blocked_before_send_when_st_names_no_limit() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 1);
         assert_eq!(ui.message_limit, None);
@@ -8817,7 +8744,7 @@ mod tests {
 
     #[test]
     fn a_refused_message_goes_back_to_the_box_unless_something_newer_is_there() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 1);
         let agent = ui.selected_id().unwrap();
@@ -8850,7 +8777,7 @@ mod tests {
 
     #[test]
     fn spoken_words_kept_to_edit_are_tagged_when_sent_and_esc_drops_them() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 1);
         let agent = ui.selected_id().unwrap();
@@ -8882,8 +8809,8 @@ mod tests {
     }
 
     #[test]
-    fn a_first_page_st_keeps_refusing_says_why_while_stui_tries_again() {
-        let mut ui = Ui::new(demo::world());
+    fn a_first_page_fractal_keeps_refusing_says_why_while_tui_tries_again() {
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let agent = ui.selected_id().unwrap();
         ui.world.conversations.insert(agent.clone(), Load::Loading);
@@ -8917,7 +8844,7 @@ mod tests {
 
     #[test]
     fn a_diverged_host_says_so_instead_of_live() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         let top = |world: &World| frame(&Ui::new(world.clone()), 140, 30)[0].clone();
         assert!(top(&world).contains("● live"));
         world.diverged = vec!["harbor".into()];
@@ -8928,7 +8855,7 @@ mod tests {
 
     #[test]
     fn every_pane_draws_alone_from_its_key_at_any_size() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let first = |tab: usize| {
             ui.listing_for(tab, 40)
                 .ids
@@ -9013,7 +8940,7 @@ mod tests {
 
     #[test]
     fn a_conversation_read_back_keeps_its_place_while_entries_come_and_go() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let id = ui.selected_id().unwrap();
         frame(&ui, 120, 30);
@@ -9077,7 +9004,7 @@ mod tests {
 
     #[test]
     fn earlier_entries_loaded_above_keep_what_was_being_read_in_place() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let id = ui.selected_id().unwrap();
         let Some(Load::Ready(entries)) = ui.world.conversations.get_mut(&id) else {
@@ -9147,7 +9074,7 @@ mod tests {
 
     #[test]
     fn a_click_on_a_subagent_line_only_selects_its_agent() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.open_in_glass(Pane::List(1), glass::Open::Tab);
         let ids = ui.ids();
         let builder = ids
@@ -9189,7 +9116,7 @@ mod tests {
 
     #[test]
     fn a_conversation_follows_new_lines_until_scrolled_up() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.open("agent/example/cos");
         frame(&ui, 140, 30);
         let key = "chat:agent/example/cos".to_owned();
@@ -9208,7 +9135,7 @@ mod tests {
 
     #[test]
     fn selection_copies_only_its_own_pane() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         frame(&ui, 140, 30);
         let pane = ui
@@ -9251,7 +9178,7 @@ mod tests {
 
     #[test]
     fn every_attention_kind_draws_its_own_card() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let expectations = [
             ("attention/1", "c or click to write"),
             ("attention/2", "YOUR FEEDBACK"),
@@ -9274,7 +9201,7 @@ mod tests {
 
     #[test]
     fn frames_never_exceed_their_width() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         for width in [72u16, 100, 160] {
             for tab in 0..5 {
                 show(&mut ui, tab);
@@ -9290,7 +9217,7 @@ mod tests {
 
     #[test]
     fn g_goes_to_the_mission_behind_a_home_item() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
         ui.select(index);
         press(&mut ui, KeyCode::Char('g'));
@@ -9303,7 +9230,7 @@ mod tests {
 
     #[test]
     fn chat_about_this_starts_a_thread_with_the_agent_involved() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let index = ui.ids().iter().position(|id| id == "attention/1").unwrap();
         ui.select(index);
         press(&mut ui, KeyCode::Char('t'));
@@ -9322,8 +9249,8 @@ mod tests {
 
     #[test]
     fn a_fault_with_nobody_attached_is_discussed_with_the_chief_of_staff() {
-        let mut ui = Ui::new(demo::world());
-        let mut world = demo::world();
+        let mut ui = Ui::new(demo::test_world());
+        let mut world = demo::test_world();
         if let Load::Ready(items) = &mut world.attention {
             for item in items.iter_mut() {
                 item.agent = None;
@@ -9336,7 +9263,7 @@ mod tests {
 
     #[test]
     fn what_a_seats_step_last_reported_leads_in_the_sidebar_and_on_its_card() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         if let Load::Ready(agents) = &mut world.agents {
             agents[0].details.progress = Some("Cut over 2 of 3 stores; waiting on the signer".into());
         }
@@ -9348,7 +9275,7 @@ mod tests {
         let whole = screen.replace('\n', " ");
         assert!(whole.contains("Cut over 2 of 3 stores; waiting on"), "{whole}");
         // A run in progress says what its step last reported on its row in Missions.
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         if let Load::Ready(missions) = &mut world.missions {
             let mission = missions
                 .iter_mut()
@@ -9380,7 +9307,7 @@ mod tests {
     fn voice_that_never_answers_cannot_hold_the_keys() {
         // Nathan, 2026-10-06: keys stopped working, Ctrl+Q did not quit, until the
         // terminal tab was closed.
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let input = ui.draft_key().expect("a conversation is open");
         let mut waiting = voice::VoiceState::stand_in(&input);
@@ -9399,7 +9326,7 @@ mod tests {
         assert!(ui.voice.is_none());
         assert!(ui.quit, "Ctrl+Q went through");
         // Plain typing still waits (it must not mix into the words) and Esc drops them.
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         let input = ui.draft_key().unwrap();
         let mut heard = voice::VoiceState::stand_in(&input);
@@ -9419,7 +9346,7 @@ mod tests {
 
     #[test]
     fn remind_me_later_hides_a_message_and_the_badge_counts_what_is_left() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         let index = ui.ids().iter().position(|id| id == "attention/6").unwrap();
         ui.select(index);
         press(&mut ui, KeyCode::Char('l'));
@@ -9437,7 +9364,7 @@ mod tests {
 
     #[test]
     fn clicking_an_agent_in_a_mission_opens_a_popover_not_another_tab() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 2);
         frame(&ui, 150, 60);
         let (rect, _) = ui
@@ -9464,7 +9391,7 @@ mod tests {
     }
     #[test]
     fn a_launch_without_a_preview_says_why_and_offers_no_approval() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         if let Load::Ready(items) = &mut world.attention {
             for item in items.iter_mut() {
                 if let AttentionKind::Launch { preview, .. } = &mut item.kind {
@@ -9484,7 +9411,7 @@ mod tests {
     }
     #[test]
     fn the_wheel_scrolls_the_sidebar_away_from_the_selection_and_stays_there() {
-        let mut world = demo::world();
+        let mut world = demo::test_world();
         if let Load::Ready(agents) = &mut world.agents {
             let template = agents[5].clone();
             for index in 0..40 {
@@ -9524,7 +9451,7 @@ mod tests {
     }
     #[test]
     fn the_message_box_grows_with_the_draft_and_keeps_new_lines() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         // Letters type: the first one opens the box.
         for character in
@@ -9551,7 +9478,7 @@ mod tests {
         assert_eq!(terminal_rows_skipped(40, 10, Some((5, 0))), 0);
         assert_eq!(terminal_rows_skipped(8, 10, Some((5, 0))), 0);
 
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.open_in_glass(
             Pane::Terminal("agent/example/atlas/builder".into()),
             glass::Open::Tab,
@@ -9564,7 +9491,7 @@ mod tests {
                 .map(|row| Line::from(format!("row {row}")))
                 .collect(),
             cursor: Some((5, 2)),
-            stale: Some("st closed the connection".into()),
+            stale: Some("Fractal closed the connection".into()),
             ended: None,
             native: None,
         });
@@ -9572,7 +9499,7 @@ mod tests {
         assert!(screen.contains("row 5"), "{screen}");
         assert!(!screen.contains("row 39"), "{screen}");
         assert!(
-            screen.contains("not current, reconnecting: st closed the connection"),
+            screen.contains("not current, reconnecting: Fractal closed the connection"),
             "{screen}"
         );
 
@@ -9599,7 +9526,7 @@ mod tests {
 
     #[test]
     fn ctrl_bracket_opens_an_agents_terminal_and_ctrl_backslash_returns() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 1);
         press(&mut ui, KeyCode::Enter);
         assert!(ui.terminal.is_none(), "Enter alone never attaches");
@@ -9626,7 +9553,7 @@ mod tests {
 
     #[test]
     fn a_new_mission_needs_every_field_before_it_creates_a_launch() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         ui.live = true;
         show(&mut ui, 2);
         press(&mut ui, KeyCode::Char('n'));
@@ -9663,7 +9590,7 @@ mod tests {
 
     #[test]
     fn a_device_is_revoked_only_after_confirming() {
-        let mut ui = Ui::new(demo::world());
+        let mut ui = Ui::new(demo::test_world());
         show(&mut ui, 3);
         let screen = frame(&ui, 140, 60).join("\n");
         assert!(screen.contains("YOUR DEVICES"), "{screen}");

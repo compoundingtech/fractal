@@ -533,8 +533,10 @@ describe('shipped live sidebar search', () => {
     await mount(1440)
     const rowName = () => roster().querySelector('[role="row"][data-sidebar-tree-key="agent/example"]')?.getAttribute('aria-label')
     expect(rowName()).toBe('Example Agent, Idle')
+    expect(roster().querySelector('[data-subagent-count]')).toBeNull()
     await act(async () => registry.set(agents, { _tag: 'Observed', value: [agent], freshness: 'stale' }))
     expect(rowName()).toBe('Example Agent, Last verified · Idle')
+    expect(roster().querySelector('[data-subagent-count]')).toBeNull()
   })
 })
 
@@ -610,7 +612,7 @@ describe('responsive agent navigation', () => {
 
 // Remembered machines live in module state shared across tests; keep these after the suites that expect an unfiltered roster.
 describe('shipped live sidebar Show filter', () => {
-  it('filters Waiting for answer from st questions only and keeps the persisted query across remount', async () => {
+  it('filters Waiting for answer from Fractal questions only and keeps the persisted query across remount', async () => {
     registry.set(agents, observed({ value: [
       { ...agent, id: 'agent/asker', name: 'Asker', host_id: Option.some('host/host-b'), blocked_on: Option.some('human'), ask: Option.some('question') },
       { ...agent, id: 'agent/permission', name: 'Permission', host_id: Option.some('host/host-b'), blocked_on: Option.some('human'), ask: Option.some('permission') },

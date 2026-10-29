@@ -17,7 +17,8 @@ import { EmbraceToolCall, EmbraceToolRegistrations, EmbraceToolRun, EmbraceToolV
 import { EmbraceScrollViewport } from './EmbraceScrollViewport'
 import { Markdown, MarkdownImagePolicy, type MarkdownImageOpener, type MarkdownImageResolver } from './composition/Markdown'
 import { ThinkingEntry } from './composition/ThinkingEntry'
-import { SendFailure, SendUnconfirmed, TranscriptEmptyContent, type TranscriptEmptyState } from './composition/TranscriptFeedback'
+import { SendStatus, TranscriptEmptyContent, type TranscriptEmptyState } from './composition/TranscriptFeedback'
+import type { ComposerAvailability } from './embrace-composer/send'
 
 export type EmbraceLevel = 'E1' | 'E2' | 'E3' | 'E4'
 export type SenderVariant = 'S1' | 'S2' | 'S3'
@@ -41,6 +42,8 @@ export interface EmbraceThreadProps {
   readonly composerProps?: Omit<EmbraceComposerProps, 'variant'>
   readonly onCommit?: React.ProfilerOnRenderCallback
   readonly onRetrySend?: (itemId: string) => void
+  /** Composer send availability; per-row Retry appears only while it is Ready (or not reported). */
+  readonly sendAvailability?: ComposerAvailability
   readonly resolveImage?: MarkdownImageResolver
   /** Opens a deferred image outside the page (for hosts whose CSP forbids inline remote images). */
   readonly onLoadImage?: MarkdownImageOpener
@@ -78,7 +81,7 @@ export function EmbraceMessage() {
       {options.senders === 'S1' ? null : <span aria-hidden="true" data-testid="sender-avatar" {...stylex.props(styles.avatar)}>{label.slice(0, 2).toUpperCase()}</span>}
       <strong {...stylex.props(styles.senderName)}>{label}</strong>
     </header> : null}
-    {editing ? <ComposerPrimitive.Root {...stylex.props(styles.edit)}><ComposerPrimitive.Input aria-label="Edit message" {...stylex.props(styles.input)} /><ComposerPrimitive.Send {...stylex.props(styles.button)}>Save edit</ComposerPrimitive.Send><ComposerPrimitive.Cancel {...stylex.props(styles.button)}>Cancel edit</ComposerPrimitive.Cancel></ComposerPrimitive.Root> : <><MessagePrimitive.Parts components={{ Text: TextPart, Reasoning: ReasoningPart, tools: { Fallback: EmbraceToolCall } }} />{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Failed' && <SendFailure state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}{item?._tag === 'Text' && item.role === 'user' && item.sendState?._tag === 'Unconfirmed' && <SendUnconfirmed state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}</>}
+    {editing ? <ComposerPrimitive.Root {...stylex.props(styles.edit)}><ComposerPrimitive.Input aria-label="Edit message" {...stylex.props(styles.input)} /><ComposerPrimitive.Send {...stylex.props(styles.button)}>Save edit</ComposerPrimitive.Send><ComposerPrimitive.Cancel {...stylex.props(styles.button)}>Cancel edit</ComposerPrimitive.Cancel></ComposerPrimitive.Root> : <><MessagePrimitive.Parts components={{ Text: TextPart, Reasoning: ReasoningPart, tools: { Fallback: EmbraceToolCall } }} />{item?._tag === 'Text' && item.role === 'user' && <SendStatus state={item.sendState} onRetry={options.onRetrySend === undefined ? undefined : () => options.onRetrySend?.(item.id)} />}</>}
     {options.embrace !== 'E1' ? <>
       <MessagePrimitive.Attachments components={{ Attachment }} />
       <MessagePrimitive.Error><ErrorPrimitive.Root {...stylex.props(styles.error)}><ErrorPrimitive.Message /></ErrorPrimitive.Root></MessagePrimitive.Error>
@@ -120,7 +123,8 @@ function rowsFor(items: readonly ConversationItem[], tools: ToolVariant, workLog
 }
 const noWorkLogs: readonly WorkLogProjection[] = []
 /** Render under AssistantRuntimeProvider. The app keeps ownership of stores and callbacks. */
-export function EmbraceThread({ items: snapshot, workLogs, readingColumn = false, embrace = 'E1', tools = 'rows', senders = 'S2', composer = 'C1', history, targetLabel, disabledReason, threadList, toolbar, composerProps, onCommit, onRetrySend, resolveImage, onLoadImage, emptyState, style }: EmbraceThreadProps) {
+export function EmbraceThread({ items: snapshot, workLogs, readingColumn = false, embrace = 'E1', tools = 'rows', senders = 'S2', composer = 'C1', history, targetLabel, disabledReason, threadList, toolbar, composerProps, onCommit, onRetrySend, sendAvailability, resolveImage, onLoadImage, emptyState, style }: EmbraceThreadProps) {
+  const retrySend = sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined
   const imageOptions = React.useMemo(() => ({ resolveImage, onLoadImage }), [resolveImage, onLoadImage])
   const messages = useAuiState(state => state.thread.messages)
   // The adapter commits after React renders its new input snapshot. Use the
@@ -140,7 +144,7 @@ export function EmbraceThread({ items: snapshot, workLogs, readingColumn = false
     const previous = items[index - 1]
     const repeatToolSender = tools === 'grouped' && item._tag === 'ToolCall' && previous?._tag === 'ToolCall' && participant(previous) === participant(item)
     const showSender = (senders !== 'S3' || index === 0 || participant(previous!) !== participant(item)) && !repeatToolSender
-    return <DisplayContext.Provider key={item.id} value={{ embrace, senders, showSender, onRetrySend }}>
+    return <DisplayContext.Provider key={item.id} value={{ embrace, senders, showSender, onRetrySend: retrySend }}>
       <ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} />
     </DisplayContext.Provider>
   }

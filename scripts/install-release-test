@@ -6,6 +6,8 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 install_fixture() { python3 "$repo/scripts/test-signal-target" "$work/package/install.sh" "$@"; }
 work=$(mktemp -d)
 trap 'chmod -R u+w "$work"; rm -rf "$work"' EXIT
+export HOME="$work/home"
+mkdir -p "$HOME"
 # These fixtures test regular-file installation; native macOS app transactions
 # are covered separately by install-macos-test.
 mkdir -p "$work/platform-bin"
@@ -28,7 +30,9 @@ ln -s /missing/old-st "$work/installed/st"
 ln -s /missing/old-ui "$work/installed/stui"
 # Nix outputs carry read-only modes; mutable installations must not inherit them.
 chmod -R a-w "$work/package/share/fractal-web"
-install_fixture --bin-dir "$work/installed"
+install_fixture --bin-dir "$work/installed" > "$work/upgrade.out"
+grep -q 'Upgrading Fractal unknown → new-st3 in ' "$work/upgrade.out"
+grep -q 'Installed CLI: unknown → new-st3' "$work/upgrade.out"
 test "$(readlink "$work/installed/st")" = st3
 test "$("$work/installed/st")" = new-st3
 test "$(readlink "$work/installed/fractal")" = st3
@@ -47,6 +51,86 @@ assert web.stat().st_mode & 0o200
 assert all(path.stat().st_mode & 0o200 for path in web.rglob('*'))
 PY_WEB_MODES
 chmod -R u+w "$work/package/share/fractal-web"
+# Fresh installs do not claim to upgrade or restart a daemon.
+install_fixture --bin-dir "$work/fresh-notice/bin" > "$work/fresh.out" 2> "$work/fresh.err"
+grep -q 'Installed st3' "$work/fresh.out"
+! grep -q 'Upgrading' "$work/fresh.out"
+if [[ -s $work/fresh.err ]]; then cat "$work/fresh.err" >&2; exit 1; fi
+# Read-only service inspection reports a running daemon without doctor or restart.
+mkdir -p "$work/running/bin"
+cat > "$work/running/bin/st3" <<'RUNNING'
+#!/bin/sh
+case "$*" in
+  --version) echo 'fractal v0.3.21 (old-build)' ;;
+  'service status --json') echo '{"services":[{"running":true}]}' ;;
+  *) echo "unexpected probe: $*" >&2; exit 9 ;;
+esac
+RUNNING
+chmod +x "$work/running/bin/st3"
+install_fixture --bin-dir "$work/running/bin" > "$work/running.out" 2> "$work/running.err"
+grep -q 'Upgrading Fractal fractal v0.3.21 (old-build) → new-st3' "$work/running.out"
+grep -q 'A daemon is running; it keeps its current build until you restart it:' "$work/running.err"
+grep -Fq "$work/running/bin/st service restart" "$work/running.err"
+grep -q 'docs/guides/upgrading' "$work/running.err"
+# Package-manager-owned links, including dangling Home Manager links, are never replaced.
+for target in /nix/store/missing-fractal/bin/st3 /nix/var/nix/profiles/per-user/alice/bin/st3 "$HOME/.nix-profile/bin/st3"; do
+  mkdir -p "$work/nix/bin"
+  ln -s "$target" "$work/nix/bin/st3"
+  if install_fixture --bin-dir "$work/nix/bin" > "$work/nix.out" 2> "$work/nix.err"; then exit 1; fi
+  grep -q 'refusing to overwrite Nix-owned path' "$work/nix.err"
+  grep -q 'docs/reference/home-manager' "$work/nix.err"
+  test "$(readlink "$work/nix/bin/st3")" = "$target"
+  test ! -e "$work/nix/bin/pty"
+  test ! -e "$work/nix/bin/.smalltalk-install.lock"
+  rm "$work/nix/bin/st3"
+done
+# A dangling ancestor can hide the managed generation from a leaf-only link walk.
+for mode in default custom ancestor relative; do
+  state="$work/xdg-$mode"
+  if [[ $mode == default ]]; then state="$HOME/.local/state"; fi
+  profile="$state/nix/profiles/home-manager"
+  if [[ $mode == ancestor ]]; then profile="$work/arbitrary-generation"; fi
+  if [[ $mode == relative ]]; then
+    # Different logical/physical depths mirror /var -> /private/var on macOS.
+    mkdir -p "$work/relative-physical/extra"
+    ln -s "$work/relative-physical/extra" "$work/relative-parent"
+    profile="$work/relative-parent/generation"
+  fi
+  bin="$work/dangling-$mode/bin"
+  mkdir -p "$(dirname "$profile")" "$bin"
+  target=/nix/store/gc-collected-fractal
+  if [[ $mode == relative ]]; then
+    target=
+    prefix=$(cd "$(dirname "$profile")" && pwd -P)
+    while [[ $prefix != / ]]; do target="../$target"; prefix=$(dirname "$prefix"); done
+    target="${target}nix/./store/missing/../gc-collected-fractal"
+  fi
+  ln -s "$target" "$profile"
+  ln -s "$profile/bin/st3" "$bin/st3"
+  if XDG_STATE_HOME="$state" install_fixture --bin-dir "$bin" > "$work/dangling.out" 2> "$work/dangling.err"; then exit 1; fi
+  grep -q 'Nix-owned path' "$work/dangling.err"
+  test "$(readlink "$bin/st3")" = "$profile/bin/st3"
+  test "$(readlink "$profile")" = "$target"
+  test ! -e "$bin/pty"
+done
+# macOS temporary HOME paths can use /var while pwd -P returns /private/var.
+mkdir -p "$work/physical-home" "$work/alias-bin"
+ln -s "$work/physical-home" "$work/logical-home"
+for relative in .nix-profile/bin/st3 .local/state/nix/profiles/home-manager/bin/st3; do
+  target="$work/logical-home/$relative"
+  ln -s "$target" "$work/alias-bin/st3"
+  if HOME="$work/logical-home" XDG_STATE_HOME= install_fixture --bin-dir "$work/alias-bin" > "$work/alias.out" 2> "$work/alias.err"; then exit 1; fi
+  grep -q 'Nix-owned path' "$work/alias.err"
+  test "$(readlink "$work/alias-bin/st3")" = "$target"
+  rm "$work/alias-bin/st3"
+done
+# Similar directory names outside Nix's actual roots are ordinary archive targets.
+for relative in profiles/per-user/alice/bin profiles/home-manager/bin unmanaged/.nix-profile/bin; do
+  bin="$work/non-nix/$relative"
+  install_fixture --bin-dir "$bin" > "$work/non-nix.out" 2> "$work/non-nix.err"
+  test "$("$bin/st3")" = new-st3
+  test ! -s "$work/non-nix.err"
+done
 # Upgrading a prior read-only installation must also clean up its replaced tree.
 chmod -R a-w "$work/share/fractal-web"
 install_fixture --bin-dir "$work/installed" --quiet

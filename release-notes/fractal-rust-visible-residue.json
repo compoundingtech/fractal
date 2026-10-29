@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Use Fractal throughout Rust CLI help, human diagnostics, setup, terminal UI prose and package metadata.",
+  "replay": { "status": "none", "detail": "No claim replay or history rewriting." },
+  "schema": { "status": "none", "detail": "No schema or serialized value changes." },
+  "rules": { "status": "none", "detail": "No lifecycle or admission rule changes." },
+  "compatibility": { "status": "changed", "detail": "Human CLI stderr uses fractal:; native-driver and exec-gate diagnostics retain their legacy prefixes. The delivery probe accepts both prefixes. Installed aliases, wire values, client identities, environment variables, state paths and service labels are unchanged." },
+  "downtime": { "status": "none", "detail": "Presentation changes require no service cutover." },
+  "manual": { "status": "none", "detail": "No manual action required." },
+  "recovery": { "status": "none", "detail": "Existing recovery commands and durable state remain compatible." }
+}

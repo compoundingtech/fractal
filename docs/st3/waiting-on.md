@@ -12,7 +12,7 @@ The HTTP read is `GET /v1/mission-runs/{run}/waiting-on`, which takes `quiet_aft
 
 ## What it reads
 
-It folds no claims and replays no history. It reads state st already keeps current:
+It folds no claims and replays no history. It reads state Fractal already keeps current:
 
 - The published work list: every open step of a current generation, with its effective state,
   holder, lease, last progress, declared wait, wake attempts and blockers. Its refresher refolds
@@ -39,19 +39,19 @@ Each open step gets one kind. These five are causes:
 | `seat-down` | The seat that holds the step, or that would take it, is stopped, failed, suspended, down, retired or faulted. | the seat |
 | `no-progress` | A seat holds the step and has recorded no progress (or claim) for longer than the quiet limit. | the holder |
 | `unclaimed` | Ready for longer than the quiet limit, and nobody claims it. | the assignee or the queue holding it |
-| `hold` | Blocked with a reason, in a declared `work wait`, in a retry backoff, or st's wait for another run. | outside the fleet |
+| `hold` | Blocked with a reason, in a declared `work wait`, in a retry backoff, or Fractal's wait for another run. | outside the fleet |
 
 The rest are not causes:
 
 | Kind | Meaning |
 | --- | --- |
 | `working` | Progress within the quiet limit. |
-| `verifying` | Submitted, and st checks its gates. |
+| `verifying` | Submitted, and Fractal checks its gates. |
 | `ready` | Ready within the quiet limit. |
 | `queued` | Ready, waiting its turn behind other work on a busy seat. |
-| `watching` | st's keep-open step. |
+| `watching` | Fractal's keep-open step. |
 
-The quiet limit is 15 minutes by default: the time st waits before it nudges an idle holder.
+The quiet limit is 15 minutes by default: the time Fractal waits before it nudges an idle holder.
 `--quiet` changes it for one read.
 
 ## A run's verdict

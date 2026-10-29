@@ -244,14 +244,45 @@ pub async fn operational_repair_plan(
 
 pub async fn apply_operational_repair(
     State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
     Json(request): Json<OperationalRepairApplyRequest>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
+    if bound.is_some() || request.actor.is_some() {
+        return Err(ApiError::bad(St3Error::new(
+            "foreign-agent-actor",
+            "the legacy repair route accepts only unbound token-only callers",
+        )));
+    }
+    apply_operational_repair_with_actor(state, request, None).await
+}
+
+/// A separate route makes an older token-only daemon refuse attributed applies
+/// before mutation, even if it would silently ignore an unknown actor field.
+pub async fn apply_attributed_operational_repair(
+    State(state): State<AppState>,
+    bound: Option<Extension<BoundAgent>>,
+    Json(request): Json<OperationalRepairApplyRequest>,
+) -> Result<Json<OperationalRepairResult>, ApiError> {
+    let bound = bound.ok_or_else(|| ApiError::bad(St3Error::new(
+        "foreign-agent-actor",
+        "attributed repair apply requires an authenticated harness binding",
+    )))?;
+    apply_operational_repair_with_actor(state, request, Some(bound.0.0)).await
+}
+
+async fn apply_operational_repair_with_actor(
+    state: AppState,
+    request: OperationalRepairApplyRequest,
+    bound_actor: Option<String>,
 ) -> Result<Json<OperationalRepairResult>, ApiError> {
     let effect_state = state.clone();
     let result = blocking_action(move || {
         let (subjects, classes) = Store::operational_repair_token_filters(&request.token)?;
         let (_guards, evidence) = legacy_start_repair_evidence(&effect_state, &subjects, &classes)
             .map_err(legacy_start_proof_error)?;
-        effect_state.store.apply_operational_repair_with_legacy_starts(&request.token, &evidence)
+        effect_state.store.apply_operational_repair_with_legacy_starts(
+            &request.token, &evidence, bound_actor.as_deref(),
+        )
     }).await?;
     if result.applied != 0 {
         signal_changed(&state);
@@ -450,6 +481,18 @@ pub async fn get_usage(
         row["stale"] = json!(now.saturating_sub(limit.measured_at_unix_ms) > fresh_ms);
     }
     if let Some((config, policy)) = policy {
+        // Entries of `keep` whose seat is no longer declared: they keep nothing. Only reported.
+        let kept = config.keep.clone();
+        let live = blocking_store({
+            let store = state.store.clone();
+            move || store.declared_seats(&kept)
+        })
+        .await?;
+        let retired_keep = config
+            .keep
+            .iter()
+            .filter(|seat| !live.contains(*seat))
+            .collect::<Vec<_>>();
         for (row, limit) in report["limits"]
             .as_array_mut()
             .into_iter()
@@ -462,6 +505,8 @@ pub async fn get_usage(
             "stop_at_weekly_percent": config.stop_at_weekly_percent,
             "exempt_accounts": config.exempt_accounts,
             "exempt_harnesses": config.exempt_harnesses,
+            "keep": config.keep,
+            "keep_retired": retired_keep,
         });
     }
     Ok(Json(report))
@@ -575,6 +620,16 @@ pub struct StatusQuery {
     /// Only the subject's current harness; see `Store::status_harness_only`.
     #[serde(default)]
     harness_only: bool,
+}
+
+pub async fn resource_referrers(
+    State(state): State<AppState>,
+    AxumPath(subject): AxumPath<String>,
+) -> Result<Json<Vec<Value>>, ApiError> {
+    let store = state.store.clone();
+    blocking_store(move || store.declared_resource_referrers(&subject))
+        .await
+        .map(Json)
 }
 
 /// One subject's desired record. Each Claude seat's status line reads it on every render (every

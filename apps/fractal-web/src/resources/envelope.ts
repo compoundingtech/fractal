@@ -8,7 +8,7 @@
  * renderer that claims it, so unknown schemas still decode as a header plus open fact bag.
  *
  * Conventions follow the generated client-v0 Effect schemas so this can be emitted by
- * `st3-client-codegen` later: snake_case wire names verbatim, `Schema.Struct` (never Class),
+ * `fractal-client-codegen` later: snake_case wire names verbatim, `Schema.Struct` (never Class),
  * `optionalKey` for optional, `NullOr` for nullable, `Literals` for enums, ids and timestamps
  * as pattern-checked strings (no brands, no Date decoding). Domain numbers use `Finite`:
  * counts, accounting, dimensions and subscription parameters reject NaN and infinities.

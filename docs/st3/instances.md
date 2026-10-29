@@ -1,4 +1,4 @@
-# Instances: a second st on one machine
+# Instances: a second Fractal on one machine
 
 `st --instance NAME` (or `ST_INSTANCE=NAME` in the environment) runs a second, fully separate
 Fractal next to the default one. Use it to try a build without risking your working install, and
@@ -116,14 +116,14 @@ outside that directory (for example a `state_dir` set elsewhere in the instance'
 
 `st uninstall` on the default install also removes: the copies of
 the `st` skill that seats install into `~/.claude/skills` and `~/.agents/skills` (only when
-unchanged), st's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
+unchanged), Fractal's Claude plugin and marketplace registration, and `~/.local/share/st/plugins`. It
 still leaves the work folder (`~/st`, see below) and what is in it, the account-wide lingering
 setting, and the managed Claude Code policy, which needs root (`st3 claude-channel
 uninstall-policy`).
 
 ## Proof
 
-`scripts/st3-instance-isolation/run ST3 PTY [OUT]` starts the default st in a throwaway `HOME` with a
+`scripts/fractal-instance-isolation/run ST3 PTY [OUT]` starts the default Fractal in a throwaway `HOME` with a
 scrubbed environment and installs its skill, snapshots every path, mode, link target and file hash,
 then starts an instance, installs its skill, uninstalls it and snapshots again. The snapshots must be
 identical and `~/.st-instance` gone. It then removes the default install and requires no file to

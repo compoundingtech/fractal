@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use crate::model::St3Error;
 
@@ -513,5 +514,90 @@ pub fn value_string(value: &KdlValue) -> Result<String, St3Error> {
             "expected-string",
             "this value must be a non-empty string",
         )),
+    }
+}
+
+/// A resource child with a locator names an edge rather than declaring a body.
+pub fn is_resource_reference(node: &KdlNode) -> bool {
+    node.name().value() == "resource"
+        && (node.get("uri").is_some() || node.get("subject").is_some())
+}
+
+/// The typed edge a `resource` child of an agent or mission names, validated.
+pub fn parse_declared_resource_reference(
+    node: &KdlNode,
+) -> Result<crate::model::DeclaredResourceReference, St3Error> {
+    reject_type(node)?;
+    ensure_only_properties(node, &["uri", "subject", "reason"])?;
+    ensure_no_children(node)?;
+    let name = one_string(node)?;
+    validate_name(&name, false)?;
+    let uri = property_string(node, "uri")?;
+    let subject = property_string(node, "subject")?;
+    if uri.is_some() == subject.is_some() {
+        return Err(St3Error::new(
+            "invalid-resource-reference",
+            format!("resource `{name}` needs exactly one of uri=\"...\" or subject=\"resource/...\""),
+        ));
+    }
+    let reason = property_string(node, "reason")?;
+    if reason.as_deref().is_some_and(|reason| reason.trim().is_empty()) {
+        return Err(St3Error::new(
+            "invalid-resource-reason",
+            format!("resource `{name}` has an empty reason"),
+        ));
+    }
+    if let Some(subject) = subject {
+        let local = subject.strip_prefix("resource/").ok_or_else(|| {
+            St3Error::new("invalid-resource-subject", "a resource reference subject must start with resource/")
+        })?;
+        validate_name(local, false)?;
+        return Ok(crate::model::DeclaredResourceReference {
+            name,
+            subject,
+            kind: crate::model::ResourceReferenceKind::Subject,
+            reason,
+        });
+    }
+    let uri = uri.expect("exactly one locator was validated");
+    validate_resource_uri(&uri)?;
+    Ok(crate::model::DeclaredResourceReference {
+        name,
+        subject: format!("resource/{}", uri_reference_name(&uri)),
+        kind: crate::model::ResourceReferenceKind::Uri,
+        reason,
+    })
+}
+
+pub fn uri_reference_name(uri: &str) -> String {
+    format!("uri/{}", hex::encode(Sha256::digest(uri.as_bytes())))
+}
+
+/// An absolute URI (RFC 3986 `scheme ":" ...`) of any scheme, kept byte for byte.
+pub fn validate_resource_uri(uri: &str) -> Result<(), St3Error> {
+    let valid = uri.len() <= 4096
+        && uri.split_once(':').is_some_and(|(scheme, rest)| {
+            !rest.is_empty()
+                && scheme.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+                && scheme
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+        })
+        && uri.bytes().all(|byte| {
+            byte.is_ascii_graphic()
+                && !matches!(byte, b'"' | b'<' | b'>' | b'\\' | b'^' | b'`' | b'{' | b'|' | b'}')
+        })
+        && uri.match_indices('%').all(|(offset, _)| {
+            uri.as_bytes()
+                .get(offset + 1..offset + 3)
+                .is_some_and(|escape| escape.iter().all(u8::is_ascii_hexdigit))
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(St3Error::new(
+            "invalid-resource-uri",
+            format!("`{uri}` is not an absolute URI; any scheme is accepted"),
+        ))
     }
 }

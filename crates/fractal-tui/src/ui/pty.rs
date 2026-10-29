@@ -1221,9 +1221,9 @@ mod tests {
         use pty_core::protocol::{MessageType, PacketReader, encode_geometry, encode_packet};
         use std::io::{Read as _, Write as _};
 
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
         daemon.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let terminal = NativeTerminal::spawn(stui, "test", "one".into(), 10, 30);
+        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 10, 30);
         let mut reader = PacketReader::new();
         let mut pending = std::collections::VecDeque::new();
         let mut next = |daemon: &mut UnixStream| loop {
@@ -1306,8 +1306,8 @@ mod tests {
                 .map(|cell| cell.symbol())
                 .collect::<String>()
         };
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
-        let terminal = NativeTerminal::spawn(stui, "test", "one".into(), 6, 30);
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
+        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 6, 30);
         let mut bytes = [0_u8; 64];
         let _ = daemon.read(&mut bytes).unwrap();
         daemon
@@ -1338,8 +1338,8 @@ mod tests {
         assert_eq!(tries, 1);
         assert!(next.unwrap() > Instant::now() + Duration::from_millis(1500));
         assert_eq!(terminal.lost().as_deref(), Some("unreachable"));
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
-        terminal.reconnect(stui, "test");
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
+        terminal.reconnect(tui, "test");
         let _ = daemon.read(&mut bytes).unwrap();
         daemon
             .write_all(&encode_packet(MessageType::Screen, b"new\r\n"))
@@ -1379,8 +1379,8 @@ mod tests {
             terminal.draw(&mut buf, area, false);
             buf
         };
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
-        let terminal = NativeTerminal::spawn(stui, "test", "one".into(), 4, 10);
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
+        let terminal = NativeTerminal::spawn(tui, "test", "one".into(), 4, 10);
         let mut bytes = [0_u8; 64];
         let _ = daemon.read(&mut bytes).unwrap();
         daemon
@@ -1452,8 +1452,8 @@ mod tests {
     fn a_session_draws_into_the_pane_takes_its_size_and_keys_and_ends() {
         use pty_core::protocol::{MessageType, PacketReader, encode_packet};
         use std::io::{Read as _, Write as _};
-        let (stui, mut daemon) = UnixStream::pair().unwrap();
-        let terminal = NativeTerminal::spawn(stui, "test", "incarnation".into(), 4, 20);
+        let (tui, mut daemon) = UnixStream::pair().unwrap();
+        let terminal = NativeTerminal::spawn(tui, "test", "incarnation".into(), 4, 20);
         let mut reader = PacketReader::new();
         let mut packets = Vec::new();
         let mut next = |daemon: &mut UnixStream, packets: &mut Vec<_>| {

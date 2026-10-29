@@ -146,8 +146,12 @@ export const scenarioExemptions: readonly string[] = [
   'EffortUnknown:contract-fixture',
   'EffortUnsupported:contract-fixture',
   'FailedSendRestored:contract-fixture',
-  'FooterWidthBudget:contract-fixture',
-  'FooterWidthBudgetLight:contract-fixture',
+  'FooterWidthBudgetMedium:contract-fixture',
+  'FooterWidthBudgetMediumLight:contract-fixture',
+  'FooterWidthBudgetNarrow:contract-fixture',
+  'FooterWidthBudgetNarrowLight:contract-fixture',
+  'FooterWidthBudgetWide:contract-fixture',
+  'FooterWidthBudgetWideLight:contract-fixture',
   'Geometry:contract-fixture',
   'Idle:contract-fixture',
   'IdleLight:contract-fixture',
@@ -207,12 +211,15 @@ export const Idle: Story = { tags: ['critical'],
     await expect(guidance?.textContent).toMatch(/@.*\//)
     await expect(field.getAttribute('aria-describedby')?.split(' ')).toContain(guidance?.id)
     const form = field.closest('form')!
-    // C2 stays a column slab even for one line; the container, not the textbox, owns the focus ring.
+    // C2 stays a column slab even for one line; textarea focus changes only the frame border.
     await expect(getComputedStyle(form).flexDirection).toBe('column')
+    const borderBeforeFocus = getComputedStyle(form).borderColor
     await userEvent.click(field)
     await expect(getComputedStyle(field).outlineStyle).toBe('none')
-    await expect(getComputedStyle(form).outlineStyle).toBe('solid')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
+    await expect(getComputedStyle(form).borderColor).not.toBe(borderBeforeFocus)
     await userEvent.keyboard('Ship the composer')
+    await expect(getComputedStyle(form).outlineStyle).toBe('none')
     await waitFor(() => expect(canvasElement.querySelector('[data-testid="composer-placeholder"]')).toBeNull())
     await expect(field.getAttribute('aria-describedby')?.split(' ')).not.toContain(guidance?.id)
     await userEvent.keyboard('{Enter}')
@@ -515,25 +522,27 @@ export const EffortAllStates: Story = {
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{effortFrames.map(frame => <ComposerFrame key={frame.id} policy={decided} state={frame.state} effort={frame.effort} frameId={`effort.${frame.id}`} />)}</div></Surface>,
 }
 
-const footerBudgetFrames = ([320, 360, 451] as const).flatMap(composerWidth =>
+const footerBudgetFrames = (composerWidth: 320 | 360 | 451) =>
   (['C1', 'C2', 'C3'] as const).flatMap(layout => (['K1', 'K2', 'K3'] as const).flatMap(target => (['R1', 'R2', 'R3'] as const).map(running => ({
     composerWidth, policy: { layout, target, running, mentions: 'M2' } satisfies ComposerPolicy, frameId: `footer-budget.${composerWidth}.${layout}.${target}.${running}`,
-  })))))
-/** The declared width is the real form width; every footer control stays inside its running composer. */
-export const FooterWidthBudget: Story = { tags: ['critical'],
+  }))))
+/** Each width owns the full policy matrix without mounting all 81 composers in one check. */
+const footerWidthBudget = (composerWidth: 320 | 360 | 451): Story => ({
   beforeEach: clearDrafts,
   args: { state: 'running', effort: 'supported' },
-  render: args => <Surface scheme={args.scheme} testId="composer-footer-width-budget"><div aria-label="Footer width budget previews" {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames.map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme} testId={`composer-footer-width-budget-${composerWidth}`}><div aria-label={`${composerWidth}px footer width budget previews`} {...stylex.props(styles.budgetPreviews)}>{footerBudgetFrames(composerWidth).map(frame => <ComposerFrame key={frame.frameId} {...frame} state="running" effort="supported" />)}</div></Surface>,
   play: async ({ canvasElement }) => {
     await canvasElement.ownerDocument.fonts.ready
     let previousGeometry: number[] | undefined
     // Retry through React/ResizeObserver updates, then require two matching measurements.
     await waitFor(() => {
       const cards = [...canvasElement.querySelectorAll<HTMLElement>('[data-footer-budget-width]')]
-      expect(cards).toHaveLength(81)
+      expect(cards).toHaveLength(27)
       const keyOf = (card: HTMLElement) => `${card.dataset.footerBudgetWidth}.${card.dataset.footerBudgetLayout}.${card.dataset.footerBudgetTarget}.${card.dataset.footerBudgetRunning}`
+      expect(new Set(cards.map(keyOf)).size).toBe(27)
       const geometry: number[] = []
       for (const card of cards) {
+        expect(Number(card.dataset.footerBudgetWidth)).toBe(composerWidth)
         expect(card.querySelectorAll('[data-testid="kit-composer"]')).toHaveLength(1)
         const footers = card.querySelectorAll<HTMLElement>('[data-testid="composer-footer"]')
         expect(footers).toHaveLength(1)
@@ -562,13 +571,18 @@ export const FooterWidthBudget: Story = { tags: ['critical'],
       expect(geometry).toEqual(previous)
     }, { timeout: 10_000 })
   },
-}
-export const FooterWidthBudgetLight: Story = { ...FooterWidthBudget, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+})
+export const FooterWidthBudgetNarrow: Story = { ...footerWidthBudget(320), tags: ['critical'] }
+export const FooterWidthBudgetNarrowLight: Story = { ...FooterWidthBudgetNarrow, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetMedium: Story = { ...footerWidthBudget(360), tags: ['critical'] }
+export const FooterWidthBudgetMediumLight: Story = { ...FooterWidthBudgetMedium, args: { scheme: 'light', state: 'running', effort: 'supported' } }
+export const FooterWidthBudgetWide: Story = { ...footerWidthBudget(451), tags: ['critical'] }
+export const FooterWidthBudgetWideLight: Story = { ...FooterWidthBudgetWide, args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
-/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab. */
+/** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab (the pending shape pick). */
 export const LayoutShapes: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
-  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.geometryLane(768))}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
+  render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.shapeGallery)}>{(['C1', 'C2', 'C3'] as const).map(layout => <div key={layout} {...stylex.props(styles.shapeLane)}><ComposerFrame policy={{ ...decided, layout }} state="idle" effort={args.effort} frameId={`layout.${layout}`} /></div>)}</div></Surface>,
   play: async ({ canvasElement }) => {
     const formOf = (layout: ComposerLayout) => canvasElement.querySelector<HTMLElement>(`[data-composer-frame="layout.${layout}"] form`)!
     await document.fonts.ready
@@ -585,7 +599,13 @@ export const LayoutShapes: Story = { tags: ['critical'],
     })
     await userEvent.click(within(formOf('C3')).getByRole('textbox'))
     await waitFor(() => expect(getComputedStyle(formOf('C3')).flexDirection).toBe('column'))
+    // C1 is the live layout: focus alone changes only the frame border, never its geometry.
+    const c1BeforeFocus = formOf('C1').getBoundingClientRect()
     await userEvent.click(within(formOf('C1')).getByRole('textbox'))
+    await expect(getComputedStyle(formOf('C1')).flexDirection).toBe('row')
+    await expect(getComputedStyle(formOf('C1')).outlineStyle).toBe('none')
+    await expect(formOf('C1').getBoundingClientRect().height).toBe(c1BeforeFocus.height)
+    await expect(formOf('C1').getBoundingClientRect().width).toBe(c1BeforeFocus.width)
     await userEvent.keyboard('one{Shift>}{Enter}{/Shift}two')
     await waitFor(() => expect(getComputedStyle(formOf('C1')).flexDirection).toBe('column'))
   },
@@ -778,6 +798,9 @@ const styles = stylex.create({
   fillFrameBody: { flexGrow: 1, justifyContent: 'flex-end' },
   narrow: { width: g.tooltipMax, minWidth: 0 },
   gallery: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.xl },
+  // Shapes are compared at one desktop lane; narrow viewports scroll instead of letting the footer cramp C1 into a slab.
+  shapeGallery: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: s.xl, maxWidth: '100%', overflowX: 'auto' },
+  shapeLane: { width: 768, flexShrink: 0 },
   budgetPreviews: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.md },
   budgetFrame: (width: number) => ({ width: `calc(${width}px + ${s.md} + ${s.md} + ${g.hairline} + ${g.hairline})`, boxSizing: 'border-box', flexShrink: 0, overflow: 'visible' }),
   budgetFrameBody: { overflow: 'visible' },

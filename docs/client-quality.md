@@ -107,7 +107,7 @@ Startup uses React Native's `performance.rnStartupTiming.startTime`, in the same
 monotonic clock as input and receipt measurements. Missing native startup metadata
 omits startup latency samples and increments `measurement_overflow`. It does not
 substitute a later startup clock. Real state requires both fresh attention and agent
-windows from st and an online presentation. Conversation success requires a native
+windows from Fractal and an online presentation. Conversation success requires a native
 list viewability callback for an actual entry, call or bundle; a loading/empty row
 is not success. Conversation and terminal intent clocks begin on focus, including a wait for the
 feed to become available. Terminals require a visible, nonzero viewport and confirmed attach.

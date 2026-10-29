@@ -366,9 +366,9 @@ in
                 : # Already points at the stable executable.
               elif [[ ! -e "$binDir/fractal" && ! -L "$binDir/fractal" ]]; then
                 ${pkgs.coreutils}/bin/ln -s st3 "$binDir/fractal" ||
-                  echo "Could not create $binDir/fractal; kept the existing path. Smalltalk remains available as st." >&2
+                  echo "Could not create $binDir/fractal; kept the existing path. Fractal remains available as st." >&2
               else
-                echo "Not replacing $binDir/fractal: it is not a Smalltalk alias. Move it yourself to opt in; use st meanwhile." >&2
+                echo "Not replacing $binDir/fractal: it is not a Fractal alias. Move it yourself to opt in; use st meanwhile." >&2
               fi
             '' else ''
               if [[ -L "$binDir/fractal" ]] && [[ "$(${pkgs.coreutils}/bin/readlink "$binDir/fractal")" == st3 ]]; then
@@ -410,7 +410,7 @@ in
     systemd.user.services = mkIf pkgs.stdenv.hostPlatform.isLinux (lib.optionalAttrs (!completed) {
       smalltalk = {
         Unit = {
-          Description = "st claims graph daemon";
+          Description = "Fractal claims graph daemon";
           After = [ "network.target" ];
           # Only Home Manager-owned builds should trigger a daemon restart.
         } // lib.optionalAttrs (!externallyManaged) {

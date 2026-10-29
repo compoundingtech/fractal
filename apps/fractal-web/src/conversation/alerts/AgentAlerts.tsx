@@ -78,7 +78,7 @@ export const promptAlerts = (items: readonly Native.Attention[], agentRef: strin
   )
 
 /**
- * Every alert this agent's conversation shows, as stui and the phone choose them (`alertsIn`):
+ * Every alert this agent's conversation shows, as the Fractal terminal UI and the phone choose them (`alertsIn`):
  * open, an alert, of a kind Home shows, and naming this conversation.
  */
 export const conversationAlerts = (items: readonly Native.Attention[], agentRef: string): readonly Native.Attention[] =>
@@ -99,7 +99,7 @@ type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertAction
 
 /**
  * The alerts of an agent's conversation, above its composer. A prompt its harness waits on shows
- * with the answers st can deliver: the one waiting call in full beside `allow` (or a plan beside
+ * with the answers Fractal can deliver: the one waiting call in full beside `allow` (or a plan beside
  * `approve`), a question's options to choose and send together, a screen prompt's own answers.
  * Anything else is answered in the seat's terminal, and an answer there still wins. An ask or a
  * review gate shows with its own answers (`AnswerAlert`).
@@ -248,7 +248,7 @@ export const LiveAgentAlerts = ({
     () => (attention._tag === 'Observed' ? conversationAlerts(attention.value, agentRef) : []),
     [attention, agentRef],
   )
-  // From st taking an answer to the paint that no longer shows its alert (st's `alert_landed`).
+  // From Fractal taking an answer to the paint that no longer shows its alert (Fractal's `alert_landed`).
   const answered = React.useRef(new Map<string, ReturnType<UxTelemetry['beginAlertAnswer']>>())
   const landing = React.useRef<Array<() => void>>([])
   React.useLayoutEffect(() => {

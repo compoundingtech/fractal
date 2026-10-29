@@ -48,6 +48,7 @@ const rowsAt = (world: World, at: number): Record<string, WireResource[]> => {
     agents: [...[...roster.agents].sort((a, b) => (order.get(a.id) ?? Infinity) - (order.get(b.id) ?? Infinity)), ...(roster.resources ?? [])],
     runtimes: [...roster.runtimes, ...terminal.terminals.map(({ runtime }) => runtime)],
     machines: roster.machines, missions: [...details.missions, ...(details.resources ?? [])], work: details.work,
+    sessions: roster.sessions, devices: roster.devices, launches: details.launches, variants: details.launch_variants,
     attention: [...attention.attention, ...(attention.resources ?? [])], messages: attention.messages,
     terminals: terminal.terminals.map(({ runtime }) => runtime),
   }
@@ -263,7 +264,7 @@ const verifyReplay = async (world: World) => {
           if (cursor !== undefined) { expect(cursors.has(cursor)).toBe(false); cursors.add(cursor) }
         } while (cursor !== undefined && fetched < pageCeiling)
         const rows = rowsAt(world, 0)
-        const expected = ['agents', 'runtimes', 'machines', 'missions', 'work', 'attention', 'messages'].flatMap((collection) => rows[collection]!)
+        const expected = ['agents', 'runtimes', 'machines', 'sessions', 'devices', 'missions', 'work', 'launches', 'variants', 'attention', 'messages'].flatMap((collection) => rows[collection]!)
         if (cursor === undefined) expect(facts).toEqual(expected)
         else {
           expect(facts).toEqual(expected.slice(0, facts.length))

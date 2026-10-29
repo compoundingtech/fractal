@@ -2,9 +2,8 @@
 """Garbage-collect the evidence records (tags and notes): a pure plan of whole trees to delete, then exactly those deletions.
 
   scripts/evidence-gc [--repo .] [--remote origin] [--fetch] [--apply] [--main origin/main]
-                      [--retention FILE] [--as-of UNIX] [--head COMMIT ...] [--heads-from FILE] [--plan-out FILE]
-                      [--lock-config FILE] [--before-delete JSON_ARGV]
-  scripts/evidence-gc --relock-only --lock-config FILE
+                      [--retention FILE] [--as-of UNIX] [--head COMMIT ...] [--heads-from FILE] [--open-heads-from FILE]
+                      [--plan-out FILE] [--before-delete JSON_ARGV]
 
 Dry run by default: it reads the records in --repo and prints the plan, changing nothing. With --fetch it first fetches
 every `refs/tags/evidence/*`, `refs/notes/evidence/*` and `refs/notes/evidence-input/*`, main's recent history and the tip
@@ -15,8 +14,9 @@ remote (EVIDENCE_PUSH_TOKEN, if set, is sent as an authorization header and neve
 THE PLAN is a pure function of git data, so anyone holding the same refs can recompute it (its `inputs_sha256` says which):
   gc_plan(records, index, live trees, live keys, retention, as_of) -> whole trees and whole input keys to delete.
   live trees    the tree of every branch tip (`refs/evidence-gc/tips/*`, plus --head/--heads-from) committed within
-                retention.branch_days of as_of: open pull request heads and merge-queue tips are branches; and the trees of
-                main's first-parent commits within retention.main_days of as_of, main's tip always
+                retention.branch_days of as_of: open pull request heads and merge-queue tips are branches; the tree of every
+                open pull request head (--open-heads-from) whatever its age; and the trees of main's first-parent commits
+                within retention.main_days of as_of, main's tip always
   live keys     the input key each live tree projects to, for every check whose policy declares inputs
   retention     `.st/evidence-retention.json` at --main (or --retention FILE): main_days, branch_days, grace_hours,
                 soft_records, cap_records
@@ -32,42 +32,38 @@ The FIRST LAYOUT (`refs/notes/evidence/<record>`, no tree in the name): its tree
 MIGRATED (the tree-prefixed ref `refs/notes/evidence/<tree>/<record>` is created, then the old name removed); in a dead tree
 it goes with its tree. Refs that are not well-formed records, and everything outside the evidence namespaces, are never touched.
 
-THE LOCK WINDOW (--lock-config FILE): a protection that refuses deleting evidence tags on the remote, such as a tag ruleset, is
-turned off only around the deletion of the plan's tags. FILE is {"version": 1, "unlock": ARGV, "relock": ARGV, "check": ARGV}: commands
-run without a shell, so moving the credential (a gh login today, a sekrets profile later) is a change of FILE alone. "check" exits 0
-only while the protection is on. The order: the migrations and the notes first (nothing protects notes); then "check" (found off:
-relock, delete no tag, exit 4); list the remote's evidence tags; "unlock"; delete the tags; "relock" in a finally that also runs on
-SIGTERM, SIGINT and SIGHUP, retried; "check" again; list again. A tag that disappeared or moved and that the plan did not name, or a
-protection still off at the end, is an alarm: exit 4. One line on stderr, and `lock` in the summary, record the window:
-  evidence-gc-lock v1 unlocked_at=... relocked_at=... window_s=... tags_deleted=N unexplained=N final=on|OFF
---relock-only runs "relock" and "check" alone (a unit's ExecStopPost, after a kill no finally survives).
+ON THE REMOTE a dead group goes whole or not at all: first the names whose record keeps another name in its group (a note beside
+its tag, a migrated or duplicate first-layout name), which changes no verdict; then each group's remaining names in one atomic push.
+A push that the remote's protection refuses keeps its groups whole and is reported (`kept_by_protection`), not a failure; the local
+refs follow exactly what the remote deleted. The evidence-tags ruleset protects tags against update and non-fast-forward only, so
+GC deletes with the host's own login and needs no window.
 
 BEFORE DELETING (--before-delete JSON_ARGV, needs --plan-out): with --apply, the command runs once the plan is written and before
 anything is deleted or migrated, with the plan file's path as its last argument, without a shell. The evidence log's GC lines go
 here (scripts/evidence-gc-timer runs `evidence-log-timer gc --plan FILE`), so the log says GC removed a tree before its records
 disappear. If it fails, nothing is deleted (`refused`, exit 1).
 
-FAILS CLOSED: if a commit named by --head cannot be turned into a tree, or no branch tip is known at all, or the --before-delete
+OPEN PULL REQUEST HEADS (--open-heads-from FILE, one commit id a line, an empty file for none): their trees are live however old
+the head is, so a pull request that waits longer than branch_days keeps its records. With --fetch the commits are fetched by id
+(a fork's head is on no branch here). A missing FILE is refused.
+
+FAILS CLOSED: if a commit named by --head or --open-heads-from cannot be turned into a tree, or no branch tip is known at all, or the --before-delete
 command fails, --apply refuses to delete anything.
 
   exit 0  done (or a dry run)    exit 1  a step failed or a head could not be resolved    exit 2  usage
   exit 3  the live set alone exceeds cap_records (nothing live was deleted)
-  exit 4  the lock window raised an alarm (see THE LOCK WINDOW)
 """
 import argparse
 import base64
 import collections
-import datetime
 import hashlib
 import importlib.machinery
 import importlib.util
 import json
 import os
 import re
-import signal
 import subprocess
 import sys
-import time
 
 sys.dont_write_bytecode = True
 
@@ -212,9 +208,10 @@ def main_log(repo, main, days, as_of):
     return log
 
 
-def live_trees(tips, main_history, retention, as_of):
-    """PURE. {tree: reason}: each branch tip's tree committed within branch_days of as_of, and main's first-parent trees within
-    main_days of as_of (main's tip, the first entry, always). tips: [(tree, unix time)]; main_history: [(tree, unix time)] newest first."""
+def live_trees(tips, main_history, retention, as_of, open_heads=()):
+    """PURE. {tree: reason}: each branch tip's tree committed within branch_days of as_of, each open pull request head's tree
+    whatever its age, and main's first-parent trees within main_days of as_of (main's tip, the first entry, always).
+    tips: [(tree, unix time)]; main_history: [(tree, unix time)] newest first; open_heads: [tree]."""
     live = {}
     for index, (tree, when) in enumerate(main_history):
         if index == 0 or when >= as_of - retention['main_days'] * 86400:
@@ -222,6 +219,8 @@ def live_trees(tips, main_history, retention, as_of):
     for tree, when in sorted(tips):
         if when >= as_of - retention['branch_days'] * 86400:
             live[tree] = 'branch-tip'
+    for tree in sorted(open_heads):
+        live[tree] = 'open-pull-request'
     return live
 
 
@@ -264,7 +263,8 @@ def gc_plan(records, index, live, live_keys, retention, as_of):
     index      [(ref, check, key, record oid, unix time)]
     live       {tree: reason}; live_keys {(check, key)}
     Returns {'delete': sorted refs, 'migrate': sorted (old ref, new ref), 'trees': sorted dead trees deleted,
-             'keys': sorted dead (check, key) deleted, and the counts}."""
+             'keys': sorted dead (check, key) deleted, 'groups': the refs of each deleted group (what must go together),
+             and the counts}."""
     records = sorted(records)
     index = sorted(index)
     cutoff = as_of - int(retention['grace_hours'] * 3600)
@@ -327,6 +327,7 @@ def gc_plan(records, index, live, live_keys, retention, as_of):
     return {
         'delete': delete, 'migrate': sorted(migrate),
         'trees': sorted(g[1] for g in deleted_groups if g[0] == 'tree'),
+        'groups': sorted(sorted(ref for ref, _, _, _ in groups[g]) for g in deleted_groups),
         'keys': sorted([g[1], g[2]] for g in deleted_groups if g[0] == 'key'),
         'refs_before': len(lengths_before), 'refs_after': len(lengths_after),
         'records_before': len(all_units), 'records_after': len(remaining), 'protected_records': len(live_units),
@@ -345,131 +346,79 @@ def header_for_token():
     return token, ('Authorization: Basic ' + base64.b64encode(f'x-access-token:{token}'.encode()).decode() if token else None)
 
 
-LOCK_KEYS = ('unlock', 'relock', 'check')
+# GitHub's answer when a ruleset refuses a push: "GH013: Repository rule violations found for <ref>".
+PROTECTION_REFUSED = re.compile(r'GH013: Repository rule violations')
 
 
-def load_lock(path):
-    with open(path) as handle:
-        try:
-            value = json.load(handle)
-        except ValueError as error:
-            raise Usage(f'--lock-config is not valid JSON: {error}')
-    if not isinstance(value, dict) or value.get('version') != 1 or set(value) != {'version', *LOCK_KEYS} or not all(
-            isinstance(value[k], list) and value[k] and all(isinstance(a, str) for a in value[k]) for k in LOCK_KEYS):
-        raise Usage('--lock-config must be {"version": 1, "unlock": ARGV, "relock": ARGV, "check": ARGV}, each a nonempty list of strings')
-    return value
+def push_deletions(repo, remote, refs, header, token, atomic):
+    """(refs the remote deleted, error text or None) of one push deleting REFS: with `atomic`, all of them or none."""
+    done = git(repo, 'push', '--porcelain', *(['--atomic'] if atomic else []), remote, *[f':{ref}' for ref in refs], header=header, check=False)
+    deleted = set()
+    for line in done.stdout.decode(errors='replace').splitlines():
+        parts = line.split('\t')
+        if len(parts) >= 3 and parts[0] == '-' and parts[1].startswith(':'):
+            deleted.add(parts[1][1:])
+    if done.returncode == 0:
+        return deleted, None
+    text = (done.stdout + done.stderr).decode(errors='replace')
+    return deleted, (text.replace(token, '***') if token else text).strip()[-300:]
 
 
-def lock_run(lock, name):
-    """(ok, the end of its output). A command that cannot start or hangs is a failure, never an exception."""
-    try:
-        done = subprocess.run(lock[name], stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return False, str(error)[-300:]
-    return done.returncode == 0, (done.stdout + done.stderr).decode(errors='replace').strip()[-300:]
+def apply_remote(repo, remote, migrate, doomed, groups):
+    """Make the remote match the plan without ever splitting a group:
+    (failures, refs gone from the remote, refs its protection kept, whether the migrations' new names exist there).
 
-
-def relock(lock, report):
-    for attempt in range(3):
-        ok, out = lock_run(lock, 'relock')
-        if ok:
-            break
-        report.setdefault('relock_failures', []).append(out)
-        time.sleep(2 ** attempt)
-    report['relocked_at'] = now_iso()
-    ok, out = lock_run(lock, 'check')
-    report['final'] = 'on' if ok else 'OFF'
-    if not ok:
-        report['final_check'] = out
-    return ok
-
-
-def now_iso():
-    return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='milliseconds')
-
-
-class Interrupted(Exception):
-    pass
-
-
-def remote_tags(repo, remote, header):
-    out = git(repo, 'ls-remote', remote, f'{TAGS}*', header=header).stdout.decode().split('\n')
-    return {line.split()[1]: line.split()[0] for line in out if len(line.split()) == 2}
-
-
-def lock_window(repo, remote, tags, push, failed, lock, header):
-    """Delete `tags` on the remote with its protection off for exactly that long; the report says what happened."""
-    report = {'tags_planned': len(tags)}
-    ok, out = lock_run(lock, 'check')
-    if not ok:
-        report['found_unlocked'] = out or 'check failed'
-        relock(lock, report)
-        return report
-    before = remote_tags(repo, remote, header)
-
-    def interrupt(number, frame):
-        raise Interrupted(signal.Signals(number).name)
-    saved = {number: signal.signal(number, interrupt) for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
-    started = time.monotonic()
-    try:
-        ok, out = lock_run(lock, 'unlock')
-        if not ok:
-            report['unlock_failed'] = out or 'unlock failed'
-            failed.append(f'unlock failed: {report["unlock_failed"]}')
-        else:
-            report['unlocked_at'] = now_iso()
-            push([f':{ref}' for ref in tags])
-    except Interrupted as error:
-        report['interrupted'] = str(error)
-        failed.append(f'interrupted by {error}')
-    finally:
-        for number in saved:
-            signal.signal(number, signal.SIG_IGN)  # nothing may interrupt the relock
-        relock(lock, report)
-        report['window_s'] = round(time.monotonic() - started, 1)
-        for number, handler in saved.items():
-            signal.signal(number, handler)
-    after = remote_tags(repo, remote, header)
-    planned = set(tags)
-    report['tags_deleted'] = sum(1 for ref in planned if ref in before and ref not in after)
-    report['unexplained'] = sorted(ref for ref, oid in before.items() if ref not in planned and after.get(ref) != oid)
-    return report
-
-
-def lock_line(report):
-    return ('evidence-gc-lock v1 ' + ' '.join(f'{k}={report.get(k, "-")}' for k in ('unlocked_at', 'relocked_at', 'window_s', 'tags_deleted'))
-            + f' unexplained={len(report.get("unexplained", []))} final={report.get("final", "-")}'
-            + (' found_unlocked=true' if 'found_unlocked' in report else ''))
-
-
-def lock_alarm(report):
-    return bool(report) and (report.get('final') != 'on' or bool(report.get('unexplained')) or 'found_unlocked' in report)
-
-
-def apply_remote(repo, remote, migrate, doomed, lock=None):
-    """(failures, lock report or None)."""
+    1. The migrations' new names are created.
+    2. Names whose record keeps another name in its own group are deleted (the migrated old names, first-layout duplicates, the note
+       name of a record that is also a tag): no record leaves any group, so no verdict can change, whatever fails next.
+    3. Each dead group's remaining names go in one atomic push (several whole groups to a push, at most BATCH refs, a bigger group
+       alone): a group is deleted whole or not at all. The groups without a tag go first, so a protection that refuses deleting
+       tags (the evidence-tags ruleset before the deploy key may bypass it) keeps the groups it covers whole and stops nothing else."""
     token, header = header_for_token()
-    failed = []
-
-    def push(refspecs):
-        for start in range(0, len(refspecs), BATCH):
-            done = git(repo, 'push', '--porcelain', remote, *refspecs[start:start + BATCH], header=header, check=False)
-            if done.returncode != 0:
-                text = (done.stdout + done.stderr).decode(errors='replace')
-                failed.append((text.replace(token, '***') if token else text).strip()[-300:])
-    # Create the new names first, so a failure leaves both and loses nothing; then remove the notes, which nothing protects, and the
-    # old names; the tags last, inside the lock window when there is one.
-    push([f'{old}:{new}' for old, new in migrate])
+    failed, deleted, protected = [], set(), set()
+    listed = git(repo, 'ls-remote', remote, f'{TAGS}*', f'{NOTES}*', f'{INPUT_NOTES}*', header=header).stdout.decode().split('\n')
+    there = {line.split()[1] for line in listed if len(line.split()) == 2}
+    deleted |= {ref for ref in doomed if ref not in there}  # already gone (a run stopped halfway): nothing to push, only to forget
+    deleted |= {old for old, _ in migrate if old not in there}
+    creates = [f'{old}:{new}' for old, new in migrate if new not in there]
+    for start in range(0, len(creates), BATCH):
+        done = git(repo, 'push', '--porcelain', remote, *creates[start:start + BATCH], header=header, check=False)
+        if done.returncode != 0:
+            text = (done.stdout + done.stderr).decode(errors='replace')
+            failed.append((text.replace(token, '***') if token else text).strip()[-300:])
     if failed:
-        return failed, None
-    tags = [ref for ref in doomed if ref.startswith(TAGS)]
-    push([f':{ref}' for ref in doomed if not ref.startswith(TAGS)] + [f':{old}' for old, _ in migrate])
-    if failed or not tags:
-        return failed, None
-    if lock is None:
-        push([f':{ref}' for ref in tags])
-        return failed, None
-    return failed, lock_window(repo, remote, tags, push, failed, lock, header)
+        return failed, set(), set(), False
+    grouped = {ref for group in groups for ref in group}
+    redundant = [ref for ref in doomed if ref not in grouped] + [old for old, _ in migrate]
+    for group in groups:
+        tagged = {ref.rsplit('/', 1)[1] for ref in group if ref.startswith(TAGS)}
+        redundant += [ref for ref in group if not ref.startswith(TAGS) and ref.rsplit('/', 1)[1] in tagged]
+    redundant = sorted(ref for ref in set(redundant) if ref in there)
+    for start in range(0, len(redundant), BATCH):
+        gone, error = push_deletions(repo, remote, redundant[start:start + BATCH], header, token, atomic=False)
+        deleted |= gone
+        if error:
+            failed.append(error)
+    batches = []
+    for tagged in (False, True):  # never in one push: a refused tag would take a tagless group down with it
+        batch = []
+        for group in sorted(sorted(r for r in group if r in there and r not in deleted) for group in groups):
+            if not group or any(r.startswith(TAGS) for r in group) != tagged:
+                continue
+            if batch and len(batch) + len(group) > BATCH:
+                batches.append(batch)
+                batch = []
+            batch += group
+        if batch:
+            batches.append(batch)
+    for batch in batches:
+        gone, error = push_deletions(repo, remote, batch, header, token, atomic=True)
+        deleted |= gone
+        if error and PROTECTION_REFUSED.search(error) and any(ref.startswith(TAGS) for ref in batch):
+            protected |= set(batch) - gone
+        elif error:
+            failed.append(error)
+    return failed, deleted, protected, True
 
 
 def before_delete(argv, plan_path, summary):
@@ -486,8 +435,7 @@ def before_delete(argv, plan_path, summary):
 
 def apply_local(repo, migrate, doomed):
     commands = ''.join(f'create {new} {git(repo, "rev-parse", old).stdout.decode().strip()}\n' for old, new in migrate)
-    commands += ''.join(f'delete {ref}\n' for ref in doomed)
-    commands += ''.join(f'delete {old}\n' for old, _ in migrate)
+    commands += ''.join(f'delete {ref}\n' for ref in sorted(doomed))  # a migration's old name among them once the remote dropped it
     git(repo, 'update-ref', '--stdin', stdin=f'start\n{commands}prepare\ncommit\n'.encode())
     git(repo, 'pack-refs', '--all')
 
@@ -503,18 +451,16 @@ def main(argv):
     parser.add_argument('--as-of', type=int, default=None, help="unix time the plan is computed at (default: main's tip commit time)")
     parser.add_argument('--head', action='append', default=[], help='a commit whose tree is live, besides the branch tips')
     parser.add_argument('--heads-from')
+    parser.add_argument('--open-heads-from', help='file of open pull request head commits, one a line: their trees are live at any age')
     parser.add_argument('--repository', default='compoundingtech/fractal', help='OWNER/NAME the skip policy is read for')
     parser.add_argument('--policy-from', help='revision whose .st/evidence-skip-policy.json says which checks have inputs (default --main)')
     parser.add_argument('--plan-out', help='also write the plan, with its inputs digest, to this file')
-    parser.add_argument('--lock-config', help='the unlock, relock and check commands of the protection on the remote\'s evidence tags')
-    parser.add_argument('--relock-only', action='store_true', help='run the relock and check commands of --lock-config, nothing else')
     parser.add_argument('--before-delete', help='JSON argv run with the --plan-out path appended, after planning and before deleting')
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return 2 if error.code else 0
     try:
-        lock = load_lock(args.lock_config) if args.lock_config else None
         before = None
         if args.before_delete:
             try:
@@ -525,14 +471,15 @@ def main(argv):
                 raise Usage('--before-delete must be a JSON array of strings')
             if not args.plan_out:
                 raise Usage('--before-delete needs --plan-out: the command is given the plan file')
-        if args.relock_only:
-            if lock is None:
-                raise Usage('--relock-only needs --lock-config')
-            report = {}
-            relock(lock, report)
-            print(lock_line(report), file=sys.stderr)
-            print(json.dumps({'mode': 'relock-only', 'lock': report}, indent=2))
-            return 0 if report['final'] == 'on' else 4
+        open_heads = []
+        if args.open_heads_from:
+            try:
+                with open(args.open_heads_from) as handle:
+                    open_heads = [line.strip() for line in handle if line.strip()]
+            except OSError as error:
+                raise Usage(f'--open-heads-from: {error}')
+            if not all(OID.match(h) for h in open_heads):
+                raise Refused('--open-heads-from values must be full commit ids')
         if args.fetch:
             if not args.remote:
                 raise Usage('--fetch needs --remote')
@@ -552,6 +499,9 @@ def main(argv):
                 git(args.repo, 'update-ref', '--stdin', stdin=''.join(f'delete {ref}\n' for ref in stale).encode())
             git(args.repo, 'fetch', '--no-tags', '-q', '--filter=blob:none', '--shallow-since=40.days.ago', args.remote,
                 f'+refs/heads/{remote_main}:refs/remotes/{args.main}', header=header)
+            for start in range(0, len(open_heads), BATCH):  # by id, one commit deep: a head that is gone stays unresolved below
+                git(args.repo, 'fetch', '--no-tags', '-q', '--depth=1', '--filter=blob:none', args.remote, *open_heads[start:start + BATCH],
+                    header=header, check=False)
         if args.retention:
             with open(args.retention) as handle:
                 retention_text = handle.read()
@@ -575,12 +525,15 @@ def main(argv):
         if not all(OID.match(h) for h in heads):
             raise Refused('--head values must be full commit ids')
         tip_commits = git(args.repo, 'for-each-ref', '--format=%(objectname)', TIPS).stdout.decode().split()
-        if args.apply and not heads and not tip_commits:
+        if args.apply and not heads and not tip_commits and not open_heads:
             raise Usage(f'--apply needs the branch tips to protect: --fetch them into {TIPS}, or give --head or --heads-from (an empty list would delete them)')
-        facts, unresolved = commit_facts(args.repo, list(dict.fromkeys(heads + tip_commits)))
-        unresolved = [c for c in unresolved if c in heads]  # a tip fetched without its commit is a fetch problem, a named head is a promise
+        facts, unresolved = commit_facts(args.repo, list(dict.fromkeys(heads + open_heads + tip_commits)))
+        # A tip fetched without its commit is a fetch problem; a named head, or an open pull request's, is a promise.
+        unresolved = [c for c in unresolved if c in heads or c in open_heads]
         history = main_log(args.repo, args.main, retention['main_days'], as_of)
-        live = live_trees([(tree, when) for tree, when in facts.values()], [(tree, when) for _, tree, when in history], retention, as_of)
+        live = live_trees([(tree, when) for commit, (tree, when) in facts.items() if commit not in open_heads],
+                          [(tree, when) for _, tree, when in history], retention, as_of,
+                          [facts[c][0] for c in open_heads if c in facts])
         records, index = read_refs(args.repo)
         legacy_tree = note_trees(args.repo, [oid for _, oid, layout, _, _ in records if layout == 'legacy'])
         records = [(ref, oid, layout, tree or legacy_tree.get(oid), when) for ref, oid, layout, tree, when in records]
@@ -595,9 +548,10 @@ def main(argv):
                    'inputs_sha256': digest(inputs), 'plan_sha256': digest({k: plan[k] for k in ('delete', 'migrate')}),
                    'retention': retention, 'unresolved_heads': unresolved,
                    'live_trees': {'branch_tips': sum(1 for r in live.values() if r == 'branch-tip'),
+                                  'open_pull_requests': sum(1 for r in live.values() if r == 'open-pull-request'),
                                   'main_window': sum(1 for r in live.values() if r == 'main-window')},
                    'trees_deleted': len(plan['trees']), 'keys_deleted': len(plan['keys']),
-                   **{k: v for k, v in plan.items() if k not in ('delete', 'migrate', 'trees', 'keys')}}
+                   **{k: v for k, v in plan.items() if k not in ('delete', 'migrate', 'trees', 'keys', 'groups')}}
         if args.plan_out:
             with open(args.plan_out, 'w') as handle:
                 json.dump({**summary, 'inputs': inputs, **{k: plan[k] for k in ('delete', 'migrate', 'trees', 'keys')}}, handle, indent=1)
@@ -610,24 +564,21 @@ def main(argv):
             summary['refused'] = 'the --before-delete command failed: nothing was changed'
             status = 1
         elif args.apply and (doomed or migrate):
-            failed, report = apply_remote(args.repo, args.remote, migrate, doomed, lock) if args.remote else ([], None)
-            if report is not None:
-                summary['lock'] = report
-                print(lock_line(report), file=sys.stderr)
+            if args.remote:
+                failed, gone, protected, migrated = apply_remote(args.repo, args.remote, migrate, doomed, plan['groups'])
+            else:
+                failed, gone, protected, migrated = [], set(doomed) | {old for old, _ in migrate}, set(), True
             if failed:
                 summary['failed'] = failed
                 status = 1
-            elif report and 'found_unlocked' in report:
-                status = 4  # nothing of the tags was touched; the notes and migrations were, so the local refs follow them below
-            if not failed:
-                kept = set() if not report or 'found_unlocked' not in report else {ref for ref in doomed if ref.startswith(TAGS)}
-                apply_local(args.repo, migrate, [ref for ref in doomed if ref not in kept])
+            if protected:
+                summary['kept_by_protection'] = {'refs': len(protected), 'groups': sum(1 for g in plan['groups'] if protected & set(g)),
+                                                 'why': 'the remote refused deleting their tags: they stay, each group whole'}
+                print(f'evidence-gc: the remote\'s protection kept {len(protected)} refs of dead groups whole', file=sys.stderr)
+            if migrated:  # the local refs follow exactly what the remote did
+                apply_local(args.repo, migrate, gone)
                 summary['applied'] = True
-            if lock_alarm(report):
-                summary['alarm'] = 'the lock window: ' + ('the protection was found off' if 'found_unlocked' in report else
-                                                           'the protection is not on' if report.get('final') != 'on' else
-                                                           'tags the plan did not name disappeared or moved')
-                status = 4
+            summary['deleted_refs'] = len(gone)
         if status == 0 and plan['protected_records'] > retention['cap_records']:
             summary['alert'] = f'the live set ({plan["protected_records"]} records) is over the cap ({retention["cap_records"]}); nothing live was deleted'
             status = 3

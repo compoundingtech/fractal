@@ -175,7 +175,7 @@ mod tests {
     }
 
     #[test]
-    fn two_stuis_do_not_undo_each_others_drafts() {
+    fn two_tuis_do_not_undo_each_others_drafts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("drafts.json");
         let first = map(&[("a", "from the first")]);

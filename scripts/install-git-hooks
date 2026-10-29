@@ -12,6 +12,17 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 [ -z "${GITHUB_ACTIONS:-}" ] && [ -z "${CI:-}" ] || exit 0
 git rev-parse --git-dir >/dev/null 2>&1 || exit 0   # not a checkout (a source export): nothing to install into
+# Signed evidence records are tags under refs/tags/evidence/ (tens of thousands, each reaching a pull request's commits). A negative
+# refspec, set once per clone, keeps `git fetch --tags` from pulling them all in; a fetch that names them (st-test and the verifier
+# fetch one tree's records by name) still gets them. Clone with --no-tags so the first fetch does not either (README).
+skip_evidence='^refs/tags/evidence/*'
+if git remote get-url origin >/dev/null 2>&1; then
+  if [ "${1:-}" = --uninstall ]; then
+    git config --fixed-value --unset-all remote.origin.fetch "$skip_evidence" 2>/dev/null || true
+  elif ! git config --get-all remote.origin.fetch | grep -qxF "$skip_evidence"; then
+    git config --add remote.origin.fetch "$skip_evidence"
+  fi
+fi
 hooks=$(git rev-parse --git-path hooks)
 mark='# st-evidence-prepush: written by scripts/install-git-hooks'
 hook="$hooks/pre-push"
@@ -54,7 +65,9 @@ cd "$top" || exit 0
 git rev-parse -q --verify "refs/remotes/$remote/main" >/dev/null 2>&1 || exit 0
 work=$(mktemp -d 2>/dev/null) || exit 0
 trap 'rm -rf "$work"' EXIT
-git archive "refs/remotes/$remote/main" scripts/evidence-prepush scripts/st-test 2>/dev/null | tar -x -C "$work" 2>/dev/null || exit 0
+# arn:lmig:smalltalk:2026-10-27-st-test-shim — copy the self-contained implementation; fractal-test needs its adjacent st-test.
+runner=scripts/st-test
+git archive "refs/remotes/$remote/main" scripts/evidence-prepush "$runner" 2>/dev/null | tar -x -C "$work" 2>/dev/null || exit 0
 [ -f "$work/scripts/evidence-prepush" ] || exit 0
 if command -v python3 >/dev/null 2>&1; then
   python3 "$work/scripts/evidence-prepush" "$@"

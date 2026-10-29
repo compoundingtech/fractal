@@ -490,7 +490,7 @@ class Run:
 
     def install_harnesses(self,scenario):
         fixtures=self.m.args.fixtures
-        if fixtures is None: raise RuntimeError("stub harness scenarios require --fixtures scripts/st3-boot-canaries")
+        if fixtures is None: raise RuntimeError("stub harness scenarios require --fixtures scripts/fractal-boot-canaries")
         with tempfile.TemporaryDirectory(prefix="st-onboarding-fixtures-") as d:
             bundle=Path(d,"fixtures.tar")
             with tarfile.open(bundle,"w") as t:
@@ -732,7 +732,7 @@ def main():
     parser.add_argument("--macos-signing-identity",help="optional explicit signing identity already in guest keychain")
     parser.add_argument("--macos-signing-team",help="optional expected signing team; requires explicit identity")
     parser.add_argument("--image",help="prebuilt Docker image implementing the embedded clean-systemd recipe")
-    parser.add_argument("--fixtures",type=Path,default=Path(__file__).resolve().parent/"st3-boot-canaries")
+    parser.add_argument("--fixtures",type=Path,default=Path(__file__).resolve().parent/"fractal-boot-canaries")
     parser.add_argument("--strict-release",action="store_true")
     parser.add_argument("--harness-only",action="store_true",help="test a disposable native-driver seat without requiring the built-in Fractal Assistant or onboarding")
     parser.add_argument("--require-wrap-up",action="store_true",help="also require mission completion; basic native fixtures only read and claim")
