@@ -3782,9 +3782,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         self.isolate("stage/provider-capacity-retries", &daemon, || {
             self.reconcile_provider_capacity_retries(&desired)
         });
-        self.isolate("stage/person-asks", &daemon, || {
-            self.store.reconcile_person_asks()
-        });
+        self.isolate("stage/person-asks", &daemon, || self.reconcile_person_asks());
         self.isolate("stage/disk-space", &daemon, || {
             self.reconcile_disk_space(&desired)
         });
@@ -14763,6 +14761,20 @@ impl<R: RuntimeControl> Reconciler<R> {
             self.arm_step_deadline(&handle, &view.subject, remaining);
         }
         Ok(false)
+    }
+
+    /// End the asks whose owner ended and resolve the ones whose deadline passed. Nothing else
+    /// writes when an unanswered ask's deadline passes, so arm a wake for the next one.
+    fn reconcile_person_asks(&self) -> Result<bool> {
+        let pass = self.store.reconcile_person_asks_at(now_ms())?;
+        if let Some(deadline) = pass.next_deadline {
+            self.arm_deadline_at(
+                "person-ask-deadline",
+                deadline,
+                crate::reconcile_telemetry::WakeCause::Deadline,
+            );
+        }
+        Ok(pass.changed)
     }
 
     /// Wake the reconciler in `remaining` ms for `step`, unless the step already armed a wake at
@@ -38471,6 +38483,49 @@ mission "review" state="ready" {
   step "review" { agentless }
 }"#;
 
+    /// The host that starts a requested mission reads the request's discovery when the request
+    /// arrives, so an observation seals a request in the batch that holds its discovery, and the
+    /// two reach every member in one envelope.
+    #[test]
+    fn a_mission_request_travels_in_the_batch_of_its_discovery() {
+        let store = Store::open_memory("node").unwrap();
+        apply_source(&store, REDELIVERY_REVIEW_SOURCE, "review-mission");
+        let revision = store.mission_spec("review", None).unwrap().unwrap().revision;
+        let source = format!(
+            r#"version 2
+resource "repo" {{ kind "vcs.repository" }}
+observer "repo" {{ resource "resource/repo"; provider "github.repository"; locator "example/repo"; field "pull_requests" }}
+subscription "reviews" {{
+  observer "observer/repo"
+  on "pull_requests"
+  delivery "mission" {{ mission "review@{revision}"; resource "source"; workspace "/srv/reviews" }}
+}}"#
+        );
+        apply_source(&store, &source, "watch");
+        let observer_revision = store.selected_desired_revision("observer/repo").unwrap().unwrap();
+        let subscriptions = store
+            .desired_subjects()
+            .unwrap()
+            .into_iter()
+            .filter(|item| item.subject == "subscription/reviews")
+            .map(|item| (item.subject, crate::graph::subscription_spec(&item.desired).unwrap()))
+            .collect::<Vec<_>>();
+        for pulls in [serde_json::json!([]), serde_json::json!([{"number": 4, "head": "a".repeat(40), "state": "open", "draft": false}])] {
+            store
+                .record_resource_observation("observer/repo", &observer_revision, None, "resource/repo", None,
+                    &serde_json::json!({"repository_id": 17, "pull_requests": pulls}), now_ms() + 60_000, &subscriptions, None)
+                .unwrap();
+        }
+        let request = store
+            .claims_for("subscription/reviews", Some("subscription.mission-requested"))
+            .unwrap()
+            .remove(0);
+        let discovery = request.body["fields"]["discovery"].as_str().unwrap();
+        let discovered = store.claim_by_id(discovery).unwrap().unwrap();
+        assert_eq!(discovered.kind, "resource.observed");
+        assert_eq!(request.batch_id, discovered.batch_id);
+    }
+
     #[test]
     fn replacement_intake_does_not_request_an_already_delivered_head() {
         let store = Store::open_memory("node").unwrap();
@@ -45897,6 +45952,8 @@ mission "ios-proof-blocked" state="ready" {
             .unwrap();
         let ask = store
             .ask_person(&crate::model::PersonAskRequest {
+                deadline_ms: None,
+                default_answer: None,
                 legacy_request: None,
                 person: "person/alex".into(),
                 title: "Repair simulator components".into(),

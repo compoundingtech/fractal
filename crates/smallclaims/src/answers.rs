@@ -224,6 +224,48 @@ pub fn summary(connection: &Connection, cut_unix_ms: u128) -> Result<AnswersSumm
     Ok(AnswersSummary { version: ANSWERS_VERSION, cut_unix_ms, trims_locally: false, kinds: kinds_answers })
 }
 
+/// Kinds named with this prefix are fold readers' answers, not claim kinds; see [`FoldReaders`].
+pub const READER_PREFIX: &str = "reader/";
+
+/// Readers that fold claims themselves rather than answer with one claim, such as a seat's
+/// current harness state or its status history. A trim can keep every key's newest claim and
+/// still change their answers by dropping an older claim they fold, so the summary covers them
+/// too. Given a reader connection and the cut, they return each reader's answers by name: one
+/// key per subject they answer for, `origin` empty and `claim` a digest of the answer, in key
+/// order. The runtime that owns the readers sets them; see [`AnswersCache::set_readers`].
+pub type FoldReaders = Arc<dyn Fn(&Connection, u128) -> Result<BTreeMap<String, Vec<AnswerKey>>> + Send + Sync>;
+
+/// A fold reader's answers as a kind: its summary entry, and every key with its bucket digests.
+pub fn reader_answers(name: &str, cut_unix_ms: u128, keys: Vec<AnswerKey>) -> (String, KindAnswers, KindBuckets) {
+    let kind = format!("{READER_PREFIX}{name}");
+    let mut hash = Sha256::new();
+    domain(&mut hash, &kind);
+    let mut hashes: Vec<Option<Sha256>> = (0..BUCKETS).map(|_| None).collect();
+    for key in &keys {
+        let bucket_hash = hashes[bucket(&key.subject, &key.origin)].get_or_insert_with(|| {
+            let mut hash = Sha256::new();
+            domain(&mut hash, &kind);
+            hash
+        });
+        for hash in [&mut hash, bucket_hash] {
+            field(hash, &key.subject);
+            field(hash, &key.origin);
+            field(hash, &key.claim);
+        }
+    }
+    let answers = KindAnswers { keys: keys.len() as u64, claims: 0, digest: hex::encode(hash.finalize()) };
+    let buckets = KindBuckets {
+        kind: kind.clone(),
+        cut_unix_ms,
+        buckets: hashes
+            .into_iter()
+            .map(|hash| hash.map(|hash| hex::encode(hash.finalize())).unwrap_or_default())
+            .collect(),
+        keys,
+    };
+    (kind, answers, buckets)
+}
+
 /// One kind's bucket digests at a cut, with the keys of `wanted` buckets.
 pub fn kind_buckets(
     connection: &Connection,
@@ -266,9 +308,14 @@ pub fn differing_kinds(
     theirs: &AnswersSummary,
     compare_claims: bool,
 ) -> Vec<KindDifference> {
+    // Fold readers compare only between members that both run them: a member on a build without
+    // them has none, which is no disagreement about any answer.
+    let runs_readers = |summary: &AnswersSummary| summary.kinds.keys().any(|kind| kind.starts_with(READER_PREFIX));
+    let readers = runs_readers(ours) && runs_readers(theirs);
     let kinds = ours.kinds.keys().chain(theirs.kinds.keys()).collect::<BTreeSet<_>>();
     kinds
         .into_iter()
+        .filter(|kind| readers || !kind.starts_with(READER_PREFIX))
         .filter_map(|kind| {
             let (a, b) = (ours.kinds.get(kind), theirs.kinds.get(kind));
             // A member that holds no claim of a kind answers as one that counts none of its keys.
@@ -406,21 +453,30 @@ const KEPT_KINDS: usize = 8;
 #[derive(Default)]
 pub struct AnswersCache {
     state: Mutex<CacheState>,
+    readers: Mutex<Option<FoldReaders>>,
 }
 
 #[derive(Default)]
 struct CacheState {
     summary: Option<(Instant, AnswersSummary)>,
     kinds: Vec<(Instant, KindBuckets)>,
+    /// Every fold reader's keys at the summary's cut, kept apart so narrowing a claim kind never
+    /// evicts them.
+    readers: Vec<KindBuckets>,
     computing: BTreeSet<(u128, Option<String>)>,
 }
 
 enum Computed {
-    Summary(AnswersSummary),
+    Summary(AnswersSummary, Vec<KindBuckets>),
     Kind(KindBuckets),
 }
 
 impl AnswersCache {
+    /// Cover these fold readers' answers in every summary from now on.
+    pub fn set_readers(&self, readers: FoldReaders) {
+        *self.readers.lock().unwrap_or_else(PoisonError::into_inner) = Some(readers);
+    }
+
     /// Answer `request` from what is kept, or answer `pending` and start computing it on a thread
     /// of its own, unless one already does.
     pub fn answer<S>(self: &Arc<Self>, store: &Arc<S>, request: &AnswersRequest) -> AnswersReply
@@ -439,9 +495,17 @@ impl AnswersCache {
                 }
             }
             Some(kind) => {
-                if let Some((_, every)) = state.kinds.iter().find(|(at, every)| {
-                    fresh(at) && every.kind == *kind && every.cut_unix_ms == request.cut_unix_ms
-                }) {
+                let summary_fresh = state.summary.as_ref().is_some_and(|(at, summary)| {
+                    fresh(at) && summary.cut_unix_ms == request.cut_unix_ms
+                });
+                let mut kept = state
+                    .readers
+                    .iter()
+                    .filter(|_| summary_fresh)
+                    .chain(state.kinds.iter().filter(|(at, _)| fresh(at)).map(|(_, every)| every));
+                if let Some(every) =
+                    kept.find(|every| every.kind == *kind && every.cut_unix_ms == request.cut_unix_ms)
+                {
                     let keys = every
                         .keys
                         .iter()
@@ -453,19 +517,46 @@ impl AnswersCache {
                         ..AnswersReply::default()
                     };
                 }
+                if summary_fresh && kind.starts_with(READER_PREFIX) {
+                    // A reader this member does not run answers for nothing.
+                    return AnswersReply {
+                        buckets: Some(KindBuckets {
+                            kind: kind.clone(),
+                            cut_unix_ms: request.cut_unix_ms,
+                            buckets: vec![String::new(); BUCKETS],
+                            keys: Vec::new(),
+                        }),
+                        ..AnswersReply::default()
+                    };
+                }
             }
         }
-        let job = (request.cut_unix_ms, request.kind.clone());
+        // A reader's keys come only with the summary that computes them.
+        let reader = request.kind.as_deref().is_some_and(|kind| kind.starts_with(READER_PREFIX));
+        let job = (request.cut_unix_ms, request.kind.clone().filter(|_| !reader));
         if !state.computing.insert(job.clone()) {
             return AnswersReply::pending();
         }
         let (cache, store) = (self.clone(), store.clone());
+        let readers = self.readers.lock().unwrap_or_else(PoisonError::into_inner).clone();
         let thread_job = job.clone();
         let spawned = std::thread::Builder::new().name("st3-answers".into()).spawn(move || {
             let (cut, kind) = thread_job;
+            let started = Instant::now();
             let store: &Store = (*store).borrow();
             let computed = crate::task_cpu::blocking("replication.answers", || match &kind {
-                None => store.answers_summary(cut).map(Computed::Summary),
+                None => {
+                    let mut summary = store.answers_summary(cut)?;
+                    let mut every = Vec::new();
+                    if let Some(readers) = &readers {
+                        for (name, keys) in readers(&store.readers.get(), cut)? {
+                            let (kind, answers, buckets) = reader_answers(&name, cut, keys);
+                            summary.kinds.insert(kind, answers);
+                            every.push(buckets);
+                        }
+                    }
+                    Ok(Computed::Summary(summary, every))
+                }
                 Some(kind) => store
                     .answer_buckets(kind, cut, &(0..BUCKETS).collect())
                     .map(Computed::Kind),
@@ -473,7 +564,16 @@ impl AnswersCache {
             let mut state = cache.state.lock().unwrap_or_else(PoisonError::into_inner);
             state.computing.remove(&(cut, kind.clone()));
             match computed {
-                Ok(Computed::Summary(summary)) => state.summary = Some((Instant::now(), summary)),
+                Ok(Computed::Summary(summary, readers)) => {
+                    eprintln!(
+                        "st3: answers at {cut} computed in {}s: {} kinds, {} of them fold readers",
+                        started.elapsed().as_secs(),
+                        summary.kinds.len(),
+                        readers.len()
+                    );
+                    state.summary = Some((Instant::now(), summary));
+                    state.readers = readers;
+                }
                 Ok(Computed::Kind(every)) => {
                     state.kinds.retain(|(_, kept)| kept.kind != every.kind);
                     state.kinds.push((Instant::now(), every));

@@ -89,8 +89,19 @@ pub(super) async fn check_answers<B: Backend>(
         check.differs_since.is_some_and(|since| since.elapsed() >= worker_interval(SETTLE))
     };
     let mut step = compare_answers(http, backend, node, peer, auth, fleet, cut, settled).await;
+    // One line per peer and cut for each outcome, so an operator can confirm the check ran.
+    match &step {
+        Ok(Step::Unsupported) => eprintln!("st3: {} keeps no answers; not compared at {cut}", peer.name),
+        Ok(Step::Differ) if !settled => eprintln!(
+            "st3: answers at {cut} differ from {}'s; comparing again until the difference settles",
+            peer.name
+        ),
+        _ => {}
+    }
     if let Ok(Step::Found(check)) = &step {
-        if !check.differences.is_empty() {
+        if check.differences.is_empty() {
+            eprintln!("st3: answers at {cut} agree with {}'s", peer.name);
+        } else {
             eprintln!(
                 "st3: answers at {cut} differ from {}'s in {}",
                 peer.name,
