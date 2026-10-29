@@ -202,6 +202,12 @@ pub struct CollectionSubscription {
     /// waits for the view's next change. A paired session's clock still reads it, so an expired
     /// or revoked grant still ends it, but another not-ready read sends nothing.
     pub waiting_for_view: bool,
+    /// The `sync` this window's last frame stated, as its state and the peers it named: a
+    /// changes frame carries `sync` only when it differs. Only attention windows carry one.
+    pub sync: Option<(String, Vec<String>)>,
+    /// The replication flags when that frame was built: a commit that moves them rereads the
+    /// window, so a host that starts or stops catching up or diverging says so at once.
+    pub sync_flags: (bool, bool),
 }
 
 // Observer grace periods and checkpoint waits can enter attention without a new claim.
