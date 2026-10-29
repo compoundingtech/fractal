@@ -13034,15 +13034,29 @@ fn a_prompt_card_reads_the_calls_without_a_result_in_its_seats_own_transcript() 
             })
             .unwrap();
     }
-    let calls = prompt_card::seat_pending_calls(&state, owner).unwrap();
+    let (calls, read) = prompt_card::seat_pending_calls(&state, owner).unwrap();
     assert_eq!(
         calls,
-        [json!({"call_id":"call-waiting","name":"shell","arguments":{"command":["make","release"]}})]
+        [json!({"call_id":"call-waiting","name":"shell","arguments":{"command":["make","release"]},"complete":true})]
     );
+    // The refresher watches the transcript the calls were read from.
+    assert_eq!(read.as_deref(), Some(transcript.as_path()));
     let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-waiting"}}});
     let prompt = prompt_card::prompt_card(&row, || Ok(calls));
     assert_eq!(prompt["calls"][0]["input"], r#"{"command":["make","release"]}"#);
     assert_eq!(prompt["allow"], true);
+
+    // A call too large for the timeline to hold whole is never answered here, however st cut it.
+    let large = json!({"type":"response_item","timestamp":"2026-09-24T12:00:04Z","payload":{"type":"function_call","name":"apply_patch",
+        "arguments":json!({"patch":"x".repeat(300 * 1024)}).to_string(),"call_id":"call-large"}});
+    let mut file = fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+    std::io::Write::write_all(&mut file, format!("{large}\n").as_bytes()).unwrap();
+    let (calls, _) = prompt_card::seat_pending_calls(&state, owner).unwrap();
+    let row = json!({"action_parameters": {"prompt.respond": {"answers": ["approve", "deny"], "call_id": "call-large"}}});
+    let prompt = prompt_card::prompt_card(&row, || Ok(calls));
+    assert_eq!(prompt["calls"][0]["call_id"], "call-large");
+    assert_eq!(prompt["calls"][0]["input_complete"], false);
+    assert_eq!(prompt["allow"], false);
 
     // A seat st has no session for says why, and the card offers no answer.
     let reason = prompt_card::seat_pending_calls(&state, "agent/example/absent").unwrap_err();

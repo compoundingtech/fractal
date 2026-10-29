@@ -15,11 +15,11 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The attention refresher now serves presentation.prompt on harness-prompt cards: the call prompt.respond names while it has no result (no call when none is named), its input cut at 4 KiB, the offered answers and allow; or calls null with unknown_reason when st cannot read the seat's conversation on this node. Older clients ignore it."
+    "detail": "The attention refresher now serves presentation.prompt on harness-prompt cards: the call prompt.respond names while it has no result (no call when none is named), its input cut at 4 KiB (and never allowed when the timeline holds only a preview of it), the offered answers and allow; or calls null with unknown_reason when st cannot read the seat's conversation on this node. Older clients ignore it."
   },
   "downtime": {
     "status": "none",
-    "detail": "No startup work or expected interruption. Each prompt card that names a call reads the newest 256 entries of its seat's conversation when the attention list folds, through the conversation cache client reads share."
+    "detail": "No startup work or expected interruption. Each prompt card that names a call reads the newest 256 entries of its seat's conversation when the attention list folds, through the conversation cache client reads share; the refresher watches those transcripts and presents the prompts again when one changes."
   },
   "manual": {
     "status": "none",

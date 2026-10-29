@@ -4,6 +4,8 @@
 
 use super::*;
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The most of a call's input a card carries, as JSON text.
 const INPUT_BYTES: usize = 4 * 1024;
@@ -13,8 +15,9 @@ const INPUT_BYTES: usize = 4 * 1024;
 const TAIL: usize = 256;
 
 /// Reads the tool calls without a result in a seat's conversation, oldest first, each
-/// `{call_id, name, arguments}`, or says why st cannot.
-pub(crate) type PendingCalls<'a> = &'a dyn Fn(&str) -> Result<Vec<Value>, String>;
+/// `{call_id, name, arguments, complete}`, with the transcript they were read from; or says why
+/// st cannot.
+pub(crate) type PendingCalls<'a> = &'a dyn Fn(&str) -> Result<(Vec<Value>, Option<PathBuf>), String>;
 
 /// The prompt on a harness-prompt row's presentation. `pending` reads the seat's calls without a
 /// result, and only when the harness names the call it asks about.
@@ -47,7 +50,8 @@ pub(crate) fn prompt_card(row: &Value, pending: impl FnOnce() -> Result<Vec<Valu
                 "call_id": call["call_id"],
                 "tool": call["name"],
                 "input": cut,
-                "input_complete": cut.len() == input.len(),
+                // The timeline may already hold only a bounded preview of the call.
+                "input_complete": call["complete"] != false && cut.len() == input.len(),
             })
         })
         .collect::<Vec<_>>();
@@ -69,7 +73,9 @@ fn cut(text: &str, bytes: usize) -> &str {
 }
 
 /// The tool calls without a result among a conversation's entries, newest first as a slice
-/// reads them: oldest first, each once.
+/// reads them: oldest first, each once. A call is not `complete` when the timeline holds only a
+/// bounded preview of its record (`_preview_of_bytes`) or a truncation marker in place of its
+/// arguments (`_oversized_bytes`).
 fn pending_calls(items: &[Value]) -> Vec<Value> {
     let answered = items
         .iter()
@@ -87,16 +93,18 @@ fn pending_calls(items: &[Value]) -> Vec<Value> {
         })
         .map(|item| {
             let body = &item["body"];
-            json!({"call_id": body["call_id"], "name": body["name"], "arguments": body["arguments"]})
+            let complete = !(item["_preview_of_bytes"].is_number() || item["_oversized_bytes"].is_number());
+            json!({"call_id": body["call_id"], "name": body["name"], "arguments": body["arguments"], "complete": complete})
         })
         .collect::<Vec<_>>();
     calls.reverse();
     calls
 }
 
-/// The tool calls without a result in `seat`'s conversation on this node, or why st cannot
-/// read it: the seat runs elsewhere, has no session yet, or its harness keeps none st reads.
-pub(crate) fn seat_pending_calls(state: &AppState, seat: &str) -> Result<Vec<Value>, String> {
+/// The tool calls without a result in `seat`'s conversation on this node and the transcript
+/// they were read from, or why st cannot read it: the seat runs elsewhere, has no session yet,
+/// or its harness keeps none st reads.
+pub(crate) fn seat_pending_calls(state: &AppState, seat: &str) -> Result<(Vec<Value>, Option<PathBuf>), String> {
     let unreadable = |error: ApiError| format!("st cannot read this seat's conversation: {}", error.message);
     let session = super::client_v0::conversation_session_id(state, seat).map_err(unreadable)?;
     let index = state.store.index().map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
@@ -109,7 +117,63 @@ pub(crate) fn seat_pending_calls(state: &AppState, seat: &str) -> Result<Vec<Val
         .hold()
         .slice(&source, crate::external_sessions::TimelineOrder::Sequence, None, TAIL)
         .map_err(|error| format!("st cannot read this seat's conversation: {error}"))?;
-    Ok(pending_calls(&slice.items))
+    Ok((pending_calls(&slice.items), Some(source.transcript.clone())))
+}
+
+/// Wakes the attention refresher when a transcript a published prompt card read changes: a
+/// seat's conversation changes no claim attention reads, so without it a card would show a new
+/// call, or keep one that has its result, until the clock period ends. Without a file watcher
+/// (one could not be made) cards change only with the clock.
+pub(crate) struct PromptWatch {
+    watcher: Option<notify::RecommendedWatcher>,
+    watched: HashSet<PathBuf>,
+    changed: Arc<AtomicBool>,
+}
+
+impl PromptWatch {
+    pub(crate) fn new(wake: Arc<tokio::sync::Notify>) -> Self {
+        let changed = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&changed);
+        let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event.is_ok_and(|event| !matches!(event.kind, notify::EventKind::Access(_))) {
+                flag.store(true, Ordering::Release);
+                wake.notify_one();
+            }
+        })
+        .inspect_err(|error| eprintln!("st3: prompt cards change only with the clock: {error}"))
+        .ok();
+        Self { watcher, watched: HashSet::new(), changed }
+    }
+
+    /// Whether a watched transcript changed since this was last asked.
+    pub(crate) fn take_changed(&self) -> bool {
+        self.changed.swap(false, Ordering::AcqRel)
+    }
+
+    /// Ask again at the next refresh: the refresh that read the change failed.
+    pub(crate) fn keep_changed(&self) {
+        self.changed.store(true, Ordering::Release);
+    }
+
+    /// Watch exactly `transcripts`, the ones the published prompt cards read.
+    pub(crate) fn watch(&mut self, transcripts: HashSet<PathBuf>) {
+        use notify::Watcher as _;
+        let Some(watcher) = self.watcher.as_mut() else {
+            return;
+        };
+        for gone in self.watched.difference(&transcripts) {
+            let _ = watcher.unwatch(gone);
+        }
+        let mut watched = HashSet::new();
+        for transcript in transcripts {
+            if self.watched.contains(&transcript)
+                || watcher.watch(&transcript, notify::RecursiveMode::NonRecursive).is_ok()
+            {
+                watched.insert(transcript);
+            }
+        }
+        self.watched = watched;
+    }
 }
 
 #[cfg(test)]
@@ -134,7 +198,7 @@ mod tests {
             entry(2, "content", json!({"text": "Building."})),
         ];
         let calls = pending_calls(&items);
-        assert_eq!(calls, [json!({"call_id": "call-c", "name": "Bash", "arguments": {"command": "make"}})]);
+        assert_eq!(calls, [json!({"call_id": "call-c", "name": "Bash", "arguments": {"command": "make"}, "complete": true})]);
 
         let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-c")), || Ok(calls.clone()));
         assert_eq!(
@@ -184,6 +248,51 @@ mod tests {
         assert!(input.len() <= INPUT_BYTES && input.len() > INPUT_BYTES - 2, "{}", input.len());
         assert_eq!(prompt["calls"][0]["input_complete"], false);
         assert_eq!(prompt["allow"], false);
+    }
+
+    /// The timeline may hold only a bounded preview of a large record, or a truncation marker in
+    /// place of its arguments: short enough to fit a card, but not what the call would run.
+    #[test]
+    fn a_call_the_timeline_holds_only_in_part_is_answered_in_the_terminal() {
+        for marker in ["_preview_of_bytes", "_oversized_bytes"] {
+            let mut call = entry(3, "tool_call", json!({"call_id": "call-a", "name": "Write",
+                "arguments": "[st truncated this native timeline value: size limit; 40000000 bytes; fetch from owner]"}));
+            call[marker] = json!(40_000_000);
+            let calls = pending_calls(&[call]);
+            assert_eq!(calls[0]["complete"], false, "{marker}");
+            let prompt = prompt_card(&row(json!(["allow", "deny"]), json!("call-a")), || Ok(calls));
+            assert_eq!(prompt["calls"][0]["input_complete"], false, "{marker}");
+            assert_eq!(prompt["allow"], false, "{marker}");
+        }
+    }
+
+    /// A change to a watched transcript wakes the refresher once; one no longer watched does not.
+    #[tokio::test]
+    async fn a_watched_transcript_that_changes_wakes_the_refresher() {
+        let root = tempfile::tempdir().unwrap();
+        let transcript = root.path().join("oak.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let mut watch = PromptWatch::new(Arc::clone(&wake));
+        watch.watch(HashSet::from([transcript.clone()]));
+        assert!(!watch.take_changed());
+        let append = || {
+            use std::io::Write as _;
+            let mut file = std::fs::OpenOptions::new().append(true).open(&transcript).unwrap();
+            writeln!(file, r#"{{"type":"response_item"}}"#).unwrap();
+        };
+        append();
+        tokio::time::timeout(Duration::from_secs(5), wake.notified()).await.expect("woken");
+        assert!(watch.take_changed());
+        assert!(!watch.take_changed(), "asked once");
+
+        watch.watch(HashSet::new());
+        // Let events from before the unwatch arrive, then forget them.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        watch.take_changed();
+        append();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!watch.take_changed());
     }
 
     #[test]

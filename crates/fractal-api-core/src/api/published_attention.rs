@@ -10,7 +10,8 @@ use crate::SeatsStore;
 use super::*;
 use crate::store::attention_list::{AttentionDelta, AttentionFleet, AttentionPublication};
 use crate::store::owner_lists::OwnerView;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// The shortest pause between two refreshes. A refresh also pauses as long as it took, so the
 /// refresher never takes more than about half a core. Windows never wait for it: a summary
@@ -45,6 +46,7 @@ pub fn start_attention_list(state: &AppState) {
     let state = state.clone();
     let mut changed = state.event_notify.subscribe();
     let mut roster = state.store.subscribe_agent_roster();
+    let mut prompts = super::prompt_card::PromptWatch::new(Arc::clone(&wake));
     tokio::spawn(crate::task_cpu::account("publication.attention", async move {
         // However this task ends, its views stop being served: windows read for themselves.
         struct Stopped(Arc<Store>);
@@ -64,6 +66,8 @@ pub fn start_attention_list(state: &AppState) {
             // checkpoint, each chunk of a long catch-up) a node nobody reads does not fold it
             // again; the next window to read it wakes this task.
             let attention = store.attention_list_read_within(idle) || store.attention_list_starting();
+            // A prompt card's conversation changed: present the prompts again.
+            let prompts_changed = prompts.take_changed();
             // One view at a time: attention, every person's glasses and arrangements, then the
             // summary rows windows read. One view's failure leaves the others refreshing. A
             // summary selection a window waits for is computed before each view, so the window
@@ -75,6 +79,7 @@ pub fn start_attention_list(state: &AppState) {
                     eprintln!("st3: pairing recheck for published views failed: {error:#}");
                 }
                 let mut results = Vec::new();
+                let mut transcripts = None;
                 let waiting = |results: &mut Vec<_>, starting: bool| {
                     if let Some(result) = refresh_waiting_summary(&summary_state, starting) {
                         results.push(("summary", result.map(|_| ())));
@@ -87,11 +92,13 @@ pub fn start_attention_list(state: &AppState) {
                     }
                     // A prompt card reads its seat's conversation on this node.
                     let pending = |seat: &str| super::prompt_card::seat_pending_calls(&summary_state, seat);
-                    refresh_attention_list_reading(
+                    transcripts = refresh_attention_list_reading(
                         &reader,
                         |previous| attention_fleet(&reader, previous),
                         Some(&pending),
-                    )
+                        prompts_changed,
+                    )?;
+                    Ok(())
                 })));
                 // As the daemon starts, the counts every summary shares, once attention is
                 // published and before any window asks for a summary.
@@ -111,11 +118,19 @@ pub fn start_attention_list(state: &AppState) {
                     )
                     .map(|_| ())
                 })));
-                results
+                (results, transcripts)
             }))
             .await;
             match refreshed {
-                Ok(results) => {
+                Ok((results, transcripts)) => {
+                    if let Some(transcripts) = transcripts {
+                        prompts.watch(transcripts);
+                    }
+                    if prompts_changed
+                        && results.iter().any(|(view, result)| *view == "attention" && result.is_err())
+                    {
+                        prompts.keep_changed();
+                    }
                     for (view, result) in results {
                         if let Err(error) = &result {
                             eprintln!("st3: {view} view refresh failed: {error:#}");
@@ -247,16 +262,20 @@ pub fn refresh_attention_list_with(
     store: &Store,
     fleet: impl FnOnce(Option<&Arc<AttentionFleet>>) -> Option<Arc<AttentionFleet>>,
 ) -> anyhow::Result<()> {
-    refresh_attention_list_reading(store, fleet, None)
+    refresh_attention_list_reading(store, fleet, None, false).map(|_| ())
 }
 
 /// `refresh_attention_list_with`, giving each prompt card the calls `pending` reads for its
-/// seat. Without it a prompt card carries no prompt.
+/// seat, and presenting them again when `prompts_changed` (a conversation they read changed)
+/// even with nothing else changed. Without `pending` a prompt card carries no prompt. Returns
+/// the transcripts the prompts were read from when it presented them.
 fn refresh_attention_list_reading(
     store: &Store,
     fleet: impl FnOnce(Option<&Arc<AttentionFleet>>) -> Option<Arc<AttentionFleet>>,
     pending: Option<super::prompt_card::PendingCalls>,
-) -> anyhow::Result<()> {
+    prompts_changed: bool,
+) -> anyhow::Result<Option<HashSet<PathBuf>>> {
+    let prompts_changed = prompts_changed && pending.is_some();
     let (generation, previous) = store.newest_attention_list();
     let clock = ATTENTION_LIST_CLOCK.as_millis();
     // Read before the snapshot: a roster published in between presents again at the next wake.
@@ -270,6 +289,7 @@ fn refresh_attention_list_reading(
         .is_none_or(|previous| previous.fleet.as_deref() != fleet.as_deref());
     store.read_snapshot(|index| {
         let now = client_now_ms();
+        let mut transcripts = None;
         let (cause, due) = match &previous {
             None => (Some("first".to_owned()), None),
             Some(previous)
@@ -282,8 +302,10 @@ fn refresh_attention_list_reading(
                 (Some("due".to_owned()), None)
             }
             Some(previous) => match store.attention_list_delta(previous, index, now)? {
-                AttentionDelta::Unchanged(None) if previous.cut == index && !fleet_changed => {
-                    return Ok(());
+                AttentionDelta::Unchanged(None)
+                    if previous.cut == index && !fleet_changed && !prompts_changed =>
+                {
+                    return Ok(None);
                 }
                 AttentionDelta::Unchanged(due) => (None, due),
                 AttentionDelta::Refold(cause) => (Some(cause), None),
@@ -295,10 +317,12 @@ fn refresh_attention_list_reading(
                 // Still pending future acceptance times stand beside the new ones.
                 let due = [previous.due_at_unix_ms, due].into_iter().flatten().min();
                 let future_after = due.and(previous.future_after.or(Some(previous.cut)));
-                let rows = if fleet_changed {
+                let rows = if fleet_changed || prompts_changed {
                     let mut rows = (*previous.rows).clone();
-                    present_attention(store, &mut rows, fleet.as_deref())?;
-                    present_prompts(&mut rows, pending);
+                    if fleet_changed {
+                        present_attention(store, &mut rows, fleet.as_deref())?;
+                    }
+                    transcripts = present_prompts(&mut rows, pending);
                     if rows == *previous.rows {
                         Arc::clone(&previous.rows)
                     } else {
@@ -313,7 +337,7 @@ fn refresh_attention_list_reading(
                 store.note_attention_list_fold(cause.as_deref().unwrap_or("first"));
                 let mut rows = client_attention_resources_at(store, None, false, now)?;
                 present_attention(store, &mut rows, fleet.as_deref())?;
-                present_prompts(&mut rows, pending);
+                transcripts = present_prompts(&mut rows, pending);
                 let rows = match &previous {
                     Some(previous) if *previous.rows == rows => Arc::clone(&previous.rows),
                     _ => Arc::new(rows),
@@ -369,7 +393,7 @@ fn refresh_attention_list_reading(
                 published_at_unix_ms,
             );
         }
-        Ok(())
+        Ok(transcripts)
     })
 }
 
@@ -426,24 +450,29 @@ pub fn present_attention(
 }
 
 /// Give each prompt card's presentation its prompt: the call it asks about, while `pending` reads
-/// it without a result in its seat's conversation. The calls are as of this fold: a conversation
-/// changes no claim attention reads, so a card shows a newer call at the next fold, within a
-/// clock period.
-fn present_prompts(rows: &mut [Value], pending: Option<super::prompt_card::PendingCalls>) {
-    let Some(pending) = pending else {
-        return;
-    };
+/// it without a result in its seat's conversation. Returns the transcripts read, which the
+/// refresher watches: a conversation changes no claim attention reads.
+fn present_prompts(
+    rows: &mut [Value],
+    pending: Option<super::prompt_card::PendingCalls>,
+) -> Option<HashSet<PathBuf>> {
+    let pending = pending?;
+    let mut transcripts = HashSet::new();
     for row in rows
         .iter_mut()
         .filter(|row| row["attention_kind"] == "harness-prompt" && row["presentation"].is_object())
     {
         let seat = row["source_id"].as_str().map(str::to_owned);
         let calls = || match seat {
-            Some(seat) => pending(&seat),
+            Some(seat) => pending(&seat).map(|(calls, transcript)| {
+                transcripts.extend(transcript);
+                calls
+            }),
             None => Err("st does not know which seat shows this prompt".to_owned()),
         };
         row["presentation"]["prompt"] = super::prompt_card::prompt_card(row, calls);
     }
+    Some(transcripts)
 }
 
 fn present_rows(
@@ -645,12 +674,17 @@ mod tests {
         let pending = |seat: &str| {
             read.lock().unwrap().push(seat.to_owned());
             match seat {
-                "agent/example/oak" => Ok(vec![json!({"call_id": "call-a", "name": "Bash", "arguments": {"command": "ls"}})]),
+                "agent/example/oak" => Ok((
+                    vec![json!({"call_id": "call-a", "name": "Bash", "arguments": {"command": "ls"}})],
+                    Some(PathBuf::from("/transcripts/oak.jsonl")),
+                )),
                 _ => Err("the seat runs elsewhere".to_owned()),
             }
         };
-        present_prompts(&mut rows, Some(&pending));
+        let transcripts = present_prompts(&mut rows, Some(&pending));
         assert_eq!(*read.lock().unwrap(), ["agent/example/oak", "agent/example/ash"]);
+        // The refresher watches the transcripts the cards read.
+        assert_eq!(transcripts, Some(HashSet::from([PathBuf::from("/transcripts/oak.jsonl")])));
         assert_eq!(rows[0]["presentation"]["prompt"]["calls"][0]["tool"], "Bash");
         assert_eq!(rows[0]["presentation"]["prompt"]["allow"], true);
         assert!(rows[1]["presentation"].get("prompt").is_none());
@@ -659,7 +693,68 @@ mod tests {
 
         // Without a reader, as in a fold that is not the refresher's, a card carries no prompt.
         let mut rows = vec![json!({"attention_kind": "harness-prompt", "source_id": "agent/example/oak", "presentation": {}})];
-        present_prompts(&mut rows, None);
+        assert_eq!(present_prompts(&mut rows, None), None);
         assert!(rows[0]["presentation"].get("prompt").is_none());
+    }
+
+    /// A seat's conversation changes no claim attention reads. When its transcript changes, the
+    /// refresher presents the prompts again at the same cut, before the clock period ends: the
+    /// named call shows once the seat makes it, and goes once it has its result.
+    #[test]
+    fn a_conversation_change_presents_the_prompts_again_without_a_claim() {
+        let store = Store::open_memory("node").unwrap();
+        store.start_attention_list_refresher().unwrap();
+        refresh_attention_list(&store).unwrap();
+        let (generation, first) = store.newest_attention_list();
+        let first = first.unwrap();
+        let mut rows = (*first.rows).clone();
+        rows.push(json!({
+            "id": "attention/prompt",
+            "attention_kind": "harness-prompt",
+            "source_id": "agent/example/oak",
+            "action_parameters": {"prompt.respond": {"answers": ["allow", "deny"], "call_id": "call-a"}},
+            "presentation": {"kind": "prompt"},
+        }));
+        store.publish_attention_list(
+            generation,
+            AttentionPublication {
+                cut: first.cut,
+                projection: first.projection.clone(),
+                evaluated_at_unix_ms: first.evaluated_at_unix_ms,
+                due_at_unix_ms: first.due_at_unix_ms,
+                future_after: first.future_after,
+                published_at_unix_ms: first.published_at_unix_ms,
+                owners: AttentionPublication::index_owners(&rows),
+                rows: Arc::new(rows),
+                fleet: first.fleet.clone(),
+            },
+            true,
+        );
+        let calls = std::sync::Mutex::new(Vec::<Value>::new());
+        let pending = |_: &str| Ok((calls.lock().unwrap().clone(), Some(PathBuf::from("/transcripts/oak.jsonl"))));
+        let prompt = || {
+            let (_, publication) = store.newest_attention_list();
+            let publication = publication.unwrap();
+            let row = publication.rows.iter().find(|row| row["id"] == "attention/prompt").unwrap();
+            row["presentation"]["prompt"].clone()
+        };
+        let refresh = |changed: bool| {
+            refresh_attention_list_reading(&store, |previous| previous.cloned(), Some(&pending), changed).unwrap()
+        };
+
+        // Nothing changed: nothing is read.
+        assert_eq!(refresh(false), None);
+        assert_eq!(prompt(), Value::Null);
+        // The seat makes the call the prompt names.
+        calls.lock().unwrap().push(json!({"call_id": "call-a", "name": "Bash", "arguments": {"command": "make"}, "complete": true}));
+        assert_eq!(refresh(true), Some(HashSet::from([PathBuf::from("/transcripts/oak.jsonl")])));
+        assert_eq!(prompt()["calls"][0]["call_id"], "call-a");
+        assert_eq!(prompt()["allow"], true);
+        // The call has its result.
+        calls.lock().unwrap().clear();
+        refresh(true);
+        assert_eq!(prompt(), json!({"calls": [], "answers": ["allow", "deny"], "allow": false}));
+        let (_, publication) = store.newest_attention_list();
+        assert_eq!(publication.unwrap().cut, first.cut, "no claim was read");
     }
 }
