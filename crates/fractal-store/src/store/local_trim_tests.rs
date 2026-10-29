@@ -108,11 +108,16 @@ fn apply(store: &Store, write: &Write, n: usize) {
         .unwrap();
 }
 
-/// Every answer the readers of these kinds give: the whole graph, each seat's current harness,
-/// and each seat's status history.
+/// Every answer the readers of these kinds give: the whole graph, each observer's newest
+/// observation (what resources and reconcile read), each seat's current harness, and each seat's
+/// status history.
 fn answers(store: &Store, now: u128) -> (String, Vec<String>) {
     let connection = store.readers.get();
     let mut seats = Vec::new();
+    for observer in 0..3 {
+        let newest = store.latest_claim(&format!("observer/watch-{observer}"), Some("observer.observed")).unwrap();
+        seats.push(format!("observer/watch-{observer}: {:?}", newest.map(|claim| claim.body)));
+    }
     for seat in SEATS {
         let harness = store.current_harness(seat).unwrap();
         let history = seat_status::history_at(&connection, seat, now, i64::MAX as u64).unwrap();
