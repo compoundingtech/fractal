@@ -210,6 +210,9 @@ impl Default for ExchangeJobs {
 
 use crate::replication::{ReplicationExchangeFailure, ReplicationFailurePhase};
 
+mod answers_check;
+pub use answers_check::{daily_cut, fetch_answers};
+
 fn exchange_failure(
     error: anyhow::Error,
     phase: ReplicationFailurePhase,
@@ -1522,6 +1525,10 @@ pub fn peer_router<B: Backend>(state: PeerState<B>, routes: Router<PeerState<B>>
             post(receive_checkpoint_request).layer(DefaultBodyLimit::max(16_384)),
         )
         .route(
+            super::ANSWERS_PATH,
+            post(answers_check::receive_answers_request).layer(DefaultBodyLimit::max(16_384)),
+        )
+        .route(
             JOIN_PATH,
             post(receive_join).layer(DefaultBodyLimit::max(MAX_JOIN_BYTES)),
         )
@@ -1822,6 +1829,8 @@ async fn dial_peer<B: Backend>(
                     notify.borrow_and_update();
                     moving = true;
                 } else {
+                    // Nothing moved, so both hold what the other wrote before today's cut.
+                    answers_check::check_answers(&http, &backend, &node, &peer, &auth, &fleet).await;
                     // A busy harness can write several observations while one exchange is in
                     // flight. Keep the first exchange immediate, then coalesce the resulting
                     // wake burst without disabling the 30-second retry path. The window stays
