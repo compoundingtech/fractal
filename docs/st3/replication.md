@@ -1151,6 +1151,28 @@ for it; a daemon that never checks shows neither the line nor the row. A miss is
 other target's: the fault goes to the fleet's fault agent, and while a peer still differs the
 replication check fails `st doctor` as above.
 
+### Answers across members
+
+A member that trims on its own (`[trim] local`) deletes claims its peers may still hold, so two
+members stop holding the same claims and their envelope and claim digests no longer settle a
+comparison. What must still agree is what readers answer. `smallclaims::store::answers`
+summarizes that per claim kind, at a cut, so members can compare it:
+
+- A kind's answer for one key, a subject and the writer that wrote it, is the key's newest claim
+  in canonical order. A trim keeps every key's newest claim, so trimming changes no answer.
+- A key counts once its newest claim is older than the cut. A key with a newer claim is still
+  moving and is left out; the cut never selects an older claim, which a trimmed member may no
+  longer hold.
+- Each kind reports its counted `keys`, its `claims` older than the cut, and a digest over its
+  keys and answers. `claims` is compared only between members that trim the same way.
+- Each key falls in one of 256 buckets by a hash of the key, with a digest per bucket, so a
+  difference narrows to a bucket and then to its keys without listing a whole kind.
+
+A summary reads every claim, one kind per statement on a reader connection: about a minute and a
+half on a store of three million claims. It is taken once a day and kept, never per request. The
+property test `a_trim_that_keeps_each_newest_claim_answers_the_same` holds the trim invariant for
+random histories and cuts.
+
 ### First sync
 
 A machine that joins with `st fleet join` records a first sync. It ends, `verified`, at the first

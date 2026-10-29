@@ -75,6 +75,7 @@ pub use checkpoint_space::CHECKPOINT_SPACE_GATE_VERSION;
 #[cfg(feature = "test-support")]
 pub use checkpoint_space::checkpoint_test_fixture_headroom;
 pub use binary_payloads::PayloadConversion;
+pub mod answers;
 pub mod canonical;
 pub mod checkpoint;
 pub mod checkpoint_agreement;
